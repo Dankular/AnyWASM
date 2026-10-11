@@ -10,7 +10,8 @@ function capabilities() {
   const caps = [
     ['WebAssembly', typeof WebAssembly === 'object', 'required'],
     ['Module workers', typeof Worker !== 'undefined', 'required'],
-    ['WebGPU', 'gpu' in navigator, 'needed for graphics programs'],
+    ['WebGPU', !!navigator.gpu, 'needed for graphics programs'],
+    ['OffscreenCanvas transfer', typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function', 'needed for worker rendering'],
     ['SharedArrayBuffer', typeof SharedArrayBuffer !== 'undefined', 'needed for threads (not used yet)'],
   ];
   $('caps').innerHTML = caps
@@ -46,7 +47,8 @@ function failLoading(label, message) {
 }
 
 async function run(bundleBytes, label) {
-  if (worker) worker.terminate();
+  const reuseWorker = !!worker && stat.dataset.status !== undefined;
+  if (worker && !reuseWorker) worker.postMessage({ type: 'dispose' });
   term.textContent = '';
   stat.textContent = `Starting ${label}…`;
   diagnostic.hidden = true;
@@ -63,8 +65,10 @@ async function run(bundleBytes, label) {
     failLoading(label, `could not load WebAssembly runtime (${e.message})`);
     return;
   }
-  worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-  window.__worker = worker; // exposed for automated tests
+  if (!reuseWorker) {
+    worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    window.__worker = worker; // exposed for automated tests
+  }
 
   // A fresh canvas per run: a canvas can only be transferred to a worker once.
   const old = $('screen');
@@ -72,7 +76,9 @@ async function run(bundleBytes, label) {
   canvas.id = 'screen'; canvas.width = 640; canvas.height = 480; canvas.hidden = true; canvas.tabIndex = 0;
   old.replaceWith(canvas);
   attachInput(canvas);
-  const off = canvas.transferControlToOffscreen();
+  const off = typeof canvas.transferControlToOffscreen === 'function'
+    ? canvas.transferControlToOffscreen()
+    : null;
 
   worker.onmessage = (ev) => {
     const m = ev.data;
@@ -108,10 +114,20 @@ async function run(bundleBytes, label) {
       $('stop').disabled = true;
     }
   };
-  worker.onerror = (e) => failLoading(label, `worker failed to start (${e.message || 'unknown error'})`);
+  worker.onerror = (e) => {
+    worker = null;
+    window.__worker = null;
+    failLoading(label, `worker failed to start (${e.message || 'unknown error'})`);
+  };
   const testMode = new URLSearchParams(location.search).has('test');
   showLoading('Starting guest program…');
-  worker.postMessage({ type: 'start', wasm, bundle: bundleBytes, canvas: off, testMode }, [wasm, off]);
+  const message = { type: 'start', wasm, bundle: bundleBytes, testMode };
+  const transfer = [wasm];
+  if (off) {
+    message.canvas = off;
+    transfer.push(off);
+  }
+  worker.postMessage(message, transfer);
 }
 
 function attachInput(canvas) {

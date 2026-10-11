@@ -11,6 +11,7 @@ import { ShaderTool } from './shaders.js';
 import { GpuExecutor } from './gpu.js';
 
 let w = null, exec = null, stopped = false, wake = null;
+let graphicsUnavailableReason = '';
 const dec = new TextDecoder();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nextFrame = () => (typeof requestAnimationFrame === 'function' ? new Promise((r) => requestAnimationFrame(() => r())) : sleep(16));
@@ -18,6 +19,11 @@ const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
 async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
+  stopped = false;
+  wake = null;
+  exec?.device?.destroy();
+  exec = null;
+  graphicsUnavailableReason = canvas ? '' : 'OffscreenCanvas worker transfer is unsupported';
   const options = jitMinPrefix === undefined ? {} : { jitMinPrefix };
   w = await AnyWasm.create(wasm, options);
   try { w.load(bundle); } catch (e) {
@@ -33,20 +39,28 @@ async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
       await exec.init();
       postMessage({ type: 'gpuinfo', info: { ...exec.adapterInfo }, features: [...exec.features] });
     } catch (e) {
-      log('WebGPU unavailable: ' + e.message);
+      graphicsUnavailableReason = `WebGPU unavailable: ${e.message}`;
+      log(graphicsUnavailableReason);
       exec = null;
     }
   }
   postMessage({ type: 'ready' });
   const t0 = performance.now();
   let status = Status.RUNNING;
+  let terminalMessage = '';
   let frames = 0;
   while (!stopped && (status === Status.RUNNING || status === Status.FRAME || status === Status.IDLE)) {
     const sliceStart = performance.now();
     status = Status.RUNNING;
     while (status === Status.RUNNING && performance.now() - sliceStart < 12) status = w.run(250_000);
     const g = w.takeGpu();
-    if (g.length && exec) exec.execute(g);
+    if (g.length) {
+      if (exec) exec.execute(g);
+      else {
+        status = Status.CRASHED;
+        terminalMessage = `Graphics unavailable: ${graphicsUnavailableReason || 'no renderer is available'}`;
+      }
+    }
     const o = w.takeStdout(); if (o.length) postMessage({ type: 'out', stream: 'stdout', text: dec.decode(o) });
     const e = w.takeStderr(); if (e.length) postMessage({ type: 'out', stream: 'stderr', text: dec.decode(e) });
     if (status === Status.FRAME) {
@@ -59,12 +73,13 @@ async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
   const dt = (performance.now() - t0) / 1000;
   const n = w.instructions();
   if (exec) postMessage({ type: 'gpu', ...exec.stats });
-  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: w.exitCode(), message: w.message(), instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats });
+  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: terminalMessage || w.message(), instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats });
 }
 
 onmessage = async (ev) => {
   const m = ev.data;
   if (m.type === 'start') start(m);
+  else if (m.type === 'dispose') { stopped = true; wake?.(); close(); }
   else if (m.type === 'input' && w) { w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }
   else if (m.type === 'stdin' && w) { w.pushStdin(new TextEncoder().encode(m.text)); wake?.(); wake = null; }
   else if (m.type === 'stop') { stopped = true; wake?.(); }

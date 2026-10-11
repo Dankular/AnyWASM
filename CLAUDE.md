@@ -29,7 +29,7 @@ reimplemented system libraries, recompile shaders, and **fail loudly** on anythi
 | `crates/anywasm-wasm` | C-ABI WASM build (`aw_*` exports) |
 | `web/` | `anywasm.js`, `worker.js`, `gpu.js` (WebGPU executor), `shaders.js`, vendored vkd3d-shader + Naga |
 | `fixtures/` | C test programs + built `.exe` (`fixtures/build.sh`; clang/lld-link + mingw-w64) |
-| `test/` | `wasm_smoke.mjs`, `bench.mjs`, `shaders.mjs`, `browser/run.mjs` (Playwright, headless Chromium) |
+| `test/` | `wasm_smoke.mjs`, `bench.mjs`, `shaders.mjs`, Chromium and cross-engine Playwright browser checks |
 | `tools/` | `gen_corpus.py` (diff corpus), `gen_vtables.py` (COM vtable slots from mingw headers) |
 | `docs/STATUS.md`, `docs/EVALUATION.md`, `THIRD_PARTY.md` | Honest status, prior-art evaluation, licences |
 
@@ -41,13 +41,15 @@ node test/wasm_smoke.mjs            # real .exe files through the WASM build und
 node test/shaders.mjs               # HLSL -> DXBC -> SPIR-V -> WGSL
 node test/bench.mjs                 # interpreter throughput (instr/s) under WASM
 (cd test/browser && npm i && node run.mjs)   # headless Chromium, pixel checks (uses ?test=1 mode)
+node test/browser/cross-engine.mjs          # Firefox and WebKit core/graphics availability checks
 bash fixtures/build.sh; node fixtures/gen_d3d_shaders.mjs   # rebuild fixtures / shader headers
 node fixtures/build_bench.mjs      # rebuild the call, memory, and SSE benchmark PE fixtures (Rust Windows target)
 ```
 Chromium path: highest `/opt/pw-browsers/chromium-NNNN/chrome-linux/chrome` (override with `CHROMIUM`).
 The browser suite uses `?test=1` for direct back-buffer readback, and separately verifies the
 visible 640x480 triangle canvas by screenshot without test mode. Other browser engines remain
-untested.
+partially exercised by `test/browser/cross-engine.mjs`; override browser paths with `FIREFOX` and
+`WEBKIT`, or select one engine with `BROWSER=Firefox` / `BROWSER=WebKit`.
 
 ## Verified state (see docs/STATUS.md for detail)
 CPU core differential-tested vs host (2,730 corpus entries); real mingw/msvcrt programs match native
@@ -105,11 +107,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       JIT/interpreter/host differential remain unverified.
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
-- [~] **Browser check**: the rebuilt runtime passes the headless Chrome worker, input, and WebGPU
+- [~] **Browser check**: the rebuilt runtime passes the headless Chromium worker, input, and WebGPU
       suite; page-realm and worker checks force the opt-in emitter and compare results with the
       cached-only path. The page-realm check grows WASM memory by one page after emitted execution
-      begins and verifies the cached generated module resumes without fallback. CSP behavior,
-      module-cache pressure, and other browser engines remain untested.
+      begins and verifies the cached generated module resumes without fallback. Firefox 141.0 runs
+      the hello and D3D11 triangle fixtures through its page and worker; Playwright WebKit 18.2 runs
+      hello and reports graphics unavailable when OffscreenCanvas transfer is missing. CSP behavior,
+      module-cache pressure, and full graphics validation on other engines remain open.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: finite `CreateThread` callbacks run inline on a private guest stack with
@@ -215,10 +219,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       runtime fetch and confirms the indicator clears once an input fixture reaches its message
       loop. Single-file/static-site export remains open. These fixtures do not satisfy the
       real-target acceptance gate above.
-- [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior are recorded
-      in `docs/BROWSER_SUPPORT.md`; the D3D11 triangle canvas blit is screenshot-checked in Chromium.
-      Firefox, Safari/WebKit, large-game memory (4 GB / `memory64`), and asset streaming remain
-      unverified.
+- [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior, Firefox
+      hello/triangle execution, and WebKit hello plus its OffscreenCanvas limitation are recorded in
+      `docs/BROWSER_SUPPORT.md`. The D3D11 triangle canvas blit is screenshot-checked only in
+      Chromium. Large-game memory (4 GB / `memory64`) and asset streaming remain unverified.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship
       obligations are in `THIRD_PARTY.md`; legal review of the packaged combined work is still required.
 - [x] Legal/scope statement: user supplies their own legally obtained binaries.
