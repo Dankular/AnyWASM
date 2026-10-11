@@ -182,14 +182,16 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       `CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple render targets,
       cube/array/3D textures, depth-stencil ops/stencil, rasterizer state
       (cull/fill/scissor/bias), `GenerateMips`, constant-buffer packing edge cases.
-- [~] **Compute shader target path**: D3D11 HLE now advertises typed UAV support for R32_FLOAT,
+- [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
-      buffer ranges, and emits dispatch commands. The selected Diligent demo reaches a guest
-      `Dispatch`, then guest `Draw` and `Present` calls. The WebGPU executor still does not bind
-      storage textures or execute compute pipelines, so no compute output or demo pixels are
-      verified. Structured/raw-buffer UAVs, geometry/hull/domain shaders, MSAA (forced to 1 sample),
-      staging read-back of GPU-written data, queries, deferred contexts/command lists, `SV_` system
-      values beyond the basics, tiled resources, and honest feature-level reporting remain open.
+      buffer ranges, and emits dispatch commands. The WebGPU executor binds the selected
+      single-float R32_FLOAT storage-texture case and executes compute pipelines. A browser fixture
+      verifies a 4x4 dispatch by reading back the UAV and sampling it in a draw. The selected
+      Diligent demo reaches guest `Dispatch`, `Draw`, and `Present` calls, but its compute shader and
+      host-visible pixels are not verified. Structured/raw-buffer UAVs, geometry/hull/domain
+      shaders, MSAA (forced to 1 sample), general staging read-back, queries, deferred
+      contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
+      feature-level reporting remain open.
 - [ ] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; collect
       failing real-world shaders as test cases; consider shader/pipeline caching (IndexedDB) and
       async pipeline creation to avoid stalls.

@@ -117,6 +117,7 @@ export class GpuExecutor {
     this.depths = new Map();
     this.swapchains = new Map();
     this.pipelines = new Map();
+    this.computePipelines = new Map();
     this.bglCache = new Map();
     this.dummyBuffers = new Map();
     this.enc = null;
@@ -124,7 +125,7 @@ export class GpuExecutor {
     this.passKey = '';
     this.ring = null;
     this.ringOff = 0;
-    this.stats = { draws: 0, presents: 0, passes: 0, pipelines: 0, errors: [] };
+    this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, errors: [] };
     this.st = {
       vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
       cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
@@ -323,7 +324,7 @@ export class GpuExecutor {
       case OP.PRESENT: this.present(u(0), u(1)); break;
       case OP.GENERATE_MIPS: this.generateMips(u(0)); break;
       case OP.RELEASE: this.release(u(0)); break;
-      case OP.DISPATCH: this.log('compute dispatch is not implemented yet'); break;
+      case OP.DISPATCH: this.dispatchCompute(u(0), u(1), u(2)); break;
       default: this.log(`unknown opcode ${op}`);
     }
   }
@@ -343,6 +344,7 @@ export class GpuExecutor {
     else if (UNSRGB[format] && !format.startsWith('bc')) viewFormats.push(UNSRGB[format]);
     let u = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     if (bind & (0x20 | 0x40)) u |= GPUTextureUsage.RENDER_ATTACHMENT;
+    if (bind & 0x80) u |= GPUTextureUsage.STORAGE_BINDING;
     if (!BLOCK(format) && !isDepth(format)) u |= GPUTextureUsage.RENDER_ATTACHMENT; // allows mip generation and clears of any colour texture
     const cube = (misc & 0x4) !== 0;
     const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], mipLevelCount: Math.max(1, mips), format, usage: u, viewFormats });
@@ -389,8 +391,16 @@ export class GpuExecutor {
       const s = new RegExp(`struct\\s+${m[2]}\\s*\\{\\s*\\w+:\\s*array<vec4<\\w+>,\\s*(\\d+)>`).exec(wgsl);
       if (s) cbSizes[+m[1]] = +s[1] * 16;
     }
+    const storageTextures = {};
+    for (const m of wgsl.matchAll(/@group\(3\)\s*@binding\((\d+)\)\s*var\s+\w+\s*:\s*texture_storage_(1d|2d|2d_array|3d)<\s*(\w+)\s*,\s*(write|read|read_write)\s*>/g)) {
+      storageTextures[+m[1]] = {
+        dimension: m[2] === '2d_array' ? '2d-array' : m[2],
+        format: m[3],
+        access: ({ write: 'write-only', read: 'read-only', read_write: 'read-write' })[m[4]],
+      };
+    }
     const module = this.device.createShaderModule({ code: wgsl });
-    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, wgsl });
+    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, storageTextures, wgsl });
   }
 
   // ── views ────────────────────────────────────────────────────────────────
@@ -481,6 +491,26 @@ export class GpuExecutor {
     return 'float';
   }
 
+  uniformBinding(stages, reg, declared) {
+    const stage = stages.find((candidate) => this.st.cb[candidate][reg]) ?? -1;
+    const id = stage >= 0 ? this.st.cb[stage][reg] : 0;
+    const range = stage >= 0 ? this.st.cbRange[stage][reg] || { first: 0, count: 0 } : { first: 0, count: 0 };
+    const resource = this.res.get(id);
+    const offset = range.first * 16;
+    const requested = range.count ? range.count * 16 : declared;
+    const available = resource ? Math.max(0, resource.size - offset) : 0;
+    const availableSize = Math.min(requested, available);
+    let buffer = resource?.gpu, bindingOffset = offset;
+    const copyToAlignedBuffer = !resource || offset % 256 !== 0 || availableSize < declared;
+    if (copyToAlignedBuffer) {
+      // WebGPU requires 256-byte uniform offsets. Copy misaligned or short D3D ranges to offset zero.
+      buffer = this.paddedBuffer(resource, Math.max(declared, requested), offset);
+      bindingOffset = 0;
+    }
+    const size = copyToAlignedBuffer ? Math.max(declared, requested) : Math.min(requested, available);
+    return { buffer, offset: bindingOffset, size: Math.max(16, (size + 15) & ~15) };
+  }
+
   draw(indexed, count, instances, first, baseVertex, firstInstance) {
     const st = this.st;
     const vs = this.shaders.get(st.shader[0]), ps = this.shaders.get(st.shader[1]);
@@ -505,22 +535,8 @@ export class GpuExecutor {
     for (const [reg, { d, vis }] of groups[0]) {
       const declared = Math.max(vs.cbSizes[reg] || 0, ps?.cbSizes[reg] || 0) || 65536;
       layoutEntries[0].push({ binding: reg, visibility: vis, buffer: { type: 'uniform' } });
-      const cbStages = (vis & GPUShaderStage.VERTEX) ? [0, 1] : [1, 0];
-      const cbStage = cbStages.find((stage) => this.st.cb[stage][reg]) ?? -1;
-      const bufId = cbStage >= 0 ? this.st.cb[cbStage][reg] : 0;
-      const range = cbStage >= 0 ? this.st.cbRange[cbStage][reg] || { first: 0, count: 0 } : { first: 0, count: 0 };
-      const r = this.res.get(bufId);
-      const offset = range.first * 16;
-      const requested = range.count ? range.count * 16 : declared;
-      const available = r ? Math.max(0, r.size - offset) : 0;
-      const size = Math.min(requested, available);
-      let buffer = r?.gpu, bindingOffset = offset;
-      if (!r || offset % 256 !== 0 || size < declared) {
-        // WebGPU requires 256-byte uniform offsets. Copy misaligned or short D3D ranges to offset zero.
-        buffer = this.paddedBuffer(r, Math.max(declared, requested), offset);
-        bindingOffset = 0;
-      }
-      resolved[0].push({ binding: reg, resource: { buffer, offset: bindingOffset, size: Math.max(16, (Math.min(requested, available || requested) + 15) & ~15) } });
+      const stages = (vis & GPUShaderStage.VERTEX) ? [0, 1] : [1, 0];
+      resolved[0].push({ binding: reg, resource: this.uniformBinding(stages, reg, declared) });
     }
     const samplerComparison = [];
     for (const [reg, { d, vis }] of groups[2]) {
@@ -588,6 +604,98 @@ export class GpuExecutor {
     if (indexed) pass.drawIndexed(count, instances, first, baseVertex, firstInstance);
     else pass.draw(count, instances, first, firstInstance);
     this.stats.draws++;
+  }
+
+  dispatchCompute(x, y, z) {
+    const st = this.st;
+    const shader = this.shaders.get(st.shader[2]);
+    if (!shader || shader.stage !== 2) {
+      this.log(`compute dispatch skipped: compute shader ${st.shader[2]} is unavailable`);
+      return;
+    }
+
+    const GROUP = { 2: 0, 0: 1, 3: 2, 1: 3 };
+    const groups = [new Map(), new Map(), new Map(), new Map()];
+    for (const d of shader.descriptors) {
+      const group = GROUP[d.type];
+      if (group === undefined) continue;
+      groups[group].set(d.register, d);
+    }
+    const layoutEntries = [[], [], [], []];
+    const resolved = [[], [], [], []];
+
+    for (const [reg] of groups[0]) {
+      const declared = shader.cbSizes[reg] || 65536;
+      layoutEntries[0].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } });
+      resolved[0].push({ binding: reg, resource: this.uniformBinding([2], reg, declared) });
+    }
+    for (const [reg, d] of groups[1]) {
+      const view = this.getView(st.srv[2][reg] || 0);
+      const fallbackDimension = d.resourceType === 5 ? '2d-array' : d.resourceType === 7 ? 'cube' : '2d';
+      const viewDimension = view?.dim || fallbackDimension;
+      const sampleType = this.sampleTypeOf(view?.format);
+      layoutEntries[1].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, texture: { sampleType, viewDimension } });
+      resolved[1].push({ binding: reg, resource: view ? view.view : this.dummyView });
+    }
+    for (const [reg] of groups[2]) {
+      const sampler = this.samplers.get(st.smp[2][reg] || 0);
+      layoutEntries[2].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, sampler: { type: sampler?.comparison ? 'comparison' : 'filtering' } });
+      resolved[2].push({ binding: reg, resource: sampler ? sampler.gpu : this.defaultSampler });
+    }
+    for (const [reg] of groups[3]) {
+      const declaration = shader.storageTextures[reg];
+      const uav = st.uav[reg];
+      const view = uav && this.getView(uav.id);
+      if (!declaration || !view || declaration.format !== view.format || declaration.dimension !== view.dim) {
+        this.log(`compute dispatch skipped: UAV u${reg} does not match the shader storage texture`);
+        return;
+      }
+      layoutEntries[3].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, storageTexture: {
+        access: declaration.access,
+        format: declaration.format,
+        viewDimension: declaration.dimension,
+      } });
+      resolved[3].push({ binding: reg, resource: view.view });
+    }
+
+    const key = JSON.stringify([st.shader[2], layoutEntries]);
+    let cached = this.computePipelines.get(key);
+    if (!cached) {
+      const bgls = layoutEntries.map((entries, group) => this.bindGroupLayout(group, entries));
+      let pipeline;
+      this.device.pushErrorScope('validation');
+      try {
+        pipeline = this.device.createComputePipeline({
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: bgls }),
+          compute: { module: shader.module, entryPoint: shader.entry },
+        });
+      } catch (error) {
+        this.device.popErrorScope();
+        this.stats.errors.push(`createComputePipeline: ${error.message}`);
+        this.log(`createComputePipeline: ${error.message}`);
+        return;
+      }
+      this.device.popErrorScope().then((error) => {
+        if (error) {
+          this.stats.errors.push('compute pipeline: ' + error.message);
+          this.log('compute pipeline validation: ' + error.message);
+        }
+      });
+      cached = { pipeline, bgls };
+      this.computePipelines.set(key, cached);
+      this.stats.pipelines++;
+    }
+
+    const bindGroups = resolved.map((entries, group) => entries.length
+      ? this.device.createBindGroup({ layout: cached.bgls[group], entries })
+      : null);
+    this.endPass();
+    const pass = this.encoder().beginComputePass();
+    pass.setPipeline(cached.pipeline);
+    for (let group = 0; group < bindGroups.length; group++) if (bindGroups[group]) pass.setBindGroup(group, bindGroups[group]);
+    pass.dispatchWorkgroups(x, y, z);
+    pass.end();
+    this.stats.dispatches++;
   }
 
   paddedBuffer(src, size, sourceOffset = 0) {

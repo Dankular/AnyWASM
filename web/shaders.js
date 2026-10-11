@@ -12,6 +12,40 @@
 const D = { SRV: 0, UAV: 1, CBV: 2, SAMPLER: 3 };
 const GROUP_OF = { [D.CBV]: 0, [D.SRV]: 1, [D.SAMPLER]: 2, [D.UAV]: 3 };
 
+// D3D11's typed float UAV declaration does not carry its DXGI format in the scanned binding.
+// AnyWASM's selected D3D11 path advertises R32_FLOAT as its typed UAV format, so specialize one
+// formatless float storage image to R32f before Naga validates it for WebGPU.
+function specializeSingleFloatUavImage(spirv, descriptors) {
+  const uavs = descriptors.filter((d) => d.type === D.UAV);
+  if (uavs.length !== 1 || uavs[0].dataType !== 5) return spirv;
+
+  const bytes = new Uint8Array(spirv);
+  const words = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.byteLength < 20 || words.getUint32(0, true) !== 0x07230203) return spirv;
+
+  let storageImage = false;
+  for (let at = 20; at < bytes.byteLength;) {
+    const first = words.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
+    if (wordCount === 0 || at + wordCount * 4 > bytes.byteLength) return spirv;
+    if (opcode === 25 && wordCount >= 9 && words.getUint32(at + 7 * 4, true) === 2 && words.getUint32(at + 8 * 4, true) === 0) {
+      words.setUint32(at + 8 * 4, 3, true); // OpTypeImage Unknown -> R32f
+      storageImage = true;
+    }
+    at += wordCount * 4;
+  }
+  if (!storageImage) return spirv;
+
+  for (let at = 20; at < bytes.byteLength;) {
+    const first = words.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
+    if (opcode === 17 && wordCount === 2) {
+      const capability = words.getUint32(at + 4, true);
+      if (capability === 55 || capability === 56) words.setUint32(at + 4, 1, true); // formatless storage -> Shader
+    }
+    at += wordCount * 4;
+  }
+  return bytes;
+}
+
 export class ShaderTool {
   constructor(base = new URL('./shaders/', import.meta.url)) {
     this.base = base;
@@ -98,7 +132,7 @@ export class ShaderTool {
         return this._result();
       } finally { if (tbl) this.vk._free(tbl); this.vk._wb_clear(); }
     });
-    const wgsl = this.naga.spirv_to_wgsl(spirv);
+    const wgsl = this.naga.spirv_to_wgsl(specializeSingleFloatUavImage(spirv, descriptors));
     return { spirv, wgsl, descriptors };
   }
 }

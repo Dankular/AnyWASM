@@ -341,6 +341,104 @@ try {
   check('CopyResource exposes the source red texel in quad D', near(at2(32, 150), RED, 1), JSON.stringify(at2(32, 150)));
   check('buffer CopyResource exposes the red quad at its copied vertex-buffer position', near(at2(604, 150), RED, 1), JSON.stringify(at2(604, 150)));
 
+  const computeResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const messages = [];
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (m) => messages.push(m), { noPresent: true });
+      await gpu.init();
+      const compute = tool.compileHlsl(`
+        RWTexture2D<float> dst : register(u0);
+        [numthreads(1, 1, 1)] void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = 0.25; }
+      `, 'main', 'cs_5_0');
+      const vertex = tool.compileHlsl(`
+        struct V { float2 position : POSITION; };
+        float4 main(V v) : SV_Position { return float4(v.position, 0.0, 1.0); }
+      `, 'main', 'vs_5_0');
+      const pixelShader = tool.compileHlsl(`
+        Texture2D<float> src : register(t0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          return float4(src.Load(int3(0, 0, 0)), 0.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
+
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28)); // swap chain and back buffer
+      command(4, words(3, 4, 4, 1, 1, 41, 0x88, 0, 1, 0)); // R32_FLOAT SRV + UAV texture
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1)); // back-buffer RTV
+      command(12, words(4, 3, 3, 41, 4, 0, 1, 0, 1)); // UAV
+      command(12, words(5, 2, 3, 41, 4, 0, 1, 0, 1)); // SRV
+      command(2, words(11, 24, 1, 0, 0, 8));
+      const vertexBytes = new Uint8Array(24), vertexData = new DataView(vertexBytes.buffer);
+      [-1, -1, -1, 3, 3, -1].forEach((value, i) => vertexData.setFloat32(i * 4, value, true));
+      const write = new Uint8Array(12 + vertexBytes.length);
+      write.set(words(11, 0, vertexBytes.length)); write.set(vertexBytes, 12); command(3, write);
+      shader(6, 2, compute); shader(7, 0, vertex); shader(8, 1, pixelShader);
+      command(7, words(10, 1, 0, 16, 0, 0, 0, 0)); // POSITION -> R32G32_FLOAT
+      command(17, words(2, 6)); command(17, words(0, 7)); command(17, words(1, 8));
+      command(43, words(0, 1, 4, 0xffffffff)); // CS UAV binding
+      command(42, words(4, 4, 1)); // compute writes all 16 texels
+      command(21, words(1, 2, 0)); command(15, words(10)); command(16, words(4));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true); clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 1, true);
+      clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true); command(27, clear);
+      command(13, words(0, 1, 11, 8, 0));
+      command(19, words(1, 0, 1, 5));
+      command(29, words(3, 0)); command(35, words(1, 9));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const observedPixel = Array.from(pixels.data.slice(i, i + 4));
+      const output = gpu.res.get(3);
+      const readback = gpu.device.createBuffer({ size: 256 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = gpu.device.createCommandEncoder();
+      encoder.copyTextureToBuffer({ texture: output.gpu }, { buffer: readback, bytesPerRow: 256, rowsPerImage: 4 }, { width: 4, height: 4 });
+      gpu.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const mapped = new DataView(readback.getMappedRange());
+      const uavCenter = mapped.getFloat32(2 * 256 + 2 * 4, true);
+      readback.unmap();
+      const result = { pixel: observedPixel, uavCenter, stats: gpu.stats, errors: messages };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message, errors: messages };
+    }
+  });
+  check('WebGPU executes one R32_FLOAT compute dispatch with no validation errors',
+    computeResult.stats?.dispatches === 1 && computeResult.stats.errors.length === 0,
+    JSON.stringify(computeResult));
+  check('compute-written UAV texture is visible to the following pixel shader',
+    computeResult.pixel?.every((value, i) => Math.abs(value - [64, 0, 0, 255][i]) <= 1),
+    JSON.stringify({ pixel: computeResult.pixel, uavCenter: computeResult.uavCenter, error: computeResult.error }));
+  check('R32_FLOAT UAV contains the compute shader value', Math.abs(computeResult.uavCenter - 0.25) < 0.0001,
+    JSON.stringify(computeResult.uavCenter));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {

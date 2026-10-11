@@ -299,10 +299,11 @@ unbounded demo loop; it did not exit normally or reach the step cap. The trace i
 environment at `%TEMP%\anywasm-glfwdemo-cb1-3b.log` and is not a repository artifact.
 
 This is guest-side progress: the CLI records HLE commands, but does not execute them through the
-browser's WebGPU executor. `web/gpu.js` still logs that compute dispatch is unimplemented, so storage
-texture binding, compute pipeline execution, SDF output, host-visible window pixels, and gameplay
-acceptance remain unverified. The 96 static missing imports, registry data store, and tutorial D3D11
-paths also remain open.
+browser's WebGPU executor. A separate browser command-stream fixture now verifies a 4x4 R32_FLOAT
+UAV dispatch, reads back the `0.25` values, and samples the texture in a draw with pixel checks.
+That validates the narrow typed-UAV executor path; it does not run the selected target's command
+stream or verify its SDF shader, host-visible GLFW Demo pixels, or gameplay. The 96 static missing
+imports, registry data store, and tutorial D3D11 paths also remain open.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -313,9 +314,9 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 
 ## Next evidence needed
 
-- Run the target's emitted command stream through the browser WebGPU executor. Add a target-shaped
-  compute/storage-texture fixture and pixel or GPU readback checks before claiming the compute path
-  works. The existing D3D11 textured fixture still covers only its tested graphics path.
+- Connect the selected target's emitted command stream to the browser WebGPU executor and capture
+  host-visible GLFW Demo pixels. The new compute fixture covers only a small single-float UAV
+  shader; the target's SDF shader, its additional bindings/instructions, and gameplay are unverified.
 - Continue to distinguish guest `Draw`/`Present` calls and virtual HLE objects from observed host
   rendering; no host-visible GLFW Demo frame has been captured.
 - Extend the virtual registry only from observed target paths and required values. The current

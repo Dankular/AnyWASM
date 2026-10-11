@@ -131,11 +131,12 @@
   setup. Target-grounded CPU and HLE slices now carry it through a guest compute `Dispatch`, `Draw`,
   and repeated `IDXGISwapChain2::Present` calls. Native and WASM fixtures cover secure
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
-  `RtlVirtualUnwind` subset are in place. General SEH remains open. The browser WebGPU compute path
-  is still unimplemented, so the guest command trace does not verify host rendering or pixels. No
-  real-game acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for exact traces and next
-  steps.
-- The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
-  checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
-  pixel-verified.
+  `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes
+  one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and verifies a following
+  draw samples it into a pixel. The selected target's shader, command stream in the browser, host
+  rendering, and gameplay remain unverified. No real-game acceptance pass is claimed. See
+  [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
+- The D3D11 textured fixture has Rust command-stream and WASM smoke coverage, and its tested WebGPU
+  rendering states have pixel checks in `test/browser/run.mjs`. Other rendering states listed in
+  `CLAUDE.md` are not pixel-verified.
 - See `docs/EVALUATION.md` for the prior-art evaluation (WineBrowser, retrowin32, ...).
