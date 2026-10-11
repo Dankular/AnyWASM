@@ -212,14 +212,18 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       buffer ranges, and emits dispatch commands. The WebGPU executor binds the selected
       single-float R32_FLOAT storage-texture case and executes compute pipelines. A browser fixture
       verifies a 4x4 dispatch by reading back the UAV and sampling it in a draw. The selected
-      Diligent demo reaches guest `Dispatch`, `Draw`, and `Present` calls, but its compute shader and
-      host-visible pixels are not verified. Structured/raw-buffer UAVs, geometry/hull/domain
+      Diligent demo's SDF compute shader now translates and passes WebGPU module/pipeline creation;
+      a bounded browser replay accepted one dispatch. Its UAV output and host-visible pixels are
+      still unverified because the first graphics pipeline lacks Naga's hidden group-3 draw-parameter
+      binding. Structured/raw-buffer UAVs, geometry/hull/domain
       shaders, MSAA (forced to 1 sample), general staging read-back, queries, deferred
       contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
       feature-level reporting remain open.
-- [ ] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; collect
-      failing real-world shaders as test cases; consider shader/pipeline caching (IndexedDB) and
-      async pipeline creation to avoid stalls.
+- [~] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; a captured
+      Diligent GLFW Demo SDF shader now has a regression for its non-finite integer-register bit
+      patterns and translates through a runtime bitcast. More failing real-world shaders, the target's
+      draw-parameter pipeline binding, shader/pipeline caching (IndexedDB), and async pipeline
+      creation to avoid stalls remain open.
 - [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
       pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
       canvas sizes, and browser engines still need coverage.
@@ -283,12 +287,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       traced replay reached `CreateComputeShader`, `CSSetUnorderedAccessViews`, `Dispatch`, then
       guest `Draw` and `IDXGISwapChain2::Present` calls. Target-grounded VEX/BMI handlers and D3D11
       UAV/constant-buffer-range command records moved execution through these paths. The replay was
-      stopped after confirming repeated guest presents; WebGPU compute dispatch and host-rendered
-      pixels remain unverified. A later headless Chromium probe reached the WebGPU path only with a
-      test-only 1,000,000,000-instruction worker slice; render pipelines were invalid and the
-      captured canvas was black. The normal worker slice still stops in a synchronous callback that
-      cannot resume. No end-to-end game acceptance pass is claimed; see `docs/TARGETS.md` for the
-      exact trace and next steps.
+      stopped after confirming repeated guest presents. A later headless Chromium replay with a
+      test-only 1,000,000,000-instruction worker slice now translates the target's SDF shader and
+      accepts its compute dispatch. The first remaining WebGPU error is the graphics pipeline's
+      missing group-3 draw-parameter binding; readback is still transparent black. The normal worker
+      slice still stops in a synchronous callback that cannot resume. No end-to-end game acceptance
+      pass is claimed; see `docs/TARGETS.md` for the exact trace and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the

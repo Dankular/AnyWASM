@@ -12,6 +12,105 @@
 const D = { SRV: 0, UAV: 1, CBV: 2, SAMPLER: 3 };
 const GROUP_OF = { [D.CBV]: 0, [D.SRV]: 1, [D.SAMPLER]: 2, [D.UAV]: 3 };
 
+// Naga 30 rejects non-finite SPIR-V float literals. DXBC uses untyped temp
+// registers, so vkd3d can encode an integer register value such as -8 as an
+// f32 NaN bit pattern before an integer operation. Re-express constants that
+// are only stored to f32 pointers as integer constants, then load and bitcast
+// them inside the function. The load prevents Naga from folding the bitcast
+// back into an unrepresentable WGSL float literal.
+function deferNonFiniteF32StoreConstants(spirv) {
+  const bytes = new Uint8Array(spirv);
+  if (bytes.byteLength < 20 || bytes.byteLength % 4 !== 0) return spirv;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== 0x07230203) return spirv;
+
+  const words = Array.from({ length: bytes.byteLength / 4 }, (_, i) => view.getUint32(i * 4, true));
+  const floatTypes = new Map(), intTypes = [], pointerTypes = new Map(), resultTypes = new Map();
+  const constants = [], stores = [], entryBlocks = new Map();
+  let functionId = 0, firstConstantAt = -1;
+  for (let at = 5; at < words.length;) {
+    const first = words[at], wordCount = first >>> 16, opcode = first & 0xffff;
+    if (wordCount === 0 || at + wordCount > words.length) return spirv;
+    if (opcode === 22 && wordCount === 3) floatTypes.set(words[at + 1], words[at + 2]); // OpTypeFloat
+    if (opcode === 21 && wordCount === 4) intTypes.push({ id: words[at + 1], width: words[at + 2], signed: words[at + 3] }); // OpTypeInt
+    if (opcode === 32 && wordCount === 4) pointerTypes.set(words[at + 1], { storage: words[at + 2], pointee: words[at + 3] }); // OpTypePointer
+    if ([59, 65, 66, 67, 83].includes(opcode) && wordCount >= 3) resultTypes.set(words[at + 2], words[at + 1]);
+    if (opcode === 43 && wordCount === 4) { // OpConstant with an f32 bit pattern
+      if (firstConstantAt < 0) firstConstantAt = at;
+      const typeId = words[at + 1], bits = words[at + 3];
+      if (floatTypes.get(typeId) === 32 && (bits & 0x7f800000) === 0x7f800000) {
+        constants.push({ at, id: words[at + 2], typeId });
+      }
+    }
+    if (opcode === 54 && wordCount >= 3) functionId = words[at + 2]; // OpFunction
+    if (opcode === 248 && wordCount === 2 && functionId && !entryBlocks.has(functionId)) entryBlocks.set(functionId, at); // first OpLabel
+    if (opcode === 62 && wordCount >= 3) stores.push({ at, pointerId: words[at + 1], objectId: words[at + 2], functionId }); // OpStore
+    if (opcode === 56) functionId = 0; // OpFunctionEnd
+    at += wordCount;
+  }
+  if (!constants.length || firstConstantAt < 0 || !intTypes.some((t) => t.width === 32)) return spirv;
+
+  const intType = intTypes.find((t) => t.width === 32 && t.signed === 1) || intTypes.find((t) => t.width === 32);
+  const insertions = new Map();
+  const insertionAt = (at) => {
+    let group = insertions.get(at);
+    if (!group) { group = { types: [], variables: [], initializers: [], operations: [] }; insertions.set(at, group); }
+    return group;
+  };
+  let nextId = words[3];
+  const intPointer = [...pointerTypes.entries()].find(([, type]) => type.storage === 7 && type.pointee === intType.id);
+  const intPointerTypeId = intPointer ? intPointer[0] : nextId++;
+  if (!intPointer) insertionAt(firstConstantAt).types.push((4 << 16) | 32, intPointerTypeId, 7, intType.id); // OpTypePointer Function i32
+
+  for (const constant of constants) {
+    const matchingStores = stores.filter((s) => s.objectId === constant.id);
+    if (!matchingStores.length || matchingStores.some((s) => pointerTypes.get(resultTypes.get(s.pointerId))?.pointee !== constant.typeId)) continue;
+    const functions = new Set(matchingStores.map((s) => s.functionId));
+    if (functions.size !== 1 || functions.has(0)) continue;
+
+    // Do not rewrite constants that also participate in some other SPIR-V
+    // construct (including composite constants or arithmetic operations).
+    const recognized = new Set([constant.at + 2, ...matchingStores.map((s) => s.at + 2)]);
+    let hasOtherUse = false;
+    for (let i = 5; i < words.length; i++) {
+      if (words[i] === constant.id && !recognized.has(i)) { hasOtherUse = true; break; }
+    }
+    if (hasOtherUse) continue;
+
+    const entryLabel = entryBlocks.get(matchingStores[0].functionId);
+    if (entryLabel === undefined) continue;
+    const variableAt = entryLabel + 2;
+    let initializerAt = variableAt;
+    while (initializerAt < words.length) {
+      const first = words[initializerAt], wordCount = first >>> 16, opcode = first & 0xffff;
+      if (opcode !== 59 || wordCount < 4) break;
+      initializerAt += wordCount;
+    }
+
+    const variableId = nextId++;
+    insertionAt(variableAt).variables.push((4 << 16) | 59, intPointerTypeId, variableId, 7); // OpVariable Function
+    insertionAt(initializerAt).initializers.push((3 << 16) | 62, variableId, constant.id); // initialize the integer bits once
+    words[constant.at + 1] = intType.id;
+    for (const store of matchingStores) {
+      const loadId = nextId++, bitcastId = nextId++;
+      words[store.at + 2] = bitcastId;
+      insertionAt(store.at).operations.push(
+        (4 << 16) | 61, intType.id, loadId, variableId, // OpLoad
+        (4 << 16) | 124, constant.typeId, bitcastId, loadId, // OpBitcast
+      );
+    }
+  }
+  if (!nextId || ![...insertions.values()].some((g) => g.variables.length)) return spirv;
+
+  for (const [at, group] of [...insertions.entries()].sort((a, b) => b[0] - a[0])) {
+    words.splice(at, 0, ...group.types, ...group.variables, ...group.initializers, ...group.operations);
+  }
+  words[3] = nextId;
+  const out = new Uint8Array(words.length * 4), outView = new DataView(out.buffer);
+  words.forEach((word, i) => outView.setUint32(i * 4, word, true));
+  return out;
+}
+
 // D3D11's typed float UAV declaration does not carry its DXGI format in the scanned binding.
 // AnyWASM's selected D3D11 path advertises R32_FLOAT as its typed UAV format, so specialize one
 // formatless float storage image to R32f before Naga validates it for WebGPU.
@@ -132,7 +231,8 @@ export class ShaderTool {
         return this._result();
       } finally { if (tbl) this.vk._free(tbl); this.vk._wb_clear(); }
     });
-    const wgsl = this.naga.spirv_to_wgsl(specializeSingleFloatUavImage(spirv, descriptors));
+    const normalizedSpirv = deferNonFiniteF32StoreConstants(spirv);
+    const wgsl = this.naga.spirv_to_wgsl(specializeSingleFloatUavImage(normalizedSpirv, descriptors));
     return { spirv, wgsl, descriptors };
   }
 }

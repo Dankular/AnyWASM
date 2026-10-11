@@ -35,7 +35,9 @@
   The back buffer is read back and compared with analytic barycentric colours: 216 sampled pixels,
   worst error 0/255, zero WebGPU validation errors.
 - Shader toolchain (`test/shaders.mjs`): HLSL -> DXBC -> SPIR-V -> WGSL with a fixed
-  descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2).
+  descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2). The captured Diligent
+  GLFW Demo SDF compute shader has a regression for integer-register bit patterns that vkd3d emits
+  as non-finite f32 constants; it now translates via an in-function integer load and bitcast.
 - Cached-block execution benchmark (Node 24.16.0, Windows x64, release WASM; two runs, six rounds
   per workload): median 32.2 M instr/s for `compute.exe`, 26.1 for call-heavy, 28.1 for
   memory-heavy, and 38.5 for SSE-float. The cached executor translates NOP-like, MOV and LEA
@@ -140,9 +142,11 @@
   texture, D32_FLOAT depth ordering, indexed draws, constant-factor and source-alpha blending, and
   one texture plus one vertex-buffer `CopyResource` case). The triangle's visible canvas screenshot
   also checks its clear colour and centre pixel. Other blend modes, alpha-test, mips/filtering,
-  instancing and other copies are not pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
-  (forced to 1 sample), staging read-back of GPU-written data, and `SV_` system values beyond the
-  basics are not implemented.
+  instancing and other copies are not pixel-verified. Compute support is limited to a single
+  R32_FLOAT storage-texture UAV; a small fixture checks its output, and the selected Diligent SDF
+  shader now translates and dispatches but has no verified UAV output. Structured/raw UAVs,
+  geometry/tessellation, multisampling (forced to 1 sample), general staging read-back, and `SV_`
+  system values beyond the basics remain unsupported.
 - **Pixel verification paths:** D3D11 back-buffer checks run in test mode (`?test=1`), which skips
   swap-chain presentation so the test can map the back buffer directly. A separate Chromium run
   without test mode captures the visible 640x480 canvas and checks the triangle's clear colour and
@@ -174,9 +178,11 @@
   `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes
   one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and verifies a following
   draw samples it into a pixel. A headless Chromium probe attempted the selected target's browser
-  path: the normal worker slice stopped in a synchronous callback, and a test-only larger slice
-  reached invalid WebGPU render pipelines with a black canvas. The target's shader output, host
-  rendering, and gameplay remain unverified. No real-game acceptance pass is claimed. See
+  path: the normal worker slice stopped in a synchronous callback; a test-only larger slice now
+  accepts one target compute dispatch, then fails graphics pipeline validation because the
+  translated vertex shader's group-3 draw-parameter uniform is missing from the layout. Readback
+  remains transparent black. Target UAV values, host rendering, and gameplay remain unverified. No
+  real-game acceptance pass is claimed. See
   [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
 - The D3D11 textured fixture has Rust command-stream and WASM smoke coverage, and its tested WebGPU
   rendering states have pixel checks in `test/browser/run.mjs`. Other rendering states listed in

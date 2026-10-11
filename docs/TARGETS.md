@@ -419,15 +419,30 @@ slice to 1,000,000,000 instructions; no repository runtime code was changed for 
 guest advanced through its first roughly 580-million-instruction frame and the browser observed
 30 or more guest `Present` stops. WebGPU reported invalid render pipelines followed by invalid
 command buffers. A 1040x807 readback contained only transparent black pixels. The page did not
-provide a successful completion status, and no target image was verified. The exact first shader
-or pipeline validation cause still needs to be captured and diagnosed. This probe does not establish
-that the target renders correctly or passes gameplay acceptance.
+provide a successful completion status, and no target image was verified. The first rejected shader
+and validation cause are now captured below.
+
+The first rejected shader was guest shader id 16, a 1,636-byte `GenerateSDF.hlsl` compute shader
+(SHA-256 `c8927fda2387000f58620450f2ffed95935283ea4794a224cc8d173fca0c7900`). Its SPIR-V
+contained an f32 `OpConstant` with bits `0xfffffff8`, originating from the HLSL integer loop
+initializer `l(-8)` in the Microsoft DXBC disassembly. SPIR-V permits this bit pattern, but Naga 30
+rejects it as an invalid constant expression. `web/shaders.js` now preserves those bits through an
+integer local and runtime bitcast; `test/shaders.mjs` regresses the captured DXBC. In a later bounded
+Chromium replay, the compute shader module and pipeline validated and one dispatch executed.
+
+The first remaining render-pipeline error is that the translated vertex shader uses Naga's hidden
+`@group(3) @binding(0)` draw-parameter uniform, while the graphics pipeline layout provides no
+binding there. The vendored Naga manifest defines the uniform as four i32 values (`baseVertex`,
+`baseInstance`, and two reserved values). A 1040x807 readback still contained only transparent
+black pixels. The normal worker slice still stops in a synchronous callback that cannot resume.
+Neither probe provides a successful completion status or proves target rendering or gameplay
+acceptance.
 
 ## Next evidence needed
 
-- Diagnose the selected target's first WebGPU render-pipeline validation error, then capture
-  host-visible GLFW Demo pixels. The new compute fixture covers only a small single-float UAV
-  shader; the target's SDF shader, its additional bindings/instructions, and gameplay are unverified.
+- Add the Naga draw-parameter uniform to the graphics pipeline layout and bind per-draw values, then
+  capture host-visible GLFW Demo pixels. The SDF shader now translates and dispatches, but its UAV
+  output, other graphics states, and gameplay remain unverified.
 - Continue to distinguish guest `Draw`/`Present` calls and virtual HLE objects from observed host
   rendering; no host-visible GLFW Demo frame has been captured.
 - Extend the virtual registry only from observed target paths and required values. The current

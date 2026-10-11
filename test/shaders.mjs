@@ -1,4 +1,5 @@
 // HLSL -> DXBC -> SPIR-V -> WGSL through the vendored toolchain.
+import { readFile } from 'node:fs/promises';
 import { ShaderTool } from '../web/shaders.js';
 let failures = 0;
 const check = (n, ok, d = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}${ok ? '' : ' :: ' + d}`); if (!ok) failures++; };
@@ -28,6 +29,14 @@ check('vs has @vertex entry with position builtin', /@vertex/.test(v.wgsl) && /@
 check('ps has @fragment entry', /@fragment/.test(p.wgsl));
 let threw = false; try { t.compileHlsl('float4 x( {', 'x', 'ps_5_0'); } catch (e) { threw = /HLSL/.test(e.message); }
 check('syntax errors reported', threw);
+let sdfWgsl = '', sdfError = '';
+try {
+  const dxbc = new Uint8Array(await readFile(new URL('../fixtures/diligent_glfwdemo_sdf.dxbc', import.meta.url)));
+  sdfWgsl = t.translate(dxbc).wgsl;
+} catch (e) { sdfError = String(e); }
+check('Diligent GLFW Demo SDF integer loop constants translate through runtime bitcasts',
+  /local\s*=\s*-8i;/.test(sdfWgsl) && /let (\w+) = local;\s*r1_\[1u\] = bitcast<f32>\(\1\);/.test(sdfWgsl),
+  sdfError || sdfWgsl.slice(0, 400));
 if (process.env.SHOW) { console.log(v.wgsl); console.log(p.wgsl); }
 console.log(failures ? `\n${failures} FAILED` : '\nshader toolchain tests passed');
 process.exit(failures ? 1 : 0);
