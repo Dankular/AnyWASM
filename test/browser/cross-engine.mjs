@@ -3,15 +3,34 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { firefox, webkit } from 'playwright-core';
+import { chromium, firefox, webkit } from 'playwright-core';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+const indexPath = fileURLToPath(new URL('../../web/index.html', import.meta.url));
 const jitPressurePath = fileURLToPath(new URL('../jit_cache_pressure.mjs', import.meta.url));
 const jitPressureSource = readFileSync(jitPressurePath);
+const csp = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self'; connect-src 'self'";
+const cspProbeSource = `
+import { AnyWasm } from '/anywasm.js';
+import { runJitCachePressure } from '/jit-cache-pressure.mjs';
+try {
+  const result = await runJitCachePressure(AnyWasm);
+  const output = document.createElement('pre');
+  output.id = 'csp-jit-results';
+  output.textContent = JSON.stringify(result);
+  document.body.append(output);
+} catch (error) {
+  const output = document.createElement('pre');
+  output.id = 'csp-jit-results';
+  output.textContent = JSON.stringify({ error: error.message });
+  document.body.append(output);
+}
+`;
 const server = spawn(process.execPath, ['web/serve.mjs', '8119'], { cwd: repoRoot, stdio: 'ignore' });
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const engines = [
+  { name: 'Chromium', engine: chromium, executablePath: process.env.CHROMIUM },
   { name: 'Firefox', engine: firefox, executablePath: process.env.FIREFOX },
   { name: 'WebKit', engine: webkit, executablePath: process.env.WEBKIT },
 ].filter((item) => !process.env.BROWSER || item.name.toLowerCase() === process.env.BROWSER.toLowerCase());
@@ -71,6 +90,42 @@ try {
       assert.deepEqual(jitPressure.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0 });
       assert.deepEqual(pageErrors, [], `${item.name} had uncaught page errors`);
       console.log(`${item.name} ${browser.version()}: ${JSON.stringify({ capabilities, hello, graphics, jitPressure })}`);
+
+      const cspPage = await browser.newPage();
+      try {
+        const cspPageErrors = [];
+        cspPage.on('pageerror', (error) => cspPageErrors.push(error.message));
+        await cspPage.route('**/index.html', (route) => route.fulfill({
+          path: indexPath,
+          headers: { 'Content-Security-Policy': csp },
+        }));
+        await cspPage.route('**/jit-cache-pressure.mjs', (route) => route.fulfill({ body: jitPressureSource, contentType: 'text/javascript' }));
+        await cspPage.route('**/csp-probe.mjs', (route) => route.fulfill({ body: cspProbeSource, contentType: 'text/javascript' }));
+        await cspPage.goto('http://localhost:8119/index.html');
+        await cspPage.locator('#demo-hello').click();
+        await cspPage.locator('#stat[data-status]').waitFor({ state: 'attached', timeout: 30000 });
+        const cspHello = {
+          status: await cspPage.locator('#stat').getAttribute('data-status'),
+          exitCode: await cspPage.locator('#stat').getAttribute('data-exit'),
+          output: await cspPage.locator('#term').textContent(),
+        };
+        assert.equal(cspHello.status, '1', `${item.name} CSP worker run did not exit`);
+        assert.equal(cspHello.exitCode, '0', `${item.name} CSP worker run exited nonzero`);
+        assert.match(cspHello.output ?? '', /Hello from a Windows PE running inside AnyWASM!/);
+
+        await cspPage.addScriptTag({ url: '/csp-probe.mjs', type: 'module' });
+        await cspPage.locator('#csp-jit-results').waitFor({ state: 'attached', timeout: 30000 });
+        const cspJit = JSON.parse((await cspPage.locator('#csp-jit-results').textContent()) ?? '{}');
+        assert.equal(cspJit.error, undefined, `${item.name} CSP probe error: ${cspJit.error}`);
+        assert.equal(cspJit.firstStatus, 0, `${item.name} CSP emitted run failed`);
+        assert.equal(cspJit.probeStatus, 0, `${item.name} CSP eviction probe failed`);
+        assert.deepEqual(cspJit.afterPressure, { compilations: 344, executions: 344, fallbacks: 0, registerRegisterHits: 0 });
+        assert.deepEqual(cspJit.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0 });
+        assert.deepEqual(cspPageErrors, [], `${item.name} CSP page had uncaught errors: ${cspPageErrors.join('; ')}`);
+        console.log(`${item.name} CSP: ${JSON.stringify({ hello: cspHello, jitPressure: cspJit })}`);
+      } finally {
+        await cspPage.close();
+      }
     } finally {
       await browser.close();
     }

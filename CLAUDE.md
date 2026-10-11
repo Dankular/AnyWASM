@@ -41,15 +41,16 @@ node test/wasm_smoke.mjs            # real .exe files through the WASM build und
 node test/shaders.mjs               # HLSL -> DXBC -> SPIR-V -> WGSL
 node test/bench.mjs                 # interpreter throughput (instr/s) under WASM
 (cd test/browser && npm i && node run.mjs)   # headless Chromium, pixel checks (uses ?test=1 mode)
-node test/browser/cross-engine.mjs          # Firefox and WebKit core/graphics availability checks
+node test/browser/cross-engine.mjs          # Chromium, Firefox, and WebKit core/graphics/CSP checks
 bash fixtures/build.sh; node fixtures/gen_d3d_shaders.mjs   # rebuild fixtures / shader headers
 node fixtures/build_bench.mjs      # rebuild the call, memory, and SSE benchmark PE fixtures (Rust Windows target)
 ```
 Chromium path: highest `/opt/pw-browsers/chromium-NNNN/chrome-linux/chrome` (override with `CHROMIUM`).
 The browser suite uses `?test=1` for direct back-buffer readback, and separately verifies the
 visible 640x480 triangle canvas by screenshot without test mode. Other browser engines remain
-partially exercised by `test/browser/cross-engine.mjs`; override browser paths with `FIREFOX` and
-`WEBKIT`, or select one engine with `BROWSER=Firefox` / `BROWSER=WebKit`.
+partially exercised by `test/browser/cross-engine.mjs`; override browser paths with `CHROMIUM`,
+`FIREFOX`, and `WEBKIT`, or select one engine with `BROWSER=Chromium`, `BROWSER=Firefox`, or
+`BROWSER=WebKit`.
 
 ## Verified state (see docs/STATUS.md for detail)
 CPU core differential-tested vs host (2,730 corpus entries); real mingw/msvcrt programs match native
@@ -114,8 +115,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       probe compiles 300 unique emitted modules, revisits entries, and confirms eviction/recompile
       and retained-module hits in Node, Firefox, and WebKit. Firefox 141.0 runs the hello and D3D11
       triangle fixtures through its page and worker; Playwright WebKit 18.2 runs hello and reports
-      graphics unavailable when OffscreenCanvas transfer is missing. CSP behavior and full graphics
-      validation on other engines remain open.
+      graphics unavailable when OffscreenCanvas transfer is missing. Chromium, Firefox, and WebKit
+      also pass the emitted path under a same-origin CSP that permits `wasm-unsafe-eval`. Full
+      graphics validation on other engines remains open.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: finite `CreateThread` callbacks run inline on a private guest stack with
