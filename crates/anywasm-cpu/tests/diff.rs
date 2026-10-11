@@ -16,6 +16,9 @@ use diff_filter::{flag_mask, mnemonic, skip};
 
 const DATA: u64 = 0x1000_0000;
 const CODE: u64 = 0x1001_0000;
+const STACK: u64 = 0x1002_0000;
+const STACK_SIZE: u64 = 0x1000;
+const STACK_TOP: u64 = STACK + STACK_SIZE / 2;
 const DATA_SPAN: usize = 0x1000;
 const SCR: u64 = DATA + 0x400;
 
@@ -205,6 +208,12 @@ fn make_case(asm: &str, r: &mut Rng) -> Case {
         st.gpr[RSI] = SCR;
         st.gpr[RDI] = r.below(4);
     }
+    if asm.split(';').any(|instruction| {
+        let instruction = instruction.trim();
+        !instruction.is_empty() && matches!(mnemonic(instruction), "call" | "ret")
+    }) {
+        st.gpr[RSP] = STACK_TOP;
+    }
     if is_string_op(asm) || asm.starts_with("rep") {
         st.gpr[RSI] = SCR + 0x100;
         st.gpr[RDI] = SCR + 0x500;
@@ -303,6 +312,7 @@ fn run_emu(code: &[u8], c: &Case) -> Result<(HState, Vec<u8>), String> {
     let mut mem = Memory::new();
     mem.map(DATA, 0x10000, PROT_RW);
     mem.map(CODE, 0x1000, PROT_RWX);
+    mem.map(STACK, STACK_SIZE, PROT_RW);
     mem.write_force(CODE, code).unwrap();
     mem.write_force(DATA, &c.data).unwrap();
     let mut cpu = Cpu::new();

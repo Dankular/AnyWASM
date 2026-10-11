@@ -150,8 +150,9 @@ fallback; dynamic WASM code generation is not implemented):
       approximation or document per-vendor differences.
 - [~] Extend the diff harness to control flow (jcc/call/ret/loop/string ops with REP), privileged-ish
       instructions used by user code (`rdtsc`, `cpuid`, `xgetbv`, `syscall` stubs), and multi-
-      instruction sequences. Remember: undefined flags/vendor-specific behaviour must be excluded
-      explicitly and documented (precedent: 16-bit shld/shrd count>16).
+      instruction sequences. Added LOOP/Jcc and direct CALL/RET corpus rows with portable semantic
+      checks; the Linux-only host differential remains unrun here. Undefined flags/vendor-specific
+      behaviour must be excluded explicitly and documented (precedent: 16-bit shld/shrd count>16).
 - [ ] Anti-debug/anti-cheat/DRM: out of scope unless a target requires it; flag as unsupported.
 
 ## 5. Tooling, CI, repo hygiene
