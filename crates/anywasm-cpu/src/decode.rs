@@ -1354,6 +1354,11 @@ fn decode_0f(d: &mut Dec, pfx: &Pfx, osz: u8) -> R<Inst> {
             i.osz = 8;
             Ok(i)
         }
+        0x01 => match d.u8()? {
+            0xd0 => Ok(blank(Xgetbv)),
+            0xf9 => Ok(blank(Rdtscp)),
+            _ => Err(DecodeError::Undefined(opc)),
+        },
         0x0b => Ok(blank(Ud2)),
         0x0d | 0x18 | 0x19..=0x1e => {
             // prefetch / reserved-nop group: consume modrm
