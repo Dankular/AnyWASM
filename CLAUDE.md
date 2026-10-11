@@ -154,13 +154,15 @@ generation and execution are not implemented):
 ## 5. Tooling, CI, repo hygiene
 - [x] **Copy `ci/web.yml` to `.github/workflows/`** (mirrored as `web.yml`; requires `workflow` scope).
 - [x] Confirm GitHub Actions is green on commits after `bd6f0bd` (incl. `631ba66`).
-- [x] `out.txt` at the repo root was confirmed as an unreferenced two-line sample added in `800f4e1`; remove it.
+- [x] Removed the tracked two-line root `out.txt` added in `800f4e1` and deleted in `1c8246c`.
+      `fixtures/crt_test.c` separately writes a guest `out.txt` during its CRT test.
 - [x] Silence/resolve compiler warnings (e.g. unused `ERROR_ACCESS_DENIED` in `kernel32.rs`).
 - [x] Add a Rust-side command-stream test for `d3d11_textured` (`tests/d3d11_stream.rs` covers the
       triangle only) and add the textured exe to `test/wasm_smoke.mjs`.
 - [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
-- [~] Task list housekeeping: the repository has no GitHub issues to reconcile the old #5/#11/#6
-      references against. The triangle/textured slices are covered; docs still evolve with verified work.
+- [~] Task list housekeeping: GitHub's all-state issue list is empty, so historical #5/#11/#6
+      references cannot be mapped to issue records. The known task notes mark #5/#11 effectively
+      done for triangle/textured slices and #6 (docs) ongoing; broader status cannot be recovered.
 
 ## 6. Productisation (after a real target runs)
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
