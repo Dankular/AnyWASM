@@ -60,7 +60,10 @@ pub enum Kind {
     State {
         id: u32,
     },
-    Query,
+    Query {
+        query_type: u32,
+        complete: bool,
+    },
 }
 
 impl Kind {
@@ -263,7 +266,7 @@ fn supports(kind: &Kind, want: &str) -> bool {
             "ID3D11DepthStencilState",
             "ID3D11DeviceChild",
         ],
-        Kind::Query => &["ID3D11Query", "ID3D11DeviceChild"],
+        Kind::Query { .. } => &["ID3D11Query", "ID3D11DeviceChild"],
     };
     fam.iter().any(|f| *f == w)
 }

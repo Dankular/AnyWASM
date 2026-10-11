@@ -19,6 +19,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 }
 
 const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
+const D3D11_QUERY_EVENT: u32 = 0;
 const DXGI_FORMAT_R32_FLOAT: u32 = 41;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
 
@@ -109,7 +110,15 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CreateDepthStencilState" => |p| create_state(p, op::CREATE_DEPTH, 52, "ID3D11DepthStencilState"),
         "CreateQuery" | "CreatePredicate" => |p| {
             let out = p.arg(2);
-            let q = create(p, "ID3D11Query", Kind::Query);
+            let query_type = p.rd32(p.arg(1))?;
+            let q = create(
+                p,
+                "ID3D11Query",
+                Kind::Query {
+                    query_type,
+                    complete: false,
+                },
+            );
             p.wr64(out, q)?;
             Ok(S_OK)
         },
@@ -269,8 +278,20 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "UpdateSubresource" | "UpdateSubresource1" => update_subresource,
         "Map" => map,
         "Unmap" => unmap,
-        "Flush" | "ClearState" | "Begin" | "End" | "SetPredication" | "ResolveSubresource" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
-        "GetData" => |_| Ok(S_FALSE),
+        "Flush1" => |p| {
+            // Guest GPU commands are serialized in order by the browser executor. Signal the
+            // optional idle event so Diligent's Flush1 + WaitForSingleObject sequence can
+            // continue.
+            let event = p.arg(2);
+            if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&event) {
+                *signaled = true;
+            }
+            Ok(0)
+        },
+        "Begin" => |p| set_query_complete(p, false),
+        "End" => |p| set_query_complete(p, true),
+        "GetData" => get_query_data,
+        "Flush" | "ClearState" | "SetPredication" | "ResolveSubresource" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
         "OMGetRenderTargets" => |p| {
             let (n, rtvs, dsv) = (p.arg(1) as usize, p.arg(2), p.arg(3));
             let bound = p.extra.com.bound_rtv.clone();
@@ -286,6 +307,42 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         _ => return None,
     })
+}
+
+fn set_query_complete(p: &mut Process, complete: bool) -> R {
+    let query = p.arg(1);
+    if let Some(Kind::Query {
+        query_type: D3D11_QUERY_EVENT,
+        complete: state,
+    }) = p
+        .extra
+        .com
+        .objs
+        .get_mut(&query)
+        .map(|obj| &mut obj.kind)
+    {
+        *state = complete;
+    }
+    Ok(0)
+}
+
+fn get_query_data(p: &mut Process) -> R {
+    let query = p.arg(1);
+    let complete = matches!(
+        kind_of(p, query),
+        Some(Kind::Query {
+            query_type: D3D11_QUERY_EVENT,
+            complete: true
+        })
+    );
+    if !complete {
+        return Ok(S_FALSE);
+    }
+    let (data, size) = (p.arg(2), p.arg(3) as u32);
+    if data != 0 && size >= 4 {
+        p.wr32(data, 1)?;
+    }
+    Ok(S_OK)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -869,6 +926,62 @@ fn get_desc(p: &mut Process) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flush1_signals_the_selected_target_idle_event() {
+        use anywasm_cpu::cpu::{R8, RCX};
+        use crate::process::Handle;
+        use crate::vfs::Vfs;
+
+        let mut p = Process::new(Vfs::new());
+        let event = p.new_handle(Handle::Event {
+            signaled: false,
+            manual: false,
+        });
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[R8] = event;
+
+        let flush1 = method("ID3D11DeviceContext3", "Flush1").unwrap();
+        assert_eq!(flush1(&mut p).unwrap(), 0);
+        assert!(matches!(
+            p.handles.get(&event),
+            Some(Handle::Event { signaled: true, .. })
+        ));
+    }
+
+    #[test]
+    fn event_query_completes_after_end_for_diligent_idle_wait() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        let query = create(
+            &mut p,
+            "ID3D11Query",
+            Kind::Query {
+                query_type: D3D11_QUERY_EVENT,
+                complete: false,
+            },
+        );
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = query;
+        p.cpu.gpr[R8] = OUT;
+        p.cpu.gpr[R9] = 4;
+
+        let get_data = method("ID3D11DeviceContext3", "GetData").unwrap();
+        assert_eq!(get_data(&mut p).unwrap(), S_FALSE);
+
+        let end = method("ID3D11DeviceContext3", "End").unwrap();
+        end(&mut p).unwrap();
+        p.cpu.gpr[RDX] = query;
+        p.cpu.gpr[R8] = OUT;
+        p.cpu.gpr[R9] = 4;
+        assert_eq!(get_data(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 1);
+    }
 
     #[test]
     fn format_support_advertises_typed_uav_for_r32_float_only() {

@@ -66,7 +66,10 @@ async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
     if (status === Status.FRAME) {
       frames++;
       if (exec && frames % 30 === 0) postMessage({ type: 'gpu', ...exec.stats });
+      const waitStart = performance.now();
       await nextFrame();
+      const elapsed100ns = Math.max(0, Math.round((performance.now() - waitStart) * 10_000));
+      w.advanceTime100ns(BigInt(elapsed100ns));
     } else if (status === Status.IDLE) await waitForInput();
     else if (status === Status.RUNNING) await sleep(0);
   }

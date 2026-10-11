@@ -440,6 +440,75 @@ try {
   check('R32_FLOAT UAV contains the compute shader value', Math.abs(computeResult.uavCenter - 0.25) < 0.0001,
     JSON.stringify(computeResult.uavCenter));
 
+  const drawParamsResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const messages = [];
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (m) => messages.push(m), { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x + float(instanceId) * 4.0, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl('float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const secondPixel = tool.compileHlsl('float4 main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(2, words(11, 6, 1, 0, 0, 0));
+      command(3, new Uint8Array([...words(11, 0, 6), 0, 0, 1, 0, 2, 0]));
+      shader(7, 0, vertex); shader(8, 1, pixel); shader(9, 1, secondPixel);
+      command(14, words(11, 57, 0));
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(16, words(4)); command(21, words(1, 2, 0));
+      command(32, words(3, 1, 0, 1, 2)); // baseVertex=1, firstInstance=2
+      command(17, words(1, 9));
+      command(32, words(3, 1, 0, 3, 4)); // distinct per-draw baseVertex and firstInstance
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), stats: gpu.stats, errors: messages };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message, errors: messages };
+    }
+  });
+  check('draw-parameter render pipeline validates and draws with nonzero indexed offsets',
+    drawParamsResult.stats?.draws === 2 && drawParamsResult.stats.errors.length === 0,
+    JSON.stringify(drawParamsResult));
+  check('SV_VertexID and SV_InstanceID use distinct base offsets for each draw',
+    drawParamsResult.pixel?.every((value, i) => Math.abs(value - [0, 255, 0, 255][i]) <= 1),
+    JSON.stringify(drawParamsResult));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {

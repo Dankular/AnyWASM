@@ -467,21 +467,79 @@ rejects it as an invalid constant expression. `web/shaders.js` now preserves tho
 integer local and runtime bitcast; `test/shaders.mjs` regresses the captured DXBC. In a later bounded
 Chromium replay, the compute shader module and pipeline validated and one dispatch executed.
 
-The first remaining render-pipeline error is that the translated vertex shader uses Naga's hidden
-`@group(3) @binding(0)` draw-parameter uniform, while the graphics pipeline layout provides no
-binding there. The vendored Naga manifest defines the uniform as four i32 values (`baseVertex`,
-`baseInstance`, and two reserved values). A 1040x807 readback still contained only transparent
-black pixels. The normal worker slice still stops in a synchronous callback that cannot resume.
-Neither probe provides a successful completion status or proves target rendering or gameplay
-acceptance.
+At this checkpoint, render-pipeline validation failed because the translated vertex shader used
+Naga's hidden `@group(3) @binding(0)` draw-parameter uniform while the graphics pipeline layout had
+no binding there. The vendored Naga manifest defines four i32 values (`baseVertex`, `baseInstance`,
+and two reserved values). Its generated WGSL subtracts the first two from WebGPU's built-in vertex
+and instance indices to reproduce the D3D system values. The earlier 1040x807 readback contained
+only transparent black pixels. The normal worker slice still stopped in a synchronous callback that
+cannot resume.
+
+### Browser replay after draw-parameter binding
+
+`web/shaders.js` now reserves group 3 binding 0 for Naga's uniform and maps D3D UAV register `u#` to
+binding `# + 1`. `web/gpu.js` writes the per-draw base vertex and first instance into a 16-byte
+uniform allocation in the staging ring. `test/shaders.mjs` checks the translated bindings, and
+`test/browser/run.mjs` renders two indexed instanced draws with different nonzero offsets; the
+second draw must update the per-draw values for its green center pixel. The existing R32_FLOAT UAV
+dispatch/readback/sample regression still passes after the binding shift.
+
+The reusable target smoke replay is `test/browser/target.mjs`. It temporarily serves the worker with
+a 1,000,000,000-instruction run slice and per-frame GPU reporting, then captures the first reported
+back buffer from a caller-supplied target bundle. Run it after packing the D3D11-only `/MT` build:
+
+```powershell
+$release = 'D:\Dev Proj\WASM\target-eval\DiligentBuild-GLFWDemo-staticcrt\DiligentSamples\Samples\GLFWDemo\Release'
+$bundle = "$env:TEMP\anywasm-glfwdemo-frame-measure.awb"
+.\target\debug\anywasm.exe pack "$release\GLFWDemo.exe" -o $bundle --dir $release
+$env:CHROMIUM = 'C:\Users\sysadmin\AppData\Local\ms-playwright\chromium-1234\chrome-win64\chrome.exe'
+$env:REQUIRE_TARGET_MOVEMENT = '1'
+$env:REQUIRE_TARGET_MAP_RESET = '1'
+node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-map-reset
+```
+
+On 2026-10-11, the latest Chromium 151.0.7922.34 replay produced a capture at 1040x807 with 5 draws,
+1 compute dispatch, 5 guest presents, 10 render/compute passes, 2 pipelines, and no WebGPU validation errors.
+The readback had 651,249 nontransparent, nonblack pixels; the center sample was RGBA `(18, 255, 26,
+255)`. Visual inspection shows the dark SDF maze scene, blue wall marks, and green player marker:
+
+![Diligent GLFW Demo WebGPU frame](images/glfwdemo-first-frame.png)
+
+The browser worker measures the time spent waiting for `requestAnimationFrame` after each guest
+`Present` and adds that elapsed duration to the virtual guest clock in 100 ns units. This lets the
+target's `QueryPerformanceCounter`-based frame delta advance while preserving the instruction-based
+clock during guest execution.
+
+The same target replay checks input through the rendered output. GLFW creates a hidden helper window
+before the visible game window, so routing browser input to the first top-level HWND silently dropped
+keys. The runtime now selects the focused visible window, or falls back to a visible top-level window.
+With this fix, holding W for 500 ms moves the green player marker 2.5 pixels upward. Pressing Tab
+regenerates the map; 165,601 of 839,280 pixels changed (19.7%), and the target issued a second compute
+dispatch. This reset path exposed Diligent's `ID3D11DeviceContext3::Flush1` followed by an idle-event
+wait and an event-query polling loop. `Flush1` now signals its optional guest event, and D3D11 event
+queries report completion after `End` in the ordered browser command-stream model. Rust regressions
+cover hidden-helper input selection, idle-event signaling, and event-query completion. The browser
+run reached 128 presents and 2 dispatches with no WebGPU validation errors. The W and Tab captures
+are saved at [after W](images/glfwdemo-first-frame.after-w.png) and
+[after Tab](images/glfwdemo-first-frame.after-tab.png).
+
+![GLFW Demo after W moves the player](images/glfwdemo-first-frame.after-w.png)
+
+![GLFW Demo after Tab regenerates the maze](images/glfwdemo-first-frame.after-tab.png)
+
+This verifies one movement direction and map regeneration in the selected target. It is not compared
+with native output; the target's compute UAV values are not independently read back, other movement
+directions and turning are unverified, and no full gameplay or real-game acceptance pass is claimed.
+The default 250,000-instruction worker slice still cannot resume the synchronous guest callback; the
+larger slice is diagnostic test routing only.
 
 ## Next evidence needed
 
-- Add the Naga draw-parameter uniform to the graphics pipeline layout and bind per-draw values, then
-  capture host-visible GLFW Demo pixels. The SDF shader now translates and dispatches, but its UAV
-  output, other graphics states, and gameplay remain unverified.
-- Continue to distinguish guest `Draw`/`Present` calls and virtual HLE objects from observed host
-  rendering; no host-visible GLFW Demo frame has been captured.
+- Compare the captured WebGPU frame with a native Diligent render from a matching state and
+  independently inspect the compute UAV output. Verify movement in all directions and turning, then
+  complete a controlled playthrough before making a gameplay acceptance claim.
+- Make the selected target's synchronous guest callbacks suspend and resume across normal worker
+  slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current
   `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
   registry query, create, write, or persisted-value behavior.
@@ -495,5 +553,6 @@ acceptance.
   linking. Conversion, version, path, scheduler, static TLS, selected target VEX/BMI, secure random,
   PE unwind primitives, the selected C++ catch path, D3D11 UAV binding, and constant-buffer ranges
   have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
-  compute dispatch, draw, and repeated present calls. Browser shader execution, host rendering, and
+  compute dispatch, draw, and repeated present calls. The browser target replay now verifies host
+  rendering, W movement, and Tab map regeneration; native comparison, independent UAV readback, and
   gameplay acceptance remain unverified.

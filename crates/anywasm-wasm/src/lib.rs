@@ -170,6 +170,14 @@ pub extern "C" fn aw_input(kind: u32, a: i64, b: i64, c: i64) {
     }
 }
 
+/// Advance guest time by host elapsed 100 ns ticks after a yielded browser frame.
+#[no_mangle]
+pub extern "C" fn aw_advance_time_100ns(ticks: u64) {
+    if let Some(s) = state() {
+        s.p.advance_time_100ns(ticks);
+    }
+}
+
 /// Queue bytes for the guest's stdin.
 ///
 /// # Safety

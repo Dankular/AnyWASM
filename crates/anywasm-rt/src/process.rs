@@ -430,6 +430,11 @@ impl Process {
             .saturating_add(self.extra.sleep_adjust)
     }
 
+    /// Add host elapsed time to the guest's 100 ns clock, used after a yielded browser frame.
+    pub fn advance_time_100ns(&mut self, ticks: u64) {
+        self.extra.sleep_adjust = self.extra.sleep_adjust.saturating_add(ticks);
+    }
+
     pub fn create_guest_thread(
         &mut self,
         id: u32,
@@ -1842,6 +1847,19 @@ mod scheduler_tests {
         process.mem.write_u64(TEB_ADDR + 0x10, 0x6000).unwrap();
         process.mem.write_u64(TEB_ADDR + 0x48, 0x1004).unwrap();
         process
+    }
+
+    #[test]
+    fn host_frame_elapsed_time_advances_virtual_clock_in_100ns_units() {
+        let mut process = process_with_teb();
+        process.retired_instructions = 1234;
+        let before = process.now_ticks();
+
+        process.advance_time_100ns(250_000);
+
+        assert_eq!(process.now_ticks(), before + 250_000);
+        process.retired_instructions += 99;
+        assert_eq!(process.now_ticks(), before + 250_099);
     }
 
     #[test]

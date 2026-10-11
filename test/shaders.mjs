@@ -27,6 +27,21 @@ check('vs WGSL uses @group(0) @binding(0) uniform', /@group\(0\)\s*@binding\(0\)
 check('ps WGSL uses texture @group(1) and sampler @group(2)', /@group\(1\)\s*@binding\(0\)\s*var\s+\w+:\s*texture_2d/.test(p.wgsl) && /@group\(2\)\s*@binding\(0\)\s*var\s+\w+:\s*sampler/.test(p.wgsl), p.wgsl.slice(0, 600));
 check('vs has @vertex entry with position builtin', /@vertex/.test(v.wgsl) && /@builtin\(position\)/.test(v.wgsl));
 check('ps has @fragment entry', /@fragment/.test(p.wgsl));
+const drawParamsVs = t.translate(t.compileHlsl(`
+  float4 main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) : SV_Position {
+    return float4(float(vertexId + instanceId), 0.0, 0.0, 1.0);
+  }
+`, 'main', 'vs_5_0'));
+check('D3D draw parameters translate through the reserved group-3 binding 0 uniform',
+  /@group\(3\)\s*@binding\(0\)\s*var<uniform>/.test(drawParamsVs.wgsl), drawParamsVs.wgsl);
+const uavCs = t.translate(t.compileHlsl(`
+  RWTexture2D<float> dst : register(u0);
+  [numthreads(1, 1, 1)] void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = 0.25; }
+`, 'main', 'cs_5_0'));
+check('D3D UAV u0 translates to group-3 binding 1 while retaining logical register 0',
+  uavCs.descriptors.some((d) => d.type === 1 && d.register === 0)
+    && /@group\(3\)\s*@binding\(1\)\s*var\s+\w+\s*:\s*texture_storage_2d/.test(uavCs.wgsl),
+  JSON.stringify(uavCs.descriptors) + '\n' + uavCs.wgsl);
 let threw = false; try { t.compileHlsl('float4 x( {', 'x', 'ps_5_0'); } catch (e) { threw = /HLSL/.test(e.message); }
 check('syntax errors reported', threw);
 let sdfWgsl = '', sdfError = '';

@@ -191,7 +191,7 @@ export class GpuExecutor {
     const need = (bytes.byteLength + 255) & ~255;
     if (!this.ring || this.ringOff + need > this.ringSize) {
       const size = Math.max(16 << 20, need);
-      this.ring = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.ring = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM });
       this.ringSize = size;
       this.ringOff = 0;
     }
@@ -386,6 +386,7 @@ export class GpuExecutor {
   createShader(id, stage, dxbc) {
     const { wgsl, descriptors } = this.tool.translate(dxbc);
     const entry = (/@(vertex|fragment|compute)(?:\s+@\w+(?:\([^)]*\))?)*\s*fn\s+(\w+)/.exec(wgsl) || [])[2] || 'main';
+    const usesDrawParameters = /@group\(3\)\s*@binding\(0\)\s*var<uniform>/.test(wgsl);
     const cbSizes = {};
     for (const m of wgsl.matchAll(/@group\(0\)\s*@binding\((\d+)\)\s*var<uniform>\s+\w+:\s*(\w+);/g)) {
       const s = new RegExp(`struct\\s+${m[2]}\\s*\\{\\s*\\w+:\\s*array<vec4<\\w+>,\\s*(\\d+)>`).exec(wgsl);
@@ -400,7 +401,7 @@ export class GpuExecutor {
       };
     }
     const module = this.device.createShaderModule({ code: wgsl });
-    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, storageTextures, wgsl });
+    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, storageTextures, usesDrawParameters, wgsl });
   }
 
   // ── views ────────────────────────────────────────────────────────────────
@@ -518,7 +519,8 @@ export class GpuExecutor {
     const att = this.attachments();
     if (!att.colors.some(Boolean) && !att.depth) return;
 
-    // Descriptor tables from shader reflection (group = type, binding = register).
+    // Descriptor tables from shader reflection. UAVs use binding register + 1 so
+    // group 3 binding 0 remains available for Naga's hidden draw-parameter uniform.
     const GROUP = { 2: 0, 0: 1, 3: 2, 1: 3 };
     const groups = [new Map(), new Map(), new Map(), new Map()];
     for (const sh of [vs, ps]) {
@@ -529,6 +531,11 @@ export class GpuExecutor {
         if (!groups[g].has(key)) groups[g].set(key, { d, vis: 0 });
         groups[g].get(key).vis |= sh === vs ? GPUShaderStage.VERTEX : GPUShaderStage.FRAGMENT;
       }
+    }
+    if (groups[3].size) {
+      const registers = [...groups[3].keys()].map((reg) => `u${reg}`).join(', ');
+      this.log(`draw skipped: graphics UAV binding is unsupported (${registers})`);
+      return;
     }
     const layoutEntries = [[], [], [], []];
     const resolved = [[], [], [], []];
@@ -553,6 +560,17 @@ export class GpuExecutor {
       const sampleType = this.sampleTypeOf(view?.format);
       layoutEntries[1].push({ binding: reg, visibility: vis, texture: { sampleType, viewDimension: view?.dim || dim } });
       resolved[1].push({ binding: reg, resource: view ? view.view : this.dummyView });
+    }
+    const drawParamVisibility = (vs.usesDrawParameters ? GPUShaderStage.VERTEX : 0)
+      | (ps?.usesDrawParameters ? GPUShaderStage.FRAGMENT : 0);
+    if (drawParamVisibility) {
+      const data = new Uint8Array(16);
+      const values = new DataView(data.buffer);
+      values.setInt32(0, baseVertex, true);
+      values.setInt32(4, firstInstance, true);
+      const allocation = this.stage(data);
+      layoutEntries[3].push({ binding: 0, visibility: drawParamVisibility, buffer: { type: 'uniform' } });
+      resolved[3].push({ binding: 0, resource: { buffer: allocation.buffer, offset: allocation.offset, size: 16 } });
     }
 
     // Pipeline.
@@ -643,19 +661,20 @@ export class GpuExecutor {
       resolved[2].push({ binding: reg, resource: sampler ? sampler.gpu : this.defaultSampler });
     }
     for (const [reg] of groups[3]) {
-      const declaration = shader.storageTextures[reg];
+      const binding = reg + 1;
+      const declaration = shader.storageTextures[binding];
       const uav = st.uav[reg];
       const view = uav && this.getView(uav.id);
       if (!declaration || !view || declaration.format !== view.format || declaration.dimension !== view.dim) {
         this.log(`compute dispatch skipped: UAV u${reg} does not match the shader storage texture`);
         return;
       }
-      layoutEntries[3].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, storageTexture: {
+      layoutEntries[3].push({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: {
         access: declaration.access,
         format: declaration.format,
         viewDimension: declaration.dimension,
       } });
-      resolved[3].push({ binding: reg, resource: view.view });
+      resolved[3].push({ binding, resource: view.view });
     }
 
     const key = JSON.stringify([st.shader[2], layoutEntries]);

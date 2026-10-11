@@ -35,9 +35,11 @@
   The back buffer is read back and compared with analytic barycentric colours: 216 sampled pixels,
   worst error 0/255, zero WebGPU validation errors.
 - Shader toolchain (`test/shaders.mjs`): HLSL -> DXBC -> SPIR-V -> WGSL with a fixed
-  descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2). The captured Diligent
-  GLFW Demo SDF compute shader has a regression for integer-register bit patterns that vkd3d emits
-  as non-finite f32 constants; it now translates via an in-function integer load and bitcast.
+  descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2, u#->group3 binding #+1);
+  group3 binding 0 carries Naga's per-draw base-vertex/base-instance uniform. The selected target's
+  indexed instanced draw values are pixel-tested. Its captured SDF compute shader also has a
+  regression for integer-register bit patterns that vkd3d emits as non-finite f32 constants; it now
+  translates via an in-function integer load and bitcast.
 - Cached-block execution benchmark (Node 24.16.0, Windows x64, release WASM; two runs, six rounds
   per workload): median 32.2 M instr/s for `compute.exe`, 26.1 for call-heavy, 28.1 for
   memory-heavy, and 38.5 for SSE-float. The cached executor translates NOP-like, MOV and LEA
@@ -148,14 +150,17 @@
   replay completed process attach for the D3D11 engine and D3DCompiler; Archiver was not observed
   loading. See [`docs/TARGETS.md`](TARGETS.md).
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
-  sampler state, mip generation, copies and instancing are implemented in the translator, but only two
-  paths are pixel-verified: the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
+  sampler state, mip generation, copies and instancing are implemented in the translator. Focused
+  pixel checks cover the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
   texture, D32_FLOAT depth ordering, indexed draws, constant-factor and source-alpha blending, and
-  one texture plus one vertex-buffer `CopyResource` case). The triangle's visible canvas screenshot
+  one texture plus one vertex-buffer `CopyResource` case). Target-level checks also cover visible
+  SDF output, W movement, and Tab map regeneration. The triangle's visible canvas screenshot
   also checks its clear colour and centre pixel. Other blend modes, alpha-test, mips/filtering,
   instancing and other copies are not pixel-verified. Compute support is limited to a single
   R32_FLOAT storage-texture UAV; a small fixture checks its output, and the selected Diligent SDF
-  shader now translates and dispatches but has no verified UAV output. Structured/raw UAVs,
+  shader now translates and dispatches but has no verified UAV output. D3D11 event queries report
+  completion after `End` for the selected target's idle path; other query types remain unsupported.
+  Structured/raw UAVs,
   geometry/tessellation, multisampling (forced to 1 sample), general staging read-back, and `SV_`
   system values beyond the basics remain unsupported.
 - **Pixel verification paths:** D3D11 back-buffer checks run in test mode (`?test=1`), which skips
@@ -163,7 +168,8 @@
   without test mode captures the visible 640x480 canvas and checks the triangle's clear colour and
   interpolated centre pixel. Other render paths and browser engines remain unverified.
 - Browser input (keyboard/mouse -> window messages) and the idle/frame scheduling in the worker are
-  exercised by the Chromium browser suite. Firefox/Safari, visible canvas pixels outside the checked
+  exercised by the Chromium browser suite. The selected GLFW target also verifies W movement and
+  Tab map regeneration after input routing skips its hidden helper window. Firefox/Safari, visible canvas pixels outside the checked
   triangle case, large-game memory limits, and asset streaming remain unverified. The web build is
   `wasm32-unknown-unknown`; the browser buffers the full `.awb`, copies it into WASM memory, and the
   bundle parser duplicates its files into the VFS. This source audit does not measure peak memory;
@@ -189,18 +195,28 @@
   at `SleepConditionVariableSRW`; a fresh 30,000,000-step CLI replay continued after the wait and hit
   the cap in D3DCompiler. A separate high-cap guest trace initializes target static TLS, completes the
   selected MSVC C++ `std::runtime_error` catch, reaches D3D11 shader/resource setup, and advances
-  through guest compute `Dispatch`, `Draw`, and repeated `IDXGISwapChain2::Present` calls. These guest
-  calls do not verify a host window or renderer. Native and WASM fixtures cover secure
+  through guest compute `Dispatch`, `Draw`, and repeated `IDXGISwapChain2::Present` calls. Those guest
+  calls alone did not verify a host window or renderer. A later Chromium replay captures the
+  1040x807 maze with 5 draws, one dispatch, and no WebGPU validation errors. After each `Stop::Frame`,
+  the worker advances the virtual guest clock by the elapsed browser `requestAnimationFrame` wait.
+  A target input regression confirms W moves the green marker 2.5 pixels. GLFW's hidden helper HWND
+  had received browser input; routing now selects the focused visible window or a visible top-level
+  fallback. Tab regenerates 19.7% of the captured pixels. This path exposed Diligent's idle sequence:
+  D3D11 `Flush1` signals its optional guest event, then event-query `GetData` reports completion
+  after `End` in the serialized command-stream model. The interaction replay reached 128 presents
+  and two compute dispatches without WebGPU validation errors. Target UAV values are not independently
+  read back, the frame is not compared with native output, and no gameplay acceptance pass is claimed.
+  Native and WASM fixtures cover secure
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
   `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes
   one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and verifies a following
-  draw samples it into a pixel. A headless Chromium probe attempted the selected target's browser
-  path: the normal worker slice stopped in a synchronous callback; a test-only larger slice now
-  accepts one target compute dispatch, then fails graphics pipeline validation because the
-  translated vertex shader's group-3 draw-parameter uniform is missing from the layout. Readback
-  remains transparent black. Target UAV values, host rendering, and gameplay remain unverified. No
-  real-game acceptance pass is claimed. See
-  [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
+  draw samples it into a pixel. A follow-up headless Chromium replay fixes the group's hidden
+  draw-parameter binding and captures a nonempty 1040x807 frame from the selected target with one
+  dispatch, five draws, and no WebGPU validation errors. The initial, W-movement, and Tab-regeneration
+  frames are saved in `docs/images/` and can be reproduced with `test/browser/target.mjs`. The normal
+  worker slice still stops in a synchronous callback that cannot resume. Target UAV values and native
+  comparison remain unverified; other movement directions and gameplay acceptance are open. See
+  [`docs/TARGETS.md`](TARGETS.md) for exact traces and limits.
 - The D3D11 textured fixture has Rust command-stream and WASM smoke coverage, and its tested WebGPU
   rendering states have pixel checks in `test/browser/run.mjs`. Other rendering states listed in
   `CLAUDE.md` are not pixel-verified.

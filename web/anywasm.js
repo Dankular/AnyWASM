@@ -116,6 +116,14 @@ export class AnyWasm {
   takeGpu() { return this._take(this.x.aw_gpu_ptr, this.x.aw_gpu_len, this.x.aw_gpu_clear); }
   /** Deliver an input event: see crates/anywasm-rt/src/hle/user32.rs `input_event`. */
   input(kind, a = 0, b = 0, c = 0) { this.x.aw_input(kind, BigInt(a), BigInt(b), BigInt(c)); }
+  /** Add host elapsed time in 100 ns ticks to the guest clock after a frame yield. */
+  advanceTime100ns(ticks) {
+    if (typeof ticks !== 'bigint' || ticks < 0n) throw new RangeError('ticks must be a nonnegative BigInt');
+    if (typeof this.x.aw_advance_time_100ns !== 'function') {
+      throw new Error('WASM runtime is missing aw_advance_time_100ns; rebuild the runtime');
+    }
+    this.x.aw_advance_time_100ns(ticks);
+  }
   takeStdout() { return this._take(this.x.aw_stdout_ptr, this.x.aw_stdout_len, this.x.aw_stdout_clear); }
   takeStderr() { return this._take(this.x.aw_stderr_ptr, this.x.aw_stderr_len, this.x.aw_stderr_clear); }
   message() {

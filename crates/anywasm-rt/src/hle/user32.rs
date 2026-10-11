@@ -1116,11 +1116,31 @@ fn peek_message(p: &mut Process) -> R {
     Ok(fetch(p, m, h, flags & PM_REMOVE != 0)? as u64)
 }
 
+/// Select the browser input target, skipping hidden GLFW helper windows.
+fn input_target_window(win: &WinState) -> u64 {
+    let is_visible_top_level = |h: u64| {
+        win.windows
+            .get(&h)
+            .map(|w| w.visible && w.parent == 0)
+            .unwrap_or(false)
+    };
+    if is_visible_top_level(win.focus) {
+        win.focus
+    } else if is_visible_top_level(win.main_window) {
+        win.main_window
+    } else {
+        win.windows
+            .iter()
+            .find_map(|(&h, w)| (w.visible && w.parent == 0).then_some(h))
+            .unwrap_or(win.main_window)
+    }
+}
+
 /// Translate a browser input event into window messages. Kinds:
 /// 0 key down (a=vk), 1 key up, 2 char (a=utf16), 3 mouse move (a=x,b=y), 4 button down (a=btn 0/1/2,b=x,c=y),
 /// 5 button up, 6 wheel (a=delta, b=x, c=y), 7 resize (a=w,b=h), 8 focus (a=1/0), 9 close request.
 pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
-    let h = p.extra.win.main_window;
+    let h = input_target_window(&p.extra.win);
     if h == 0 {
         return;
     }
@@ -1162,5 +1182,43 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
         8 => post(p, h, if a != 0 { WM_SETFOCUS } else { WM_KILLFOCUS }, 0, 0),
         9 => post(p, h, WM_CLOSE, 0, 0),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_window(visible: bool, parent: u64) -> Window {
+        Window {
+            class: "test".into(),
+            wndproc: 0,
+            title: String::new(),
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 480,
+            visible,
+            style: 0,
+            user_data: 0,
+            parent,
+            control_id: 0,
+            unicode: true,
+            needs_paint: false,
+            gpu_id: 0,
+        }
+    }
+
+    #[test]
+    fn browser_input_targets_visible_game_window_after_hidden_glfw_helper() {
+        let helper = HWND_BASE;
+        let game = HWND_BASE + 0x10;
+        let mut win = WinState::default();
+        win.windows.insert(helper, test_window(false, 0));
+        win.windows.insert(game, test_window(true, 0));
+        win.main_window = helper;
+        win.focus = helper;
+
+        assert_eq!(input_target_window(&win), game);
     }
 }

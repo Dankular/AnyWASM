@@ -7,7 +7,8 @@
 //   group 0: constant buffers   binding = b# register
 //   group 1: shader resources   binding = t# register  (textures / buffers)
 //   group 2: samplers           binding = s# register
-//   group 3: UAVs               binding = u# register
+//   group 3: draw parameters     binding = 0 (Naga's hidden 4 x i32 uniform)
+//            UAVs               binding = u# register + 1
 
 const D = { SRV: 0, UAV: 1, CBV: 2, SAMPLER: 3 };
 const GROUP_OF = { [D.CBV]: 0, [D.SRV]: 1, [D.SAMPLER]: 2, [D.UAV]: 3 };
@@ -222,7 +223,10 @@ export class ShaderTool {
   translate(dxbc) {
     const descriptors = this.scan(dxbc);
     const rec = new Uint32Array(descriptors.length * 7);
-    descriptors.forEach((d, i) => rec.set([d.type, d.space, d.register, d.resourceType, GROUP_OF[d.type], d.register, d.count], i * 7));
+    descriptors.forEach((d, i) => {
+      const binding = d.register + (d.type === D.UAV ? 1 : 0);
+      rec.set([d.type, d.space, d.register, d.resourceType, GROUP_OF[d.type], binding, d.count], i * 7);
+    });
     const spirv = this._withBytes(dxbc, (p) => {
       const tbl = rec.length ? this.vk._malloc(rec.byteLength) : 0;
       if (tbl) this.vk.HEAPU8.set(new Uint8Array(rec.buffer), tbl);

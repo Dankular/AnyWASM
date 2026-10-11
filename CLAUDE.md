@@ -54,8 +54,9 @@ partially exercised by `test/browser/cross-engine.mjs`; override browser paths w
 
 ## Verified state (see docs/STATUS.md for detail)
 CPU core differential-tested vs host (2,730 corpus entries); real mingw/msvcrt programs match native
-output; D3D11 triangle (216 px, worst error 0/255) and `d3d11_textured` (texels, D32 depth ordering,
-indexed draws) pixel-verified in headless Chromium; Rust and WASM CI green through `86b3ee6`.
+output; D3D11 triangle and `d3d11_textured` pixel checks pass in headless Chromium; the selected
+Diligent GLFW Demo renders a 1040x807 WebGPU frame, moves on W, and regenerates its map on Tab. The
+exact checks and remaining acceptance gaps are tracked in `docs/TARGETS.md`.
 
 ---
 
@@ -171,8 +172,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
-      `WM_LBUTTONDOWN` messages reach the guest; add XInput (Gamepad API), DirectInput, raw input,
-      cursor capture/pointer lock.
+      `WM_LBUTTONDOWN` messages reach the guest. `test/browser/target.mjs` also verifies W moves
+      the selected Diligent maze player and Tab regenerates the map; browser input now skips hidden
+      top-level helper windows. Add XInput (Gamepad API), DirectInput, raw input, cursor capture/
+      pointer lock.
 - [~] **Registry**: `advapi32!RegOpenKeyExA` recognizes predefined roots, returns the root for an
       empty subkey, and reports missing subkeys while no registry data store exists. Target probes
       `HKCU` and `HKLM` at `Software\Microsoft\Direct3D\Direct3D12`; query/create/write APIs and
@@ -221,25 +224,33 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       single-float R32_FLOAT storage-texture case and executes compute pipelines. A browser fixture
       verifies a 4x4 dispatch by reading back the UAV and sampling it in a draw. The selected
       Diligent demo's SDF compute shader now translates and passes WebGPU module/pipeline creation;
-      a bounded browser replay accepted one dispatch. Its UAV output and host-visible pixels are
-      still unverified because the first graphics pipeline lacks Naga's hidden group-3 draw-parameter
-      binding. Structured/raw-buffer UAVs, geometry/hull/domain
-      shaders, MSAA (forced to 1 sample), general staging read-back, queries, deferred
+      a browser replay accepted its dispatch and draw pipelines. Naga's hidden group-3 draw-parameter
+      uniform is bound per draw at binding 0; D3D UAV register `u#` maps to binding `# + 1`, and a
+      Chromium pixel regression exercises distinct nonzero `baseVertex` and `firstInstance` values.
+      The selected target's 1040x807 readback is saved in
+      [`docs/images/glfwdemo-first-frame.png`](docs/images/glfwdemo-first-frame.png); SDF maze pixels
+      are visible with no WebGPU validation errors. The target's UAV values, comparison with native
+      output, other graphics states, and gameplay remain unverified. Target-driven Tab map reset is
+      pixel-checked after adding D3D11 `Flush1` event signaling and event-query completion; other
+      query types are not supported. Structured/raw-buffer UAVs, geometry/hull/domain
+      shaders, MSAA (forced to 1 sample), general staging read-back, deferred
       contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
       feature-level reporting remain open.
 - [~] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; a captured
       Diligent GLFW Demo SDF shader now has a regression for its non-finite integer-register bit
-      patterns and translates through a runtime bitcast. More failing real-world shaders, the target's
-      draw-parameter pipeline binding, shader/pipeline caching (IndexedDB), and async pipeline
-      creation to avoid stalls remain open.
+      patterns and translates through a runtime bitcast. The target's draw-parameter uniform and UAV
+      binding collision is fixed and pixel-tested. More failing real-world shaders, shader/pipeline
+      caching (IndexedDB), and async pipeline creation to avoid stalls remain open.
 - [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
       pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
       canvas sizes, and browser engines still need coverage.
 - [ ] **Other APIs**: D3D9 (very common in older games), D3D12, DXGI flip-model/fullscreen/
       resize/vsync semantics, OpenGL (WGL), Vulkan. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
-- [ ] **Frame pacing**: `Present` interval vs rAF, `Stop::Frame` scheduling under JIT, offscreen
-      canvas resize, HiDPI.
+- [~] **Frame pacing**: after each `Stop::Frame`, the worker advances the virtual guest clock by the
+      measured time spent waiting for browser `requestAnimationFrame`; the selected target's W
+      movement regression covers `QueryPerformanceCounter`-based simulation time. `Present` interval
+      semantics, scheduling under JIT, offscreen canvas resize, and HiDPI remain open.
 
 ## 4. CPU correctness
 - [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
@@ -279,7 +290,7 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [x] Add WASM smoke regressions for condition-variable thread resumption and per-thread static PE
       TLS isolation.
 - [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
-- [x] Task list housekeeping: current open work is queued in [JIT](https://github.com/Dankular/AnyWASM/issues/1), [runtime](https://github.com/Dankular/AnyWASM/issues/2), [graphics](https://github.com/Dankular/AnyWASM/issues/3), [CPU](https://github.com/Dankular/AnyWASM/issues/4), and [productization](https://github.com/Dankular/AnyWASM/issues/5); their open checklists match this file as of `bc434ba`. Update them alongside future checklist edits. Historical #5/#11/#6 references cannot be mapped because the prior issue list was empty and the old notes' broader status cannot be recovered.
+- [x] Task list housekeeping: current open work is queued in [JIT](https://github.com/Dankular/AnyWASM/issues/1), [runtime](https://github.com/Dankular/AnyWASM/issues/2), [graphics](https://github.com/Dankular/AnyWASM/issues/3), [CPU](https://github.com/Dankular/AnyWASM/issues/4), and [productization](https://github.com/Dankular/AnyWASM/issues/5); keep their open checklists in sync with this file. Historical #5/#11/#6 references cannot be mapped because the prior issue list was empty and the old notes' broader status cannot be recovered.
 
 ## 6. Productisation (after a real target runs)
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
@@ -294,20 +305,23 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       regressions cover condition-variable wake/resume. An earlier bounded run stopped at
       `SleepConditionVariableSRW` because its blocked guest continuation could not be resumed; a
       fresh 30,000,000-step CLI replay reaches that call, continues after the wait, and hits its step
-      cap in D3DCompiler. A separate high-cap guest trace reached `Present` calls; none of these runs
-      verified a host window or renderer. After target-grounded static TLS and VEXTRACTF128 support,
+      cap in D3DCompiler. A separate high-cap guest trace reached `Present` calls; those guest-only
+      runs did not verify a host window or renderer. After target-grounded static TLS and VEXTRACTF128 support,
       a bounded trace first reached guest `ExitProcess(3)`. Target-grounded MSVC C++
       exception search and second-pass unwind now reach the
       catch. After the observed `HKCU`/`HKLM` Direct3D 12 registry probes, a 1,000,000,000-step
       traced replay reached `CreateComputeShader`, `CSSetUnorderedAccessViews`, `Dispatch`, then
       guest `Draw` and `IDXGISwapChain2::Present` calls. Target-grounded VEX/BMI handlers and D3D11
       UAV/constant-buffer-range command records moved execution through these paths. The replay was
-      stopped after confirming repeated guest presents. A later headless Chromium replay with a
-      test-only 1,000,000,000-instruction worker slice now translates the target's SDF shader and
-      accepts its compute dispatch. The first remaining WebGPU error is the graphics pipeline's
-      missing group-3 draw-parameter binding; readback is still transparent black. The normal worker
-      slice still stops in a synchronous callback that cannot resume. No end-to-end game acceptance
-      pass is claimed; see `docs/TARGETS.md` for the exact trace and next steps.
+      stopped after confirming repeated guest presents. Headless Chromium now replays the target's
+      compute and graphics commands through WebGPU with no validation errors and captures visible
+      1040x807 SDF maze pixels; `test/browser/target.mjs` reproduces this against a caller-supplied
+      bundle and saves PNGs for the initial frame, W movement, and Tab map regeneration. Browser
+      input is routed past GLFW's hidden helper window; D3D11 `Flush1` signals the optional guest idle
+      event, and event-query `GetData` completes in the ordered command-stream model. The normal
+      worker slice still stops in a synchronous callback that cannot resume. The frame has not been
+      compared with native output, and no gameplay or end-to-end game acceptance pass is claimed;
+      see `docs/TARGETS.md` for the exact trace and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
