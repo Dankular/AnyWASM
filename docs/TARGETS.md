@@ -194,20 +194,22 @@ pointer.
 
 The HLE now reads both signed length parameters from their low 32 bits, preserves
 `cbMultiByte=-1` as the null-terminated input form, rejects `cbMultiByte=0` and negative output
-capacity with `ERROR_INVALID_PARAMETER`, and returns `ERROR_INSUFFICIENT_BUFFER` for a null output
-pointer with nonzero capacity or an undersized buffer. A new freestanding guest fixture covers these
-cases. Microsoft documents `cchWideChar=0` as a count-only call that does not use the output pointer,
-`cbMultiByte=-1` as including the terminating NUL, and lists `ERROR_INSUFFICIENT_BUFFER` for a null
-output buffer ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar)).
+capacity with `ERROR_INVALID_PARAMETER`, returns `ERROR_INVALID_PARAMETER` for a null output pointer
+with nonzero capacity, and returns `ERROR_INSUFFICIENT_BUFFER` for a short non-null buffer. A new
+freestanding guest fixture covers these cases. Microsoft documents `cchWideChar=0` as a count-only call that does not use the output pointer,
+`cbMultiByte=-1` as including the terminating NUL, and lists both
+`ERROR_INSUFFICIENT_BUFFER` and `ERROR_INVALID_PARAMETER` among possible errors
+([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar)).
 The x64 calling convention assigns arguments beyond the fourth to eight-byte stack slots, so the HLE
 must honor the declared 32-bit parameter type when reading those values
 ([ABI documentation](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170)).
 The new fixture was built locally with the installed VS 2022 `cl`/`link`; `fixtures/build.sh` now
-includes it in the existing clang/lld-link fixture build. A native Windows run of that same fixture
-reported `ERROR_INVALID_PARAMETER` (87) for the null-output/nonzero-capacity call, while the API
-documentation's error list also describes `ERROR_INSUFFICIENT_BUFFER` (122) for a null output
-buffer. The AnyWASM regression currently asserts 122 per the documented error entry and requested
-behavior; this host observation is retained as an open compatibility detail.
+includes it in the existing clang/lld-link fixture build. Native Windows probes returned
+`ERROR_INVALID_PARAMETER` (87) for a null output with nonzero capacity, both with `cbMultiByte=-1`
+and with an explicit byte count of 256. A null output with `cchWideChar=0` returned the required
+size (256), and a non-null undersized buffer returned `ERROR_INSUFFICIENT_BUFFER` (122). The guest
+regression follows those observed results; Microsoft's error list includes both codes but does not
+map each code to each null-buffer case.
 
 After that fix, the same bounded game run passed the conversion calls and reached a second null
 write in `kernel32!LCMapStringEx`. The last captured call was

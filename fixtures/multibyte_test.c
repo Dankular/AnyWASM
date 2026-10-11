@@ -25,12 +25,12 @@ void mainCRTStartup(void)
     if (result != 256)
         ExitProcess(10);
 
-    /* The matching 256-char output buffer is NULL: fail with error 122. */
+    /* A NULL output with nonzero capacity is an invalid parameter on Windows. */
     SetLastError(0);
     result = MultiByteToWideChar(1252, 1, source, 256, (WCHAR *)0, 256);
     if (result != 0)
         ExitProcess(21);
-    if (GetLastError() != 122)
+    if (GetLastError() != 87)
         ExitProcess(GetLastError());
 
     /* A non-NULL but undersized buffer must take the same error path. */

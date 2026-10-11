@@ -1330,7 +1330,11 @@ fn multi_byte_to_wide_char(p: &mut Process) -> R {
     if dn == 0 {
         return Ok(w.len() as u64);
     }
-    if dst == 0 || w.len() > dn as usize {
+    if dst == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if w.len() > dn as usize {
         p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
         return Ok(0);
     }
