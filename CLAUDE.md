@@ -118,8 +118,9 @@ generation and execution are not implemented):
       stability, a "will this run?" report that lists blockers before packaging.
 
 ## 3. Graphics
-- [ ] **D3D11 verification gaps** (implemented in the translator but *not* pixel-verified):
-      blending, alpha test/discard, mips + trilinear/anisotropic filtering, instancing,
+- [~] **D3D11 verification gaps** (implemented in the translator; the constant blend-factor path
+      is pixel-verified in `test/browser/run.mjs` via `d3d11_textured`): other blend modes, alpha
+      test/discard, mips + trilinear/anisotropic filtering, instancing,
       `CopyResource`/`CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple
       render targets, cube/array/3D textures, depth-stencil ops/stencil, rasterizer state
       (cull/fill/scissor/bias), `GenerateMips`, constant-buffer packing edge cases.

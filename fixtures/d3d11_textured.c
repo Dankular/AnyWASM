@@ -1,4 +1,4 @@
-/* Direct3D 11: textured quads with a depth buffer, point sampling, indexed draws.
+/* Direct3D 11: textured and half-blended quads with a depth buffer, point sampling, indexed draws.
  * Draws the NEAR quad first and the FAR quad second, so the overlap is only correct if the depth test works. */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
@@ -66,6 +66,18 @@ int main(void) {
     ID3D11DepthStencilState *dss; hr = ID3D11Device_CreateDepthStencilState(dev, &dsd, &dss);
     printf("depth state hr=%08lx\n", (unsigned long)hr);
 
+    D3D11_BLEND_DESC bld = {0};
+    bld.RenderTarget[0].BlendEnable = TRUE;
+    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_BLEND_FACTOR;
+    bld.RenderTarget[0].DestBlend = D3D11_BLEND_INV_BLEND_FACTOR;
+    bld.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    bld.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ID3D11BlendState *blend; hr = ID3D11Device_CreateBlendState(dev, &bld, &blend);
+    printf("blend state hr=%08lx\n", (unsigned long)hr);
+
     /* near quad A (z 0.2) samples only the red texel, far quad B (z 0.8) only the green texel,
      * quad C (z 0.5) maps the whole texture. */
     Vertex verts[12] = {
@@ -124,7 +136,10 @@ int main(void) {
         ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cb);
         ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &srv);
         ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &smp);
+        float blendFactor[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        ID3D11DeviceContext_OMSetBlendState(ctx, blend, blendFactor, 0xffffffffu);
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 0, 0);   /* A (near) */
+        ID3D11DeviceContext_OMSetBlendState(ctx, NULL, NULL, 0xffffffffu);
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 6, 0);   /* B (far, drawn later) */
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 12, 0);  /* C */
         IDXGISwapChain_Present(sc, 1, 0);
