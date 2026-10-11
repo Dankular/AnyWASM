@@ -237,8 +237,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       target-grounded forms, not broad AVX/AVX2/BMI2 support; remaining AVX/AVX2/BMI/FMA and
       AES/PCLMUL/MMX instructions are open.
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
-- [ ] `rcpps`/`rsqrtps` return exact results (excluded from the diff corpus); match hardware
-      approximation or document per-vendor differences.
+- [x] Document `rcpps`/`rsqrtps` approximation behavior. Intel and AMD specify a maximum relative
+      error of `1.5 × 2^-12`, without fixing exact result bits (confirmed by the linked manuals);
+      inference: valid estimates may vary by processor. The interpreter deliberately computes exact
+      scalar reciprocals instead, and these instructions remain excluded from bit-exact host
+      differential checks. See `docs/STATUS.md`.
 - [~] Extend the diff harness to control flow (jcc/call/ret/loop/string ops with REP), privileged-ish
       instructions used by user code (`rdtsc`, `cpuid`, `xgetbv`, `syscall` stubs), and multi-
       instruction sequences. Added LOOP/Jcc, direct CALL/RET, and REP string cases; portable REP

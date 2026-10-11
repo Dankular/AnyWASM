@@ -83,7 +83,14 @@
 
 ## Known limits (not hidden)
 - x87 is modelled with f64, not 80-bit; transcendentals compared to 1e-9 relative tolerance.
-- rcpps/rsqrtps return exact reciprocals (excluded from the diff corpus).
+- `RCPPS`/`RSQRTPS` (and scalar `RCPSS`/`RSQRTSS`) use the interpreter's exact scalar
+  `1.0 / x` and `1.0 / sqrt(x)` operations rather than a processor estimate. Intel's SDM and AMD's
+  Architecture Programmer's Manual specify approximate results with maximum relative error
+  `1.5 × 2^-12`, but do not specify exact output bits. Inference: compliant processor estimates can
+  differ while staying within that bound. No per-model bit pattern is claimed, and the instructions
+  remain excluded from bit-exact host differential checks. Sources: [Intel SDM, Volume 2B
+  (RCPPS/RSQRTPS)](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf),
+  [AMD64 Architecture Programmer's Manual, Volume 1](https://docs.amd.com/v/u/en-US/24592_3.24).
 - Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic, XOR,
   rounding/conversion, `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the
   exact list in `CLAUDE.md`). The target BZHI memory form is also checked against the host CPU on

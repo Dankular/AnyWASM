@@ -1,8 +1,9 @@
 //! SSE / SSE2 / SSE3 / SSSE3 / SSE4.1 / SSE4.2 interpreter.
 //!
 //! Semantics follow the Intel SDM. Known deliberate deviations (documented in docs/STATUS.md):
-//! `rcpps`/`rsqrtps` return exact reciprocals instead of the hardware's 12-bit approximations,
-//! and MXCSR FTZ/DAZ and exception masks are not modelled.
+//! `rcpps`/`rsqrtps` use exact scalar math instead of the processor estimate (the ISA specifies a
+//! maximum relative error, not fixed result bits; see docs/STATUS.md), and MXCSR FTZ/DAZ and
+//! exception masks are not modelled.
 
 use crate::cpu::*;
 use crate::decode::*;
