@@ -1,0 +1,330 @@
+//! COM object model for host-implemented interfaces (DXGI / Direct3D 11).
+//!
+//! A guest COM object is 16 bytes of guest heap whose first qword points at a vtable. Each vtable
+//! slot holds the address of a host thunk named `"<Interface>::<Method>"` (slot order generated from
+//! the mingw-w64 headers, see `vtables.rs`). Host state lives in [`ComState`], keyed by the object's
+//! guest address.
+
+use super::gpu::{op, Pk};
+use super::*;
+use crate::process::*;
+use std::collections::HashMap;
+
+pub const S_OK: u64 = 0;
+pub const S_FALSE: u64 = 1;
+pub const E_NOTIMPL: u64 = 0x8000_4001;
+pub const E_NOINTERFACE: u64 = 0x8000_4002;
+pub const E_FAIL: u64 = 0x8000_4005;
+pub const E_INVALIDARG: u64 = 0x8007_0057;
+pub const E_OUTOFMEMORY: u64 = 0x8007_000e;
+pub const DXGI_ERROR_INVALID_CALL: u64 = 0x887a_0001;
+pub const DXGI_ERROR_NOT_FOUND: u64 = 0x887a_0002;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    Rtv,
+    Dsv,
+    Srv,
+    Uav,
+}
+
+#[derive(Clone, Debug)]
+pub enum Kind {
+    Factory,
+    Adapter,
+    Output,
+    Device,
+    Context,
+    SwapChain { id: u32, backbuffer: u64 },
+    Buffer { id: u32 },
+    Texture2D { id: u32 },
+    View { vk: ViewKind, id: u32, resource: u32 },
+    Shader { id: u32, stage: u32 },
+    InputLayout { id: u32 },
+    State { id: u32 },
+    Query,
+}
+
+impl Kind {
+    /// Host id carried by the object, if it owns GPU-side state.
+    pub fn host_id(&self) -> Option<u32> {
+        match self {
+            Kind::SwapChain { id, .. } | Kind::Buffer { id } | Kind::Texture2D { id } | Kind::View { id, .. } | Kind::Shader { id, .. } | Kind::InputLayout { id } | Kind::State { id } => Some(*id),
+            _ => None,
+        }
+    }
+}
+
+pub struct ComObj {
+    pub iface: &'static str,
+    pub kind: Kind,
+    pub refs: u32,
+    pub block: u64,
+}
+
+/// CPU-visible description of a buffer or texture.
+#[derive(Clone, Default)]
+pub struct ResInfo {
+    pub is_buffer: bool,
+    pub width: u32,
+    pub height: u32,
+    pub mips: u32,
+    pub array: u32,
+    pub format: u32,
+    pub samples: u32,
+    pub usage: u32,
+    pub bind: u32,
+    pub cpu: u32,
+    pub misc: u32,
+    pub size: u32,
+    pub stride: u32,
+    /// Last known CPU-side contents (buffers; textures with CPU access).
+    pub shadow: Vec<u8>,
+    /// Guest scratch memory handed out by Map, and the write intent to flush on Unmap.
+    pub map_addr: u64,
+    pub map_write: bool,
+    pub map_sub: u32,
+}
+
+#[derive(Default)]
+pub struct ComState {
+    pub objs: HashMap<u64, ComObj>,
+    vtables: HashMap<&'static str, u64>,
+    pub res: HashMap<u32, ResInfo>,
+    id_refs: HashMap<u32, u32>,
+    pub device: u64,
+    pub context: u64,
+    pub factory: u64,
+    pub adapter: u64,
+    pub output: u64,
+    /// Currently bound render targets (guest COM pointers) for `OMGetRenderTargets`.
+    pub bound_rtv: Vec<u64>,
+    pub bound_dsv: u64,
+}
+
+/// Canonical interface family used to share method implementations across versions
+/// (`ID3D11Device3` -> `ID3D11Device`, `IDXGIFactory2` -> `IDXGIFactory`, ...).
+pub fn canonical(iface: &str) -> &str {
+    for fam in ["ID3D11DeviceContext", "ID3D11Device", "IDXGIFactory", "IDXGIAdapter", "IDXGISwapChain", "IDXGIDevice", "IDXGIOutput"] {
+        if let Some(rest) = iface.strip_prefix(fam) {
+            if rest.chars().all(|c| c.is_ascii_digit()) {
+                return fam;
+            }
+        }
+    }
+    iface
+}
+
+/// Create a guest COM object of interface `iface` backed by host state `kind`.
+pub fn create(p: &mut Process, iface: &'static str, kind: Kind) -> u64 {
+    let vt = vtable_for(p, iface);
+    let block = kernel32::alloc_block(p, 32, true);
+    let _ = p.wr64(block, vt);
+    if let Some(id) = kind.host_id() {
+        *p.extra.com.id_refs.entry(id).or_insert(0) += 1;
+    }
+    p.extra.com.objs.insert(block, ComObj { iface, kind, refs: 1, block });
+    block
+}
+
+fn vtable_for(p: &mut Process, iface: &'static str) -> u64 {
+    if let Some(&v) = p.extra.com.vtables.get(iface) {
+        return v;
+    }
+    let methods = vtables::methods(iface).unwrap_or(&["QueryInterface", "AddRef", "Release"]);
+    let vt = kernel32::alloc_block(p, methods.len() as u64 * 8 + 8, true);
+    for (i, m) in methods.iter().enumerate() {
+        let a = p.thunk_for("com", &format!("{iface}::{m}"), true).unwrap();
+        let _ = p.wr64(vt + 8 * i as u64, a);
+    }
+    p.extra.com.vtables.insert(iface, vt);
+    vt
+}
+
+pub fn kind_of(p: &Process, this: u64) -> Option<Kind> {
+    p.extra.com.objs.get(&this).map(|o| o.kind.clone())
+}
+
+/// Write an interface pointer to `*out` (if non-null).
+pub fn out_ptr(p: &mut Process, out: u64, obj: u64) -> Result<(), Stop> {
+    if out != 0 {
+        p.wr64(out, obj)?;
+    }
+    Ok(())
+}
+
+fn guid_string(p: &Process, a: u64) -> Result<String, Stop> {
+    let b = p.read_bytes(a, 16)?;
+    Ok(format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        u32::from_le_bytes(b[0..4].try_into().unwrap()),
+        u16::from_le_bytes(b[4..6].try_into().unwrap()),
+        u16::from_le_bytes(b[6..8].try_into().unwrap()),
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    ))
+}
+
+/// Whether an object of `kind` may be queried as interface `want`.
+fn supports(kind: &Kind, want: &str) -> bool {
+    let w = canonical(want);
+    if matches!(w, "IUnknown") {
+        return true;
+    }
+    let fam: &[&str] = match kind {
+        Kind::Device => &["ID3D11Device", "IDXGIDevice", "IDXGIObject"],
+        Kind::Context => &["ID3D11DeviceContext", "ID3D11DeviceChild"],
+        Kind::SwapChain { .. } => &["IDXGISwapChain", "IDXGIObject", "IDXGIDeviceSubObject"],
+        Kind::Factory => &["IDXGIFactory", "IDXGIObject"],
+        Kind::Adapter => &["IDXGIAdapter", "IDXGIObject"],
+        Kind::Output => &["IDXGIOutput", "IDXGIObject"],
+        Kind::Buffer { .. } => &["ID3D11Buffer", "ID3D11Resource", "ID3D11DeviceChild"],
+        Kind::Texture2D { .. } => &["ID3D11Texture2D", "ID3D11Resource", "ID3D11DeviceChild", "IDXGISurface", "IDXGIObject", "IDXGIResource"],
+        Kind::View { vk, .. } => match vk {
+            ViewKind::Rtv => &["ID3D11RenderTargetView", "ID3D11View", "ID3D11DeviceChild"],
+            ViewKind::Dsv => &["ID3D11DepthStencilView", "ID3D11View", "ID3D11DeviceChild"],
+            ViewKind::Srv => &["ID3D11ShaderResourceView", "ID3D11View", "ID3D11DeviceChild"],
+            ViewKind::Uav => &["ID3D11UnorderedAccessView", "ID3D11View", "ID3D11DeviceChild"],
+        },
+        Kind::Shader { stage, .. } => match stage {
+            0 => &["ID3D11VertexShader", "ID3D11DeviceChild"],
+            1 => &["ID3D11PixelShader", "ID3D11DeviceChild"],
+            _ => &["ID3D11ComputeShader", "ID3D11DeviceChild"],
+        },
+        Kind::InputLayout { .. } => &["ID3D11InputLayout", "ID3D11DeviceChild"],
+        Kind::State { .. } => &["ID3D11SamplerState", "ID3D11BlendState", "ID3D11RasterizerState", "ID3D11DepthStencilState", "ID3D11DeviceChild"],
+        Kind::Query => &["ID3D11Query", "ID3D11DeviceChild"],
+    };
+    fam.iter().any(|f| *f == w)
+}
+
+fn static_iface(name: &str) -> Option<&'static str> {
+    // Interned lookup: only names we have vtables for are valid interfaces.
+    vtables::methods(name)?;
+    for (k, _) in ALL_NAMES.iter().map(|n| (*n, ())) {
+        if k == name {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// Every interface name present in the generated tables (for interning &'static str).
+const ALL_NAMES: &[&str] = &[
+    "IUnknown", "IDXGIObject", "IDXGIDeviceSubObject", "IDXGIFactory", "IDXGIFactory1", "IDXGIFactory2", "IDXGIFactory3", "IDXGIFactory4", "IDXGIAdapter", "IDXGIAdapter1", "IDXGIAdapter2",
+    "IDXGIOutput", "IDXGISwapChain", "IDXGISwapChain1", "IDXGISwapChain2", "IDXGISwapChain3", "IDXGIDevice", "IDXGIDevice1", "IDXGIDevice2", "IDXGISurface", "IDXGIResource", "ID3D11Device", "ID3D11Device1",
+    "ID3D11Device2", "ID3D11Device3", "ID3D11DeviceContext", "ID3D11DeviceContext1", "ID3D11DeviceContext2", "ID3D11DeviceContext3", "ID3D11DeviceChild", "ID3D11Resource", "ID3D11Buffer", "ID3D11Texture2D",
+    "ID3D11View", "ID3D11RenderTargetView", "ID3D11DepthStencilView", "ID3D11ShaderResourceView", "ID3D11UnorderedAccessView", "ID3D11VertexShader", "ID3D11PixelShader", "ID3D11ComputeShader",
+    "ID3D11InputLayout", "ID3D11SamplerState", "ID3D11BlendState", "ID3D11RasterizerState", "ID3D11DepthStencilState", "ID3D11Query", "ID3D10Blob", "ID3DBlob",
+];
+
+pub fn query_interface(p: &mut Process) -> R {
+    let (this, riid, out) = (p.arg(0), p.arg(1), p.arg(2));
+    let Some(obj) = p.extra.com.objs.get(&this) else { return Ok(E_NOINTERFACE) };
+    let (kind, own) = (obj.kind.clone(), obj.iface);
+    let iid = guid_string(p, riid)?;
+    let Some(name) = vtables::iid_name(&iid) else {
+        p.wr64(out, 0)?;
+        return Ok(E_NOINTERFACE);
+    };
+    if !supports(&kind, name) {
+        p.wr64(out, 0)?;
+        return Ok(E_NOINTERFACE);
+    }
+    if name == "IUnknown" || canonical(name) == canonical(own) {
+        p.wr64(out, this)?;
+        add_ref_obj(p, this);
+        return Ok(S_OK);
+    }
+    // A different interface of the same object: make a sibling wrapper sharing the host state.
+    let Some(iface) = static_iface(name) else {
+        p.wr64(out, 0)?;
+        return Ok(E_NOINTERFACE);
+    };
+    // Reuse the device/context/factory/adapter singletons so identity comparisons hold.
+    let singleton = match kind {
+        Kind::Device => Some(p.extra.com.device),
+        Kind::Context => Some(p.extra.com.context),
+        _ => None,
+    };
+    if let Some(s) = singleton.filter(|&s| s != 0) {
+        // Same pointer works for any version of the interface because vtables are prefix-compatible.
+        p.wr64(out, s)?;
+        add_ref_obj(p, s);
+        return Ok(S_OK);
+    }
+    let o = create(p, iface, kind);
+    p.wr64(out, o)?;
+    Ok(S_OK)
+}
+
+fn add_ref_obj(p: &mut Process, this: u64) -> u64 {
+    match p.extra.com.objs.get_mut(&this) {
+        Some(o) => {
+            o.refs += 1;
+            o.refs as u64
+        }
+        None => 0,
+    }
+}
+
+pub fn add_ref(p: &mut Process) -> R {
+    let this = p.arg(0);
+    Ok(add_ref_obj(p, this))
+}
+
+pub fn release(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let Some(o) = p.extra.com.objs.get_mut(&this) else { return Ok(0) };
+    if o.refs > 0 {
+        o.refs -= 1;
+    }
+    let refs = o.refs;
+    if refs == 0 {
+        let o = p.extra.com.objs.remove(&this).unwrap();
+        if let Some(id) = o.kind.host_id() {
+            let left = p.extra.com.id_refs.get_mut(&id).map(|c| {
+                *c = c.saturating_sub(1);
+                *c
+            });
+            if left == Some(0) {
+                p.extra.com.id_refs.remove(&id);
+                // The backbuffer texture belongs to its swap chain; the host releases it with it.
+                p.extra.com.res.remove(&id);
+                p.extra.gpu.emit(op::RELEASE, Pk::new().u32(id));
+            }
+        }
+        kernel32::free_block(p, o.block);
+    }
+    Ok(refs as u64)
+}
+
+pub fn get_device(p: &mut Process) -> R {
+    let (_this, out) = (p.arg(0), p.arg(1));
+    let d = p.extra.com.device;
+    if d != 0 {
+        add_ref_obj(p, d);
+    }
+    out_ptr(p, out, d)?;
+    Ok(0)
+}
+
+pub fn lookup(name: &str) -> Option<HleFn> {
+    let (iface, m) = name.split_once("::")?;
+    Some(match m {
+        "QueryInterface" => query_interface,
+        "AddRef" => add_ref,
+        "Release" => release,
+        "GetDevice" => get_device,
+        "GetPrivateData" => |_| Ok(DXGI_ERROR_NOT_FOUND),
+        "SetPrivateData" | "SetPrivateDataInterface" | "SetEvictionPriority" => |_| Ok(S_OK),
+        "GetEvictionPriority" => |_| Ok(0x8000_0000),
+        _ => return d3d11::method(iface, m).or_else(|| dxgi::method(iface, m)),
+    })
+}
+
+/// Register a new resource in the CPU-side table and return its host id.
+pub fn new_res(p: &mut Process, info: ResInfo) -> u32 {
+    let id = p.extra.gpu.new_id();
+    p.extra.com.res.insert(id, info);
+    id
+}

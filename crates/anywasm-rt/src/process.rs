@@ -33,6 +33,10 @@ pub enum Stop {
     Crash(String),
     /// The step budget was exhausted; call `run` again to continue.
     StepLimit,
+    /// A frame was presented; the host should execute the GPU stream, then call `run` again.
+    Frame,
+    /// The guest is blocked waiting for a window message; push input, then call `run` again.
+    Idle,
 }
 
 pub type RunResult = Stop;
@@ -98,6 +102,8 @@ pub struct Process {
     pub nested: u32,
     /// Set by an HLE function that has rewritten RSP/RIP itself (longjmp): skip the normal return.
     pub skip_ret: bool,
+    /// Set by an HLE function to make `run` return after the current call completes.
+    pub yield_request: Option<Stop>,
     pub dcache: DecodeCache,
     pub extra: hle::Extra,
 }
@@ -149,6 +155,7 @@ impl Process {
             trace_imports: false,
             nested: 0,
             skip_ret: false,
+            yield_request: None,
             dcache: DecodeCache::new(),
             extra: hle::Extra::default(),
         };
@@ -688,7 +695,8 @@ impl Process {
     fn step_once(&mut self) -> Result<Option<Stop>, Stop> {
         let rip = self.cpu.rip;
         if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
-            return self.dispatch_thunk(rip).map(|_| None);
+            self.dispatch_thunk(rip)?;
+            return Ok(self.yield_request.take());
         }
         match self.dcache.step(&mut self.cpu, &mut self.mem) {
             Ok(()) => Ok(None),

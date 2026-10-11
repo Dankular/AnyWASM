@@ -1,0 +1,97 @@
+//! Runs a real mingw-built Direct3D 11 program and checks the GPU command stream it produces.
+use anywasm_rt::hle::gpu::{decode, op};
+use anywasm_rt::{Process, Stop, Vfs};
+
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{}/../../fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+/// Run to exit, collecting the GPU stream across presented frames.
+fn run_collect(name: &str) -> (Vec<(u32, Vec<u8>)>, String, Stop) {
+    let mut vfs = Vfs::new();
+    vfs.insert(name, fixture(name));
+    let mut p = Process::new(vfs);
+    p.load_exe(name, None).unwrap();
+    let mut stream = Vec::new();
+    let stop = loop {
+        let s = p.run(5_000_000);
+        stream.extend(std::mem::take(&mut p.extra.gpu.buf));
+        match s {
+            Stop::StepLimit | Stop::Frame => {}
+            other => break other,
+        }
+    };
+    let out = String::from_utf8_lossy(&p.take_stdout()).into_owned();
+    (decode(&stream), out, stop)
+}
+
+fn u32s(b: &[u8]) -> Vec<u32> {
+    b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
+#[test]
+fn triangle_program_produces_the_expected_gpu_stream() {
+    let (cmds, out, stop) = run_collect("d3d11_triangle.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout:\n{out}");
+    assert!(out.contains("create device hr=00000000 feature_level=b000"), "{out}");
+    assert!(out.contains("frames=3"), "{out}");
+    for l in ["rtv hr=00000000", "vb hr=00000000", "vs hr=00000000", "ps hr=00000000", "layout hr=00000000"] {
+        assert!(out.contains(l), "missing `{l}` in:\n{out}");
+    }
+
+    let ops: Vec<u32> = cmds.iter().map(|c| c.0).collect();
+    let count = |o: u32| ops.iter().filter(|&&x| x == o).count();
+    assert_eq!(count(op::PRESENT), 3, "one PRESENT per frame");
+    assert_eq!(count(op::DRAW), 3);
+    assert_eq!(count(op::CLEAR_RTV), 3);
+    assert_eq!(count(op::CREATE_SHADER), 2);
+    assert_eq!(count(op::CREATE_INPUT_LAYOUT), 1);
+    assert_eq!(count(op::SWAPCHAIN), 1);
+
+    // Creation commands precede the first draw.
+    let first_draw = ops.iter().position(|&o| o == op::DRAW).unwrap();
+    for creator in [op::SWAPCHAIN, op::CREATE_SHADER, op::CREATE_INPUT_LAYOUT, op::CREATE_BUFFER, op::CREATE_VIEW] {
+        assert!(ops.iter().position(|&o| o == creator).unwrap() < first_draw, "op {creator} after first draw");
+    }
+
+    // Shaders are forwarded as untouched DXBC containers (vertex = stage 0, pixel = stage 1).
+    let shaders: Vec<_> = cmds.iter().filter(|c| c.0 == op::CREATE_SHADER).collect();
+    let stages: Vec<u32> = shaders.iter().map(|c| u32s(&c.1)[1]).collect();
+    assert_eq!(stages, vec![0, 1]);
+    for s in &shaders {
+        assert_eq!(&s.1[12..16], b"DXBC");
+    }
+
+    // Input layout: POSITION -> register 0 (R32G32B32_FLOAT=6 @0), COLOR -> register 1 (R32G32B32A32_FLOAT=2 @12).
+    let il = cmds.iter().find(|c| c.0 == op::CREATE_INPUT_LAYOUT).unwrap();
+    let w = u32s(&il.1);
+    assert_eq!(w[1], 2, "two elements");
+    assert_eq!(&w[2..8], &[0, 6, 0, 0, 0, 0], "POSITION");
+    assert_eq!(&w[8..14], &[1, 2, 0, 12, 0, 0], "COLOR");
+
+    // Vertex data upload matches what the program wrote.
+    let writes: Vec<_> = cmds.iter().filter(|c| c.0 == op::BUFFER_WRITE).collect();
+    let vb = writes.iter().find(|c| u32s(&c.1)[2] == 3 * 28).expect("vertex buffer upload");
+    let floats: Vec<f32> = vb.1[12..12 + 84].chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    assert_eq!(&floats[0..7], &[0.0, 0.6, 0.0, 1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(&floats[7..14], &[0.6, -0.6, 0.0, 0.0, 1.0, 0.0, 1.0]);
+
+    // Frame state: clear color, draw size, vertex stride.
+    let clear = cmds.iter().find(|c| c.0 == op::CLEAR_RTV).unwrap();
+    let cc: Vec<f32> = u32s(&clear.1)[1..5].iter().map(|b| f32::from_bits(*b)).collect();
+    assert_eq!(cc, vec![0.0, 0.0, 0.2, 1.0]);
+    let draw = cmds.iter().find(|c| c.0 == op::DRAW).unwrap();
+    assert_eq!(u32s(&draw.1), vec![3, 0]);
+    let svb = cmds.iter().find(|c| c.0 == op::SET_VERTEX_BUFFERS).unwrap();
+    let w = u32s(&svb.1);
+    assert_eq!((w[0], w[1], w[3], w[4]), (0, 1, 28, 0), "slot 0, one buffer, stride 28, offset 0");
+    let vp = cmds.iter().find(|c| c.0 == op::SET_VIEWPORTS).unwrap();
+    let w = u32s(&vp.1);
+    assert_eq!(w[0], 1);
+    assert_eq!(f32::from_bits(w[3]), 640.0);
+    assert_eq!(f32::from_bits(w[4]), 480.0);
+
+    // The dynamic constant buffer is re-uploaded through Map/Unmap every frame (16 bytes of 1.0f).
+    let cb_writes = writes.iter().filter(|c| u32s(&c.1)[2] == 16).count();
+    assert!(cb_writes >= 3, "constant buffer uploads: {cb_writes}");
+}

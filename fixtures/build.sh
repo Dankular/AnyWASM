@@ -18,6 +18,8 @@ build d3dprobe windows kernel32.lib user32.lib d3d11.lib
 # Real CRT-linked program (needs gcc-mingw-w64-x86-64); output was cross-checked against a native build.
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then
   x86_64-w64-mingw32-gcc -O2 -o crt_test.exe crt_test.c
+  x86_64-w64-mingw32-gcc -O2 -o unimpl.exe unimpl.c
+  x86_64-w64-mingw32-gcc -O2 -o d3d11_triangle.exe d3d11_triangle.c -ld3d11 -ldxgi -ldxguid -luser32  # shaders: node fixtures/gen_d3d_shaders.mjs
 fi
 rm -f *.obj *.lib
 ls -l *.exe

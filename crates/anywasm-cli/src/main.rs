@@ -288,6 +288,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
                     break Stop::StepLimit;
                 }
             }
+            // No display attached: a presented frame needs no host work, keep going.
+            Stop::Frame => {
+                p.extra.gpu.buf.clear();
+            }
             other => break other,
         }
     };
@@ -305,6 +309,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         Stop::StepLimit => {
             eprintln!("\nanywasm: step limit reached after {} instructions", o.max_steps);
             Ok(ExitCode::from(122))
+        }
+        Stop::Frame | Stop::Idle => {
+            eprintln!("\nanywasm: program is waiting for window input (no display attached to the CLI)");
+            Ok(ExitCode::from(123))
         }
     }
 }

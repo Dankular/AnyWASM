@@ -8,8 +8,9 @@ tested against real hardware; the system libraries are written in Rust and compi
 WASM module.
 
 > **Status: early.** Console programs run, including real mingw-compiled programs that import the
-> actual `msvcrt.dll` API. There is **no windowing, no Direct3D/WebGPU path, no audio, no threads
-> yet**, and the interpreter is ~20 M instructions/s (games need 10-50x more). See
+> actual `msvcrt.dll` API, and a **Direct3D 11 program renders through WebGPU** (verified
+> pixel-for-pixel on a coloured triangle). There is **no audio, no threads, no GDI**, the D3D11
+> surface is a vertical slice, and the interpreter is ~20 M instructions/s (games need 10-50x more). See
 > [docs/STATUS.md](docs/STATUS.md) for exactly what is verified and what is not, and
 > [docs/EVALUATION.md](docs/EVALUATION.md) for the prior-art research (WineBrowser, retrowin32, ...).
 
@@ -22,7 +23,7 @@ WASM module.
 | `crates/anywasm-rt` | Process runtime: PE64 loader, TEB/PEB, import thunks, host kernel32/ntdll/C runtime, VFS, bundles |
 | `crates/anywasm-cli` | `anywasm analyze | run | pack` |
 | `crates/anywasm-wasm` | C-ABI WebAssembly build (no wasm-bindgen) |
-| `web/` | Browser page, worker and JS glue |
+| `web/` | Browser page, worker, JS glue, WebGPU executor (`gpu.js`), shader toolchain (`shaders.js` + vendored vkd3d-shader/Naga WASM, see `web/shaders/licenses`) |
 | `fixtures/` | Test executables (clang/lld-link and mingw-w64 builds) and `build.sh` |
 | `tools/gen_corpus.py` | Generates the differential-test instruction corpus via `llvm-mc` |
 

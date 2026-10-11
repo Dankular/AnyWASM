@@ -42,7 +42,13 @@ check('crt_test.exe output identical to native build', r.out.replace(/\r\n/g, '\
 check('crt_test.exe stderr captured', r.err === 'to stderr\n', JSON.stringify(r.err));
 
 r = await runExe('fixtures/d3dprobe.exe');
-check('d3dprobe.exe reports the unimplemented import by name', r.status === Status.UNIMPLEMENTED && /D3D11CreateDevice|MessageBoxA/.test(r.message), JSON.stringify(r));
+check('d3dprobe.exe (D3D11CreateDevice + MessageBoxA) runs to completion', r.status === Status.EXITED && r.exitCode === 0 && r.err.includes('[MessageBox] probe: ok'), JSON.stringify(r));
+
+r = await runExe('fixtures/unimpl.exe');
+check('unimpl.exe reports the unimplemented import by name', r.status === Status.UNIMPLEMENTED && /kernel32!CreateToolhelp32Snapshot/.test(r.message) && r.out === 'before\n', JSON.stringify(r));
+
+r = await runExe('fixtures/d3d11_triangle.exe');
+check('d3d11_triangle.exe runs under WASM and emits a GPU stream', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('frames=3'), JSON.stringify(r));
 
 try { const w = await AnyWasm.create(wasm); w.load(new Uint8Array([1, 2, 3])); check('bad bundle rejected', false); }
 catch (e) { check('bad bundle rejected with message', /corrupt bundle/.test(e.message), e.message); }

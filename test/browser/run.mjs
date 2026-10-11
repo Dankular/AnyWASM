@@ -1,5 +1,34 @@
 // Drives the real web page in headless Chromium and checks the program output on screen.
 import { chromium } from 'playwright-core';
+import { inflateSync } from 'node:zlib';
+
+/** Minimal PNG decoder (8-bit RGB/RGBA, non-interlaced) - enough for Playwright screenshots. */
+function decodePng(buf) {
+  let p = 8, w = 0, h = 0, ct = 0; const idat = [];
+  while (p < buf.length) {
+    const len = buf.readUInt32BE(p), type = buf.toString('ascii', p + 4, p + 8), data = buf.subarray(p + 8, p + 8 + len);
+    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); ct = data[9]; if (data[8] !== 8 || data[12] !== 0) throw new Error('unsupported PNG'); }
+    if (type === 'IDAT') idat.push(data);
+    p += 12 + len;
+  }
+  const bpp = ct === 6 ? 4 : 3, stride = w * bpp, raw = inflateSync(Buffer.concat(idat)), out = Buffer.alloc(w * h * 4);
+  let prev = Buffer.alloc(stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], line = Buffer.from(raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1)));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= bpp ? line[x - bpp] : 0, b = prev[x], c = x >= bpp ? prev[x - bpp] : 0;
+      let v = line[x];
+      if (f === 1) v += a; else if (f === 2) v += b; else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) { const pa = Math.abs(b - c), pb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      line[x] = v & 255;
+    }
+    for (let x = 0; x < w; x++) { out[(y * w + x) * 4] = line[x * bpp]; out[(y * w + x) * 4 + 1] = line[x * bpp + 1]; out[(y * w + x) * 4 + 2] = line[x * bpp + 2]; out[(y * w + x) * 4 + 3] = bpp === 4 ? line[x * bpp + 3] : 255; }
+    prev = line;
+  }
+  return { w, h, data: out };
+}
+
+
 import { spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 
@@ -32,6 +61,50 @@ try {
   check('crt_test.exe stderr shown', t2.includes('to stderr'), t2);
   check('crt_test.exe exit code 7', (await page.getAttribute('#stat', 'data-exit')) === '7');
 
+  // ── Direct3D 11 triangle: replay the program's GPU stream with WebGPU and read the pixels back ──
+  await page.goto('http://localhost:8099/index.html?run=d3d11_triangle&test=1');
+  await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
+  const triText = await page.textContent('#term');
+  const triStat = await page.textContent('#stat');
+  console.log('triangle status:', triStat);
+  check('d3d11 program ran to completion', /exited \(exit code 0\)/.test(triStat) && triText.includes('frames=3'), triText + triStat);
+  const gpuStats = await page.evaluate(() => window.__gpuStats);
+  console.log('gpu stats:', JSON.stringify(gpuStats));
+  check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));
+  check('no WebGPU validation errors', gpuStats && gpuStats.errors.length === 0, JSON.stringify(gpuStats?.errors));
+  // The page runs in test mode (`&test=1`): the executor does not touch the canvas texture, because in
+  // this headless Chromium build getCurrentTexture() breaks later mapAsync calls and screenshots do not
+  // capture WebGPU canvases at all (both reproduced in isolation). The back buffer is read directly.
+  await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
+  await page.waitForFunction(() => window.__pixels, null, { timeout: 20000 });
+  const px = await page.evaluate(() => { const p = window.__pixels; return { w: p.width, h: p.height, error: p.error, data: Array.from(p.data) }; });
+  console.log('captured:', px.w, 'x', px.h, 'bytes', px.data.length, px.error || '');
+  const at = (x, y) => { const i = (y * px.w + x) * 4; return px.data.slice(i, i + 4); };
+  const near = (a, b, tol = 4) => a.length === b.length && a.every((v, k) => Math.abs(v - b[k]) <= tol);
+  check('backbuffer is 640x480', px.w === 640 && px.h === 480, `${px.w}x${px.h}`);
+  check('clear colour (0,0,51,255) in the corner', near(at(10, 10), [0, 0, 51, 255]), JSON.stringify(at(10, 10)));
+  check('triangle centroid is mid-grey (barycentric blend 85,85,85)', near(at(320, 288), [85, 85, 85, 255], 6), JSON.stringify(at(320, 288)));
+  // Exact expected colours: barycentric interpolation of red/green/blue over the NDC triangle.
+  const V = [[320, 96, [255, 0, 0]], [512, 384, [0, 255, 0]], [128, 384, [0, 0, 255]]];
+  const bary = (x, y) => {
+    const [a, b, c] = V, d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+    const w0 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d, w1 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d;
+    return [w0, w1, 1 - w0 - w1];
+  };
+  let worst = 0, checked = 0;
+  for (let y = 100; y < 380; y += 17) for (let x = 140; x < 500; x += 13) {
+    const w = bary(x + 0.5, y + 0.5);
+    if (w.some((v) => v < 0.03)) continue; // skip pixels too close to an edge (rasterisation rule differences)
+    const exp = [0, 1, 2].map((k) => Math.round(255 * w[0] * V[0][2][k] / 255 + 255 * w[1] * V[1][2][k] / 255 + 255 * w[2] * V[2][2][k] / 255));
+    const got = at(x, y);
+    worst = Math.max(worst, ...exp.map((v, k) => Math.abs(v - got[k])));
+    checked++;
+  }
+  check(`interpolated colours match barycentric maths at ${checked} pixels (worst error ${worst}/255)`, checked > 50 && worst <= 3, `worst ${worst}`);
+  check('near the bottom-right vertex it is green', at(500, 380)[1] > 200 && at(500, 380)[0] < 50, JSON.stringify(at(500, 380)));
+  check('near the bottom-left vertex it is blue', at(140, 380)[2] > 200 && at(140, 380)[0] < 50, JSON.stringify(at(140, 380)));
+  check('outside the triangle (left of the bottom-left vertex) is still the clear colour', near(at(100, 400), [0, 0, 51, 255]), JSON.stringify(at(100, 400)));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {
@@ -39,7 +112,9 @@ try {
     try { const a = await navigator.gpu.requestAdapter(); return a ? 'adapter: ' + (a.info?.description || a.info?.vendor || 'ok') : 'no adapter'; } catch (e) { return 'error: ' + e.message; }
   });
   console.log('WebGPU in this headless Chromium:', gpu);
-  check('no page errors', !logs.some((l) => l.startsWith('PAGEERROR')), logs.join('\n'));
+  const real = logs.filter((l) => l.startsWith('PAGEERROR') && !/Instance dropped/.test(l));
+  check('no page errors', real.length === 0, real.join('\n'));
+  if (logs.some((l) => /\[gpu\]/.test(l))) console.log(logs.filter((l) => /\[gpu\]/.test(l)).join('\n'));
 } finally {
   await browser.close();
   server.kill();

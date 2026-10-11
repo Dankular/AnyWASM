@@ -1,7 +1,7 @@
 // AnyWASM runtime glue: loads the WASM module and drives a Windows x64 process inside it.
 // Works unchanged in browsers (main thread or worker) and Node >= 18.
 
-export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3 });
+export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
@@ -41,6 +41,10 @@ export class AnyWasm {
     clearFn();
     return out;
   }
+  /** Window/GPU command stream produced since the last call (copied out of WASM memory). */
+  takeGpu() { return this._take(this.x.aw_gpu_ptr, this.x.aw_gpu_len, this.x.aw_gpu_clear); }
+  /** Deliver an input event: see crates/anywasm-rt/src/hle/user32.rs `input_event`. */
+  input(kind, a = 0, b = 0, c = 0) { this.x.aw_input(kind, BigInt(a), BigInt(b), BigInt(c)); }
   takeStdout() { return this._take(this.x.aw_stdout_ptr, this.x.aw_stdout_len, this.x.aw_stdout_clear); }
   takeStderr() { return this._take(this.x.aw_stderr_ptr, this.x.aw_stderr_len, this.x.aw_stderr_clear); }
   message() {
@@ -62,10 +66,11 @@ export class AnyWasm {
   runToEnd({ sliceSteps = 2_000_000, maxSlices = Infinity, onOutput = () => {}, yieldFn = null } = {}) {
     const textDec = new TextDecoder();
     let status = Status.RUNNING;
-    for (let i = 0; i < maxSlices && status === Status.RUNNING; i++) {
+    for (let i = 0; i < maxSlices && (status === Status.RUNNING || status === Status.FRAME); i++) {
       status = this.run(sliceSteps);
       const o = this.takeStdout(); if (o.length) onOutput('stdout', textDec.decode(o));
       const e = this.takeStderr(); if (e.length) onOutput('stderr', textDec.decode(e));
+      if (status === Status.FRAME) { this.takeGpu(); status = Status.RUNNING; }
       if (yieldFn && status === Status.RUNNING) return Promise.resolve(yieldFn()).then(() => this.runToEnd({ sliceSteps, maxSlices: maxSlices - i - 1, onOutput, yieldFn }));
     }
     return { status, exitCode: this.exitCode(), message: this.message() };

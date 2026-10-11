@@ -1,0 +1,766 @@
+// WebGPU executor: replays the binary command stream produced by the runtime's Direct3D 11 layer
+// (see crates/anywasm-rt/src/hle/gpu.rs for the wire format and opcodes).
+//
+// Ordering model: D3D11 is an immediate-mode API, WebGPU records command buffers. Every upload
+// goes through a staging ring and is recorded as a copy in the same encoder as the draws, so a
+// draw sees exactly the data that was uploaded before it. Render passes are kept open across
+// consecutive draws and closed whenever a copy, clear or attachment change needs the encoder.
+
+const OP = {
+  WINDOW: 1, CREATE_BUFFER: 2, BUFFER_WRITE: 3, CREATE_TEXTURE2D: 4, TEXTURE_WRITE: 5, CREATE_SHADER: 6,
+  CREATE_INPUT_LAYOUT: 7, CREATE_SAMPLER: 8, CREATE_BLEND: 9, CREATE_RASTER: 10, CREATE_DEPTH: 11, CREATE_VIEW: 12,
+  SET_VERTEX_BUFFERS: 13, SET_INDEX_BUFFER: 14, SET_INPUT_LAYOUT: 15, SET_TOPOLOGY: 16, SET_SHADER: 17,
+  SET_CBUFFERS: 18, SET_SRVS: 19, SET_SAMPLERS: 20, SET_RENDER_TARGETS: 21, SET_VIEWPORTS: 22, SET_SCISSORS: 23,
+  SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
+  DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
+  GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42,
+};
+
+// DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
+const TEX = {
+  1: 'rgba32float', 2: 'rgba32float', 3: 'rgba32uint', 4: 'rgba32sint',
+  9: 'rgba16float', 10: 'rgba16float', 11: 'rgba16float', 12: 'rgba16uint', 13: 'rgba16float', 14: 'rgba16sint',
+  15: 'rg32float', 16: 'rg32float', 17: 'rg32uint', 18: 'rg32sint',
+  23: 'rgb10a2unorm', 24: 'rgb10a2unorm', 25: 'rgb10a2uint', 26: 'rg11b10ufloat',
+  27: 'rgba8unorm', 28: 'rgba8unorm', 29: 'rgba8unorm-srgb', 30: 'rgba8uint', 31: 'rgba8snorm', 32: 'rgba8sint',
+  33: 'rg16float', 34: 'rg16float', 35: 'rg16float', 36: 'rg16uint', 37: 'rg16float', 38: 'rg16sint',
+  39: 'r32float', 40: 'depth32float', 41: 'r32float', 42: 'r32uint', 43: 'r32sint',
+  44: 'depth24plus-stencil8', 45: 'depth24plus-stencil8', 46: 'depth24plus-stencil8', 47: 'depth24plus-stencil8',
+  20: 'depth32float-stencil8', 19: 'depth32float-stencil8', 21: 'depth32float-stencil8', 22: 'depth32float-stencil8',
+  48: 'rg8unorm', 49: 'rg8unorm', 50: 'rg8uint', 51: 'rg8snorm', 52: 'rg8sint',
+  53: 'r16float', 54: 'r16float', 55: 'depth16unorm', 56: 'r16float', 57: 'r16uint', 58: 'r16float', 59: 'r16sint',
+  60: 'r8unorm', 61: 'r8unorm', 62: 'r8uint', 63: 'r8snorm', 64: 'r8sint', 65: 'r8unorm',
+  70: 'bc1-rgba-unorm', 71: 'bc1-rgba-unorm', 72: 'bc1-rgba-unorm-srgb',
+  73: 'bc2-rgba-unorm', 74: 'bc2-rgba-unorm', 75: 'bc2-rgba-unorm-srgb',
+  76: 'bc3-rgba-unorm', 77: 'bc3-rgba-unorm', 78: 'bc3-rgba-unorm-srgb',
+  79: 'bc4-r-unorm', 80: 'bc4-r-unorm', 81: 'bc4-r-snorm', 82: 'bc5-rg-unorm', 83: 'bc5-rg-unorm', 84: 'bc5-rg-snorm',
+  87: 'bgra8unorm', 88: 'bgra8unorm', 90: 'bgra8unorm', 91: 'bgra8unorm-srgb', 92: 'bgra8unorm', 93: 'bgra8unorm-srgb',
+  94: 'bc6h-rgb-ufloat', 95: 'bc6h-rgb-ufloat', 96: 'bc6h-rgb-float',
+  97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
+};
+
+// DXGI_FORMAT -> GPUVertexFormat
+const VTX = {
+  2: 'float32x4', 6: 'float32x3', 16: 'float32x2', 41: 'float32',
+  3: 'uint32x4', 7: 'uint32x3', 17: 'uint32x2', 42: 'uint32', 4: 'sint32x4', 8: 'sint32x3', 18: 'sint32x2', 43: 'sint32',
+  10: 'float16x4', 34: 'float16x2', 11: 'unorm16x4', 12: 'uint16x4', 13: 'snorm16x4', 14: 'sint16x4',
+  35: 'unorm16x2', 36: 'uint16x2', 37: 'snorm16x2', 38: 'sint16x2',
+  28: 'unorm8x4', 30: 'uint8x4', 31: 'snorm8x4', 32: 'sint8x4', 87: 'unorm8x4-bgra',
+  49: 'unorm8x2', 50: 'uint8x2', 51: 'snorm8x2', 52: 'sint8x2', 24: 'unorm10-10-10-2',
+  61: 'unorm8', 62: 'uint8', 63: 'snorm8', 64: 'sint8',
+};
+
+const SRGB_PAIR = {
+  'rgba8unorm': 'rgba8unorm-srgb', 'bgra8unorm': 'bgra8unorm-srgb', 'bc1-rgba-unorm': 'bc1-rgba-unorm-srgb',
+  'bc2-rgba-unorm': 'bc2-rgba-unorm-srgb', 'bc3-rgba-unorm': 'bc3-rgba-unorm-srgb', 'bc7-rgba-unorm': 'bc7-rgba-unorm-srgb',
+};
+const UNSRGB = Object.fromEntries(Object.entries(SRGB_PAIR).map(([a, b]) => [b, a]));
+
+const BLOCK = (f) => (f.startsWith('bc') ? [4, 4, f.startsWith('bc1') || f.startsWith('bc4') ? 8 : 16] : null);
+const BYTES = (f) => {
+  const b = BLOCK(f);
+  if (b) return b[2];
+  if (/^rgba32|^rg32.*x/.test(f)) return 16;
+  if (f.startsWith('rgba32')) return 16;
+  if (f.startsWith('rg32') || f.startsWith('rgba16')) return 8;
+  if (f.startsWith('depth24') || f.startsWith('depth32float') && !f.includes('stencil')) return 4;
+  if (f === 'depth32float-stencil8') return 8;
+  if (f.startsWith('rg16') || f.startsWith('r32') || f.includes('8unorm') && f.startsWith('rgba') || f.startsWith('rgba8') || f.startsWith('bgra8') || f.startsWith('rgb10') || f.startsWith('rg11')) return 4;
+  if (f.startsWith('rg8') || f.startsWith('r16') || f === 'depth16unorm') return 2;
+  return 1;
+};
+const isDepth = (f) => f.startsWith('depth');
+const hasStencil = (f) => f.includes('stencil');
+
+const CMP = { 1: 'never', 2: 'less', 3: 'equal', 4: 'less-equal', 5: 'greater', 6: 'not-equal', 7: 'greater-equal', 8: 'always' };
+const STENCIL_OP = { 1: 'keep', 2: 'zero', 3: 'replace', 4: 'increment-clamp', 5: 'decrement-clamp', 6: 'invert', 7: 'increment-wrap', 8: 'decrement-wrap' };
+const BLEND_FACTOR = { 1: 'zero', 2: 'one', 3: 'src', 4: 'one-minus-src', 5: 'src-alpha', 6: 'one-minus-src-alpha', 7: 'dst-alpha', 8: 'one-minus-dst-alpha', 9: 'dst', 10: 'one-minus-dst', 11: 'src-alpha-saturated', 14: 'constant', 15: 'one-minus-constant' };
+const BLEND_OP = { 1: 'add', 2: 'subtract', 3: 'reverse-subtract', 4: 'min', 5: 'max' };
+const ADDRESS = { 1: 'repeat', 2: 'mirror-repeat', 3: 'clamp-to-edge', 4: 'clamp-to-edge', 5: 'mirror-repeat' };
+const TOPOLOGY = { 1: 'point-list', 2: 'line-list', 3: 'line-strip', 4: 'triangle-list', 5: 'triangle-strip' };
+
+const BLIT_WGSL = `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
+  var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  var o: VOut;
+  o.pos = vec4(p[i], 0.0, 1.0);
+  o.uv = vec2((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5);
+  return o;
+}
+@fragment fn fs(v: VOut) -> @location(0) vec4<f32> { return textureSampleLevel(src, smp, v.uv, 0.0); }
+`;
+
+export class GpuExecutor {
+  /**
+   * @param {OffscreenCanvas|HTMLCanvasElement} canvas
+   * @param {import('./shaders.js').ShaderTool} tool
+   */
+  constructor(canvas, tool, log = () => {}, { noPresent = false } = {}) {
+    this.noPresent = noPresent; // skip the canvas blit (headless test mode; see docs/STATUS.md)
+    this.canvas = canvas;
+    this.tool = tool;
+    this.log = log;
+    this.reset();
+  }
+
+  reset() {
+    this.res = new Map();      // id -> {kind:'buffer'|'texture', gpu, ...}
+    this.views = new Map();    // id -> view description
+    this.shaders = new Map();
+    this.layouts = new Map();  // input layouts
+    this.samplers = new Map();
+    this.blends = new Map();
+    this.rasters = new Map();
+    this.depths = new Map();
+    this.swapchains = new Map();
+    this.pipelines = new Map();
+    this.bglCache = new Map();
+    this.dummyBuffers = new Map();
+    this.enc = null;
+    this.pass = null;
+    this.passKey = '';
+    this.ring = null;
+    this.ringOff = 0;
+    this.stats = { draws: 0, presents: 0, passes: 0, pipelines: 0, errors: [] };
+    this.st = {
+      vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
+      cb: [[], [], []], srv: [[], [], []], smp: [[], [], []], rtvs: [], dsv: 0,
+      viewports: [], scissors: [], blend: { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }, raster: 0, depth: { id: 0, ref: 0 },
+    };
+  }
+
+  async init() {
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    // Keep the GPU instance alive: in workers Chromium drops the underlying instance when this
+    // object is collected, which breaks every later mapAsync/popErrorScope on the device.
+    this.gpuInstance = navigator.gpu;
+    const adapter = await this.gpuInstance.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('No WebGPU adapter');
+    this.adapter = adapter; // keep alive: the device's instance reference is tied to the adapter wrapper
+    const want = ['texture-compression-bc', 'depth32float-stencil8', 'float32-filterable', 'rg11b10ufloat-renderable', 'bgra8unorm-storage', 'indirect-first-instance', 'depth-clip-control', 'float32-blendable', 'dual-source-blending', 'clip-distances'];
+    const features = want.filter((f) => adapter.features.has(f));
+    const L = adapter.limits;
+    this.device = await adapter.requestDevice({
+      requiredFeatures: features,
+      requiredLimits: { maxBufferSize: L.maxBufferSize, maxStorageBufferBindingSize: L.maxStorageBufferBindingSize, maxUniformBufferBindingSize: L.maxUniformBufferBindingSize, maxColorAttachmentBytesPerSample: L.maxColorAttachmentBytesPerSample, maxVertexBuffers: L.maxVertexBuffers, maxVertexAttributes: L.maxVertexAttributes },
+    });
+    this.features = this.device.features;
+    this.device.addEventListener?.('uncapturederror', (e) => {
+      const m = e.error?.message || String(e.error);
+      this.stats.errors.push(m);
+      this.log('WebGPU error: ' + m);
+    });
+    this.adapterInfo = adapter.info || {};
+    this.canvasFormat = this.gpuInstance.getPreferredCanvasFormat();
+    this.ctx = this.canvas.getContext('webgpu');
+    this.ctx.configure({ device: this.device, format: this.canvasFormat, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const mod = this.device.createShaderModule({ code: BLIT_WGSL });
+    this.blitBGL = this.device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    ] });
+    this.blit = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blitBGL] }),
+      vertex: { module: mod, entryPoint: 'vs' }, fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.canvasFormat }] }, primitive: { topology: 'triangle-list' },
+    });
+    this.blitSampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    this.defaultSampler = this.device.createSampler({});
+    this.dummyTex = this.device.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.dummyView = this.dummyTex.createView();
+  }
+
+  // ── encoder / pass management ────────────────────────────────────────────
+  encoder() {
+    if (!this.enc) this.enc = this.device.createCommandEncoder();
+    return this.enc;
+  }
+  endPass() {
+    if (this.pass) { this.pass.end(); this.pass = null; this.passKey = ''; }
+  }
+  flush() {
+    this.endPass();
+    if (this.enc) { this.device.queue.submit([this.enc.finish()]); this.enc = null; }
+  }
+
+  /** Copy `bytes` into the staging ring; returns {buffer, offset}. */
+  stage(bytes) {
+    const need = (bytes.byteLength + 255) & ~255;
+    if (!this.ring || this.ringOff + need > this.ringSize) {
+      const size = Math.max(16 << 20, need);
+      this.ring = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this.ringSize = size;
+      this.ringOff = 0;
+    }
+    const off = this.ringOff;
+    this.ringOff += need;
+    const pad = (bytes.byteLength + 3) & ~3;
+    if (pad === bytes.byteLength) this.device.queue.writeBuffer(this.ring, off, bytes);
+    else { const t = new Uint8Array(pad); t.set(bytes); this.device.queue.writeBuffer(this.ring, off, t); }
+    return { buffer: this.ring, offset: off, size: pad };
+  }
+
+  // ── formats ──────────────────────────────────────────────────────────────
+  texFormat(dxgi, bind = 0) {
+    if ((dxgi === 39) && (bind & 0x40)) return 'depth32float';
+    if ((dxgi === 44) && (bind & 0x40)) return 'depth24plus-stencil8';
+    if (dxgi === 53 && (bind & 0x40)) return 'depth16unorm';
+    let f = TEX[dxgi];
+    if (!f) { this.log(`unsupported DXGI format ${dxgi}, using rgba8unorm`); f = 'rgba8unorm'; }
+    if (f.startsWith('bc') && !this.features.has('texture-compression-bc')) { this.log('BC texture requested but unsupported; substituting rgba8unorm'); return 'rgba8unorm'; }
+    if (f === 'depth32float-stencil8' && !this.features.has('depth32float-stencil8')) return 'depth24plus-stencil8';
+    return f;
+  }
+
+  // ── command dispatch ─────────────────────────────────────────────────────
+  /** Execute a command stream (Uint8Array). */
+  execute(buf) {
+    let p = 0;
+    const dvAll = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    while (p + 8 <= buf.length) {
+      const op = dvAll.getUint32(p, true), len = dvAll.getUint32(p + 4, true);
+      const dv = new DataView(buf.buffer, buf.byteOffset + p + 8, len);
+      const bytes = buf.subarray(p + 8, p + 8 + len);
+      try { this.dispatch(op, dv, bytes); } catch (e) { this.stats.errors.push(`op ${op}: ${e.message}`); this.log(`op ${op} failed: ${e.stack || e.message}`); }
+      p += 8 + len;
+    }
+    this.flush();
+  }
+
+  dispatch(op, dv, bytes) {
+    const u = (i) => dv.getUint32(i * 4, true);
+    const i32 = (i) => dv.getInt32(i * 4, true);
+    const f = (i) => dv.getFloat32(i * 4, true);
+    const st = this.st;
+    switch (op) {
+      case OP.WINDOW: {
+        const w = u(1), h = u(2);
+        if (!this.windowSize || this.windowSize[0] !== w || this.windowSize[1] !== h) {
+          this.windowSize = [w, h];
+          this.onWindow?.({ id: u(0), width: w, height: h, title: bytes.length > 12 ? new TextDecoder().decode(bytes.subarray(12)) : undefined });
+        }
+        break;
+      }
+      case OP.CREATE_BUFFER: {
+        const size = Math.max(16, (u(1) + 15) & ~15);
+        const gpu = this.device.createBuffer({ size, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2) });
+        break;
+      }
+      case OP.BUFFER_WRITE: {
+        const r = this.res.get(u(0));
+        if (!r) break;
+        const off = u(1), n = u(2);
+        const data = bytes.subarray(12, 12 + n);
+        const aligned = off & ~3;
+        let payload = data;
+        if (aligned !== off) { const t = new Uint8Array(n + (off - aligned)); t.set(data, off - aligned); payload = t; }
+        this.endPass();
+        const s = this.stage(payload);
+        this.encoder().copyBufferToBuffer(s.buffer, s.offset, r.gpu, aligned, Math.min(s.size, r.size - aligned));
+        break;
+      }
+      case OP.CREATE_TEXTURE2D: this.createTexture(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(9)); break;
+      case OP.TEXTURE_WRITE: this.textureWrite(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(8), bytes.subarray(36, 36 + u(8))); break;
+      case OP.CREATE_SHADER: this.createShader(u(0), u(1), bytes.slice(12, 12 + u(2))); break;
+      case OP.CREATE_INPUT_LAYOUT: {
+        const n = u(1), els = [];
+        for (let i = 0; i < n; i++) els.push({ location: u(2 + i * 6), format: u(3 + i * 6), slot: u(4 + i * 6), offset: u(5 + i * 6), cls: u(6 + i * 6), step: u(7 + i * 6) });
+        this.layouts.set(u(0), els);
+        break;
+      }
+      case OP.CREATE_SAMPLER: this.samplers.set(u(0), this.makeSampler(new DataView(bytes.buffer, bytes.byteOffset + 4, bytes.length - 4))); break;
+      case OP.CREATE_BLEND: this.blends.set(u(0), new DataView(bytes.slice(4).buffer)); break;
+      case OP.CREATE_RASTER: this.rasters.set(u(0), new DataView(bytes.slice(4).buffer)); break;
+      case OP.CREATE_DEPTH: this.depths.set(u(0), new DataView(bytes.slice(4).buffer)); break;
+      case OP.CREATE_VIEW: this.views.set(u(0), { kind: u(1), resource: u(2), format: u(3), dim: u(4), mip: u(5), mips: u(6), slice: u(7), slices: u(8), cache: null }); break;
+      case OP.SET_VERTEX_BUFFERS: { const s = u(0), n = u(1); for (let i = 0; i < n; i++) st.vb[s + i] = { buf: u(2 + i * 3), stride: u(3 + i * 3), offset: u(4 + i * 3) }; break; }
+      case OP.SET_INDEX_BUFFER: st.ib = { buf: u(0), format: u(1), offset: u(2) }; break;
+      case OP.SET_INPUT_LAYOUT: st.layout = u(0); break;
+      case OP.SET_TOPOLOGY: st.topology = u(0); break;
+      case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
+      case OP.SET_CBUFFERS: case OP.SET_SRVS: case OP.SET_SAMPLERS: {
+        const arr = (op === OP.SET_CBUFFERS ? st.cb : op === OP.SET_SRVS ? st.srv : st.smp)[u(0)];
+        const s = u(1), n = u(2);
+        for (let i = 0; i < n; i++) arr[s + i] = u(3 + i);
+        break;
+      }
+      case OP.SET_RENDER_TARGETS: { const n = u(0); st.rtvs = []; for (let i = 0; i < n; i++) st.rtvs.push(u(1 + i)); st.dsv = u(1 + n); break; }
+      case OP.SET_VIEWPORTS: { const n = u(0); st.viewports = []; for (let i = 0; i < n; i++) st.viewports.push([f(1 + i * 6), f(2 + i * 6), f(3 + i * 6), f(4 + i * 6), f(5 + i * 6), f(6 + i * 6)]); break; }
+      case OP.SET_SCISSORS: { const n = u(0); st.scissors = []; for (let i = 0; i < n; i++) st.scissors.push([i32(1 + i * 4), i32(2 + i * 4), i32(3 + i * 4), i32(4 + i * 4)]); break; }
+      case OP.SET_BLEND: st.blend = { id: u(0), factor: [f(1), f(2), f(3), f(4)], mask: u(5) }; break;
+      case OP.SET_RASTER: st.raster = u(0); break;
+      case OP.SET_DEPTH: st.depth = { id: u(0), ref: u(1) }; break;
+      case OP.CLEAR_RTV: this.clearRtv(u(0), [f(1), f(2), f(3), f(4)]); break;
+      case OP.CLEAR_DSV: this.clearDsv(u(0), u(1), f(2), u(3)); break;
+      case OP.DRAW: this.draw(false, u(0), 1, u(1), 0, 0, 0); break;
+      case OP.DRAW_INDEXED: this.draw(true, u(0), 1, u(1), i32(2), 0, 0); break;
+      case OP.DRAW_INSTANCED: this.draw(false, u(0), u(1), u(2), 0, u(3), 0); break;
+      case OP.DRAW_INDEXED_INSTANCED: this.draw(true, u(0), u(1), u(2), i32(3), u(4), 0); break;
+      case OP.COPY_RESOURCE: this.copyResource(u(0), u(1)); break;
+      case OP.COPY_REGION: this.copyRegion(dv); break;
+      case OP.SWAPCHAIN: this.createSwapchain(u(0), u(2), u(3), u(4), u(5)); break;
+      case OP.RESIZE_SWAPCHAIN: this.resizeSwapchain(u(0), u(1), u(2), u(3), u(4)); break;
+      case OP.PRESENT: this.present(u(0), u(1)); break;
+      case OP.GENERATE_MIPS: this.generateMips(u(0)); break;
+      case OP.RELEASE: this.release(u(0)); break;
+      case OP.DISPATCH: this.log('compute dispatch is not implemented yet'); break;
+      default: this.log(`unknown opcode ${op}`);
+    }
+  }
+
+  release(id) {
+    const r = this.res.get(id);
+    if (r) { this.flush(); r.gpu.destroy?.(); this.res.delete(id); }
+    this.views.delete(id); this.shaders.delete(id); this.layouts.delete(id); this.samplers.delete(id);
+    this.blends.delete(id); this.rasters.delete(id); this.depths.delete(id);
+  }
+
+  // ── resources ────────────────────────────────────────────────────────────
+  createTexture(id, w, h, mips, array, dxgi, bind, usage, misc) {
+    let format = this.texFormat(dxgi, bind);
+    const viewFormats = [];
+    if (SRGB_PAIR[format] && !format.startsWith('bc')) viewFormats.push(SRGB_PAIR[format]);
+    else if (UNSRGB[format] && !format.startsWith('bc')) viewFormats.push(UNSRGB[format]);
+    let u = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
+    if (bind & (0x20 | 0x40)) u |= GPUTextureUsage.RENDER_ATTACHMENT;
+    if (!BLOCK(format) && !isDepth(format)) u |= GPUTextureUsage.RENDER_ATTACHMENT; // allows mip generation and clears of any colour texture
+    const cube = (misc & 0x4) !== 0;
+    const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], mipLevelCount: Math.max(1, mips), format, usage: u, viewFormats });
+    this.res.set(id, { kind: 'texture', gpu, width: w, height: h, mips: Math.max(1, mips), array: Math.max(1, array), format, dxgi, bind, cube });
+  }
+
+  textureWrite(id, mip, slice, x, y, w, h, rowPitch, len, data) {
+    const r = this.res.get(id);
+    if (!r) return;
+    const blk = BLOCK(r.format) || [1, 1, BYTES(r.format)];
+    const rows = Math.ceil(h / blk[1]);
+    const rowBytes = Math.ceil(w / blk[0]) * blk[2];
+    const bpr = (rowBytes + 255) & ~255;
+    const packed = new Uint8Array(bpr * rows);
+    for (let row = 0; row < rows; row++) packed.set(data.subarray(row * rowPitch, row * rowPitch + rowBytes), row * bpr);
+    this.endPass();
+    const s = this.stage(packed);
+    const cw = Math.ceil(w / blk[0]) * blk[0], ch = Math.ceil(h / blk[1]) * blk[1];
+    this.encoder().copyBufferToTexture({ buffer: s.buffer, offset: s.offset, bytesPerRow: bpr, rowsPerImage: rows }, { texture: r.gpu, mipLevel: mip, origin: { x, y, z: slice } }, { width: cw, height: ch, depthOrArrayLayers: 1 });
+  }
+
+  makeSampler(dv) {
+    const filter = dv.getUint32(0, true), au = dv.getUint32(4, true), av = dv.getUint32(8, true), aw = dv.getUint32(12, true);
+    const bias = dv.getFloat32(16, true), aniso = dv.getUint32(20, true), cmp = dv.getUint32(24, true);
+    const minLod = dv.getFloat32(44, true), maxLod = dv.getFloat32(48, true);
+    const isAniso = (filter & 0x40) !== 0, comparison = ((filter >> 7) & 3) === 1;
+    const lin = (bit) => ((filter >> bit) & 1 ? 'linear' : 'nearest');
+    const d = {
+      minFilter: lin(4), magFilter: lin(2), mipmapFilter: lin(0),
+      addressModeU: ADDRESS[au] || 'repeat', addressModeV: ADDRESS[av] || 'repeat', addressModeW: ADDRESS[aw] || 'repeat',
+      lodMinClamp: Math.max(0, minLod), lodMaxClamp: Math.min(32, Math.max(maxLod, minLod)),
+    };
+    if (isAniso) { d.minFilter = d.magFilter = d.mipmapFilter = 'linear'; d.maxAnisotropy = Math.max(1, Math.min(16, aniso)); }
+    if (comparison) d.compare = CMP[cmp] || 'always';
+    void bias;
+    return { gpu: this.device.createSampler(d), comparison };
+  }
+
+  createShader(id, stage, dxbc) {
+    const { wgsl, descriptors } = this.tool.translate(dxbc);
+    const entry = (/@(vertex|fragment|compute)(?:\s+@\w+(?:\([^)]*\))?)*\s*fn\s+(\w+)/.exec(wgsl) || [])[2] || 'main';
+    const cbSizes = {};
+    for (const m of wgsl.matchAll(/@group\(0\)\s*@binding\((\d+)\)\s*var<uniform>\s+\w+:\s*(\w+);/g)) {
+      const s = new RegExp(`struct\\s+${m[2]}\\s*\\{\\s*\\w+:\\s*array<vec4<\\w+>,\\s*(\\d+)>`).exec(wgsl);
+      if (s) cbSizes[+m[1]] = +s[1] * 16;
+    }
+    const module = this.device.createShaderModule({ code: wgsl });
+    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, wgsl });
+  }
+
+  // ── views ────────────────────────────────────────────────────────────────
+  viewFormat(dxgi, tex) {
+    const f = dxgi ? this.texFormat(dxgi, tex.bind) : tex.format;
+    return f === tex.format || f === SRGB_PAIR[tex.format] || f === UNSRGB[tex.format] ? f : tex.format;
+  }
+
+  getView(id) {
+    const v = this.views.get(id);
+    if (!v) return null;
+    if (v.cache) return v.cache;
+    const tex = this.res.get(v.resource);
+    if (!tex || tex.kind !== 'texture') return null;
+    const format = this.viewFormat(v.format, tex);
+    const d = { format };
+    if (isDepth(format)) d.aspect = hasStencil(format) && v.kind === 2 ? 'depth-only' : 'all';
+    if (v.kind === 0 || v.kind === 1) { // render attachments: one mip, one layer, '2d'
+      d.dimension = '2d'; d.baseMipLevel = v.mip; d.mipLevelCount = 1; d.baseArrayLayer = v.dim === 5 || v.dim === 4 && v.slices > 1 ? v.slice : 0; d.arrayLayerCount = 1;
+    } else {
+      d.baseMipLevel = v.mip; d.mipLevelCount = Math.min(v.mips || tex.mips, tex.mips - v.mip);
+      if (v.dim === 9 || (tex.cube && v.dim !== 5)) { d.dimension = 'cube'; d.baseArrayLayer = 0; d.arrayLayerCount = 6; }
+      else if (v.dim === 5) { d.dimension = '2d-array'; d.baseArrayLayer = v.slice; d.arrayLayerCount = Math.min(v.slices, tex.array - v.slice); }
+      else { d.dimension = '2d'; d.baseArrayLayer = 0; d.arrayLayerCount = 1; }
+    }
+    v.cache = { view: tex.gpu.createView(d), format, tex, dim: d.dimension };
+    return v.cache;
+  }
+
+  // ── clears ───────────────────────────────────────────────────────────────
+  clearRtv(id, color) {
+    const v = this.getView(id);
+    if (!v) return;
+    this.endPass();
+    const pass = this.encoder().beginRenderPass({ colorAttachments: [{ view: v.view, loadOp: 'clear', storeOp: 'store', clearValue: { r: color[0], g: color[1], b: color[2], a: color[3] } }] });
+    pass.end();
+    this.stats.passes++;
+  }
+
+  clearDsv(id, flags, depth, stencil) {
+    const v = this.getView(id);
+    if (!v) return;
+    this.endPass();
+    const a = { view: v.view };
+    a.depthLoadOp = flags & 1 ? 'clear' : 'load'; a.depthStoreOp = 'store'; a.depthClearValue = depth;
+    if (hasStencil(v.format)) { a.stencilLoadOp = flags & 2 ? 'clear' : 'load'; a.stencilStoreOp = 'store'; a.stencilClearValue = stencil; }
+    const pass = this.encoder().beginRenderPass({ colorAttachments: [], depthStencilAttachment: a });
+    pass.end();
+    this.stats.passes++;
+  }
+
+  // ── draws ────────────────────────────────────────────────────────────────
+  attachments() {
+    const st = this.st;
+    const colors = st.rtvs.map((id) => (id ? this.getView(id) : null));
+    const depth = st.dsv ? this.getView(st.dsv) : null;
+    return { colors, depth };
+  }
+
+  ensurePass(att) {
+    const key = JSON.stringify([this.st.rtvs, this.st.dsv]);
+    if (this.pass && this.passKey === key) return;
+    this.endPass();
+    const desc = { colorAttachments: att.colors.map((c) => (c ? { view: c.view, loadOp: 'load', storeOp: 'store' } : null)) };
+    if (att.depth) {
+      const a = { view: att.depth.view, depthLoadOp: 'load', depthStoreOp: 'store' };
+      if (hasStencil(att.depth.format)) { a.stencilLoadOp = 'load'; a.stencilStoreOp = 'store'; }
+      desc.depthStencilAttachment = a;
+    }
+    this.pass = this.encoder().beginRenderPass(desc);
+    this.passKey = key;
+    this.stats.passes++;
+  }
+
+  bindGroupLayout(group, entries) {
+    const key = group + JSON.stringify(entries);
+    let l = this.bglCache.get(key);
+    if (!l) { l = this.device.createBindGroupLayout({ entries }); this.bglCache.set(key, l); }
+    return l;
+  }
+
+  sampleTypeOf(format) {
+    if (!format) return 'float';
+    if (isDepth(format)) return 'unfilterable-float';
+    if (/uint$/.test(format)) return 'uint';
+    if (/sint$/.test(format)) return 'sint';
+    if (/32float$/.test(format) && !this.features.has('float32-filterable')) return 'unfilterable-float';
+    return 'float';
+  }
+
+  draw(indexed, count, instances, first, baseVertex, firstInstance) {
+    const st = this.st;
+    const vs = this.shaders.get(st.shader[0]), ps = this.shaders.get(st.shader[1]);
+    if (!vs) return;
+    const att = this.attachments();
+    if (!att.colors.some(Boolean) && !att.depth) return;
+
+    // Descriptor tables from shader reflection (group = type, binding = register).
+    const GROUP = { 2: 0, 0: 1, 3: 2, 1: 3 };
+    const groups = [new Map(), new Map(), new Map(), new Map()];
+    for (const sh of [vs, ps]) {
+      if (!sh) continue;
+      for (const d of sh.descriptors) {
+        const g = GROUP[d.type];
+        const key = d.register;
+        if (!groups[g].has(key)) groups[g].set(key, { d, vis: 0 });
+        groups[g].get(key).vis |= sh === vs ? GPUShaderStage.VERTEX : GPUShaderStage.FRAGMENT;
+      }
+    }
+    const layoutEntries = [[], [], [], []];
+    const resolved = [[], [], [], []];
+    for (const [reg, { d, vis }] of groups[0]) {
+      const declared = Math.max(vs.cbSizes[reg] || 0, ps?.cbSizes[reg] || 0) || 65536;
+      layoutEntries[0].push({ binding: reg, visibility: vis, buffer: { type: 'uniform' } });
+      const bufId = this.st.cb[(vis & GPUShaderStage.VERTEX) ? 0 : 1][reg] || this.st.cb[0][reg] || this.st.cb[1][reg] || 0;
+      const r = this.res.get(bufId);
+      let buffer = r?.gpu, size = declared;
+      if (!r || r.size < declared) {
+        // Bound buffer is missing or smaller than the shader declares: bind a zero-padded copy.
+        buffer = this.paddedBuffer(r, declared);
+      } else size = Math.min(declared, r.size);
+      resolved[0].push({ binding: reg, resource: { buffer, offset: 0, size: Math.max(16, (size + 15) & ~15) } });
+    }
+    const samplerComparison = [];
+    for (const [reg, { d, vis }] of groups[2]) {
+      const sid = this.st.smp[(vis & GPUShaderStage.VERTEX) ? 0 : 1][reg] || this.st.smp[1][reg] || this.st.smp[0][reg] || 0;
+      const s = this.samplers.get(sid);
+      samplerComparison[reg] = !!s?.comparison;
+      layoutEntries[2].push({ binding: reg, visibility: vis, sampler: { type: s?.comparison ? 'comparison' : 'filtering' } });
+      resolved[2].push({ binding: reg, resource: s ? s.gpu : this.defaultSampler });
+    }
+    for (const [reg, { d, vis }] of groups[1]) {
+      const vid = this.st.srv[(vis & GPUShaderStage.FRAGMENT) ? 1 : 0][reg] || this.st.srv[1][reg] || this.st.srv[0][reg] || 0;
+      const view = this.getView(vid);
+      const dim = d.resourceType === 4 ? '2d' : d.resourceType === 5 ? '2d-array' : d.resourceType === 7 ? 'cube' : d.resourceType === 3 ? '2d' : '2d';
+      const sampleType = this.sampleTypeOf(view?.format);
+      layoutEntries[1].push({ binding: reg, visibility: vis, texture: { sampleType, viewDimension: view?.dim || dim } });
+      resolved[1].push({ binding: reg, resource: view ? view.view : this.dummyView });
+    }
+
+    // Pipeline.
+    const layoutDesc = this.layouts.get(st.layout) || [];
+    const strides = layoutDesc.map((e) => st.vb[e.slot]?.stride || 0);
+    const rtFormats = att.colors.map((c) => c?.format || null);
+    const key = JSON.stringify([st.shader[0], st.shader[1], st.layout, strides, st.topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, layoutEntries, indexed && (st.topology === 3 || st.topology === 5) ? st.ib.format : 0]);
+    let pipe = this.pipelines.get(key);
+    if (!pipe) {
+      pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed);
+      this.pipelines.set(key, pipe);
+      this.stats.pipelines++;
+    }
+    if (!pipe) return;
+
+    this.ensurePass(att);
+    const pass = this.pass;
+    pass.setPipeline(pipe.pipeline);
+    for (let g = 0; g < 4; g++) {
+      if (resolved[g].length) pass.setBindGroup(g, this.device.createBindGroup({ layout: pipe.bgls[g], entries: resolved[g] }));
+    }
+    // Vertex buffers.
+    for (const slot of new Set(layoutDesc.map((e) => e.slot))) {
+      const b = st.vb[slot];
+      const r = b && this.res.get(b.buf);
+      if (r) pass.setVertexBuffer(slot, r.gpu, b.offset);
+    }
+    if (indexed) {
+      const r = this.res.get(st.ib.buf);
+      if (!r) return;
+      pass.setIndexBuffer(r.gpu, st.ib.format === 42 ? 'uint32' : 'uint16', st.ib.offset);
+    }
+    // Viewport / scissor.
+    const first0 = att.colors.find(Boolean) || att.depth;
+    const tex = first0.tex;
+    const mipW = Math.max(1, tex.width >> (this.views.get(this.st.rtvs.find(Boolean) || st.dsv)?.mip || 0));
+    const mipH = Math.max(1, tex.height >> (this.views.get(this.st.rtvs.find(Boolean) || st.dsv)?.mip || 0));
+    const vp = st.viewports[0] || [0, 0, mipW, mipH, 0, 1];
+    pass.setViewport(vp[0], vp[1], Math.min(vp[2], mipW - vp[0]), Math.min(vp[3], mipH - vp[1]), vp[4], vp[5]);
+    const raster = this.rasters.get(st.raster);
+    if (raster && raster.getUint32(28, true)) {
+      const sc = st.scissors[0] || [0, 0, mipW, mipH];
+      const l = Math.max(0, sc[0]), t = Math.max(0, sc[1]);
+      pass.setScissorRect(l, t, Math.max(0, Math.min(sc[2], mipW) - l), Math.max(0, Math.min(sc[3], mipH) - t));
+    } else pass.setScissorRect(0, 0, mipW, mipH);
+    pass.setBlendConstant({ r: st.blend.factor[0], g: st.blend.factor[1], b: st.blend.factor[2], a: st.blend.factor[3] });
+    pass.setStencilReference(st.depth.ref);
+
+    if (indexed) pass.drawIndexed(count, instances, first, baseVertex, firstInstance);
+    else pass.draw(count, instances, first, firstInstance);
+    this.stats.draws++;
+  }
+
+  paddedBuffer(src, size) {
+    const sz = Math.max(16, (size + 15) & ~15);
+    const key = `${src ? 'b' : 'z'}${sz}`;
+    if (!src) {
+      let b = this.dummyBuffers.get(key);
+      if (!b) { b = this.device.createBuffer({ size: sz, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); this.dummyBuffers.set(key, b); }
+      return b;
+    }
+    const b = this.device.createBuffer({ size: sz, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.endPass();
+    this.encoder().copyBufferToBuffer(src.gpu, 0, b, 0, Math.min(src.size, sz));
+    return b;
+  }
+
+  buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed) {
+    const st = this.st;
+    const bgls = layoutEntries.map((e, g) => this.bindGroupLayout(g, e));
+    const pl = this.device.createPipelineLayout({ bindGroupLayouts: bgls });
+
+    // Vertex buffers grouped by slot.
+    const bySlot = new Map();
+    layoutDesc.forEach((e, i) => {
+      if (!bySlot.has(e.slot)) bySlot.set(e.slot, { arrayStride: strides[i] || 16, stepMode: e.cls === 1 ? 'instance' : 'vertex', attributes: [] });
+      bySlot.get(e.slot).attributes.push({ shaderLocation: e.location, offset: e.offset, format: VTX[e.format] || 'float32x4' });
+    });
+    const maxSlot = Math.max(-1, ...bySlot.keys());
+    const buffers = [];
+    for (let s = 0; s <= maxSlot; s++) buffers.push(bySlot.get(s) || null);
+
+    // Output merger.
+    const blend = this.blends.get(st.blend.id);
+    const targets = att.colors.map((c, i) => {
+      if (!c) return null;
+      const t = { format: c.format, writeMask: 0xf };
+      if (blend) {
+        const o = 8 + 32 * (blend.getUint32(4, true) ? i : 0);
+        if (blend.getUint32(o, true)) {
+          const fac = (n) => BLEND_FACTOR[n] || 'one';
+          const color = { srcFactor: fac(blend.getUint32(o + 4, true)), dstFactor: fac(blend.getUint32(o + 8, true)), operation: BLEND_OP[blend.getUint32(o + 12, true)] || 'add' };
+          const alpha = { srcFactor: fac(blend.getUint32(o + 16, true)), dstFactor: fac(blend.getUint32(o + 20, true)), operation: BLEND_OP[blend.getUint32(o + 24, true)] || 'add' };
+          for (const c2 of [color, alpha]) if (c2.operation === 'min' || c2.operation === 'max') { c2.srcFactor = 'one'; c2.dstFactor = 'one'; }
+          t.blend = { color, alpha };
+        }
+        t.writeMask = blend.getUint8(o + 28);
+      }
+      return t;
+    });
+
+    const desc = {
+      layout: pl,
+      vertex: { module: vs.module, entryPoint: vs.entry, buffers },
+      primitive: { topology: TOPOLOGY[st.topology] || 'triangle-list' },
+    };
+    if (ps) desc.fragment = { module: ps.module, entryPoint: ps.entry, targets };
+    else if (targets.some(Boolean)) desc.fragment = undefined;
+    if (indexed && (st.topology === 3 || st.topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';
+    const r = this.rasters.get(st.raster);
+    if (r) {
+      desc.primitive.cullMode = ({ 1: 'none', 2: 'front', 3: 'back' })[r.getUint32(4, true)] || 'back';
+      desc.primitive.frontFace = r.getUint32(8, true) ? 'ccw' : 'cw';
+    } else { desc.primitive.cullMode = 'back'; desc.primitive.frontFace = 'cw'; }
+    const dsd = this.depths.get(st.depth.id);
+    if (att.depth) {
+      const fmt = att.depth.format;
+      const d = { format: fmt };
+      const enable = dsd ? dsd.getUint32(0, true) : 1;
+      d.depthWriteEnabled = dsd ? !!(enable && dsd.getUint32(4, true)) : true;
+      d.depthCompare = enable ? CMP[dsd ? dsd.getUint32(8, true) : 2] || 'less' : 'always';
+      if (r) { d.depthBias = r.getInt32(12, true); d.depthBiasSlopeScale = r.getFloat32(20, true); d.depthBiasClamp = r.getFloat32(16, true); }
+      if (dsd && dsd.getUint32(12, true) && hasStencil(fmt)) {
+        const face = (o) => ({ failOp: STENCIL_OP[dsd.getUint32(o, true)] || 'keep', depthFailOp: STENCIL_OP[dsd.getUint32(o + 4, true)] || 'keep', passOp: STENCIL_OP[dsd.getUint32(o + 8, true)] || 'keep', compare: CMP[dsd.getUint32(o + 12, true)] || 'always' });
+        d.stencilFront = face(20); d.stencilBack = face(36);
+        d.stencilReadMask = dsd.getUint8(16); d.stencilWriteMask = dsd.getUint8(17);
+      }
+      desc.depthStencil = d;
+    }
+    const before = this.stats.errors.length;
+    this.device.pushErrorScope('validation');
+    let pipeline = null;
+    try { pipeline = this.device.createRenderPipeline(desc); } catch (e) { this.stats.errors.push('createRenderPipeline: ' + e.message); this.log('createRenderPipeline: ' + e.message); }
+    this.device.popErrorScope().then((e) => { if (e) { this.stats.errors.push('pipeline: ' + e.message); this.log('pipeline validation: ' + e.message); } });
+    void before;
+    return pipeline ? { pipeline, bgls } : null;
+  }
+
+  // ── copies ───────────────────────────────────────────────────────────────
+  copyResource(dstId, srcId) {
+    const d = this.res.get(dstId), s = this.res.get(srcId);
+    if (!d || !s) return;
+    this.endPass();
+    const enc = this.encoder();
+    if (d.kind === 'buffer' && s.kind === 'buffer') enc.copyBufferToBuffer(s.gpu, 0, d.gpu, 0, Math.min(s.size, d.size));
+    else if (d.kind === 'texture' && s.kind === 'texture') {
+      for (let m = 0; m < Math.min(d.mips, s.mips); m++) enc.copyTextureToTexture({ texture: s.gpu, mipLevel: m }, { texture: d.gpu, mipLevel: m }, { width: Math.max(1, s.width >> m), height: Math.max(1, s.height >> m), depthOrArrayLayers: Math.min(s.array, d.array) });
+    }
+  }
+
+  copyRegion(dv) {
+    const u = (i) => dv.getUint32(i * 4, true);
+    const [dst, dsub, dx, dy, dz, src, ssub, hasBox] = [u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7)];
+    const d = this.res.get(dst), s = this.res.get(src);
+    if (!d || !s) return;
+    this.endPass();
+    if (d.kind === 'buffer' && s.kind === 'buffer') {
+      const l = hasBox ? u(8) : 0, r = hasBox ? u(11) : s.size;
+      this.encoder().copyBufferToBuffer(s.gpu, l & ~3, d.gpu, dx & ~3, Math.min(r - l, d.size - dx) & ~3);
+      return;
+    }
+    const smip = ssub % s.mips, sslice = Math.floor(ssub / s.mips), dmip = dsub % d.mips, dslice = Math.floor(dsub / d.mips);
+    const box = hasBox ? { l: u(8), t: u(9), r: u(11), b: u(12) } : { l: 0, t: 0, r: Math.max(1, s.width >> smip), b: Math.max(1, s.height >> smip) };
+    this.encoder().copyTextureToTexture({ texture: s.gpu, mipLevel: smip, origin: { x: box.l, y: box.t, z: sslice } }, { texture: d.gpu, mipLevel: dmip, origin: { x: dx, y: dy, z: dslice } }, { width: box.r - box.l, height: box.b - box.t, depthOrArrayLayers: 1 });
+  }
+
+  generateMips(viewId) {
+    const v = this.views.get(viewId);
+    const tex = v && this.res.get(v.resource);
+    if (!tex || tex.mips < 2) return;
+    this.endPass();
+    // Simple box-filter chain using the blit pipeline (colour textures only).
+    if (isDepth(tex.format) || BLOCK(tex.format)) return;
+    if (!this.mipPipelines) this.mipPipelines = new Map();
+    let pipe = this.mipPipelines.get(tex.format);
+    if (!pipe) {
+      const mod = this.device.createShaderModule({ code: BLIT_WGSL });
+      pipe = this.device.createRenderPipeline({ layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blitBGL] }), vertex: { module: mod, entryPoint: 'vs' }, fragment: { module: mod, entryPoint: 'fs', targets: [{ format: tex.format }] } });
+      this.mipPipelines.set(tex.format, pipe);
+    }
+    for (let layer = 0; layer < tex.array; layer++) {
+      for (let m = 1; m < tex.mips; m++) {
+        const src = tex.gpu.createView({ baseMipLevel: m - 1, mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1, dimension: '2d' });
+        const dst = tex.gpu.createView({ baseMipLevel: m, mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1, dimension: '2d' });
+        const pass = this.encoder().beginRenderPass({ colorAttachments: [{ view: dst, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+        pass.setPipeline(pipe);
+        pass.setBindGroup(0, this.device.createBindGroup({ layout: this.blitBGL, entries: [{ binding: 0, resource: src }, { binding: 1, resource: this.blitSampler }] }));
+        pass.draw(3);
+        pass.end();
+      }
+    }
+  }
+
+  // ── swap chains ──────────────────────────────────────────────────────────
+  createSwapchain(id, texId, w, h, dxgi) {
+    this.swapchains.set(id, { texId });
+    const base = this.texFormat(dxgi, 0x20);
+    const unsrgb = UNSRGB[base] || base;
+    const view = SRGB_PAIR[unsrgb];
+    const gpu = this.device.createTexture({ size: [w, h], format: unsrgb, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST, viewFormats: view ? [view] : [] });
+    this.res.set(texId, { kind: 'texture', gpu, width: w, height: h, mips: 1, array: 1, format: unsrgb, dxgi, bind: 0x28, cube: false, swapchain: id });
+    // The backbuffer is an application-visible texture; if the app asked for SRGB the RTV view picks the sRGB format.
+    if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
+  }
+
+  resizeSwapchain(id, texId, w, h, dxgi) {
+    this.flush();
+    this.res.get(texId)?.gpu.destroy?.();
+    for (const v of this.views.values()) if (v.resource === texId) v.cache = null;
+    this.createSwapchain(id, texId, w, h, dxgi);
+  }
+
+  present(scId, texId) {
+    const t = this.res.get(texId);
+    if (!t) return;
+    this.endPass();
+    if (this.noPresent) { this.flush(); this.stats.presents++; return; } // test mode: leave the canvas untouched
+    const target = this.ctx.getCurrentTexture();
+    const src = t.gpu.createView({ format: UNSRGB[t.format] || t.format });
+    const pass = this.encoder().beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    pass.setPipeline(this.blit);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout: this.blitBGL, entries: [{ binding: 0, resource: src }, { binding: 1, resource: this.blitSampler }] }));
+    pass.draw(3);
+    pass.end();
+    this.flush();
+    this.stats.presents++;
+  }
+
+  /** Read the most recent back buffer as tightly packed RGBA8 (for tests/screenshots). */
+  async readBackbuffer(scId) {
+    const sc = this.swapchains.get(scId ?? [...this.swapchains.keys()][0]);
+    const t = sc && this.res.get(sc.texId);
+    if (!t) return null;
+    this.flush();
+    const bpr = (t.width * 4 + 255) & ~255;
+    const buf = this.device.createBuffer({ size: bpr * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: t.gpu }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: t.height }, { width: t.width, height: t.height });
+    this.device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const raw = new Uint8Array(buf.getMappedRange());
+    const out = new Uint8Array(t.width * t.height * 4);
+    const bgra = t.format.startsWith('bgra');
+    for (let y = 0; y < t.height; y++) {
+      const row = raw.subarray(y * bpr, y * bpr + t.width * 4);
+      if (!bgra) out.set(row, y * t.width * 4);
+      else for (let x = 0; x < t.width; x++) { const i = y * t.width * 4 + x * 4; out[i] = row[x * 4 + 2]; out[i + 1] = row[x * 4 + 1]; out[i + 2] = row[x * 4]; out[i + 3] = row[x * 4 + 3]; }
+    }
+    buf.unmap(); buf.destroy();
+    return { width: t.width, height: t.height, data: out };
+  }
+}

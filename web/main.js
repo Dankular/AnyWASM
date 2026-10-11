@@ -28,22 +28,58 @@ async function run(bundleBytes, label) {
   if (worker) worker.terminate();
   term.textContent = '';
   stat.textContent = `Starting ${label}…`;
+  delete stat.dataset.status;
   $('stop').disabled = false;
   const wasm = await (await fetch(new URL('./anywasm_wasm.wasm', import.meta.url))).arrayBuffer();
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  window.__worker = worker; // exposed for automated tests
+
+  // A fresh canvas per run: a canvas can only be transferred to a worker once.
+  const old = $('screen');
+  const canvas = document.createElement('canvas');
+  canvas.id = 'screen'; canvas.width = 640; canvas.height = 480; canvas.hidden = true; canvas.tabIndex = 0;
+  old.replaceWith(canvas);
+  attachInput(canvas);
+  const off = canvas.transferControlToOffscreen();
+
   worker.onmessage = (ev) => {
     const m = ev.data;
     if (m.type === 'out') print(m.text, m.stream === 'stderr' ? 'err' : '');
-    else if (m.type === 'status') {
+    else if (m.type === 'window') {
+      canvas.hidden = false;
+      canvas.style.aspectRatio = `${m.width} / ${m.height}`;
+      if (m.title) document.title = `${m.title} - AnyWASM`;
+    } else if (m.type === 'gpuinfo') {
+      window.__gpuInfo = m;
+    } else if (m.type === 'gpu') {
+      window.__gpuStats = m;
+    } else if (m.type === 'pixels') {
+      window.__pixels = m;
+    } else if (m.type === 'status') {
       const names = { 0: 'stopped', 1: 'exited', 2: 'stopped at an unimplemented import', 3: 'crashed' };
       const detail = m.status === 1 ? `exit code ${m.exitCode}` : m.message;
-      stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s`;
+      stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s${m.frames ? ' · ' + m.frames + ' frames' : ''}`;
       stat.dataset.status = String(m.status);
       stat.dataset.exit = String(m.exitCode);
       $('stop').disabled = true;
     }
   };
-  worker.postMessage({ type: 'start', wasm, bundle: bundleBytes }, [wasm]);
+  const testMode = new URLSearchParams(location.search).has('test');
+  worker.postMessage({ type: 'start', wasm, bundle: bundleBytes, canvas: off, testMode }, [wasm, off]);
+}
+
+function attachInput(canvas) {
+  const send = (kind, a = 0, b = 0, c = 0) => worker?.postMessage({ type: 'input', kind, a, b, c });
+  const pos = (e) => { const r = canvas.getBoundingClientRect(); return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)]; };
+  canvas.addEventListener('keydown', (e) => { send(0, e.keyCode); if (e.key.length === 1) send(2, e.key.charCodeAt(0)); e.preventDefault(); });
+  canvas.addEventListener('keyup', (e) => { send(1, e.keyCode); e.preventDefault(); });
+  canvas.addEventListener('mousemove', (e) => { const [x, y] = pos(e); send(3, x, y); });
+  canvas.addEventListener('mousedown', (e) => { canvas.focus(); const [x, y] = pos(e); send(4, e.button, x, y); });
+  canvas.addEventListener('mouseup', (e) => { const [x, y] = pos(e); send(5, e.button, x, y); });
+  canvas.addEventListener('wheel', (e) => { const [x, y] = pos(e); send(6, -Math.sign(e.deltaY) * 120, x, y); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('focus', () => send(8, 1));
+  canvas.addEventListener('blur', () => send(8, 0));
 }
 
 async function demo(name) {
@@ -59,6 +95,7 @@ $('file').addEventListener('change', async (e) => {
 });
 $('demo-hello').addEventListener('click', () => demo('hello'));
 $('demo-crt').addEventListener('click', () => demo('crt_test'));
+$('demo-tri').addEventListener('click', () => demo('d3d11_triangle'));
 $('stop').addEventListener('click', () => { worker?.postMessage({ type: 'stop' }); });
 
 const auto = new URLSearchParams(location.search).get('run');

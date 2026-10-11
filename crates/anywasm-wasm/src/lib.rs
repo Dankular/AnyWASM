@@ -5,7 +5,8 @@
 //! draining `aw_stdout_*` / `aw_stderr_*` between calls.
 //!
 //! Status codes from `aw_run`: 0 running (step budget used), 1 exited, 2 stopped at an
-//! unimplemented import, 3 guest crash. Details via `aw_message_*` and `aw_exit_code`.
+//! unimplemented import, 3 guest crash, 4 a frame was presented (drain the GPU stream, then call
+//! again), 5 the guest is idle waiting for window input (push input, then call again). Details via `aw_message_*` and `aw_exit_code`.
 
 use anywasm_rt::{Bundle, Process, Stop};
 
@@ -15,6 +16,7 @@ struct State {
     exit_code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    gpu: Vec<u8>,
 }
 
 static mut STATE: Option<State> = None;
@@ -56,11 +58,11 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     });
     match res {
         Ok(p) => {
-            STATE = Some(State { p, message: Vec::new(), exit_code: 0, stdout: Vec::new(), stderr: Vec::new() });
+            STATE = Some(State { p, message: Vec::new(), exit_code: 0, stdout: Vec::new(), stderr: Vec::new(), gpu: Vec::new() });
             0
         }
         Err(e) => {
-            STATE = Some(State { p: Process::new(anywasm_rt::Vfs::new()), message: e.into_bytes(), exit_code: 0, stdout: vec![], stderr: vec![] });
+            STATE = Some(State { p: Process::new(anywasm_rt::Vfs::new()), message: e.into_bytes(), exit_code: 0, stdout: vec![], stderr: vec![], gpu: vec![] });
             1
         }
     }
@@ -72,6 +74,9 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
     let r = s.p.run(steps);
     s.stdout.extend(s.p.take_stdout());
     s.stderr.extend(s.p.take_stderr());
+    // Move GPU/window commands to the host-visible buffer (appended: the host clears after reading).
+    let g = std::mem::take(&mut s.p.extra.gpu.buf);
+    s.gpu.extend(g);
     match r {
         Stop::StepLimit => 0,
         Stop::Exit(c) => {
@@ -86,6 +91,8 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             s.message = m.into_bytes();
             3
         }
+        Stop::Frame => 4,
+        Stop::Idle => 5,
     }
 }
 
@@ -121,6 +128,15 @@ macro_rules! buf_api {
 buf_api!(aw_stdout_ptr, aw_stdout_len, aw_stdout_clear, stdout);
 buf_api!(aw_stderr_ptr, aw_stderr_len, aw_stderr_clear, stderr);
 buf_api!(aw_message_ptr, aw_message_len, aw_message_clear, message);
+buf_api!(aw_gpu_ptr, aw_gpu_len, aw_gpu_clear, gpu);
+
+/// Deliver a browser input event (see `hle::user32::input_event` for the kinds).
+#[no_mangle]
+pub extern "C" fn aw_input(kind: u32, a: i64, b: i64, c: i64) {
+    if let Some(s) = state() {
+        anywasm_rt::hle::user32::input_event(&mut s.p, kind, a, b, c);
+    }
+}
 
 /// Queue bytes for the guest's stdin.
 ///

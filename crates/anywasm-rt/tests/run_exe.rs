@@ -45,18 +45,19 @@ fn compute_exe_heap_fpu_indirect_calls_and_getprocaddress() {
 
 #[test]
 fn unimplemented_imports_are_reported_by_name() {
-    // d3dprobe imports user32!MessageBoxA and d3d11!D3D11CreateDevice, neither implemented yet.
-    let (stop, _, _, p) = run("d3dprobe.exe");
-    match stop {
-        Stop::Unimplemented { dll, name } => {
-            assert!(
-                (dll == "unknown" && name == "D3D11CreateDevice") || (dll == "user32" && name == "MessageBoxA"),
-                "got {dll}!{name}"
-            );
-        }
-        other => panic!("expected an unimplemented-import stop, got {other:?}"),
-    }
-    assert!(!p.unimplemented_log.is_empty());
+    // unimpl.exe calls kernel32!CreateToolhelp32Snapshot, which the runtime does not implement.
+    let (stop, out, _, p) = run("unimpl.exe");
+    assert_eq!(stop, Stop::Unimplemented { dll: "kernel32".into(), name: "CreateToolhelp32Snapshot".into() });
+    assert_eq!(out, "before\n", "output up to the failing call is preserved");
+    assert_eq!(p.unimplemented_log, vec![("kernel32".to_string(), "CreateToolhelp32Snapshot".to_string())]);
+}
+
+#[test]
+fn d3dprobe_runs_through_d3d11_and_user32() {
+    // Formerly stopped at the first missing import; now D3D11CreateDevice and MessageBoxA are implemented.
+    let (stop, _, err, _) = run("d3dprobe.exe");
+    assert_eq!(stop, Stop::Exit(0));
+    assert!(err.contains("[MessageBox] probe: ok"), "{err:?}");
 }
 
 fn run_with(name: &str, cmdline: &str) -> (Stop, String, String, Process) {
