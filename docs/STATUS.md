@@ -133,8 +133,9 @@
   semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. Nested
   synchronous callback scheduling and alertable waits remain unsupported. A synchronous callback
   cannot suspend when its active run slice expires, so the runtime stops with a diagnostic instead
-  of exceeding the budget. No SEH/C++ exception
-  unwinding, audio, DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL. GDI support is limited to
+  of exceeding the budget. PE64 unwind metadata and a selected version 1 unwind subset are tested,
+  including one target-grounded MSVC C++ catch; general SEH dispatch, vectored handlers, audio,
+  DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL remain unsupported. GDI support is limited to
   virtual display DCs and basic caps.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
   sampler state, mip generation, copies and instancing are implemented in the translator, but only two
