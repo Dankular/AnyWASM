@@ -110,10 +110,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [~] **Browser check**: the rebuilt runtime passes the headless Chromium worker, input, and WebGPU
       suite; page-realm and worker checks force the opt-in emitter and compare results with the
       cached-only path. The page-realm check grows WASM memory by one page after emitted execution
-      begins and verifies the cached generated module resumes without fallback. Firefox 141.0 runs
-      the hello and D3D11 triangle fixtures through its page and worker; Playwright WebKit 18.2 runs
-      hello and reports graphics unavailable when OffscreenCanvas transfer is missing. CSP behavior,
-      module-cache pressure, and full graphics validation on other engines remain open.
+      begins and verifies the cached generated module resumes without fallback. A cache-pressure
+      probe compiles 300 unique emitted modules, revisits entries, and confirms eviction/recompile
+      and retained-module hits in Node, Firefox, and WebKit. Firefox 141.0 runs the hello and D3D11
+      triangle fixtures through its page and worker; Playwright WebKit 18.2 runs hello and reports
+      graphics unavailable when OffscreenCanvas transfer is missing. CSP behavior and full graphics
+      validation on other engines remain open.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: finite `CreateThread` callbacks run inline on a private guest stack with

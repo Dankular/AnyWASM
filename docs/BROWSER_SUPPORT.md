@@ -15,8 +15,10 @@ run, so it does not establish visible-canvas pixel output.
 Fresh local cross-engine run on 2026-10-11: Firefox `141.0` and Playwright WebKit `18.2`, on Windows
 x64. The hello fixture exited with code 0 in both. Firefox completed the D3D11 triangle fixture in
 three frames. WebKit reported no WebGPU and no `transferControlToOffscreen`; the triangle stopped
-with a clear `Graphics unavailable: OffscreenCanvas worker transfer is unsupported` status. The
-WebKit result verifies explicit failure handling, not rendering support or native Safari behavior.
+with a clear `Graphics unavailable: OffscreenCanvas worker transfer is unsupported` status. A
+synthetic cache-pressure probe compiled 300 unique emitted modules in Node, Firefox, and WebKit,
+then verified that evicted modules recompile and retained modules execute from cache. The WebKit
+result verifies explicit failure handling, not rendering support or native Safari behavior.
 
 | Browser or feature | Evidence and current status |
 |---|---|

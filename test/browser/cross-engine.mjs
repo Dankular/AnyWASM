@@ -2,10 +2,13 @@
 // Set FIREFOX / WEBKIT to override Playwright's default browser executables.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { firefox, webkit } from 'playwright-core';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+const jitPressurePath = fileURLToPath(new URL('../jit_cache_pressure.mjs', import.meta.url));
+const jitPressureSource = readFileSync(jitPressurePath);
 const server = spawn(process.execPath, ['web/serve.mjs', '8119'], { cwd: repoRoot, stdio: 'ignore' });
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const engines = [
@@ -22,6 +25,7 @@ try {
       const page = await browser.newPage();
       const pageErrors = [];
       page.on('pageerror', (error) => pageErrors.push(error.message));
+      await page.route('**/jit-cache-pressure.mjs', (route) => route.fulfill({ body: jitPressureSource, contentType: 'text/javascript' }));
       await page.goto('http://localhost:8119/index.html');
       const capabilities = await page.evaluate(() => ({
         webgpu: !!navigator.gpu,
@@ -55,8 +59,18 @@ try {
         assert.equal(graphics.status, '3', `${item.name} silently completed without graphics: ${graphics.stat}`);
         assert.match(graphics.stat, /Graphics unavailable:/, `${item.name} did not explain its graphics limitation: ${graphics.stat}`);
       }
+      const jitPressure = await page.evaluate(async () => {
+        const [{ AnyWasm }, { runJitCachePressure }] = await Promise.all([
+          import('/anywasm.js'), import('/jit-cache-pressure.mjs'),
+        ]);
+        return runJitCachePressure(AnyWasm);
+      });
+      assert.equal(jitPressure.firstStatus, 0, `${item.name} JIT cache pressure run failed`);
+      assert.equal(jitPressure.probeStatus, 0, `${item.name} JIT cache eviction probe failed`);
+      assert.deepEqual(jitPressure.afterPressure, { compilations: 344, executions: 344, fallbacks: 0, registerRegisterHits: 0 });
+      assert.deepEqual(jitPressure.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0 });
       assert.deepEqual(pageErrors, [], `${item.name} had uncaught page errors`);
-      console.log(`${item.name} ${browser.version()}: ${JSON.stringify({ capabilities, hello, graphics })}`);
+      console.log(`${item.name} ${browser.version()}: ${JSON.stringify({ capabilities, hello, graphics, jitPressure })}`);
     } finally {
       await browser.close();
     }

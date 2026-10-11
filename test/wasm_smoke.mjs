@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { AnyWasm, Status } from '../web/anywasm.js';
+import { runJitCachePressure } from './jit_cache_pressure.mjs';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const wasm = readFileSync(fileURLToPath(new URL('../target/wasm32-unknown-unknown/release/anywasm_wasm.wasm', import.meta.url)));
@@ -15,6 +16,14 @@ const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-smoke-'));
 process.on('exit', () => rmSync(tempDir, { recursive: true, force: true }));
 let failures = 0;
 const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : ' :: ' + detail}`); if (!ok) failures++; };
+
+const jitPressure = await runJitCachePressure(AnyWasm);
+check('JIT cache evicts old modules after 256 entries and recompiles evicted code',
+  jitPressure.firstStatus === 0 && jitPressure.probeStatus === 0 &&
+    jitPressure.afterPressure.compilations === 344 && jitPressure.afterPressure.executions === 344 &&
+    jitPressure.afterPressure.fallbacks === 0 && jitPressure.afterProbe.compilations === 345 &&
+    jitPressure.afterProbe.executions === 390 && jitPressure.afterProbe.fallbacks === 0,
+  JSON.stringify(jitPressure));
 
 function pack(exe, extra = []) {
   const out = join(tempDir, `${exe.split('/').pop()}.awb`);
