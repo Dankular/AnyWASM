@@ -206,9 +206,7 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [x] Add a Rust-side command-stream test for `d3d11_textured` (`tests/d3d11_stream.rs` covers the
       triangle only) and add the textured exe to `test/wasm_smoke.mjs`.
 - [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
-- [~] Task list housekeeping: GitHub's all-state issue list is empty, so historical #5/#11/#6
-      references cannot be mapped to issue records. The known task notes mark #5/#11 effectively
-      done for triangle/textured slices and #6 (docs) ongoing; broader status cannot be recovered.
+- [~] Task list housekeeping: current open work is now queued in GitHub issues for [JIT](https://github.com/Dankular/AnyWASM/issues/1), [runtime](https://github.com/Dankular/AnyWASM/issues/2), [graphics](https://github.com/Dankular/AnyWASM/issues/3), [CPU](https://github.com/Dankular/AnyWASM/issues/4), and [productization](https://github.com/Dankular/AnyWASM/issues/5). Keep these grouped issues synchronized with this file's detailed checklists. Historical #5/#11/#6 references still cannot be mapped: the issue list was empty when inspected, and the old notes' broader status cannot be recovered.
 
 ## 6. Productisation (after a real target runs)
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
