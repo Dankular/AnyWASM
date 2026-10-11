@@ -218,7 +218,6 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let s = p.read_wstr(p.arg(0))?;
             Ok(file_attrs(p, &s))
         },
-        "CreateDirectoryA" | "CreateDirectoryW" | "SetFileAttributesA" | "SetFileAttributesW" | "SetCurrentDirectoryA" | "SetCurrentDirectoryW" => |_| Ok(1),
         "GetCurrentDirectoryA" => |p| {
             let (n, b) = (p.arg(0), p.arg(1));
             if n >= 4 {
