@@ -164,6 +164,8 @@
   [`BROWSER_SUPPORT.md`](BROWSER_SUPPORT.md).
 - DLL/function imports with no host implementation are bound to a trap that stops the process with
   `Stop::Unimplemented{dll,name}` (and logs it) instead of guessing.
+- Anti-debugging, anti-cheat, and DRM behavior is not a supported compatibility target. No selected
+  target currently requires it; revisit only if a representative target provides that evidence.
 
 ## Remaining target-level and project work
 - The section 1–6 checklist in `CLAUDE.md` tracks unfinished JIT, runtime, graphics, CPU, and

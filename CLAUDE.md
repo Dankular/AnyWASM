@@ -264,7 +264,8 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       and 255; AF/PF are masked because they are undefined. Linux-only byte-sized host differential
       cases remain unrun locally. Undefined flags/vendor-specific behaviour must be excluded and
       documented (e.g. 16-bit shld/shrd count>16).
-- [ ] Anti-debug/anti-cheat/DRM: out of scope unless a target requires it; flag as unsupported.
+- [x] Anti-debug/anti-cheat/DRM: documented as unsupported; revisit only if a representative target
+      requires it.
 
 ## 5. Tooling, CI, repo hygiene
 - [x] **Copy `ci/web.yml` to `.github/workflows/`** (mirrored as `web.yml`; requires `workflow` scope).
