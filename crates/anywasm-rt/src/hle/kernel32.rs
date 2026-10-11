@@ -30,6 +30,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetCurrentProcessId" => |_| Ok(0x1000),
         "GetCurrentThreadId" => |_| Ok(0x1004),
         "GetProcessId" => |_| Ok(0x1000),
+        "InitializeSListHead" => |p| {
+            // Win64 SLIST_HEADER is a 16-byte, 16-byte-aligned opaque structure.
+            p.write_bytes(p.arg(0), &[0; 16])?;
+            Ok(0)
+        },
         "GetLastError" => |p| Ok(p.rd32(TEB_ADDR + 0x68)? as u64),
         "SetLastError" => |p| {
             let v = p.arg(0) as u32;

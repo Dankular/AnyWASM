@@ -25,6 +25,13 @@ fn hello_exe_prints_and_exits_zero() {
 }
 
 #[test]
+fn initializes_empty_slist_header() {
+    let (stop, out, _, _) = run("slist_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout so far: {out:?}");
+    assert_eq!(out, "");
+}
+
+#[test]
 fn reloc_exe_follows_relocated_pointer_tables() {
     let (stop, out, _, _) = run("reloc.exe");
     assert_eq!(stop, Stop::Exit(0));

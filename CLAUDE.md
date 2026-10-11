@@ -100,8 +100,10 @@ generation and execution are not implemented):
       browser per the capabilities line).
 - [ ] **SEH / C++ exceptions**: `.pdata` unwind tables, `RtlUnwindEx`/`RtlLookupFunctionEntry`,
       `__C_specific_handler`, `RaiseException`, vectored handlers; guest faults → exceptions.
-- [ ] **More of kernel32/ntdll/user32**: driven by `anywasm analyze` on real target programs, not
-      guessed. Use the per-import report to prioritise.
+- [~] **More of kernel32/ntdll/user32**: `InitializeSListHead` now initializes a Win64 SList header
+      and is covered by a guest fixture. `docs/TARGETS.md` gives aggregate counts and blocker
+      categories, not individual missing symbols, so this API is not confirmed as a specific
+      Diligent target blocker.
 - [ ] **GDI / gdi32**, common controls, message boxes, clipboard (as needed by real programs).
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
