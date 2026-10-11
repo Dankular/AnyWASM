@@ -2,11 +2,12 @@
 
 use super::*;
 use crate::process::*;
-use crate::vfs::norm;
+use crate::vfs::{absolute, norm};
 use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_X};
 
 const INVALID_HANDLE: u64 = u64::MAX;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -204,11 +205,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetEndOfFile" | "FlushFileBuffers" => |_| Ok(1),
         "DeleteFileA" => |p| {
             let s = p.read_cstr(p.arg(0))?;
-            Ok(p.vfs.remove(&s) as u64)
+            Ok(p.vfs.remove(&absolute(&s, &p.current_directory)) as u64)
         },
         "DeleteFileW" => |p| {
             let s = p.read_wstr(p.arg(0))?;
-            Ok(p.vfs.remove(&s) as u64)
+            Ok(p.vfs.remove(&absolute(&s, &p.current_directory)) as u64)
         },
         "GetFileAttributesA" => |p| {
             let s = p.read_cstr(p.arg(0))?;
@@ -218,19 +219,15 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let s = p.read_wstr(p.arg(0))?;
             Ok(file_attrs(p, &s))
         },
-        "GetCurrentDirectoryA" => |p| {
-            let (n, b) = (p.arg(0), p.arg(1));
-            if n >= 4 {
-                p.write_cstr(b, "C:\\")?;
-            }
-            Ok(3)
+        "GetCurrentDirectoryA" => |p| get_current_directory(p, false),
+        "GetCurrentDirectoryW" => |p| get_current_directory(p, true),
+        "SetCurrentDirectoryA" => |p| {
+            let path = p.read_cstr(p.arg(0))?;
+            set_current_directory(p, &path)
         },
-        "GetCurrentDirectoryW" => |p| {
-            let (n, b) = (p.arg(0), p.arg(1));
-            if n >= 4 {
-                p.write_wstr(b, "C:\\")?;
-            }
-            Ok(3)
+        "SetCurrentDirectoryW" => |p| {
+            let path = p.read_wstr(p.arg(0))?;
+            set_current_directory(p, &path)
         },
         "GetTempPathA" => |p| {
             let (n, b) = (p.arg(0), p.arg(1));
@@ -1032,14 +1029,15 @@ fn get_console_screen_buffer_info(p: &mut Process) -> R {
 
 fn create_file(p: &mut Process, wide: bool) -> R {
     let (name, access, _share, _sec, disp) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3), p.arg(4));
-    let path = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
-    let n = norm(&path);
+    let raw_path = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
+    let n = norm(&raw_path);
     if n == "conout$" {
         return Ok(STD_OUT);
     }
     if n == "conin$" {
         return Ok(STD_IN);
     }
+    let path = absolute(&raw_path, &p.current_directory);
     let write = access & 0x4000_0000 != 0 || access & 0x1_0000 != 0 || access & 2 != 0;
     let exists = p.vfs.exists(&path);
     match disp {
@@ -1070,13 +1068,51 @@ fn file_len(p: &Process, h: u64) -> Option<u64> {
 }
 
 fn file_attrs(p: &Process, path: &str) -> u64 {
-    if p.vfs.exists(path) {
+    let path = absolute(path, &p.current_directory);
+    if p.vfs.exists(&path) {
         0x80
-    } else if matches!(norm(path).as_str(), "c:\\" | "c:\\windows" | "c:\\temp") {
+    } else if p.vfs.is_dir(&path) || matches!(norm(&path).as_str(), "windows" | "temp") {
         0x10
     } else {
         0xffff_ffff
     }
+}
+
+fn get_current_directory(p: &mut Process, wide: bool) -> R {
+    let (capacity, buffer) = (p.arg(0) as usize, p.arg(1));
+    let current_directory = p.current_directory.clone();
+    let length = if wide {
+        current_directory.encode_utf16().count()
+    } else {
+        current_directory.len()
+    };
+    let required = length + 1;
+    if capacity < required {
+        p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return Ok(required as u64);
+    }
+    if wide {
+        p.write_wstr(buffer, &current_directory)?;
+    } else {
+        p.write_cstr(buffer, &current_directory)?;
+    }
+    p.set_last_error(0);
+    Ok(length as u64)
+}
+
+fn set_current_directory(p: &mut Process, path: &str) -> R {
+    if path.is_empty() {
+        p.set_last_error(ERROR_PATH_NOT_FOUND);
+        return Ok(0);
+    }
+    let absolute_path = absolute(path, &p.current_directory);
+    if !p.vfs.is_dir(&absolute_path) {
+        p.set_last_error(ERROR_PATH_NOT_FOUND);
+        return Ok(0);
+    }
+    p.current_directory = absolute_path;
+    p.set_last_error(0);
+    Ok(1)
 }
 
 fn set_file_pointer(p: &mut Process) -> R {
@@ -1125,17 +1161,27 @@ fn seek(p: &mut Process, h: u64, off: i64, method: u64) -> Result<Option<u64>, S
 
 fn full_path(p: &mut Process, wide: bool) -> R {
     let (name, n, buf) = (p.arg(0), p.arg(1) as usize, p.arg(2));
-    let s = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
-    let full = if s.contains(':') { s } else { format!("C:\\{}", s.trim_start_matches(".\\")) };
-    if full.len() + 1 <= n {
+    let path = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
+    let full = absolute(&path, &p.current_directory);
+    let length = if wide { full.encode_utf16().count() } else { full.len() };
+    if length + 1 <= n {
         if wide {
             p.write_wstr(buf, &full)?;
         } else {
             p.write_cstr(buf, &full)?;
         }
-        Ok(full.len() as u64)
+        if p.arg(3) != 0 {
+            let file_part = full.rfind('\\').map(|i| i + 1).unwrap_or(0);
+            if wide {
+                p.wr64(p.arg(3), buf + (full[..file_part].encode_utf16().count() * 2) as u64)?;
+            } else {
+                p.wr64(p.arg(3), buf + file_part as u64)?;
+            }
+        }
+        Ok(length as u64)
     } else {
-        Ok(full.len() as u64 + 1)
+        p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        Ok(length as u64 + 1)
     }
 }
 
@@ -1260,7 +1306,14 @@ fn load_library(p: &mut Process, name: &str) -> R {
     if let Some(i) = p.module_by_name(&n) {
         return Ok(p.modules[i].base);
     }
-    let file = if p.vfs.exists(&n) { Some(n.clone()) } else { p.vfs.find_by_name(crate::process::base_name(&n)).cloned() };
+    let relative = absolute(&n, &p.current_directory);
+    let file = if p.vfs.exists(&relative) {
+        Some(norm(&relative))
+    } else if p.vfs.exists(&n) {
+        Some(norm(&n))
+    } else {
+        p.vfs.find_by_name(crate::process::base_name(&n)).cloned()
+    };
     if let Some(f) = file {
         let data = p.vfs.get(&f).unwrap().clone();
         let before = p.modules.len();

@@ -92,6 +92,7 @@ pub struct Process {
     pub vmem_next: u64,
     pub cmdline: String,
     pub image_path: String,
+    pub current_directory: String,
     pub env: Vec<(String, String)>,
     pub tls_next: u32,
     pub fls: HashMap<u32, u64>,
@@ -146,6 +147,7 @@ impl Process {
             vmem_next: 0x2_0000_0000,
             cmdline: String::new(),
             image_path: String::new(),
+            current_directory: "C:\\".into(),
             env: vec![
                 ("SystemRoot".into(), "C:\\Windows".into()),
                 ("TEMP".into(), "C:\\Temp".into()),
@@ -579,7 +581,14 @@ impl Process {
             return Ok(i);
         }
         // Bundled DLL?
-        let file = if self.vfs.exists(dll) { Some(dll.to_string()) } else { self.vfs.find_by_name(dll).cloned() };
+        let relative = crate::vfs::absolute(dll, &self.current_directory);
+        let file = if self.vfs.exists(&relative) {
+            Some(crate::vfs::norm(&relative))
+        } else if self.vfs.exists(dll) {
+            Some(crate::vfs::norm(dll))
+        } else {
+            self.vfs.find_by_name(dll).cloned()
+        };
         if let Some(f) = file {
             let data = self.vfs.get(&f).unwrap().clone();
             return self.load_image(&data, &f, true);

@@ -758,7 +758,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "remove" | "_unlink" => |p| {
             let n = p.read_cstr(p.arg(0))?;
-            Ok(if p.vfs.remove(&n) { 0 } else { u64::MAX })
+            let path = crate::vfs::absolute(&n, &p.current_directory);
+            Ok(if p.vfs.remove(&path) { 0 } else { u64::MAX })
         },
         "printf" | "_printf" => |p| {
             let out = do_printf(p, p.arg(0), &mut SlotArgs(1), false)?;
@@ -1297,20 +1298,21 @@ fn math2f(p: &mut Process) -> R {
 }
 
 fn fopen_impl(p: &mut Process, name: &str, mode: &str) -> R {
+    let path = crate::vfs::absolute(name, &p.current_directory);
     let write = mode.contains('w') || mode.contains('a') || mode.contains('+');
-    let exists = p.vfs.exists(name);
+    let exists = p.vfs.exists(&path);
     if mode.starts_with('w') {
-        p.vfs.insert(name, Vec::new());
+        p.vfs.insert(&path, Vec::new());
     } else if !exists {
         if mode.starts_with('a') {
-            p.vfs.insert(name, Vec::new());
+            p.vfs.insert(&path, Vec::new());
         } else {
             return Ok(0);
         }
     }
-    let pos = if mode.starts_with('a') { p.vfs.get(name).map(|d| d.len()).unwrap_or(0) } else { 0 };
+    let pos = if mode.starts_with('a') { p.vfs.get(&path).map(|d| d.len()).unwrap_or(0) } else { 0 };
     let fp = kernel32::alloc_block(p, FILE_SIZE, true);
-    p.extra.files.insert(fp, CFile { kind: FileKind::Vfs { path: crate::vfs::norm(name), pos, write }, eof: false, err: false, ungot: None });
+    p.extra.files.insert(fp, CFile { kind: FileKind::Vfs { path: crate::vfs::norm(&path), pos, write }, eof: false, err: false, ungot: None });
     Ok(fp)
 }
 

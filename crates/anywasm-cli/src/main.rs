@@ -2,13 +2,14 @@
 //!
 //! ```text
 //! anywasm analyze <exe> [--json]          compatibility report (which imports are implemented)
-//! anywasm run <exe> [--dir D] [--trace-imports] [--max-steps N] [-- args...]
-//! anywasm pack <exe> -o <out.awb> [--dir D] [--args "..."]
+//! anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports] [--max-steps N] [-- args...]
+//! anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args "..."]
 //! ```
 
 use anywasm_pe::{canonical_dll, ImportName, Pe};
 use anywasm_rt::hle;
 use anywasm_rt::{Bundle, Process, Stop, Vfs};
+use anywasm_rt::vfs::absolute;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -303,10 +304,11 @@ struct Opts {
     max_steps: u64,
     args: Vec<String>,
     cmdline: Option<String>,
+    cwd: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { exe: PathBuf::new(), dir: None, out: None, trace: false, json: false, max_steps: 20_000_000_000, args: vec![], cmdline: None };
+    let mut o = Opts { exe: PathBuf::new(), dir: None, out: None, trace: false, json: false, max_steps: 20_000_000_000, args: vec![], cmdline: None, cwd: None };
     let mut it = args.iter();
     let mut have_exe = false;
     while let Some(a) = it.next() {
@@ -317,6 +319,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--json" => o.json = true,
             "--max-steps" => o.max_steps = it.next().ok_or("--max-steps needs a value")?.parse().map_err(|_| "bad --max-steps")?,
             "--args" => o.cmdline = Some(it.next().ok_or("--args needs a value")?.clone()),
+            "--cwd" => o.cwd = Some(it.next().ok_or("--cwd needs a value")?.clone()),
             "--" => {
                 o.args = it.cloned().collect();
                 break;
@@ -358,10 +361,24 @@ fn command_line(name: &str, o: &Opts) -> String {
     s
 }
 
+fn guest_cwd(o: &Opts, vfs: &Vfs) -> Result<Option<String>, String> {
+    let Some(cwd) = &o.cwd else { return Ok(None) };
+    if cwd.is_empty() {
+        return Err("guest current directory cannot be empty".into());
+    }
+    let cwd = absolute(cwd, "C:\\");
+    if !vfs.is_dir(&cwd) {
+        return Err(format!("guest current directory is not present in the VFS: {cwd}"));
+    }
+    Ok(Some(cwd))
+}
+
 fn run(o: &Opts) -> Result<ExitCode, String> {
     let (vfs, name) = build_vfs(o)?;
+    let cwd = guest_cwd(o, &vfs)?.unwrap_or_else(|| "C:\\".into());
     let cmd = command_line(&name, o);
     let mut p = Process::new(vfs);
+    p.current_directory = cwd;
     p.trace_imports = o.trace;
     p.load_exe(&name, Some(&cmd))?;
     let mut left = o.max_steps;
@@ -412,10 +429,11 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
 
 fn pack(o: &Opts) -> Result<(), String> {
     let (vfs, name) = build_vfs(o)?;
+    let cwd = guest_cwd(o, &vfs)?;
     let out = o.out.clone().ok_or("pack needs -o <out.awb>")?;
     let mut files: Vec<(String, Vec<u8>)> = vfs.paths().map(|p| (p.clone(), vfs.get(p).unwrap().clone())).collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let b = Bundle { exe: name.to_ascii_lowercase(), cmdline: o.cmdline.clone().or_else(|| if o.args.is_empty() { None } else { Some(command_line(&name, o)) }), files };
+    let b = Bundle { exe: name.to_ascii_lowercase(), cmdline: o.cmdline.clone().or_else(|| if o.args.is_empty() { None } else { Some(command_line(&name, o)) }), cwd, files };
     let bytes = b.to_bytes();
     std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
     println!("wrote {} ({} files, {} KiB)", out.display(), b.files.len(), bytes.len() / 1024);
@@ -424,7 +442,7 @@ fn pack(o: &Opts) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--trace-imports] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--args \"cmdline\"]";
+    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args \"cmdline\"]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
@@ -437,6 +455,7 @@ fn main() -> ExitCode {
         }
     };
     let res = match cmd.as_str() {
+        "analyze" if o.cwd.is_some() => Err("--cwd is only supported by run and pack".into()),
         "analyze" => analyze(&o.exe, o.dir.as_deref()).map(|r| {
             print_report(&r, o.json);
             ExitCode::SUCCESS

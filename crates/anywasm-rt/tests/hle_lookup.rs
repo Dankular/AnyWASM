@@ -1,10 +1,11 @@
 use anywasm_rt::hle;
 
 #[test]
-fn filesystem_mutators_are_not_claimed_until_they_change_runtime_state() {
+fn implemented_current_directory_and_unimplemented_filesystem_mutators_are_reported_truthfully() {
+    for name in ["SetCurrentDirectoryA", "SetCurrentDirectoryW", "GetCurrentDirectoryA", "GetCurrentDirectoryW"] {
+        assert!(hle::lookup("kernel32", name).is_some(), "{name} should be implemented");
+    }
     for name in [
-        "SetCurrentDirectoryA",
-        "SetCurrentDirectoryW",
         "CreateDirectoryA",
         "CreateDirectoryW",
         "SetFileAttributesA",

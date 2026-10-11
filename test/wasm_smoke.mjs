@@ -1,7 +1,7 @@
 // Runs real Windows executables through the WebAssembly build under Node.
 // Usage: node test/wasm_smoke.mjs   (expects target/wasm32-unknown-unknown/release/anywasm_wasm.wasm
 //                                    and target/debug/anywasm for packing)
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -152,6 +152,13 @@ check('MultiByteToWideChar handles sizing, null/short buffers, invalid lengths, 
 
 r = await runExe('fixtures/lcmap_test.exe');
 check('LCMapStringEx handles count-only sizing and NUL-terminated case mapping',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
+const cwdDataDir = join(tempDir, 'cwd_data');
+mkdirSync(join(cwdDataDir, 'game', 'assets'), { recursive: true });
+writeFileSync(join(cwdDataDir, 'game', 'assets', 'config.txt'), 'vfs!!');
+r = await runExe('fixtures/cwd_bundle_test.exe', ['--dir', cwdDataDir, '--cwd', 'C:\\game\\assets']);
+check('.awb current directory is restored by the WASM loader and resolves relative paths',
   r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 
 r = await runExe('fixtures/mapvirtualkey_test.exe');

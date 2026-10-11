@@ -53,8 +53,15 @@ pub unsafe extern "C" fn aw_free(ptr: *mut u8, n: usize) {
 pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     let bytes = std::slice::from_raw_parts(ptr, len);
     let res = Bundle::from_bytes(bytes).and_then(|b| {
-        let (vfs, exe, cmd) = b.into_vfs();
+        let (vfs, exe, cmd, cwd) = b.into_vfs_with_cwd();
         let mut p = Process::new(vfs);
+        if let Some(cwd) = cwd {
+            let cwd = anywasm_rt::vfs::absolute(&cwd, "C:\\");
+            if !p.vfs.is_dir(&cwd) {
+                return Err(format!("bundle current directory is not present in its VFS: {cwd}"));
+            }
+            p.current_directory = cwd;
+        }
         p.load_exe(&exe, cmd.as_deref())?;
         Ok(p)
     });

@@ -1,7 +1,8 @@
 //! `.awb` application bundle: the executable, its DLLs and data files in one blob, plus a tiny
 //! manifest. Layout (little endian): `"AWB1"`, u32 entry count, then per entry
 //! `u16 name_len, name (UTF-8), u64 size`, followed by all file contents back to back.
-//! The first entry is always `__manifest__` with `key=value` lines (`exe`, `cmdline`).
+//! The first entry is always `__manifest__` with `key=value` lines (`exe`, optional `cmdline`
+//! and `cwd`).
 
 use crate::Vfs;
 
@@ -9,6 +10,7 @@ use crate::Vfs;
 pub struct Bundle {
     pub exe: String,
     pub cmdline: Option<String>,
+    pub cwd: Option<String>,
     pub files: Vec<(String, Vec<u8>)>,
 }
 
@@ -17,6 +19,9 @@ impl Bundle {
         let mut manifest = format!("exe={}\n", self.exe);
         if let Some(c) = &self.cmdline {
             manifest.push_str(&format!("cmdline={}\n", c.replace('\n', " ")));
+        }
+        if let Some(cwd) = &self.cwd {
+            manifest.push_str(&format!("cwd={}\n", cwd.replace('\n', " ")));
         }
         let mut entries: Vec<(&str, &[u8])> = vec![("__manifest__", manifest.as_bytes())];
         entries.extend(self.files.iter().map(|(n, d)| (n.as_str(), d.as_slice())));
@@ -60,6 +65,7 @@ impl Bundle {
                         match k {
                             "exe" => bundle.exe = v.to_string(),
                             "cmdline" => bundle.cmdline = Some(v.to_string()),
+                            "cwd" => bundle.cwd = Some(v.to_string()),
                             _ => {}
                         }
                     }
@@ -75,11 +81,16 @@ impl Bundle {
     }
 
     pub fn into_vfs(self) -> (Vfs, String, Option<String>) {
+        let (vfs, exe, cmdline, _) = self.into_vfs_with_cwd();
+        (vfs, exe, cmdline)
+    }
+
+    pub fn into_vfs_with_cwd(self) -> (Vfs, String, Option<String>, Option<String>) {
         let mut v = Vfs::new();
         for (n, d) in self.files {
             v.insert(&n, d);
         }
-        (v, self.exe, self.cmdline)
+        (v, self.exe, self.cmdline, self.cwd)
     }
 }
 
@@ -89,16 +100,29 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let b = Bundle { exe: "a.exe".into(), cmdline: Some("\"a.exe\" x".into()), files: vec![("a.exe".into(), vec![1, 2, 3]), ("d\\x.dll".into(), vec![])] };
+        let b = Bundle { exe: "a.exe".into(), cmdline: Some("\"a.exe\" x".into()), cwd: Some("C:\\games".into()), files: vec![("a.exe".into(), vec![1, 2, 3]), ("d\\x.dll".into(), vec![])] };
         let r = Bundle::from_bytes(&b.to_bytes()).unwrap();
         assert_eq!(r.exe, "a.exe");
         assert_eq!(r.cmdline.as_deref(), Some("\"a.exe\" x"));
+        assert_eq!(r.cwd.as_deref(), Some("C:\\games"));
         assert_eq!(r.files, b.files);
     }
 
     #[test]
+    fn bundles_without_cwd_keep_the_legacy_default() {
+        let b = Bundle { exe: "a.exe".into(), cmdline: None, cwd: None, files: vec![("a.exe".into(), vec![9])] };
+        let decoded = Bundle::from_bytes(&b.to_bytes()).unwrap();
+        assert_eq!(decoded.cwd, None);
+        let (vfs, exe, cmdline, cwd) = decoded.into_vfs_with_cwd();
+        assert_eq!(exe, "a.exe");
+        assert_eq!(cmdline, None);
+        assert_eq!(cwd, None);
+        assert!(vfs.exists("a.exe"));
+    }
+
+    #[test]
     fn rejects_truncated_and_bad_magic() {
-        let good = Bundle { exe: "a.exe".into(), cmdline: None, files: vec![("a.exe".into(), vec![9; 10])] }.to_bytes();
+        let good = Bundle { exe: "a.exe".into(), cmdline: None, cwd: None, files: vec![("a.exe".into(), vec![9; 10])] }.to_bytes();
         assert!(Bundle::from_bytes(b"XXXX").is_err());
         for n in 0..good.len() {
             assert!(Bundle::from_bytes(&good[..n]).is_err() || n == good.len(), "prefix {n} accepted");

@@ -36,6 +36,8 @@ build gdiprobe_test console kernel32.lib gdi32.lib
 build mapvirtualkey_test console kernel32.lib user32.lib
 build tounicode_test console kernel32.lib user32.lib
 build wfopen_s_test console kernel32.lib ucrtstdio.lib
+build cwd_test console kernel32.lib ucrtstdio.lib
+build cwd_bundle_test console kernel32.lib
 # Real CRT-linked program (needs gcc-mingw-w64-x86-64); output was cross-checked against a native build.
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then
   x86_64-w64-mingw32-gcc -O2 -o crt_test.exe crt_test.c

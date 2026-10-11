@@ -18,8 +18,10 @@
   setjmp/longjmp, file I/O on the VFS, sscanf, atexit, exit code, stderr). The mingw program's
   output is identical to the same source compiled natively (checked by hand).
 - `printf` engine: unit tests for flags/width/precision/length modifiers/floats.
-- `anywasm` CLI (`analyze`, `run`, `pack`) and `.awb` bundles; the same executables run through the
-  **WebAssembly build** under Node (`test/wasm_smoke.mjs`) with output identical to native, and in
+- `anywasm` CLI (`analyze`, `run`, `pack`) and `.awb` bundles. `run` and `pack` support `--cwd`,
+  bundles retain that guest directory, and the WASM loader restores it; relative Win32 and CRT file
+  paths resolve against process state. Old bundles default to `C:\`. The same executables run through
+  the **WebAssembly build** under Node (`test/wasm_smoke.mjs`) with output identical to native, and in
   **headless Chromium** through the real page and worker (`test/browser/run.mjs`).
 - **Direct3D 11 -> WebGPU, end to end.** A mingw-compiled Win64 program using the real `d3d11.h`
   COM API (window class + `CreateWindowEx`, `D3D11CreateDeviceAndSwapChain`, buffers, DXBC shaders,

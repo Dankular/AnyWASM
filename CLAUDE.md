@@ -148,12 +148,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
 - [ ] **DLL loading**: bundled DLLs are supported by the loader; verify behaviour with real
       third-party DLLs (init order, `DllMain`, TLS callbacks, forwarded exports).
-- [~] **Packer/analyzer**: a live pack audit confirmed `--dir` recursively adds assets with
-      preserved relative subpaths and `--args` embeds the caller's command line. Working directory
-      selection is still missing: the process reports `C:\`, and `SetCurrentDirectoryA/W` now stop
-      explicitly as unimplemented; `CreateDirectoryA/W` and `SetFileAttributesA/W` do too, since
-      those handlers had been returning success without changing runtime state. `tests/hle_lookup.rs`
-      guards all six imports. Current-directory state and relative path resolution remain open.
+- [x] **Packer/analyzer**: `--dir` recursively adds assets with preserved relative subpaths and
+      `--args` embeds the caller's command line. `run` and `pack` accept `--cwd`; the process stores
+      a guest current directory, resolves relative Win32 and CRT file paths against it, and `.awb`
+      bundles persist it. Older bundles default to `C:\`. `SetCurrentDirectoryA/W`,
+      `GetCurrentDirectoryA/W`, `GetFullPathNameA/W`, and relative file operations have guest
+      regression coverage. Directories are inferred from VFS file paths, so empty directories cannot
+      be selected. `CreateDirectoryA/W` and `SetFileAttributesA/W` remain unimplemented.
       `analyze --json` now adds `schemaVersion: 1` while preserving existing top-level fields. Its
       `preflight` summary separates known blockers from potentially unused missing imports and
       explicitly does not guarantee runtime success. The JSON serializer escapes control characters.

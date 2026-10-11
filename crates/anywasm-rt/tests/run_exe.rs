@@ -40,6 +40,25 @@ fn lc_map_string_ex_handles_count_only_and_nul_terminated_strings() {
 }
 
 #[test]
+fn current_directory_resolves_relative_win32_and_crt_file_paths() {
+    let mut vfs = Vfs::new();
+    vfs.insert("cwd_test.exe", fixture("cwd_test.exe"));
+    vfs.insert("game\\assets\\config.txt", b"vfs!!".to_vec());
+    let mut p = Process::new(vfs);
+    p.load_exe("cwd_test.exe", None).unwrap();
+
+    let stop = p.run_to_end(100_000_000);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {:?}; stderr: {:?}; unimplemented: {:?}",
+        p.take_stdout(),
+        p.take_stderr(),
+        p.unimplemented_log
+    );
+}
+
+#[test]
 fn create_thread_runs_finite_worker_with_isolated_tls_and_thread_identity() {
     let (stop, out, err, p) = run("thread_test.exe");
     assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
