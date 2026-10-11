@@ -22,7 +22,7 @@ are not part of this repository.
 ## Analyzer results
 
 Reports below were regenerated with `anywasm analyze <exe> --json` at AnyWASM commit
-`0c435c496fb1d8cec1fd4e1a6ebf48d947f18671`. The binaries were read from the external build tree;
+`d4c5455cdf305b28e1bd4824df27229e4a89fbbc`. The binaries were read from the external build tree;
 none were copied into this repository:
 
 - `D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial01_HelloTriangle\Release\Tutorial01_HelloTriangle.exe`
@@ -36,8 +36,8 @@ The source-base revisions for these builds are pinned and verified: DiligentEngi
 
 | Program | What it exercises | Analyzer result | Missing blocker counts |
 |---|---|---:|---|
-| `Tutorial01_HelloTriangle.exe` | Win64 GUI triangle tutorial; built with D3D11 support and offers D3D11 at the device-selection dialog | 153 implemented, 97 missing | MSVCP140 65; USER32 14; IMM32 4; VCRUNTIME140 6; KERNEL32 1; SHELL32 1; UCRT API sets 6 |
-| `Tutorial03_Texturing.exe` | Win64 GUI textured cube tutorial; loads `DGLogo.png`; built with D3D11 support and offers D3D11 at the device-selection dialog | 154 implemented, 97 missing | MSVCP140 65; USER32 14; IMM32 4; VCRUNTIME140 6; KERNEL32 1; SHELL32 1; UCRT API sets 6 |
+| `Tutorial01_HelloTriangle.exe` | Win64 GUI triangle tutorial; built with D3D11 support and offers D3D11 at the device-selection dialog | 154 implemented, 96 missing | MSVCP140 65; USER32 13; IMM32 4; VCRUNTIME140 6; KERNEL32 1; SHELL32 1; UCRT API sets 6 |
+| `Tutorial03_Texturing.exe` | Win64 GUI textured cube tutorial; loads `DGLogo.png`; built with D3D11 support and offers D3D11 at the device-selection dialog | 155 implemented, 96 missing | MSVCP140 65; USER32 13; IMM32 4; VCRUNTIME140 6; KERNEL32 1; SHELL32 1; UCRT API sets 6 |
 | `Asteroids.exe` | Win64 50,000-asteroid benchmark; includes native and Diligent D3D11 and D3D12 modes | 137 implemented, 115 missing | MSVCP140 68; CONCRT140 17; NInput 9; VCRUNTIME140 6; D3D12 2; USER32 4; KERNEL32 1; UCRT API sets 8 |
 
 ### Exact missing imports
@@ -48,7 +48,7 @@ the D3D12 and NInput DLLs do not appear in either tutorial's import report.
 | DLL | Tutorial01_HelloTriangle | Tutorial03_Texturing | Asteroids |
 |---|---|---|---|
 | `KERNEL32.dll` | `SleepConditionVariableSRW` | `SleepConditionVariableSRW` | `SleepConditionVariableSRW` |
-| `USER32.dll` | `TrackMouseEvent`, `GetKeyboardLayout`, `GetDesktopWindow`, `EndDialog`, `LoadBitmapW`, `GetDlgItem`, `EnumDisplaySettingsW`, `DialogBoxParamW`, `GetMessageExtraInfo`, `SetClipboardData`, `GetClipboardData`, `EmptyClipboard`, `CloseClipboard`, `OpenClipboard` | Same 14 symbols as Tutorial01_HelloTriangle | `GetWindowPlacement`, `EnableMouseInPointer`, `SetWindowPlacement`, `GetPointerInfo` |
+| `USER32.dll` | `TrackMouseEvent`, `GetKeyboardLayout`, `GetDesktopWindow`, `EndDialog`, `LoadBitmapW`, `EnumDisplaySettingsW`, `DialogBoxParamW`, `GetMessageExtraInfo`, `SetClipboardData`, `GetClipboardData`, `EmptyClipboard`, `CloseClipboard`, `OpenClipboard` | Same 13 symbols as Tutorial01_HelloTriangle | `GetWindowPlacement`, `EnableMouseInPointer`, `SetWindowPlacement`, `GetPointerInfo` |
 | `IMM32.dll` | `ImmSetCandidateWindow`, `ImmReleaseContext`, `ImmGetContext`, `ImmSetCompositionWindow` | Same 4 symbols as Tutorial01_HelloTriangle | — |
 | `SHELL32.dll` | `ShellExecuteW` | `ShellExecuteW` | — |
 | `d3d12.dll` | — | — | `D3D12SerializeRootSignature`, ordinal `#101` |
@@ -87,8 +87,9 @@ documented licence review.
 ## Next evidence needed
 
 - Trace each executable on its D3D11 path and record the first runtime blocker, distinguishing
-  imports reached on that path from static-only imports. `GetCapture` and `IsWindowUnicode` are
-  implemented; each tutorial still reports 14 missing USER32 symbols and 4 missing IMM32 symbols.
+  imports reached on that path from static-only imports. `GetCapture`, `IsWindowUnicode`, and
+  `GetDlgItem` are implemented; each tutorial still reports 13 missing USER32 symbols and 4 missing
+  IMM32 symbols.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
 - Replace or supplement the tutorials with a redistributable Win64 game once one can be built and
