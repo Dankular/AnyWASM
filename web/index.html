@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AnyWASM</title>
+<style>
+  :root { --bg:#0e1116; --fg:#d8dee9; --dim:#7b8794; --acc:#7cc4ff; --ok:#6fcf97; --bad:#eb6f6f; --panel:#161b22; --line:#262d36; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f6f8fa; --fg:#1f2933; --dim:#5f6c7b; --acc:#0969da; --ok:#1a7f37; --bad:#cf222e; --panel:#fff; --line:#d0d7de; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--dim); }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  button, label.btn { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 12px; font:inherit; cursor:pointer; }
+  button:hover, label.btn:hover { border-color: var(--acc); }
+  button:disabled { opacity:.5; cursor:default; }
+  input[type=file] { display:none; }
+  .caps { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap:8px; margin-bottom:16px; }
+  .cap { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  .cap b { display:block; font-weight:600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .dim { color: var(--dim); }
+  #term { background:#000; color:#d6d6d6; border:1px solid var(--line); border-radius:6px; padding:12px; min-height:240px; max-height:480px; overflow:auto; white-space:pre-wrap; word-break:break-word; font:13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
+  #term .err { color:#ff8b8b; }
+  #stat { margin-top:8px; color:var(--dim); font-variant-numeric: tabular-nums; }
+  canvas { display:block; width:100%; max-width:640px; aspect-ratio:4/3; background:#000; border:1px solid var(--line); border-radius:6px; margin-top:16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AnyWASM</h1>
+  <p class="sub">Run a packaged Windows x64 program inside WebAssembly.</p>
+
+  <div class="caps" id="caps"></div>
+
+  <div class="row">
+    <label class="btn">Open .awb bundle…<input type="file" id="file" accept=".awb"></label>
+    <button id="demo-hello">Run hello.exe</button>
+    <button id="demo-crt">Run crt_test.exe</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+
+  <div id="term" aria-live="polite" role="log"></div>
+  <div id="stat"></div>
+  <canvas id="screen" width="640" height="480" hidden></canvas>
+</main>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

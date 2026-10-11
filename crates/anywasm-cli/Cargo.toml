@@ -3,3 +3,12 @@ name = "anywasm-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "anywasm: analyze, run and pack Windows x64 executables for the AnyWASM runtime"
+
+[[bin]]
+name = "anywasm"
+path = "src/main.rs"
+
+[dependencies]
+anywasm-pe.workspace = true
+anywasm-rt.workspace = true

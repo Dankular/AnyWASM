@@ -54,10 +54,11 @@ pub struct Memory {
     /// Bumped on every write to a page that has ever been fetched from (self-modifying code
     /// detection for future translation caches) and on every protection change.
     pub code_epoch: u64,
-    exec_pages: std::collections::HashSet<u64>,
     // Software TLB: (page number, frame byte offset) per access kind; u64::MAX = invalid.
     tlb_r: Cell<(u64, usize)>,
     tlb_w: Cell<(u64, usize)>,
+    /// Number of mapped pages that currently have PROT_X (0 lets writes skip SMC tracking).
+    exec_page_count: u64,
 }
 
 impl Default for Memory {
@@ -85,9 +86,9 @@ impl Memory {
             free_frames: Vec::new(),
             pages_mapped: 0,
             code_epoch: 0,
-            exec_pages: Default::default(),
             tlb_r: Cell::new((u64::MAX, 0)),
             tlb_w: Cell::new((u64::MAX, 0)),
+            exec_page_count: 0,
         }
     }
 
@@ -158,7 +159,7 @@ impl Memory {
             *s = PRESENT | ((prot as u64 & 7) << 1) | ((f as u64) << 32);
             self.pages_mapped += 1;
             if prot & PROT_X != 0 {
-                self.exec_pages.insert(p);
+                self.exec_page_count += 1;
             }
         }
         self.flush_tlb();
@@ -173,7 +174,9 @@ impl Memory {
         };
         self.free_frames.push((old >> 32) as u32);
         self.pages_mapped -= 1;
-        self.exec_pages.remove(&p);
+        if (old >> 1) & PROT_X as u64 != 0 {
+            self.exec_page_count -= 1;
+        }
     }
 
     pub fn unmap(&mut self, addr: u64, len: u64) {
@@ -197,11 +200,13 @@ impl Memory {
         }
         for p in start..end {
             let s = self.slot_mut(p, false).unwrap();
+            let was_x = (*s >> 1) & PROT_X as u64 != 0;
             *s = (*s & !(7 << 1)) | ((prot as u64 & 7) << 1);
-            if prot & PROT_X != 0 {
-                self.exec_pages.insert(p);
-            } else {
-                self.exec_pages.remove(&p);
+            let now_x = prot & PROT_X != 0;
+            match (was_x, now_x) {
+                (false, true) => self.exec_page_count += 1,
+                (true, false) => self.exec_page_count -= 1,
+                _ => {}
             }
         }
         self.flush_tlb();
@@ -290,7 +295,7 @@ impl Memory {
             let off = self.translate(a, Access::Write)?;
             let n = ((PAGE_SIZE - (a & PAGE_MASK)) as usize).min(src.len() - done);
             self.frames[off..off + n].copy_from_slice(&src[done..done + n]);
-            if !self.exec_pages.is_empty() && self.exec_pages.contains(&(a >> 12)) {
+            if self.exec_page_count != 0 && self.slot(a >> 12).is_some_and(|s| (s >> 1) & PROT_X as u64 != 0) {
                 self.code_epoch += 1;
             }
             done += n;
@@ -407,7 +412,7 @@ impl Memory {
         if (a & PAGE_MASK) as usize + b.len() <= PAGE_SIZE as usize {
             let o = self.translate(a, Access::Write)?;
             self.frames[o..o + b.len()].copy_from_slice(b);
-            if !self.exec_pages.is_empty() && self.exec_pages.contains(&(a >> 12)) {
+            if self.exec_page_count != 0 && self.slot(a >> 12).is_some_and(|s| (s >> 1) & PROT_X as u64 != 0) {
                 self.code_epoch += 1;
             }
             Ok(())

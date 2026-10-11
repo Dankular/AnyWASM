@@ -1,1 +1,354 @@
-fn main(){}
+//! `anywasm` command line tool.
+//!
+//! ```text
+//! anywasm analyze <exe> [--json]          compatibility report (which imports are implemented)
+//! anywasm run <exe> [--dir D] [--trace-imports] [--max-steps N] [-- args...]
+//! anywasm pack <exe> -o <out.awb> [--dir D] [--args "..."]
+//! ```
+
+use anywasm_pe::{canonical_dll, ImportName, Pe};
+use anywasm_rt::hle;
+use anywasm_rt::{Bundle, Process, Stop, Vfs};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+struct ImportStatus {
+    dll: String,
+    group: Option<&'static str>,
+    bundled: bool,
+    implemented: Vec<String>,
+    missing: Vec<String>,
+}
+
+#[derive(Default)]
+struct Report {
+    machine: String,
+    subsystem: String,
+    is_dll: bool,
+    is_dotnet: bool,
+    image_base: u64,
+    size_of_image: u32,
+    has_tls: bool,
+    imports: Vec<ImportStatus>,
+    features: BTreeSet<&'static str>,
+    blockers: Vec<String>,
+}
+
+fn feature_of(dll: &str) -> Option<&'static str> {
+    Some(match dll {
+        "d3d9" => "Direct3D 9",
+        "d3d10" | "d3d10_1" | "d3d10core" => "Direct3D 10",
+        "d3d11" => "Direct3D 11",
+        "d3d12" => "Direct3D 12",
+        "dxgi" => "DXGI",
+        "ddraw" => "DirectDraw",
+        "opengl32" => "OpenGL",
+        "vulkan-1" => "Vulkan",
+        "dsound" => "DirectSound",
+        "winmm" => "Windows multimedia/audio",
+        "xaudio2_9" | "xaudio2_8" | "xaudio2_7" => "XAudio2",
+        "xinput1_4" | "xinput1_3" | "xinput9_1_0" => "XInput gamepad",
+        "dinput8" | "dinput" => "DirectInput",
+        "ws2_32" | "wsock32" | "wininet" | "winhttp" => "Networking",
+        "user32" => "Win32 windows/messages (user32)",
+        "gdi32" => "GDI drawing",
+        _ => return None,
+    })
+}
+
+fn blocker_of(dll: &str) -> Option<&'static str> {
+    Some(match dll {
+        d if d.starts_with("easyanticheat") => "Easy Anti-Cheat (kernel/driver based; cannot run)",
+        d if d.starts_with("beclient") || d.starts_with("battleye") => "BattlEye anti-cheat (cannot run)",
+        "steam_api64" | "steam_api" => "Steamworks (needs a steam_api replacement)",
+        "winusb" | "setupapi" | "hid" => "Direct device/driver access",
+        _ => return None,
+    })
+}
+
+fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let pe = Pe::parse(&data).map_err(|e| e.to_string())?;
+    let mut r = Report {
+        machine: match pe.machine {
+            anywasm_pe::MACHINE_AMD64 => "x86-64".into(),
+            anywasm_pe::MACHINE_I386 => "x86 (32-bit)".into(),
+            anywasm_pe::MACHINE_ARM64 => "ARM64".into(),
+            m => format!("unknown ({m:#x})"),
+        },
+        subsystem: match pe.subsystem {
+            anywasm_pe::SUBSYSTEM_WINDOWS_GUI => "Windows GUI".into(),
+            anywasm_pe::SUBSYSTEM_WINDOWS_CUI => "console".into(),
+            s => format!("subsystem {s}"),
+        },
+        is_dll: pe.is_dll(),
+        is_dotnet: pe.is_dotnet(),
+        image_base: pe.image_base,
+        size_of_image: pe.size_of_image,
+        has_tls: pe.tls().map_err(|e| e.to_string())?.is_some(),
+        ..Default::default()
+    };
+    if pe.machine != anywasm_pe::MACHINE_AMD64 || !pe.is_64 {
+        r.blockers.push(format!("{} images are not supported: only PE32+ x86-64", r.machine));
+    }
+    if pe.is_dotnet() {
+        r.blockers.push(".NET managed executable (needs a CLR, not a native Win64 runtime)".into());
+    }
+    let bundled: BTreeSet<String> = dir
+        .map(|d| {
+            std::fs::read_dir(d)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(|s| canonical_dll(s)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut by_dll: BTreeMap<String, ImportStatus> = BTreeMap::new();
+    for imp in pe.all_imports().map_err(|e| e.to_string())? {
+        let canon = canonical_dll(&imp.dll);
+        let group = hle::group_of(&canon);
+        let is_bundled = bundled.contains(&canon);
+        let st = by_dll.entry(canon.clone()).or_insert_with(|| ImportStatus { dll: imp.dll.clone(), group, bundled: is_bundled, implemented: vec![], missing: vec![] });
+        if let Some(f) = feature_of(&canon) {
+            r.features.insert(f);
+        }
+        if let Some(b) = blocker_of(&canon) {
+            r.blockers.push(b.to_string());
+        }
+        for e in &imp.entries {
+            let name = match &e.name {
+                ImportName::Name { name, .. } => name.clone(),
+                ImportName::Ordinal(o) => format!("#{o}"),
+            };
+            let ok = is_bundled || group.map(|g| hle::lookup(g, &name).is_some() || hle::data_symbol(g, &name).is_some()).unwrap_or(false);
+            if ok {
+                st.implemented.push(name);
+            } else {
+                st.missing.push(name);
+            }
+        }
+    }
+    r.imports = by_dll.into_values().collect();
+    Ok(r)
+}
+
+fn print_report(r: &Report, json: bool) {
+    let (imp, miss): (usize, usize) = r.imports.iter().fold((0, 0), |a, i| (a.0 + i.implemented.len(), a.1 + i.missing.len()));
+    if json {
+        let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+        let list = |v: &[String]| format!("[{}]", v.iter().map(|s| q(s)).collect::<Vec<_>>().join(","));
+        let imports = r
+            .imports
+            .iter()
+            .map(|i| format!("{{\"dll\":{},\"bundled\":{},\"implemented\":{},\"missing\":{}}}", q(&i.dll), i.bundled, list(&i.implemented), list(&i.missing)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let feats = r.features.iter().map(|f| q(f)).collect::<Vec<_>>().join(",");
+        let blockers = r.blockers.iter().map(|b| q(b)).collect::<Vec<_>>().join(",");
+        println!(
+            "{{\"machine\":{},\"subsystem\":{},\"dll\":{},\"dotnet\":{},\"imageBase\":\"{:#x}\",\"implemented\":{imp},\"missing\":{miss},\"features\":[{feats}],\"blockers\":[{blockers}],\"imports\":[{imports}]}}",
+            q(&r.machine),
+            q(&r.subsystem),
+            r.is_dll,
+            r.is_dotnet,
+            r.image_base
+        );
+        return;
+    }
+    println!("Machine     : {}", r.machine);
+    println!("Subsystem   : {}{}", r.subsystem, if r.is_dll { " (DLL)" } else { "" });
+    println!("Image       : base {:#x}, {} KiB mapped{}", r.image_base, r.size_of_image / 1024, if r.has_tls { ", has TLS" } else { "" });
+    if !r.features.is_empty() {
+        println!("Uses        : {}", r.features.iter().copied().collect::<Vec<_>>().join(", "));
+    }
+    for b in &r.blockers {
+        println!("BLOCKER     : {b}");
+    }
+    println!("\nImports ({imp} implemented, {miss} missing):");
+    for i in &r.imports {
+        let tag = if i.bundled { "bundled DLL".to_string() } else { i.group.map(|g| format!("host:{g}")).unwrap_or_else(|| "NO HOST LIBRARY".into()) };
+        println!("  {:<34} [{tag}] {} ok, {} missing", i.dll, i.implemented.len(), i.missing.len());
+        for m in i.missing.iter().take(12) {
+            println!("      - missing {m}");
+        }
+        if i.missing.len() > 12 {
+            println!("      ... and {} more", i.missing.len() - 12);
+        }
+    }
+    println!();
+    if !r.blockers.is_empty() {
+        println!("Verdict: cannot run ({} blocker(s) above).", r.blockers.len());
+    } else if miss == 0 {
+        println!("Verdict: every imported function has a host implementation (this does not prove the program will work).");
+    } else {
+        println!("Verdict: {miss} imported function(s) are not implemented; the program stops when it first calls one.");
+    }
+}
+
+fn load_dir(vfs: &mut Vfs, dir: &Path) -> std::io::Result<()> {
+    fn walk(vfs: &mut Vfs, root: &Path, cur: &Path) -> std::io::Result<()> {
+        for e in std::fs::read_dir(cur)? {
+            let e = e?;
+            let p = e.path();
+            if p.is_dir() {
+                walk(vfs, root, &p)?;
+            } else {
+                let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('/', "\\");
+                vfs.insert(&rel, std::fs::read(&p)?);
+            }
+        }
+        Ok(())
+    }
+    walk(vfs, dir, dir)
+}
+
+struct Opts {
+    exe: PathBuf,
+    dir: Option<PathBuf>,
+    out: Option<PathBuf>,
+    trace: bool,
+    json: bool,
+    max_steps: u64,
+    args: Vec<String>,
+    cmdline: Option<String>,
+}
+
+fn parse(args: &[String]) -> Result<Opts, String> {
+    let mut o = Opts { exe: PathBuf::new(), dir: None, out: None, trace: false, json: false, max_steps: 20_000_000_000, args: vec![], cmdline: None };
+    let mut it = args.iter();
+    let mut have_exe = false;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--dir" => o.dir = Some(it.next().ok_or("--dir needs a value")?.into()),
+            "-o" | "--out" => o.out = Some(it.next().ok_or("-o needs a value")?.into()),
+            "--trace-imports" => o.trace = true,
+            "--json" => o.json = true,
+            "--max-steps" => o.max_steps = it.next().ok_or("--max-steps needs a value")?.parse().map_err(|_| "bad --max-steps")?,
+            "--args" => o.cmdline = Some(it.next().ok_or("--args needs a value")?.clone()),
+            "--" => {
+                o.args = it.cloned().collect();
+                break;
+            }
+            s if !have_exe && !s.starts_with('-') => {
+                o.exe = s.into();
+                have_exe = true;
+            }
+            s => return Err(format!("unknown option {s}")),
+        }
+    }
+    if !have_exe {
+        return Err("missing <exe>".into());
+    }
+    Ok(o)
+}
+
+fn build_vfs(o: &Opts) -> Result<(Vfs, String), String> {
+    let mut vfs = Vfs::new();
+    if let Some(d) = &o.dir {
+        load_dir(&mut vfs, d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let name = o.exe.file_name().ok_or("bad exe path")?.to_string_lossy().into_owned();
+    if !vfs.exists(&name) {
+        vfs.insert(&name, std::fs::read(&o.exe).map_err(|e| format!("{}: {e}", o.exe.display()))?);
+    }
+    Ok((vfs, name))
+}
+
+fn command_line(name: &str, o: &Opts) -> String {
+    if let Some(c) = &o.cmdline {
+        return c.clone();
+    }
+    let mut s = format!("\"C:\\{name}\"");
+    for a in &o.args {
+        s.push(' ');
+        if a.contains(' ') { s.push_str(&format!("\"{a}\"")) } else { s.push_str(a) }
+    }
+    s
+}
+
+fn run(o: &Opts) -> Result<ExitCode, String> {
+    let (vfs, name) = build_vfs(o)?;
+    let cmd = command_line(&name, o);
+    let mut p = Process::new(vfs);
+    p.trace_imports = o.trace;
+    p.load_exe(&name, Some(&cmd))?;
+    let mut left = o.max_steps;
+    let stop = loop {
+        let chunk = left.min(2_000_000);
+        let s = p.run(chunk);
+        std::io::stdout().write_all(&p.take_stdout()).ok();
+        std::io::stderr().write_all(&p.take_stderr()).ok();
+        match s {
+            Stop::StepLimit => {
+                left -= chunk;
+                if left == 0 {
+                    break Stop::StepLimit;
+                }
+            }
+            other => break other,
+        }
+    };
+    std::io::stdout().flush().ok();
+    match stop {
+        Stop::Exit(c) => Ok(ExitCode::from((c & 0xff) as u8)),
+        Stop::Unimplemented { dll, name } => {
+            eprintln!("\nanywasm: stopped at unimplemented import {dll}!{name}");
+            Ok(ExitCode::from(120))
+        }
+        Stop::Crash(m) => {
+            eprintln!("\nanywasm: guest crashed: {m}");
+            Ok(ExitCode::from(121))
+        }
+        Stop::StepLimit => {
+            eprintln!("\nanywasm: step limit reached after {} instructions", o.max_steps);
+            Ok(ExitCode::from(122))
+        }
+    }
+}
+
+fn pack(o: &Opts) -> Result<(), String> {
+    let (vfs, name) = build_vfs(o)?;
+    let out = o.out.clone().ok_or("pack needs -o <out.awb>")?;
+    let mut files: Vec<(String, Vec<u8>)> = vfs.paths().map(|p| (p.clone(), vfs.get(p).unwrap().clone())).collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let b = Bundle { exe: name.to_ascii_lowercase(), cmdline: o.cmdline.clone().or_else(|| if o.args.is_empty() { None } else { Some(command_line(&name, o)) }), files };
+    let bytes = b.to_bytes();
+    std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("wrote {} ({} files, {} KiB)", out.display(), b.files.len(), bytes.len() / 1024);
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--trace-imports] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--args \"cmdline\"]";
+    let Some(cmd) = args.first() else {
+        eprintln!("{usage}");
+        return ExitCode::from(2);
+    };
+    let o = match parse(&args[1..]) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("anywasm: {e}\n{usage}");
+            return ExitCode::from(2);
+        }
+    };
+    let res = match cmd.as_str() {
+        "analyze" => analyze(&o.exe, o.dir.as_deref()).map(|r| {
+            print_report(&r, o.json);
+            ExitCode::SUCCESS
+        }),
+        "run" => run(&o),
+        "pack" => pack(&o).map(|_| ExitCode::SUCCESS),
+        _ => Err(format!("unknown command {cmd}\n{usage}")),
+    };
+    match res {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("anywasm: {e}");
+            ExitCode::from(1)
+        }
+    }
+}

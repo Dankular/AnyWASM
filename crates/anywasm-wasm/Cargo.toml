@@ -3,3 +3,10 @@ name = "anywasm-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "WebAssembly build of the AnyWASM runtime with a plain C ABI (no wasm-bindgen)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anywasm-rt.workspace = true

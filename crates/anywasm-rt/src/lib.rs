@@ -5,9 +5,11 @@
 //! lives outside the guest. Imports that are not implemented are bound to a trap that reports the
 //! exact `dll!function` (instead of guessing), so compatibility gaps are explicit.
 
+pub mod bundle;
 pub mod hle;
 pub mod process;
 pub mod vfs;
 
 pub use process::{Process, RunResult, Stop};
+pub use bundle::Bundle;
 pub use vfs::Vfs;

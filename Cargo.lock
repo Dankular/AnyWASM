@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "anywasm-cli"
 version = "0.1.0"
+dependencies = [
+ "anywasm-pe",
+ "anywasm-rt",
+]
 
 [[package]]
 name = "anywasm-cpu"
@@ -28,6 +32,9 @@ dependencies = [
 [[package]]
 name = "anywasm-wasm"
 version = "0.1.0"
+dependencies = [
+ "anywasm-rt",
+]
 
 [[package]]
 name = "libc"

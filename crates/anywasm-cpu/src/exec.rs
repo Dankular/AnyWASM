@@ -988,3 +988,40 @@ fn adv(reg: u64, delta: u64, am: u64) -> u64 {
         (reg.wrapping_add(delta)) & am
     }
 }
+
+
+/// Direct-mapped cache of decoded instructions, valid while `Memory::code_epoch` is unchanged.
+pub struct DecodeCache {
+    entries: Vec<(u64, u64, Inst)>,
+}
+
+const DC_BITS: usize = 15;
+
+impl Default for DecodeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DecodeCache {
+    pub fn new() -> Self {
+        let dummy = crate::decode::decode(&[0x90], 0).unwrap();
+        DecodeCache { entries: vec![(u64::MAX, u64::MAX, dummy); 1 << DC_BITS] }
+    }
+
+    /// Fetch (cached), decode and execute one instruction.
+    #[inline]
+    pub fn step(&mut self, cpu: &mut Cpu, mem: &mut Memory) -> ExecResult<()> {
+        let rip = cpu.rip;
+        let idx = ((rip ^ (rip >> DC_BITS)) as usize) & ((1 << DC_BITS) - 1);
+        let e = &mut self.entries[idx];
+        if e.0 != rip || e.1 != mem.code_epoch {
+            let mut buf = [0u8; 15];
+            let n = mem.fetch(rip, &mut buf)?;
+            let inst = decode(&buf[..n], rip).map_err(Exit::Decode)?;
+            *e = (rip, mem.code_epoch, inst);
+        }
+        let inst = e.2;
+        exec(cpu, mem, &inst)
+    }
+}

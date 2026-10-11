@@ -4,7 +4,7 @@ use crate::hle;
 use crate::vfs::Vfs;
 use anywasm_cpu::cpu::*;
 use anywasm_cpu::mem::{PROT_R, PROT_RW, PROT_RWX, PROT_X};
-use anywasm_cpu::{step, Cpu, Exit, Memory};
+use anywasm_cpu::{Cpu, DecodeCache, Exit, Memory};
 use anywasm_pe::{canonical_dll, ImportName, Pe};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -98,6 +98,7 @@ pub struct Process {
     pub nested: u32,
     /// Set by an HLE function that has rewritten RSP/RIP itself (longjmp): skip the normal return.
     pub skip_ret: bool,
+    pub dcache: DecodeCache,
     pub extra: hle::Extra,
 }
 
@@ -148,6 +149,7 @@ impl Process {
             trace_imports: false,
             nested: 0,
             skip_ret: false,
+            dcache: DecodeCache::new(),
             extra: hle::Extra::default(),
         };
         p.handles.insert(0xfffffffffffffff5, Handle::Std(1)); // pseudo values never used directly
@@ -688,7 +690,7 @@ impl Process {
         if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
             return self.dispatch_thunk(rip).map(|_| None);
         }
-        match step(&mut self.cpu, &mut self.mem) {
+        match self.dcache.step(&mut self.cpu, &mut self.mem) {
             Ok(()) => Ok(None),
             Err(e) => Err(self.describe_exit(e)),
         }

@@ -1,0 +1,20 @@
+# Copy to .github/workflows/web.yml (this session could not push workflow files: token lacks the `workflow` scope).
+name: WASM
+
+on:
+  push:
+    branches: [ "claude/upbeat-franklin-c1vbxr" ]
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Add wasm target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Build wasm module and CLI
+      run: |
+        cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
+        cargo build -p anywasm-cli
+    - name: Run executables through the WASM build under Node
+      run: node test/wasm_smoke.mjs

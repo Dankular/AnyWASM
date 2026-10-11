@@ -3,3 +3,7 @@ node_modules/
 dist/
 *.wasm.map
 crates/anywasm-wasm/pkg/
+web/anywasm_wasm.wasm
+web/demo/
+test/browser/node_modules/
+test/browser/package-lock.json
