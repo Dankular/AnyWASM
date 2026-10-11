@@ -248,8 +248,26 @@ fn double_shift(cpu: &mut Cpu, left: bool, dst: u64, src: u64, count: u64, sz: u
         return dst;
     }
     if cnt > bits {
-        // Undefined on hardware for 16-bit; mirror the common behaviour of a 2*bits rotate.
-        return dst;
+        // Only reachable for 16-bit operands. Intel documents this as undefined; measured on
+        // hardware (80/80 random probes) it rotates the 32-bit dst:src (SHLD) / src:dst (SHRD)
+        // value by `cnt` and takes the corresponding half.
+        let res = if left {
+            let w = ((dst as u32) << 16) | src as u32;
+            (w.rotate_left(cnt) >> 16) as u64
+        } else {
+            let w = ((src as u32) << 16) | dst as u32;
+            (w.rotate_right(cnt) & 0xffff) as u64
+        };
+        let cf = if left {
+            (((dst as u32) << 16 | src as u32) >> (32 - cnt)) & 1 != 0
+        } else {
+            (((src as u32) << 16 | dst as u32) >> (cnt - 1)) & 1 != 0
+        };
+        cpu.set_flag(CF, cf);
+        cpu.set_flag(OF, false);
+        set_szp(cpu, res, sz);
+        cpu.set_flag(AF, false);
+        return res;
     }
     let res = if left {
         let wide = ((dst as u128) << bits) | src as u128;

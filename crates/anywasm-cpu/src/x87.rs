@@ -45,8 +45,15 @@ pub fn f80_to_f64(b: &[u8; 10]) -> f64 {
         let nan = (m << 1) != 0;
         return f64::from_bits(sign << 63 | 0x7ff << 52 | if nan { frac | 1 << 51 } else { 0 });
     }
-    // value = m * 2^(e - 16383 - 63)
-    let v = (m as f64) * 2f64.powi(e - 16383 - 63);
+    // value = m * 2^(e - 16383 - 63); apply the exponent in chunks so no intermediate
+    // power of two overflows or underflows (powi(-1059) alone would flush to zero).
+    let mut v = m as f64;
+    let mut k = e - 16383 - 63;
+    while k != 0 {
+        let step = k.clamp(-1000, 1000);
+        v *= 2f64.powi(step);
+        k -= step;
+    }
     if sign != 0 {
         -v
     } else {
@@ -102,7 +109,8 @@ fn compare(cpu: &mut Cpu, a: f64, b: f64) {
     }
 }
 fn compare_flags(cpu: &mut Cpu, a: f64, b: f64) {
-    cpu.rflags &= !(ZF | PF | CF);
+    // FCOMI/FUCOMI define ZF/PF/CF and clear OF/SF/AF.
+    cpu.rflags &= !(ZF | PF | CF | OF | SF | AF);
     if a.is_nan() || b.is_nan() {
         cpu.rflags |= ZF | PF | CF;
     } else if a < b {
@@ -345,19 +353,48 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                         push(cpu, sig);
                     }
                     5 => {
+                        // FPREM1: IEEE (round-to-nearest) remainder; same quotient-bit reporting.
                         let (a, b) = (st(cpu, 0), st(cpu, 1));
-                        let v = a - (a / b).round_ties_even() * b;
-                        set_st(cpu, 0, v);
-                        set_cc(cpu, false, false, false);
+                        if b == 0.0 || a.is_infinite() || a.is_nan() || b.is_nan() {
+                            // Invalid operation: default (negative) QNaN, IE set, C0-C3 cleared.
+                            set_st(cpu, 0, f64::from_bits(0xFFF8_0000_0000_0000));
+                            set_cc(cpu, false, false, false);
+                            cpu.fpu_sw &= !(1 << 9);
+                            cpu.fpu_sw |= 1;
+                            cpu.rip = next;
+                            cpu.icount += 1;
+                            cpu.tsc += 1;
+                            return Ok(());
+                        }
+                        let qf = (a / b).round_ties_even();
+                        let q = qf.abs() as u64;
+                        set_st(cpu, 0, a - qf * b);
+                        set_cc(cpu, q & 4 != 0, false, q & 2 != 0);
+                        cpu.fpu_sw = (cpu.fpu_sw & !(1 << 9)) | ((q & 1) as u16) << 9;
                     }
                     6 => cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7,
                     _ => cpu.fpu_top = (cpu.fpu_top + 1) & 7,
                 },
                 7 => match rm {
                     0 => {
+                        // FPREM: truncating remainder. Completion sets C2=0 and reports the low
+                        // three quotient bits in C0 (Q2), C3 (Q1) and C1 (Q0).
                         let (a, b) = (st(cpu, 0), st(cpu, 1));
+                        if b == 0.0 || a.is_infinite() || a.is_nan() || b.is_nan() {
+                            // Invalid operation: default (negative) QNaN, IE set, C0-C3 cleared.
+                            set_st(cpu, 0, f64::from_bits(0xFFF8_0000_0000_0000));
+                            set_cc(cpu, false, false, false);
+                            cpu.fpu_sw &= !(1 << 9);
+                            cpu.fpu_sw |= 1;
+                            cpu.rip = next;
+                            cpu.icount += 1;
+                            cpu.tsc += 1;
+                            return Ok(());
+                        }
+                        let q = (a / b).trunc().abs() as u64;
                         set_st(cpu, 0, a % b);
-                        set_cc(cpu, false, false, false);
+                        set_cc(cpu, q & 4 != 0, false, q & 2 != 0);
+                        cpu.fpu_sw = (cpu.fpu_sw & !(1 << 9)) | ((q & 1) as u16) << 9;
                     }
                     1 => {
                         let v = st(cpu, 1) * (1.0 + st(cpu, 0)).log2();

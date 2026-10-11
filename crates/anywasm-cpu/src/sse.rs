@@ -471,7 +471,7 @@ fn palignr(d: u128, s: u128, imm: u8) -> u128 {
 
 // ── string compare (pcmp[ei]str[im]) ─────────────────────────────────────────
 
-fn pcmpstr(cpu: &mut Cpu, d: u128, s: u128, imm: u8, explicit: bool, want_mask: bool) {
+fn pcmpstr(cpu: &mut Cpu, d: u128, s: u128, imm: u8, explicit: bool, want_mask: bool, wide: bool) {
     let word = imm & 1 != 0;
     let signed = imm & 2 != 0;
     let agg = (imm >> 2) & 3;
@@ -480,7 +480,8 @@ fn pcmpstr(cpu: &mut Cpu, d: u128, s: u128, imm: u8, explicit: bool, want_mask: 
     let n = 16 / l as usize;
     let len_of = |v: u128, reg: u64| -> usize {
         if explicit {
-            let r = reg as i64;
+            // Lengths come from EAX/EDX (RAX/RDX with REX.W), as signed values.
+            let r = if wide { reg as i64 } else { reg as i32 as i64 };
             (r.unsigned_abs() as usize).min(n)
         } else {
             (0..n).position(|i| get(v, l, i) == 0).unwrap_or(n)
@@ -777,14 +778,8 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             let n = dst_n(&i.ops[0])?;
             let cnt = match i.ops[1] {
                 Opnd::Imm => i.imm as u64 & 0xff,
-                _ => {
-                    let v = src_x(cpu, mem, &i.ops[1], 16)?;
-                    if v >> 64 != 0 {
-                        u64::MAX
-                    } else {
-                        v as u64
-                    }
-                }
+                // The count is the low quadword of the source; the high quadword is ignored.
+                _ => src_x(cpu, mem, &i.ops[1], 16)? as u64,
             };
             cpu.xmm[n] = shift_lanes(k, l, cpu.xmm[n], cnt);
         }
@@ -887,26 +882,19 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             };
         }
         Op::Dpp(pr) => {
+            // Per the SDM: masked-out products are +0.0, then summed pairwise ((p0+p1)+(p2+p3)).
             let n = dst_n(&i.ops[0])?;
             let s = src_x(cpu, mem, &i.ops[1], 16)?;
             let d = cpu.xmm[n];
             cpu.xmm[n] = if pr == Prec::Ps {
                 let (a, b) = (f32x4(d), f32x4(s));
-                let mut sum = 0f32;
-                for k in 0..4 {
-                    if imm8 >> (4 + k) & 1 != 0 {
-                        sum += a[k] * b[k];
-                    }
-                }
+                let p = [0, 1, 2, 3].map(|k| if imm8 >> (4 + k) & 1 != 0 { a[k] * b[k] } else { 0.0 });
+                let sum = (p[0] + p[1]) + (p[2] + p[3]);
                 from_f32x4([0, 1, 2, 3].map(|k| if imm8 >> k & 1 != 0 { sum } else { 0.0 }))
             } else {
                 let (a, b) = (f64x2(d), f64x2(s));
-                let mut sum = 0f64;
-                for k in 0..2 {
-                    if imm8 >> (4 + k) & 1 != 0 {
-                        sum += a[k] * b[k];
-                    }
-                }
+                let p = [0, 1].map(|k| if imm8 >> (4 + k) & 1 != 0 { a[k] * b[k] } else { 0.0 });
+                let sum = p[0] + p[1];
                 from_f64x2([0, 1].map(|k| if imm8 >> k & 1 != 0 { sum } else { 0.0 }))
             };
         }
@@ -1015,7 +1003,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
         Op::Pcmpstr(explicit, mask) => {
             let d = cpu.xmm[dst_n(&i.ops[0])?];
             let s = src_x(cpu, mem, &i.ops[1], 16)?;
-            pcmpstr(cpu, d, s, imm8, explicit, mask);
+            pcmpstr(cpu, d, s, imm8, explicit, mask, i.rexw);
         }
         other => return Err(Exit::Unimplemented(other)),
     }
