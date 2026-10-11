@@ -120,9 +120,10 @@
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
   sampler state, mip generation, copies and instancing are implemented in the translator, but only two
   paths are pixel-verified: the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
-  texture, D32_FLOAT depth test with the near quad drawn first, 16-bit indexed draws, 3 quads).
-  The triangle's visible canvas screenshot also checks its clear colour and centre pixel. Blending,
-  alpha-test, mips/filtering, instancing and copies are not pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
+  texture, D32_FLOAT depth ordering, indexed draws, constant-factor and source-alpha blending, and
+  one texture plus one vertex-buffer `CopyResource` case). The triangle's visible canvas screenshot
+  also checks its clear colour and centre pixel. Other blend modes, alpha-test, mips/filtering,
+  instancing and other copies are not pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
   (forced to 1 sample), staging read-back of GPU-written data, and `SV_` system values beyond the
   basics are not implemented.
 - **Pixel verification paths:** D3D11 back-buffer checks run in test mode (`?test=1`), which skips

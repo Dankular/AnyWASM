@@ -55,6 +55,16 @@ int main(void) {
     ID3D11ShaderResourceView *srv; hr = ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource *)tex, NULL, &srv);
     printf("srv hr=%08lx\n", (unsigned long)hr);
 
+    /* Half-alpha white texel for the SRC_ALPHA blend check over quad C's blue region. */
+    unsigned halfWhite = 0x80ffffffu; /* RGBA bytes: 255,255,255,128 */
+    D3D11_TEXTURE2D_DESC alphaDesc = td; alphaDesc.Width = alphaDesc.Height = 1;
+    D3D11_SUBRESOURCE_DATA alphaInit = { &halfWhite, 4, 0 };
+    ID3D11Texture2D *alphaTex; hr = ID3D11Device_CreateTexture2D(dev, &alphaDesc, &alphaInit, &alphaTex);
+    printf("half-white texture hr=%08lx\n", (unsigned long)hr);
+    ID3D11ShaderResourceView *alphaSrv;
+    hr = ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource *)alphaTex, NULL, &alphaSrv);
+    printf("half-white srv hr=%08lx\n", (unsigned long)hr);
+
     /* Copy into a magenta-initialized texture; quad D must show the source red after the copy. */
     unsigned poison[4] = { 0xffff00ffu, 0xffff00ffu, 0xffff00ffu, 0xffff00ffu };
     D3D11_TEXTURE2D_DESC copyDesc = td; copyDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -90,26 +100,33 @@ int main(void) {
     bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     ID3D11BlendState *blend; hr = ID3D11Device_CreateBlendState(dev, &bld, &blend);
     printf("blend state hr=%08lx\n", (unsigned long)hr);
+    D3D11_BLEND_DESC alphaBld = bld;
+    alphaBld.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    alphaBld.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    ID3D11BlendState *alphaBlend;
+    hr = ID3D11Device_CreateBlendState(dev, &alphaBld, &alphaBlend);
+    printf("alpha blend state hr=%08lx\n", (unsigned long)hr);
 
     /* near quad A (z 0.2) samples only the red texel, far quad B (z 0.8) only the green texel,
      * quad C (z 0.5) maps the whole texture. */
-    Vertex verts[20] = {
+    Vertex verts[24] = {
         QUAD(-0.8f, -0.1f, 0.2f, 0.7f, 0.2f, 0.25f, 0.25f, 0.25f, 0.25f),
         QUAD(-0.2f, -0.1f, 0.8f, 0.7f, 0.8f, 0.75f, 0.25f, 0.75f, 0.25f),
         QUAD(-0.6f, -0.9f, 0.6f, -0.3f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f),
         QUAD(-0.95f, -0.1f, -0.825f, 0.7f, 0.3f, 0.25f, 0.25f, 0.25f, 0.25f),
         QUAD(0.825f, -0.1f, 0.95f, 0.7f, 0.3f, 0.25f, 0.25f, 0.25f, 0.25f),
+        QUAD(-0.3f, -0.87f, -0.05f, -0.67f, 0.4f, 0.25f, 0.25f, 0.25f, 0.25f),
     };
-    unsigned short idx[30];
-    for (int q = 0; q < 5; q++) {
+    unsigned short idx[36];
+    for (int q = 0; q < 6; q++) {
         unsigned short b = (unsigned short)(q * 4), *i = idx + q * 6;
         i[0] = b; i[1] = b + 1; i[2] = b + 2; i[3] = b; i[4] = b + 2; i[5] = b + 3;
     }
     D3D11_BUFFER_DESC vbd = { sizeof verts, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
     D3D11_SUBRESOURCE_DATA vinit = { verts, 0, 0 };
     ID3D11Buffer *vb; ID3D11Device_CreateBuffer(dev, &vbd, &vinit, &vb);
-    Vertex poisonVerts[20];
-    for (int i = 0; i < 20; i++) {
+    Vertex poisonVerts[24];
+    for (int i = 0; i < 24; i++) {
         poisonVerts[i].x = 2.0f; poisonVerts[i].y = 2.0f; poisonVerts[i].z = 0.3f;
         poisonVerts[i].u = 0.25f; poisonVerts[i].v = 0.25f;
     }
@@ -173,6 +190,11 @@ int main(void) {
         ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &srv);
         ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &copyVb, &stride, &offset);
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 24, 0);  /* E (copied vertex buffer) */
+        ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb, &stride, &offset);
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &alphaSrv);
+        ID3D11DeviceContext_OMSetBlendState(ctx, alphaBlend, blendFactor, 0xffffffffu);
+        ID3D11DeviceContext_DrawIndexed(ctx, 6, 30, 0);  /* F: half-alpha white over C's blue texel */
+        ID3D11DeviceContext_OMSetBlendState(ctx, NULL, NULL, 0xffffffffu);
         IDXGISwapChain_Present(sc, 1, 0);
         if (++frames == 3) PostQuitMessage(0);
     }

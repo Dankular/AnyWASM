@@ -191,8 +191,8 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       explicitly does not guarantee runtime success. The JSON serializer escapes control characters.
 
 ## 3. Graphics
-- [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor blending,
-      one 2x2 texture-to-texture `CopyResource` case, and one same-size vertex-buffer
+- [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor and
+      `SRC_ALPHA`/`INV_SRC_ALPHA` blending, one 2x2 texture-to-texture `CopyResource` case, and one same-size vertex-buffer
       `CopyResource` case are pixel-verified in `test/browser/run.mjs` via `d3d11_textured`):
       other buffer `CopyResource` cases, other blend modes,
       alpha test/discard, mips and trilinear/anisotropic filtering, instancing,
@@ -246,8 +246,8 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [x] Removed the tracked two-line root `out.txt` added in `800f4e1` and deleted in `1c8246c`.
       `fixtures/crt_test.c` separately writes a guest `out.txt` during its CRT test.
 - [x] Silence/resolve compiler warnings (e.g. unused `ERROR_ACCESS_DENIED` in `kernel32.rs`).
-- [x] Add a Rust-side command-stream test for `d3d11_textured` (`tests/d3d11_stream.rs` covers the
-      triangle only) and add the textured exe to `test/wasm_smoke.mjs`.
+- [x] Add Rust-side command-stream tests for both D3D11 fixtures in `tests/d3d11_stream.rs` and
+      add the textured exe to `test/wasm_smoke.mjs`.
 - [x] Add WASM smoke regressions for condition-variable thread resumption and per-thread static PE
       TLS isolation.
 - [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).

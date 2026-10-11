@@ -106,6 +106,8 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
         "dsv hr=00000000",
         "texture hr=00000000",
         "srv hr=00000000",
+        "half-white texture hr=00000000",
+        "alpha blend state hr=00000000",
         "copy destination hr=00000000",
         "copy srv hr=00000000",
         "copy vertex buffer hr=00000000",
@@ -119,14 +121,30 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
     let ops: Vec<u32> = cmds.iter().map(|c| c.0).collect();
     let count = |opcode: u32| ops.iter().filter(|&&op| op == opcode).count();
     assert_eq!(count(op::PRESENT), 3);
-    assert_eq!(count(op::DRAW_INDEXED), 15);
+    assert_eq!(count(op::DRAW_INDEXED), 18);
     assert_eq!(count(op::COPY_RESOURCE), 2);
     assert_eq!(count(op::CREATE_BUFFER), 4);
-    assert_eq!(count(op::CREATE_TEXTURE2D), 3, "depth, source texture, and copy destination");
+    assert_eq!(
+        count(op::CREATE_TEXTURE2D),
+        4,
+        "depth, source, copy destination, and half-white textures"
+    );
     assert_eq!(count(op::CLEAR_DSV), 3);
     assert_eq!(count(op::CREATE_SAMPLER), 1);
     assert_eq!(count(op::CREATE_DEPTH), 1);
-    assert_eq!(count(op::TEXTURE_WRITE), 2);
+    let blend_descs: Vec<_> = cmds
+        .iter()
+        .filter(|c| c.0 == op::CREATE_BLEND)
+        .map(|c| u32s(&c.1))
+        .collect();
+    assert_eq!(blend_descs.len(), 2);
+    assert!(
+        blend_descs.iter().any(|words| {
+            words.len() >= 11 && words[1..11] == [0, 0, 1, 5, 6, 1, 2, 1, 1, 0xf]
+        }),
+        "expected SRC_ALPHA / INV_SRC_ALPHA RGB factors and opaque alpha output: {blend_descs:?}"
+    );
+    assert_eq!(count(op::TEXTURE_WRITE), 3);
 
     let first_draw = ops
         .iter()
@@ -196,10 +214,17 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
     let index_buffer = cmds.iter().find(|c| c.0 == op::SET_INDEX_BUFFER).unwrap();
     assert_eq!(u32s(&index_buffer.1)[1], 57, "R16_UINT index format");
     let draws: Vec<_> = cmds.iter().filter(|c| c.0 == op::DRAW_INDEXED).collect();
-    let expected_frame = [[6, 0, 0], [6, 6, 0], [6, 12, 0], [6, 18, 0], [6, 24, 0]];
+    let expected_frame = [
+        [6, 0, 0],
+        [6, 6, 0],
+        [6, 12, 0],
+        [6, 18, 0],
+        [6, 24, 0],
+        [6, 30, 0],
+    ];
     for frame in 0..3 {
-        for draw in 0..5 {
-            assert_eq!(u32s(&draws[frame * 5 + draw].1), expected_frame[draw]);
+        for draw in 0..6 {
+            assert_eq!(u32s(&draws[frame * 6 + draw].1), expected_frame[draw]);
         }
     }
 }

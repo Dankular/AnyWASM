@@ -320,7 +320,7 @@ try {
   const texText = await page.textContent('#term');
   check('textured program ran to completion', texText.includes('frames=3') && /exited \(exit code 0\)/.test(await page.textContent('#stat')), texText);
   const g2 = await page.evaluate(() => window.__gpuStats);
-  check('textured: 15 indexed draws, no validation errors', g2 && g2.draws === 15 && g2.errors.length === 0, JSON.stringify(g2));
+  check('textured: 18 indexed draws, no validation errors', g2 && g2.draws === 18 && g2.errors.length === 0, JSON.stringify(g2));
   await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
   await page.waitForFunction(() => window.__pixels, null, { timeout: 20000 });
   const p2 = await page.evaluate(() => { const p = window.__pixels; return { w: p.width, h: p.height, data: Array.from(p.data) }; });
@@ -335,6 +335,7 @@ try {
   check('quad C top-left texel red', near(at2(200, 340), RED, 1), JSON.stringify(at2(200, 340)));
   check('quad C top-right texel green', near(at2(440, 340), GREEN, 1), JSON.stringify(at2(440, 340)));
   check('quad C bottom-left texel blue', near(at2(200, 430), BLUE, 1), JSON.stringify(at2(200, 430)));
+  check('SRC_ALPHA blends half-white over the known blue region', near(at2(270, 420), [128, 128, 255, 128], 1), JSON.stringify(at2(270, 420)));
   check('quad C bottom-right texel white', near(at2(440, 430), WHITE, 1), JSON.stringify(at2(440, 430)));
   check('background untouched', near(at2(10, 10), BG, 1) && near(at2(320, 290), BG, 1), JSON.stringify([at2(10, 10), at2(320, 290)]));
   check('point sampling gives hard texel edge (no blend at the seam)', [at2(319, 340), at2(320, 340)].every((c) => near(c, RED, 1) || near(c, GREEN, 1)), JSON.stringify([at2(319, 340), at2(320, 340)]));
