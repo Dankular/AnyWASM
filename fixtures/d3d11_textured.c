@@ -1,4 +1,4 @@
-/* Direct3D 11: textured and half-blended quads with a depth buffer, point sampling, indexed draws.
+/* Direct3D 11: textured, copied, and half-blended quads with a depth buffer, point sampling, indexed draws.
  * Draws the NEAR quad first and the FAR quad second, so the overlap is only correct if the depth test works. */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
@@ -55,6 +55,19 @@ int main(void) {
     ID3D11ShaderResourceView *srv; hr = ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource *)tex, NULL, &srv);
     printf("srv hr=%08lx\n", (unsigned long)hr);
 
+    /* Copy into a magenta-initialized texture; quad D must show the source red after the copy. */
+    unsigned poison[4] = { 0xffff00ffu, 0xffff00ffu, 0xffff00ffu, 0xffff00ffu };
+    D3D11_TEXTURE2D_DESC copyDesc = td; copyDesc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA copyInit = { poison, 8, 0 };
+    ID3D11Texture2D *copyTex; hr = ID3D11Device_CreateTexture2D(dev, &copyDesc, &copyInit, &copyTex);
+    printf("copy destination hr=%08lx\n", (unsigned long)hr);
+    if (FAILED(hr)) return 2;
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)copyTex, (ID3D11Resource *)tex);
+    ID3D11ShaderResourceView *copySrv;
+    hr = ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource *)copyTex, NULL, &copySrv);
+    printf("copy srv hr=%08lx\n", (unsigned long)hr);
+    if (FAILED(hr)) return 2;
+
     D3D11_SAMPLER_DESC smd = {0};
     smd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT; smd.AddressU = smd.AddressV = smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     smd.MaxLOD = D3D11_FLOAT32_MAX; smd.ComparisonFunc = D3D11_COMPARISON_NEVER;
@@ -80,13 +93,14 @@ int main(void) {
 
     /* near quad A (z 0.2) samples only the red texel, far quad B (z 0.8) only the green texel,
      * quad C (z 0.5) maps the whole texture. */
-    Vertex verts[12] = {
+    Vertex verts[16] = {
         QUAD(-0.8f, -0.1f, 0.2f, 0.7f, 0.2f, 0.25f, 0.25f, 0.25f, 0.25f),
         QUAD(-0.2f, -0.1f, 0.8f, 0.7f, 0.8f, 0.75f, 0.25f, 0.75f, 0.25f),
         QUAD(-0.6f, -0.9f, 0.6f, -0.3f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f),
+        QUAD(-0.95f, -0.1f, -0.825f, 0.7f, 0.3f, 0.25f, 0.25f, 0.25f, 0.25f),
     };
-    unsigned short idx[18];
-    for (int q = 0; q < 3; q++) {
+    unsigned short idx[24];
+    for (int q = 0; q < 4; q++) {
         unsigned short b = (unsigned short)(q * 4), *i = idx + q * 6;
         i[0] = b; i[1] = b + 1; i[2] = b + 2; i[3] = b; i[4] = b + 2; i[5] = b + 3;
     }
@@ -142,6 +156,8 @@ int main(void) {
         ID3D11DeviceContext_OMSetBlendState(ctx, NULL, NULL, 0xffffffffu);
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 6, 0);   /* B (far, drawn later) */
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 12, 0);  /* C */
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &copySrv);
+        ID3D11DeviceContext_DrawIndexed(ctx, 6, 18, 0);  /* D (copied red texture) */
         IDXGISwapChain_Present(sc, 1, 0);
         if (++frames == 3) PostQuitMessage(0);
     }

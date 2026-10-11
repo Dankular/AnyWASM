@@ -120,11 +120,12 @@ fallback; dynamic WASM code generation is not implemented):
       stability, a "will this run?" report that lists blockers before packaging.
 
 ## 3. Graphics
-- [~] **D3D11 verification gaps** (implemented in the translator; the constant blend-factor path
-      is pixel-verified in `test/browser/run.mjs` via `d3d11_textured`): other blend modes, alpha
-      test/discard, mips + trilinear/anisotropic filtering, instancing,
-      `CopyResource`/`CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple
-      render targets, cube/array/3D textures, depth-stencil ops/stencil, rasterizer state
+- [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor blending
+      and one 2x2 texture-to-texture `CopyResource` case are pixel-verified in
+      `test/browser/run.mjs` via `d3d11_textured`): buffer `CopyResource`, other blend modes,
+      alpha test/discard, mips and trilinear/anisotropic filtering, instancing,
+      `CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple render targets,
+      cube/array/3D textures, depth-stencil ops/stencil, rasterizer state
       (cull/fill/scissor/bias), `GenerateMips`, constant-buffer packing edge cases.
 - [ ] **D3D11 unimplemented**: compute shaders + UAVs/structured/raw buffers, geometry/hull/domain
       shaders, MSAA (forced to 1 sample), staging read-back of GPU-written data, queries,
