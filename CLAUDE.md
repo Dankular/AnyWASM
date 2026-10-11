@@ -144,8 +144,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
 - [ ] **DLL loading**: bundled DLLs are supported by the loader; verify behaviour with real
       third-party DLLs (init order, `DllMain`, TLS callbacks, forwarded exports).
-- [ ] **Packer/analyzer**: `anywasm pack` UX (assets, args, working dir), `analyze` JSON schema
-      stability, a "will this run?" report that lists blockers before packaging.
+- [~] **Packer/analyzer**: a live pack audit confirmed `--dir` recursively adds assets with
+      preserved relative subpaths and `--args` embeds the caller's command line. Working directory
+      selection is still missing: the process reports `C:\`, and `SetCurrentDirectoryA/W` currently
+      return success without changing it. `analyze --json` is manually serialized and has no schema
+      version; its `blockers` list covers known incompatibilities, while unimplemented imports are
+      only listed per DLL. Add a stable versioned contract and a preflight summary without implying
+      static analysis guarantees runtime success.
 
 ## 3. Graphics
 - [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor blending,
