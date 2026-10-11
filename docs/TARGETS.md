@@ -228,8 +228,10 @@ A 30,000,000-instruction AnyWASM replay with `--mode d3d11` reached `user32!Crea
 before reaching the step cap. This confirms that the selected target maps and executes code in those
 DLLs; it does not verify their initialization order. Source inspection shows `load_image` reserves a
 module before recursively loading its imports, while `run_dll_inits` invokes `DllMain` in module
-creation order. That order is not dependency-first. Static TLS data is initialized, but the loader
-does not invoke `Pe::tls_callbacks()`. Named forwarded exports are resolved opportunistically;
+creation order. The engine and compiler DLLs have nonzero entry points; their process-attach calls
+returned successfully in that order. `Archiver_64r.dll` also has an entry point, but its runtime load
+was not observed. The initialization order is not dependency-first. Static TLS data is initialized,
+but the loader does not invoke `Pe::tls_callbacks()`. Named forwarded exports are resolved opportunistically;
 ordinal forwarders are dropped, while failed named forwarders are omitted and only fail if later
 imported.
 
