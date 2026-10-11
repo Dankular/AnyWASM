@@ -286,10 +286,14 @@ unreached and its behavior has not been verified in this target.
 
 ### Current checkpoint after scheduler, CPU, and API slices
 
-The cooperative scheduler now retains and resumes guest contexts through the target's condition
-waits. Target-grounded static TLS support assigns the image's TLS slot from index zero, initializes
-private blocks from each module template, and saves/restores `TEB+0x58` per thread. The freestanding
-`static_tls_thread_test.exe` verifies template initialization and worker/main isolation.
+The cooperative scheduler and synthetic regressions cover retaining and resuming guest contexts for
+condition-variable waits. The normal bounded target run still reaches
+`kernel32!SleepConditionVariableSRW` after finite thread callbacks and stops because the blocked guest
+continuation cannot be resumed. No host GLFW window or D3D11 renderer was observed in that run; the
+higher-cap guest traces below are separate evidence. Target-grounded static TLS support assigns the
+image's TLS slot from index zero, initializes private blocks from each module template, and
+saves/restores `TEB+0x58` per thread. The freestanding `static_tls_thread_test.exe` verifies template
+initialization and worker/main isolation.
 
 The next trace stopped at `GLFWDemo.exe+0x96d8` with a read fault at `0x4`. Its sequence loaded the
 TLS vector from `GS:[0x58]`, loaded slot zero, then dereferenced a null block. After the TLS fix, the

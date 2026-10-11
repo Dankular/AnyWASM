@@ -289,10 +289,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       The Apache-2.0 GLFW Demo maze is now the selected game candidate. A separate D3D11-only `/MT`
       build succeeded; the current
       analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
-      `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Cooperative
-      scheduling now resumes the selected target beyond its condition-variable waits. After
-      target-grounded static TLS and VEXTRACTF128 support, its bounded run first reached guest
-      `ExitProcess(3)`. Target-grounded MSVC C++ exception search and second-pass unwind now reach the
+      `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Scheduler
+      regressions cover condition-variable wake/resume, but the normal bounded target run reaches
+      `SleepConditionVariableSRW` after finite thread callbacks and stops because the blocked guest
+      continuation cannot be resumed. A separate high-cap guest trace advanced beyond the waits; it
+      did not verify a host window or renderer. After target-grounded static TLS and VEXTRACTF128
+      support, a bounded trace first reached guest `ExitProcess(3)`. Target-grounded MSVC C++
+      exception search and second-pass unwind now reach the
       catch. After the observed `HKCU`/`HKLM` Direct3D 12 registry probes, a 1,000,000,000-step
       traced replay reached `CreateComputeShader`, `CSSetUnorderedAccessViews`, `Dispatch`, then
       guest `Draw` and `IDXGISwapChain2::Present` calls. Target-grounded VEX/BMI handlers and D3D11
