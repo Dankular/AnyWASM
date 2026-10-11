@@ -1,7 +1,7 @@
 {
-  "generated_utc": "2026-10-11T09:56:48Z",
+  "generated_utc": "2026-10-11T11:22:57Z",
   "analyzer": "anywasm analyze --json",
-  "anywasm_commit": "28f9f0bf3259d82fda3c0236960c4cdb7a0cd692",
+  "anywasm_commit": "54bc2a05aacf722810ad7e6c8556a9eab8599023",
   "diligentengine_commit": "efe5da2270c6edfc8b0d2e39e946b35acbeaa874",
   "diligentcore_commit": "074060cfd1db73064d7a18cf40df86af6531520c",
   "diligentsamples_commit": "03a10e15e69c5ae1738a52175ae029f3f4275a90",
@@ -16,8 +16,8 @@
   "images": [
     {
       "image": "GLFWDemo.exe",
-      "implemented_count": 141,
-      "missing_count": 63,
+      "implemented_count": 162,
+      "missing_count": 42,
       "unresolved_imports": [
         {
           "dll": "GDI32.dll",
@@ -28,9 +28,6 @@
             "ChoosePixelFormat",
             "SetDeviceGammaRamp",
             "GetDeviceGammaRamp",
-            "GetDeviceCaps",
-            "DeleteDC",
-            "CreateDCW",
             "CreateDIBSection",
             "DeleteObject",
             "CreateBitmap",
@@ -40,14 +37,12 @@
         {
           "dll": "KERNEL32.dll",
           "missing": [
-            "VerSetConditionMask",
             "FindNextFileW",
             "FindClose",
             "FindFirstFileExW",
             "EnumSystemLocalesW",
             "IsValidLocale",
             "RtlPcToFileHeader",
-            "SleepConditionVariableSRW",
             "HeapQueryInformation",
             "SetThreadExecutionState"
           ]
@@ -57,8 +52,7 @@
           "missing": [
             "DragQueryPoint",
             "DragFinish",
-            "DragQueryFileW",
-            "DragAcceptFiles"
+            "DragQueryFileW"
           ]
         },
         {
@@ -67,35 +61,20 @@
             "TrackMouseEvent",
             "GetRawInputDeviceList",
             "GetRawInputDeviceInfoA",
-            "EnumDisplayMonitors",
-            "EnumDisplayDevicesW",
             "EnumDisplaySettingsExW",
-            "EnumDisplaySettingsW",
             "ChangeDisplaySettingsExW",
-            "ToUnicode",
-            "UnregisterDeviceNotification",
-            "RegisterDeviceNotificationW",
             "RegisterRawInputDevices",
             "GetRawInputData",
             "CreateIconIndirect",
             "DestroyIcon",
             "GetClassLongPtrW",
-            "PtInRect",
-            "OffsetRect",
-            "SetRect",
             "WindowFromPoint",
-            "RemovePropW",
-            "GetPropW",
-            "SetPropW",
             "MsgWaitForMultipleObjects",
-            "MapVirtualKeyW",
             "EmptyClipboard",
             "GetClipboardData",
             "SetClipboardData",
             "CloseClipboard",
             "OpenClipboard",
-            "SetWindowPlacement",
-            "GetWindowPlacement",
             "FlashWindow",
             "GetLayeredWindowAttributes",
             "WaitMessage",
@@ -106,51 +85,7 @@
     },
     {
       "image": "GraphicsEngineD3D11_64r.dll",
-      "implemented_count": 104,
-      "missing_count": 17,
-      "unresolved_imports": [
-        {
-          "dll": "D3DCOMPILER_47.dll",
-          "missing": [
-            "D3DReflect",
-            "D3DCompile"
-          ]
-        },
-        {
-          "dll": "KERNEL32.dll",
-          "missing": [
-            "InterlockedFlushSList",
-            "RtlPcToFileHeader",
-            "FindClose",
-            "FindFirstFileExW",
-            "FindNextFileW",
-            "IsValidLocale",
-            "EnumSystemLocalesW",
-            "VerSetConditionMask",
-            "VerifyVersionInfoW",
-            "SleepConditionVariableSRW",
-            "FreeLibraryAndExitThread",
-            "HeapQueryInformation",
-            "GetExitCodeThread"
-          ]
-        },
-        {
-          "dll": "SHLWAPI.dll",
-          "missing": [
-            "PathFileExistsW"
-          ]
-        },
-        {
-          "dll": "USER32.dll",
-          "missing": [
-            "GetDesktopWindow"
-          ]
-        }
-      ]
-    },
-    {
-      "image": "Archiver_64r.dll",
-      "implemented_count": 98,
+      "implemented_count": 107,
       "missing_count": 14,
       "unresolved_imports": [
         {
@@ -170,10 +105,49 @@
             "FindNextFileW",
             "IsValidLocale",
             "EnumSystemLocalesW",
-            "SleepConditionVariableSRW",
+            "VerifyVersionInfoW",
             "FreeLibraryAndExitThread",
-            "HeapQueryInformation",
-            "GetExitCodeThread"
+            "HeapQueryInformation"
+          ]
+        },
+        {
+          "dll": "SHLWAPI.dll",
+          "missing": [
+            "PathFileExistsW"
+          ]
+        },
+        {
+          "dll": "USER32.dll",
+          "missing": [
+            "GetDesktopWindow"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "Archiver_64r.dll",
+      "implemented_count": 100,
+      "missing_count": 12,
+      "unresolved_imports": [
+        {
+          "dll": "D3DCOMPILER_47.dll",
+          "missing": [
+            "D3DReflect",
+            "D3DCompile"
+          ]
+        },
+        {
+          "dll": "KERNEL32.dll",
+          "missing": [
+            "InterlockedFlushSList",
+            "RtlPcToFileHeader",
+            "FindClose",
+            "FindFirstFileExW",
+            "FindNextFileW",
+            "IsValidLocale",
+            "EnumSystemLocalesW",
+            "FreeLibraryAndExitThread",
+            "HeapQueryInformation"
           ]
         },
         {

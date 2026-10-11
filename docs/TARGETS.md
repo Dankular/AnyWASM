@@ -21,9 +21,9 @@ are not part of this repository.
 
 ## Analyzer results
 
-Reports below were refreshed with `anywasm analyze <exe> --json` after the HLE coverage updates in
-this branch. The binaries were read from the external build tree; none were copied into this
-repository. The final analyzer source revision is recorded with the committed static-runtime report.
+Reports below were regenerated with `anywasm analyze <exe> --json` at AnyWASM commit
+`54bc2a05aacf722810ad7e6c8556a9eab8599023`. The binaries were read from the external build tree;
+none were copied into this repository. The static-runtime report records the same analyzer revision.
 
 - `D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial01_HelloTriangle\Release\Tutorial01_HelloTriangle.exe`
 - `D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial03_Texturing\Release\Tutorial03_Texturing.exe`
