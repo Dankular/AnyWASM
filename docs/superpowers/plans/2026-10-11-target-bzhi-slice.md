@@ -12,20 +12,26 @@ in `crates/anywasm-cpu/tests/vex_movups.rs`.
 
 ### Task 1: Add decoder and execution regressions
 
-- [ ] Assert the exact target bytes decode with ModRM.reg destination, SIB memory source, and
+- [x] Assert the exact target bytes decode with ModRM.reg destination, SIB memory source, and
       VEX.vvvv index register.
-- [ ] Test index 0, 4, 31, 32, and a value above 32, plus all documented flags and GPR zero-extension.
-- [ ] Confirm focused tests fail on the unsupported current decode path.
+- [x] Test index 0, 4, 31, 32, and a value above 32, plus all documented flags and GPR zero-extension.
+- [x] Confirm focused tests fail on the unsupported current decode path.
 
 ### Task 2: Implement target form
 
-- [ ] Add `Op::Bzhi`, decode only VEX.LZ.0F38.W0 F5, and use existing operand helpers.
-- [ ] Execute low-eight-bit index semantics, memory reads, and documented flag behavior.
-- [ ] Keep W1 and unrelated VEX BMI2 encodings unsupported.
-- [ ] Run focused tests and neighboring ANDN/SHLX/SHRX regressions.
+- [x] Add `Op::Bzhi`, decode only VEX.LZ.0F38.W0 F5, and use existing operand helpers.
+- [x] Execute low-eight-bit index semantics, memory reads, and documented flag behavior.
+- [x] Keep W1 and unrelated VEX BMI2 encodings unsupported.
+- [x] Run focused tests and neighboring ANDN/SHLX/SHRX regressions.
 
 ### Task 3: Verify target progress
 
-- [ ] Run `cargo test -p anywasm-cpu`.
-- [ ] Rerun the selected target at 30,000,000 guest instructions with import tracing.
-- [ ] Record the actual stop and distinguish guest progress from real rendering/game acceptance.
+- [x] Run `cargo test -p anywasm-cpu`.
+- [x] Rerun the selected target at 30,000,000 guest instructions with import tracing.
+- [x] Record the actual stop and distinguish guest progress from real rendering/game acceptance.
+
+## Reconciliation (2026-10-11)
+
+Decoder/execution regressions pass in the workspace suite. Linux CI host-differential coverage checks
+the target memory form at indexes 0, 1, 31, 32, 33, 0x101, and 255. The target trace and bounded
+acceptance limits are recorded in `docs/TARGETS.md`.

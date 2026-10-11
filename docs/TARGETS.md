@@ -527,16 +527,33 @@ are saved at [after W](images/glfwdemo-first-frame.after-w.png) and
 
 ![GLFW Demo after Tab regenerates the maze](images/glfwdemo-first-frame.after-tab.png)
 
-This verifies one movement direction and map regeneration in the selected target. It is not compared
-with native output; the target's compute UAV values are not independently read back, other movement
-directions and turning are unverified, and no full gameplay or real-game acceptance pass is claimed.
-The default 250,000-instruction worker slice still cannot resume the synchronous guest callback; the
-larger slice is diagnostic test routing only.
+### Deterministic native comparison
+
+For a matched maze layout, a temporary D3D11-only `/MT` build used maze seed 1 and teleport seed 2;
+the source edit was restored after the build. The native D3D11 run rendered at 1024x768. A browser
+replay of the same bundle rendered at 1040x807, with 6 draws, 1 compute dispatch, 6 initial presents,
+12 passes, 2 pipelines, and no WebGPU validation errors. The native and browser captures are checked
+in as [native](images/glfwdemo-native-seed1.png) and
+[WebGPU](images/glfwdemo-webgpu-seed1.png) images.
+
+The capture hashes are SHA-256 `FF9CFF060A7179E9D489F13A76C6F9AA46DE3EDB88B9C1E9FAE163FFD4C07A3C`
+(native) and `9007C1DFD3ACEB3EA2776B653C6C46BAA45106BEFC57614C587194F878B58C84` (WebGPU). Centered
+crop comparison with FFmpeg gave 40.936 dB PSNR for 256x256 crops (browser origin 392,275; native
+origin 384,256), and 35.014 dB PSNR with 0.897977 SSIM for the 128x128 scene-focus crops (browser
+origin 456,339; native origin 448,320). Visual inspection confirms the same seed-1 wall layout,
+player, and teleport. These are bounded visual comparisons: the backbuffer sizes and capture phases
+differ, and they do not establish pixel equivalence, independently validate the target's compute
+UAV values, or verify gameplay.
+
+This verifies one movement direction and map regeneration in the selected target. The target's
+compute UAV values are not independently read back, other movement directions and turning are
+unverified, and no full gameplay or real-game acceptance pass is claimed. The default
+250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
+is diagnostic test routing only.
 
 ## Next evidence needed
 
-- Compare the captured WebGPU frame with a native Diligent render from a matching state and
-  independently inspect the compute UAV output. Verify movement in all directions and turning, then
+- Independently inspect the compute UAV output. Verify movement in all directions and turning, then
   complete a controlled playthrough before making a gameplay acceptance claim.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.

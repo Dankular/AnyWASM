@@ -35,11 +35,11 @@ return boundary; timer deadlines use a process-wide virtual clock.
 
 **Files:** `crates/anywasm-rt/src/process.rs`, `crates/anywasm-rt/tests/run_exe.rs`
 
-- [ ] Add a `GuestThread` context holding complete `Cpu`, stack bounds, last error, TLS/FLS, and
+- [x] Add a `GuestThread` context holding complete `Cpu`, stack bounds, last error, TLS/FLS, and
   Ready/Running/Blocked/Exited state.
-- [ ] Add save/restore helpers that switch the active thread's TEB fields and TLS/FLS maps without
+- [x] Add save/restore helpers that switch the active thread's TEB fields and TLS/FLS maps without
   changing shared guest memory or module state.
-- [ ] Add a guest regression that switches between two finite threads and proves full context and
+- [x] Add a guest regression that switches between two finite threads and proves full context and
   TLS isolation.
 
 ### Task 2: Ready queue and resumable thread callbacks
@@ -47,25 +47,25 @@ return boundary; timer deadlines use a process-wide virtual clock.
 **Files:** `crates/anywasm-rt/src/process.rs`, `crates/anywasm-rt/src/hle/kernel32.rs`,
 `crates/anywasm-rt/tests/run_exe.rs`, `fixtures/thread_test.c`, `fixtures/build.sh`
 
-- [ ] Replace synchronous `CreateThread` callback execution with a saved guest context and ready
+- [x] Replace synchronous `CreateThread` callback execution with a saved guest context and ready
   queue entry; preserve initial suspend and `ResumeThread` behavior.
-- [ ] Add an internal scheduler-yield signal handled by `Process::run` after the HLE thunk has
+- [x] Add an internal scheduler-yield signal handled by `Process::run` after the HLE thunk has
   returned to guest code.
-- [ ] Detect guest thread return and `ExitThread`, store its exit code, and wake thread-handle
+- [x] Detect guest thread return and `ExitThread`, store its exit code, and wake thread-handle
   waiters.
-- [ ] Add an instruction quantum and process-wide retired-instruction accounting.
-- [ ] Verify existing finite-thread behavior and a guest thread that yields/resumes multiple times.
+- [x] Add an instruction quantum and process-wide retired-instruction accounting.
+- [x] Verify existing finite-thread behavior and a guest thread that yields/resumes multiple times.
 
 ### Task 3: Waitable objects and deadlines
 
 **Files:** `crates/anywasm-rt/src/process.rs`, `crates/anywasm-rt/src/hle/kernel32.rs`,
 `crates/anywasm-rt/src/hle/mod.rs`, `crates/anywasm-rt/tests/run_exe.rs`, guest fixtures.
 
-- [ ] Model event, mutex, and semaphore state in their handles; implement signal/release operations.
-- [ ] Implement blocking `WaitForSingleObject` and `WaitForMultipleObjects` with wait-any/all,
+- [x] Model event, mutex, and semaphore state in their handles; implement signal/release operations.
+- [x] Implement blocking `WaitForSingleObject` and `WaitForMultipleObjects` with wait-any/all,
   timeout-zero, finite timeout, and infinite timeout behavior.
-- [ ] Implement `Sleep` and `SwitchToThread` as scheduler operations driven by virtual time.
-- [ ] Add guest cases for auto/manual-reset events, semaphore counts, waits on thread exit, and
+- [x] Implement `Sleep` and `SwitchToThread` as scheduler operations driven by virtual time.
+- [x] Add guest cases for auto/manual-reset events, semaphore counts, waits on thread exit, and
   timeout results.
 
 ### Task 4: Locks and condition variables
@@ -73,18 +73,27 @@ return boundary; timer deadlines use a process-wide virtual clock.
 **Files:** `crates/anywasm-rt/src/process.rs`, `crates/anywasm-rt/src/hle/kernel32.rs`,
 `crates/anywasm-rt/tests/run_exe.rs`, guest fixtures.
 
-- [ ] Track recursive critical-section ownership and SRW shared/exclusive ownership by guest
+- [x] Track recursive critical-section ownership and SRW shared/exclusive ownership by guest
   address; block contending threads and wake them on release.
-- [ ] Implement condition-variable wait queues; release and reacquire the requested lock around a
+- [x] Implement condition-variable wait queues; release and reacquire the requested lock around a
   wait, with wake-one, wake-all, and timeout behavior.
-- [ ] Add the worker-waits/worker-wakes regression and cover lock reacquisition after both wake and
+- [x] Add the worker-waits/worker-wakes regression and cover lock reacquisition after both wake and
   timeout.
 
 ### Task 5: Target and host verification
 
 **Files:** `docs/TARGETS.md`, `docs/STATUS.md`, `CLAUDE.md`, `test/wasm_smoke.mjs`.
 
-- [ ] Run `cargo test --workspace` and `node test/wasm_smoke.mjs` and record complete results.
-- [ ] Run the selected static-CRT GLFW Demo with a bounded instruction budget; record the next
+- [x] Run `cargo test --workspace` and `node test/wasm_smoke.mjs` and record complete results.
+- [x] Run the selected static-CRT GLFW Demo with a bounded instruction budget; record the next
   reached import/stop and whether a host window, renderer, or frame was actually observed.
-- [ ] Update the runtime task queue only for behaviors covered by the tests and target trace.
+- [x] Update the runtime task queue only for behaviors covered by the tests and target trace.
+
+## Reconciliation (2026-10-11)
+
+The planned scheduler behaviors are implemented and covered by `cargo test --workspace` and
+`node test/wasm_smoke.mjs` on this revision. The bounded selected-target trace reaches the D3D11
+compute/draw/present path. Remaining limits are nested synchronous callback scheduling, alertable
+waits, static TLS images loaded after guest-thread creation, and suspension/resumption of a
+synchronous callback across the normal browser worker slice. No host-renderer or gameplay acceptance
+is claimed.
