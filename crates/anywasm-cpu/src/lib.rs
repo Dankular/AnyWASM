@@ -2,6 +2,7 @@
 pub mod cpu;
 pub mod decode;
 pub mod exec;
+pub mod jit;
 pub mod sse;
 pub mod x87;
 pub mod mem;

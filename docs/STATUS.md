@@ -32,8 +32,17 @@
   descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2).
 - Cached-block execution benchmark (Node 24.16.0, Windows x64, release WASM; two runs, six rounds
   per workload): median 32.2 M instr/s for `compute.exe`, 26.1 for call-heavy, 28.1 for
-  memory-heavy, and 38.5 for SSE-float. The executor translates NOP-like, MOV and LEA operations;
-  other instructions use the interpreter. The benchmark output is retained per commit by WASM CI.
+  memory-heavy, and 38.5 for SSE-float. The cached executor translates NOP-like, MOV and LEA
+  operations; other instructions use the interpreter. These figures predate dynamic WASM emission
+  and are not performance measurements of the emitted path. The benchmark output is retained per
+  commit by WASM CI.
+- First emitted-path sample (`node test/bench.mjs`, Node 24.16.0/Windows x64, one run with three
+  rounds): medians were 22.9 M instr/s compute, 15.0 call-heavy, 25.5 memory-heavy, and 38.5
+  SSE-float. The benchmark now prints emitted-call/module/fallback counts: compute exercised 60,007
+  emitted calls across 16 modules; call-heavy exercised 500,000 calls from one module; memory/SSE
+  did not enter the supported subset. This is not an apples-to-apples comparison with the earlier
+  six-round/two-run baseline. It shows no demonstrated speedup yet; the frequent host trampoline
+  cost is a likely contributor and needs isolated measurement or batching.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 
@@ -43,9 +52,17 @@
 - Not decoded: VEX/EVEX (AVX, BMI), MMX, AES/PCLMUL, 16-bit/segment modes. CPUID hides them.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
-- **Performance:** the process run loop executes cached blocks with a translated NOP/MOV/LEA subset;
-  every other instruction falls back to the existing interpreter. No dynamic WASM code is emitted
-  yet. Real-game requirements remain unmeasured; the 10–50x speedup target is still an estimate.
+- **Dynamic WASM emission (first verified slice):** at a block entry, Rust emits a module for a
+  leading sequence of 32-bit/64-bit register-immediate MOVs. The module imports the main runtime's
+  memory and runs through `anywasm.run_emitted_block` in `web/anywasm.js`. It mutates a copied
+  160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC); Rust commits only a valid exact
+  instruction count. Compile/trap/invalid-count failures retry through the interpreter. The JS
+  wrapper caches up to 256 generated modules and validates bytes if an ID is reused. Rust tests,
+  `test/wasm_smoke.mjs` (including generated execution and one-instruction budgets), and the
+  headless Chrome worker suite pass. This is a mechanism prototype, not a throughput win: no
+  register-register/partial-width MOV, NOP, LEA, memory operations, arithmetic, SIMD, or control
+  flow is emitted. Full JIT/interpreter state differential, cache-pressure and CSP checks, browser
+  engine matrix, and real-game performance remain open.
 - No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
   no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and

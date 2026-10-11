@@ -65,33 +65,37 @@ on the call-heavy, memory-heavy and SSE-float fixtures (`test/bench.mjs`, releas
 I have **not** measured what a real game needs; the 10–50x figure in STATUS.md is an estimate.
 Measure first (e.g. instructions per frame of a representative program) before fixing a target.
 
-Design (partial implementation — decoded blocks execute a small translated subset with interpreter
-fallback; dynamic WASM code generation is not implemented):
+Design (partial implementation; the verified dynamic-emission scope is a leading run of 32-bit or
+64-bit register-immediate MOV instructions at a block entry):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [x] **Block discovery**: decode and cache basic blocks keyed by guest RIP. `code_epoch` invalidates
       cached blocks on executable-memory writes and protection changes.
-- [ ] **WASM emission**: emit a WASM module per block (or per trace) from Rust, instantiate via a
-      host import (`WebAssembly.Module`/`Instance` from JS; the Rust core runs *inside* WASM, so
-      compiled blocks must be called through an imported trampoline / `call_indirect` table).
-      Need to decide and measure: per-block module instantiate cost vs batching blocks.
-- [ ] **State model**: guest registers in a linear-memory struct (or WASM locals within a block,
-      spilled at block exit); lazy flags (compute flags only when consumed) — the interpreter's
-      current flag handling must be read before choosing.
+- [x] **WASM emission (MVP)**: Rust emits a separate module for the supported MOV prefix; JS compiles
+      and instantiates it through the `anywasm.run_emitted_block` import. Generated modules import
+      the runtime's exported memory. The JS side caches up to 256 modules and checks bytes when a
+      process-local module ID is reused. Module batching and its performance trade-offs remain open.
+- [~] **State model (MVP)**: generated code receives a 160-byte `repr(C)` snapshot containing GPRs,
+      RIP, RFLAGS, retired count, and TSC. It writes GPRs, RIP, count, and TSC; RFLAGS pass through
+      unchanged. Rust commits the snapshot only when the returned retired count matches the budget
+      and emitted prefix. Register-local allocation and lazy flags remain open.
 - [ ] **Memory access**: fast path through the existing 3-level page table/TLB, with an inline TLB
       probe in generated code and a slow-path call for misses/faults.
 - [ ] **Exits**: direct block chaining for known targets; indirect jumps via hash lookup;
       `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`,
       `yield_request`, step limit/icount accounting must all keep working.
-- [x] **Fallback**: instructions outside the translated NOP/MOV/LEA subset execute through the
-      existing interpreter; unsupported instructions are never silently translated.
-- [ ] **Correctness gate**: extend `tests/diff.rs` to run each corpus entry through the JIT as well
-      as the interpreter and the host CPU; add a block-level differential (run whole fixtures with
-      JIT on/off and compare registers/memory/output).
+- [x] **Fallback**: only 32-bit and 64-bit GPR-immediate MOVs at a block's beginning are emitted.
+      Partial-width/register-register MOVs and all remaining instructions use the interpreter.
+      Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
+- [~] **Correctness checks**: Rust emitter tests cover prefix limits and immediate-width semantics;
+      the WASM smoke runs `compute.exe`, checks its expected output, confirms generated executions,
+      and checks `run(1)` retirement limits. Full JIT/interpreter/host differential and whole-process
+      register/memory comparisons are still open.
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
-- [ ] Browser constraints to check: JIT in the worker, CSP, `WebAssembly.compile` of many small
-      modules, memory growth interaction with `Memory.buffer` detachment.
+- [~] **Browser check**: the rebuilt runtime passes the headless Chrome worker, input, and WebGPU
+      suite. CSP behavior, module-cache pressure, memory-growth stress, and other browser engines
+      remain untested.
 
 ## 2. Windows runtime coverage
 - [ ] **Threads**: `CreateThread`, `_beginthreadex`, TLS per thread, critical sections/events/

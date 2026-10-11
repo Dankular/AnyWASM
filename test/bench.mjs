@@ -1,4 +1,4 @@
-// Interpreter throughput under WebAssembly (Node/V8). Prints guest instructions per second.
+// WASM executor throughput under Node/V8, including generated-block trampoline activity.
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,7 +35,8 @@ try {
       if (r.status !== Status.EXITED || r.exitCode !== 0) {
         throw new Error(`${name} did not exit cleanly: status=${r.status}, exit=${r.exitCode}, message=${r.message}`);
       }
-      console.log(`  round ${round}: status=${r.status} exit=${r.exitCode} ${n.toLocaleString()} instr in ${dt.toFixed(2)}s = ${(n / dt / 1e6).toFixed(1)} M instr/s`);
+      const jit = w.jitStats;
+      console.log(`  round ${round}: status=${r.status} exit=${r.exitCode} ${n.toLocaleString()} instr in ${dt.toFixed(2)}s = ${(n / dt / 1e6).toFixed(1)} M instr/s; emitted=${jit.executions} modules=${jit.compilations} fallback=${jit.fallbacks}`);
     }
   }
 } finally {

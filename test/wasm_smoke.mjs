@@ -27,7 +27,7 @@ async function runExe(exe, extra = []) {
   w.load(pack(exe, extra));
   let out = '', err = '';
   const r = w.runToEnd({ onOutput: (s, t) => (s === 'stdout' ? (out += t) : (err += t)) });
-  return { ...r, out, err, instr: w.instructions() };
+  return { ...r, out, err, instr: w.instructions(), jitStats: w.jitStats };
 }
 
 let r = await runExe('fixtures/hello.exe');
@@ -35,6 +35,19 @@ check('hello.exe exits 0 with greeting', r.status === Status.EXITED && r.exitCod
 
 r = await runExe('fixtures/compute.exe');
 check('compute.exe (heap, SSE2, indirect calls)', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('primes<20000=2262') && r.out.includes('fp=609') && r.out.includes('gpa=ok'), JSON.stringify(r));
+check('compute.exe executes generated WebAssembly blocks', r.jitStats.executions > 0 && r.jitStats.compilations > 0 && r.jitStats.fallbacks === 0, JSON.stringify(r.jitStats));
+
+const budgetWasm = await AnyWasm.create(wasm);
+budgetWasm.load(pack('fixtures/compute.exe'));
+let budgetOkay = true;
+for (let i = 0; i < 50_000 && budgetWasm.jitStats?.executions === 0; i++) {
+  const before = budgetWasm.instructions();
+  budgetWasm.run(1);
+  const retired = budgetWasm.instructions() - before;
+  if (retired < 0 || retired > 1) { budgetOkay = false; break; }
+}
+check('generated MOV blocks honor a one-instruction budget', budgetWasm.jitStats?.executions > 0 && budgetWasm.jitStats?.fallbacks === 0 && budgetOkay,
+  JSON.stringify({ jitStats: budgetWasm.jitStats, instructions: budgetWasm.instructions(), budgetOkay }));
 
 r = await runExe('fixtures/crt_test.exe', ['--args', '"C:\\crt_test.exe" first "second arg"']);
 // Ground truth: the same C source compiled and run natively (it exits 7 by design).

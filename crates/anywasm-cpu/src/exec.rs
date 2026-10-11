@@ -1049,6 +1049,8 @@ pub struct DecodedBlock {
 pub struct BlockCache {
     code_epoch: Option<u64>,
     blocks: HashMap<u64, CachedBlock>,
+    #[cfg(target_arch = "wasm32")]
+    next_jit_id: u32,
 }
 
 const MAX_CACHED_BLOCKS: usize = 1024;
@@ -1056,6 +1058,8 @@ const MAX_CACHED_BLOCKS: usize = 1024;
 struct CachedBlock {
     decoded: DecodedBlock,
     instructions: Vec<CachedInstruction>,
+    #[cfg(target_arch = "wasm32")]
+    emitted: Option<crate::jit::EmittedBlock>,
 }
 
 #[derive(Clone, Copy)]
@@ -1092,6 +1096,8 @@ impl BlockCache {
         Self {
             code_epoch: None,
             blocks: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            next_jit_id: 1,
         }
     }
 
@@ -1120,14 +1126,28 @@ impl BlockCache {
         }
 
         let block = self.get_cached_block(cpu.rip, mem)?;
-        let mut executed = 0;
-        for cached in &block.instructions {
+        #[cfg(target_arch = "wasm32")]
+        let (mut executed, start_index, interpreter_only) = match block.emitted.as_ref() {
+            Some(emitted) => match emitted.execute(cpu, max_instructions) {
+                Some(executed) => (executed as u64, emitted.instruction_count(), true),
+                None => (0, 0, true),
+            },
+            None => (0, 0, false),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let (mut executed, start_index, interpreter_only) = (0, 0, false);
+
+        for cached in block.instructions.iter().skip(start_index) {
             if executed == max_instructions {
                 break;
             }
             let before_rip = cpu.rip;
             let before_epoch = mem.code_epoch;
-            execute_cached(cpu, mem, cached)?;
+            if interpreter_only {
+                exec(cpu, mem, &cached.inst)?;
+            } else {
+                execute_cached(cpu, mem, cached)?;
+            }
             executed += 1;
 
             let sequential_rip = before_rip.wrapping_add(cached.inst.len as u64);
@@ -1157,9 +1177,21 @@ impl BlockCache {
                 .copied()
                 .map(translate_instruction)
                 .collect();
+            #[cfg(target_arch = "wasm32")]
+            let emitted = crate::jit::emit_register_immediate_mov_block(
+                self.next_jit_id,
+                decoded.start,
+                &decoded.instructions,
+            );
+            #[cfg(target_arch = "wasm32")]
+            if emitted.is_some() {
+                self.next_jit_id = self.next_jit_id.wrapping_add(1).max(1);
+            }
             let block = CachedBlock {
                 decoded,
                 instructions,
+                #[cfg(target_arch = "wasm32")]
+                emitted,
             };
             self.blocks.insert(start, block);
         }

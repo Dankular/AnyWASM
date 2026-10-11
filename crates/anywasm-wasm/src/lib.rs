@@ -3,6 +3,8 @@
 //! One process per module instance. Typical host sequence:
 //! `aw_alloc` -> copy bundle bytes in -> `aw_load` -> loop `aw_run(steps)` while it returns 0,
 //! draining `aw_stdout_*` / `aw_stderr_*` between calls.
+//! The module imports `anywasm.run_emitted_block`; `web/anywasm.js` supplies the host trampoline
+//! that compiles emitted blocks against this module's exported memory.
 //!
 //! Status codes from `aw_run`: 0 running (step budget used), 1 exited, 2 stopped at an
 //! unimplemented import, 3 guest crash, 4 a frame was presented (drain the GPU stream, then call

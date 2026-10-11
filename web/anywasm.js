@@ -3,11 +3,21 @@
 
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
+const MAX_JIT_MODULES = 256;
+
+function bytesEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0 }) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
+    /** Counts calls routed through the dynamic WebAssembly trampoline. */
+    this.jitStats = jitStats;
   }
 
   /** Instantiate from raw WASM bytes (Uint8Array/ArrayBuffer) or a Response/URL string. */
@@ -15,8 +25,38 @@ export class AnyWasm {
     let bytes = source;
     if (typeof source === 'string') bytes = await (await fetch(source)).arrayBuffer();
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
-    const { instance } = await WebAssembly.instantiate(bytes, {});
-    return new AnyWasm(instance);
+    let instance;
+    const modules = new Map();
+    const jitStats = { compilations: 0, executions: 0, fallbacks: 0 };
+    const imports = {
+      anywasm: {
+        run_emitted_block(id, modulePtr, moduleLen, statePtr, budget) {
+          try {
+            const memory = instance.exports.memory;
+            const moduleView = new Uint8Array(memory.buffer, modulePtr >>> 0, moduleLen >>> 0);
+            let cached = modules.get(id >>> 0);
+            if (!cached || !bytesEqual(cached.bytes, moduleView)) {
+              const moduleBytes = moduleView.slice();
+              const module = new WebAssembly.Module(moduleBytes);
+              const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
+              cached = { bytes: moduleBytes, run: emitted.exports.run };
+              modules.set(id >>> 0, cached);
+              if (modules.size > MAX_JIT_MODULES) modules.delete(modules.keys().next().value);
+              jitStats.compilations++;
+            }
+            const executed = cached.run(statePtr, budget);
+            if (executed > 0 && executed <= (budget >>> 0)) jitStats.executions++;
+            return executed;
+          } catch {
+            // The Rust side passed a copied CPU state, so the interpreter can retry safely.
+            jitStats.fallbacks++;
+            return -1;
+          }
+        },
+      },
+    };
+    ({ instance } = await WebAssembly.instantiate(bytes, imports));
+    return new AnyWasm(instance, jitStats);
   }
 
   /** Load an .awb bundle. Throws with the loader's message on failure. */
