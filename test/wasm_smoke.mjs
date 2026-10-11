@@ -85,7 +85,7 @@ async function runBundle(bundle, runtimeOptions = {}) {
   w.load(bundle);
   let out = '', err = '';
   const r = w.runToEnd({ onOutput: (s, t) => (s === 'stdout' ? (out += t) : (err += t)) });
-  return { ...r, out, err, instr: w.instructions(), jitStats: w.jitStats };
+  return { ...r, out, err, instr: w.instructions(), retiredInstr: w.retiredInstructions?.(), jitStats: w.jitStats };
 }
 
 async function runExe(exe, extra = [], runtimeOptions = {}) {
@@ -183,6 +183,9 @@ check('LCMapStringEx handles count-only sizing and NUL-terminated case mapping',
 r = await runExe('fixtures/thread_sync_test.exe');
 check('cooperative guest threads resume condition waiters under WASM',
   r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+check('threaded WASM retired count includes worker-thread instructions',
+  Number.isFinite(r.retiredInstr) && r.retiredInstr > r.instr,
+  JSON.stringify({ activeThread: r.instr, processTotal: r.retiredInstr }));
 
 r = await runExe('fixtures/static_tls_thread_test.exe');
 check('static PE TLS initializes and remains isolated across WASM guest threads',

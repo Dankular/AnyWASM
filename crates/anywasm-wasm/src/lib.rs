@@ -133,6 +133,12 @@ pub extern "C" fn aw_icount() -> u64 {
     state().map(|s| s.p.cpu.icount).unwrap_or(0)
 }
 
+/// Retired guest instruction count across all guest threads.
+#[no_mangle]
+pub extern "C" fn aw_retired_instructions() -> u64 {
+    state().map(|s| s.p.retired_instructions).unwrap_or(0)
+}
+
 macro_rules! buf_api {
     ($ptr:ident, $len:ident, $clear:ident, $field:ident) => {
         #[no_mangle]

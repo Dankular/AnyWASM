@@ -124,6 +124,7 @@ export class AnyWasm {
   }
   exitCode() { return this.x.aw_exit_code(); }
   instructions() { return Number(this.x.aw_icount()); }
+  retiredInstructions() { return Number(this.x.aw_retired_instructions?.() ?? this.x.aw_icount()); }
 
   pushStdin(bytes) {
     const n = bytes.byteLength;
