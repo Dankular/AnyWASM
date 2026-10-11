@@ -104,9 +104,9 @@ generation and execution are not implemented):
       guessed. Use the per-import report to prioritise.
 - [ ] **GDI / gdi32**, common controls, message boxes, clipboard (as needed by real programs).
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
-- [ ] **Input devices**: keyboard/mouse → window messages is implemented but has **no automated
-      interaction test**; add one (Playwright key/mouse events → guest observes). Add
-      XInput (Gamepad API), DirectInput, raw input, cursor capture/pointer lock.
+- [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
+      `WM_LBUTTONDOWN` messages reach the guest; add XInput (Gamepad API), DirectInput, raw input,
+      cursor capture/pointer lock.
 - [ ] **Registry, COM beyond D3D/DXGI, shell/known-folders, networking (winsock → WebSocket/
       fetch relay)**, timers/QueryPerformanceCounter accuracy, file dialogs, persistent VFS
       (IndexedDB/OPFS) — verify what is already implemented before starting each.

@@ -31,14 +31,15 @@ function decodePng(buf) {
 
 import { spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const server = spawn('node', ['web/serve.mjs', '8099'], { cwd: new URL('../../', import.meta.url).pathname, stdio: 'ignore' });
+const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: fileURLToPath(new URL('../../', import.meta.url)), stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 800));
 let failures = 0;
 const check = (n, ok, d = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}${ok ? '' : ' :: ' + d}`); if (!ok) failures++; };
 
 const dir = '/opt/pw-browsers';
-const versioned = readdirSync(dir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
+const versioned = process.env.CHROMIUM ? undefined : readdirSync(dir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
 const exe = process.env.CHROMIUM || (versioned ? `${dir}/${versioned}/chrome-linux/chrome` : undefined);
 const browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan'] });
 try {
@@ -60,6 +61,33 @@ try {
   check('crt_test.exe full output in the page', t2.includes('sscanf=3 x+y=46 word=hello') && t2.includes('atexit handler ran') && t2.includes('arg2=second arg'), t2);
   check('crt_test.exe stderr shown', t2.includes('to stderr'), t2);
   check('crt_test.exe exit code 7', (await page.getAttribute('#stat', 'data-exit')) === '7');
+
+  // ── Browser key + mouse events must reach the guest window procedure ──
+  await page.goto('http://localhost:8099/index.html?run=input_test');
+  await page.waitForFunction(() => {
+    const term = document.querySelector('#term')?.textContent || '';
+    return term.includes('guest input ready') || document.getElementById('stat').dataset.status !== undefined;
+  }, null, { timeout: 20000 });
+  const inputReady = await page.evaluate(() => document.querySelector('#term').textContent.includes('guest input ready'));
+  const inputReadyDiag = await page.evaluate(() => ({ term: document.querySelector('#term').textContent, stat: document.getElementById('stat').textContent, caps: document.getElementById('caps').textContent }));
+  check('input fixture reached its message loop', inputReady, JSON.stringify(inputReadyDiag));
+  if (inputReady) {
+    // Input delivery is independent of WebGPU; expose the canvas in browsers without a GPU adapter.
+    await page.locator('#screen').evaluate((canvas) => { canvas.hidden = false; });
+    await page.locator('#screen').focus();
+    await page.keyboard.press('a');
+    await page.locator('#screen').click({ position: { x: 320, y: 240 } });
+    await page.waitForFunction(() => {
+      const term = document.querySelector('#term')?.textContent || '';
+      return term.includes('guest input complete') || document.getElementById('stat').dataset.status !== undefined;
+    }, null, { timeout: 10000 }).catch(() => {});
+  }
+  const inputText = await page.textContent('#term');
+  const inputStat = await page.textContent('#stat');
+  check('guest observed WM_KEYDOWN(A)', inputText.includes('guest saw keydown A'), inputText);
+  check('guest observed WM_LBUTTONDOWN', inputText.includes('guest saw left-down'), inputText);
+  check('guest observed both input messages', inputText.includes('guest input complete'), inputText);
+  check('guest input fixture exited zero', /exited \(exit code 0\)/.test(inputStat), inputStat);
 
   // ── Direct3D 11 triangle: replay the program's GPU stream with WebGPU and read the pixels back ──
   await page.goto('http://localhost:8099/index.html?run=d3d11_triangle&test=1');
