@@ -1,0 +1,8 @@
+[package]
+name = "anywasm-pe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dependency-free PE32/PE32+ parser (headers, imports, delay-imports, exports, relocations, TLS)"
+
+[dependencies]

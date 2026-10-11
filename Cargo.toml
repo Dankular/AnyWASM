@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/anywasm-pe",
+    "crates/anywasm-cpu",
+    "crates/anywasm-rt",
+    "crates/anywasm-cli",
+    "crates/anywasm-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[workspace.dependencies]
+anywasm-cpu   = { path = "crates/anywasm-cpu" }
+anywasm-pe    = { path = "crates/anywasm-pe" }
+anywasm-rt    = { path = "crates/anywasm-rt" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
