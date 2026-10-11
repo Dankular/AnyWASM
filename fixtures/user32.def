@@ -9,6 +9,7 @@ ShowWindow
 UpdateWindow
 IsWindowUnicode
 GetCapture
+GetDlgItem
 SetCapture
 ReleaseCapture
 GetMessageA

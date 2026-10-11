@@ -37,6 +37,7 @@ pub const WM_MOUSEWHEEL: u64 = 0x020a;
 
 const PM_REMOVE: u64 = 1;
 const HWND_BASE: u64 = 0x0001_0010;
+const WS_CHILD: u32 = 0x4000_0000;
 
 #[derive(Clone)]
 pub struct Class {
@@ -58,6 +59,7 @@ pub struct Window {
     pub style: u32,
     pub user_data: u64,
     pub parent: u64,
+    pub control_id: u32,
     pub unicode: bool,
     pub needs_paint: bool,
     pub gpu_id: u32,
@@ -247,6 +249,15 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             })
         },
         "GetParent" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.parent).unwrap_or(0)),
+        "GetDlgItem" => |p| {
+            let (parent, id) = (p.arg(0), p.arg(1) as u32);
+            if !p.extra.win.windows.contains_key(&parent) {
+                return Ok(0);
+            }
+            Ok(p.extra.win.windows.iter().find_map(|(&h, w)| {
+                (w.parent == parent && w.style & WS_CHILD != 0 && w.control_id == id).then_some(h)
+            }).unwrap_or(0))
+        },
         "GetDC" | "GetWindowDC" => |p| Ok(0x7000_0000 + p.arg(0)),
         "ReleaseDC" | "DeleteDC" => |_| Ok(1),
         "BeginPaint" => |p| {
@@ -385,7 +396,7 @@ fn register_class(p: &mut Process, wide: bool, ex: bool) -> R {
 fn create_window(p: &mut Process, wide: bool) -> R {
     let (ex_style, cls, title, style) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3) as u32);
     let (x, y, w, h) = (p.arg(4) as i32, p.arg(5) as i32, p.arg(6) as i32, p.arg(7) as i32);
-    let (parent, _menu, inst, param) = (p.arg(8), p.arg(9), p.arg(10), p.arg(11));
+    let (parent, menu, inst, param) = (p.arg(8), p.arg(9), p.arg(10), p.arg(11));
     let cname = if cls < 0x10000 && cls >= 0xc000 { p.extra.win.atoms.get(&(cls as u16)).cloned().unwrap_or_default() } else { lc(&class_name(p, cls, wide)?) };
     let Some(class) = p.extra.win.classes.get(&cname).cloned().or_else(|| builtin_class(&cname)) else {
         p.set_last_error(1407); // ERROR_CANNOT_FIND_WND_CLASS
@@ -398,7 +409,8 @@ fn create_window(p: &mut Process, wide: bool) -> R {
     p.extra.win.next = p.extra.win.next.max(HWND_BASE) + 0x10;
     let hwnd = p.extra.win.next;
     let gpu_id = p.extra.gpu.new_id();
-    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, visible: false, style, user_data: 0, parent, unicode: class.unicode, needs_paint: false, gpu_id });
+    let control_id = if parent != 0 && style & WS_CHILD != 0 { menu as u32 } else { 0 };
+    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, visible: false, style, user_data: 0, parent, control_id, unicode: class.unicode, needs_paint: false, gpu_id });
     if p.extra.win.main_window == 0 && parent == 0 {
         p.extra.win.main_window = hwnd;
         p.extra.win.focus = hwnd;

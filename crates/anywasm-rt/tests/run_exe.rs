@@ -88,6 +88,13 @@ fn is_window_unicode_reports_the_window_class_character_mode() {
 }
 
 #[test]
+fn get_dlg_item_returns_direct_child_by_control_id() {
+    let (stop, out, _, _) = run("getdlgitem_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout so far: {out:?}");
+    assert_eq!(out, "");
+}
+
+#[test]
 fn reloc_exe_follows_relocated_pointer_tables() {
     let (stop, out, _, _) = run("reloc.exe");
     assert_eq!(stop, Stop::Exit(0));
