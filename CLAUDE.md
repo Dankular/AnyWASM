@@ -315,9 +315,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       loop. Single-file/static-site export remains open. These fixtures do not satisfy the
       real-target acceptance gate above.
 - [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior, Firefox
-      hello/triangle execution, and WebKit hello plus its OffscreenCanvas limitation are recorded in
-      `docs/BROWSER_SUPPORT.md`. The D3D11 triangle canvas blit is screenshot-checked only in
-      Chromium. Large-game memory (4 GB / `memory64`) and asset streaming remain unverified. The
+      hello plus version-specific graphics availability, and WebKit hello plus its OffscreenCanvas
+      limitation are recorded in `docs/BROWSER_SUPPORT.md`. Firefox 141.0 previously completed the
+      triangle; the current Windows Firefox 140.0.2 lacks WebGPU. The D3D11 triangle canvas blit is
+      screenshot-checked only in Chromium. Large-game memory (4 GB / `memory64`) and asset streaming
+      remain unverified. The
       `wasm32-unknown-unknown` browser path buffers the full bundle, copies it into WASM memory, then
       duplicates each file into the VFS; this source audit is not a peak-memory measurement.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship

@@ -7,10 +7,10 @@ otherwise the script expects a Chromium under `/opt/pw-browsers`. The cross-engi
 `test/browser/cross-engine.mjs`; `CHROMIUM`, `FIREFOX`, and `WEBKIT` can select executables, and
 `BROWSER` can select one engine.
 
-Fresh local run on 2026-10-11: Chrome `154.0.8037.98`, selected with `CHROMIUM` on Windows x64;
-`node test/browser/run.mjs` passed all checks. WebGPU reported an NVIDIA adapter, zero validation
-errors, and successful triangle/textured back-buffer checks. This was still a headless `?test=1`
-run, so it does not establish visible-canvas pixel output.
+An earlier local run on 2026-10-11: Chrome `154.0.8037.98`, selected with `CHROMIUM` on Windows
+x64; `node test/browser/run.mjs` passed all checks. WebGPU reported an NVIDIA adapter, zero
+validation errors, and successful triangle/textured back-buffer checks. This was still a headless
+`?test=1` run, so it does not establish visible-canvas pixel output.
 
 Fresh local cross-engine run on 2026-10-11: Firefox `141.0` and Playwright WebKit `18.2`, on Windows
 x64. The hello fixture exited with code 0 in both. Firefox completed the D3D11 triangle fixture in
@@ -27,12 +27,21 @@ The hello worker exited successfully, and the emitted-module cache-pressure prob
 without fallback in all three engines. This verifies that policy's requirements; it is not a general
 CSP deployment guide.
 
+Repeat run on 2026-10-11 using the currently installed Windows x64 browsers: Chromium
+`151.0.7922.34`, Firefox `140.0.2`, and Playwright WebKit `18.2`. `node test/browser/run.mjs`
+passed all checks, including visible triangle screenshot pixels and D3D11 textured back-buffer
+pixels. `node test/browser/cross-engine.mjs` passed its core and CSP assertions in all three
+engines. Firefox reported WebGPU unavailable and returned the expected explicit graphics-unavailable
+status; WebKit reported WebGPU and OffscreenCanvas worker transfer unavailable and returned its
+expected explicit status. This differs from the earlier Firefox `141.0` run, which completed the
+triangle; the current results are specific to the installed browser builds and platform.
+
 | Browser or feature | Evidence and current status |
 |---|---|
 | Chromium, headless | **Partial, exercised by the browser suite.** It drives the real page and worker; checks load progress and accessible unimplemented-import diagnostics; sends keyboard and mouse input to a guest window; and compares opt-in emitted execution with cached execution. |
 | Content Security Policy | **Partial, exercised in Chromium, Firefox, and WebKit.** A same-origin policy allowing `wasm-unsafe-eval` permits the page and worker to run hello and the emitted-module cache-pressure probe. Other deployment policies and directives remain untested. |
 | WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are checked by reading back the GPU back buffer in `?test=1` mode. A separate non-test-mode run captures the visible 640x480 triangle canvas and checks its clear colour and interpolated centre pixel. Other rendering paths and browser engines remain unverified. |
-| Firefox | **Partial, smoke tested.** Firefox 141.0 exits the hello fixture and completes the D3D11 triangle program in three frames. Pixel output, input behavior, and the broader conformance matrix remain untested. |
+| Firefox | **Partial, smoke tested.** Firefox 141.0 previously completed the D3D11 triangle in three frames. The current Windows Firefox 140.0.2 run exits hello but reports WebGPU unavailable and stops graphics with an explicit status. Pixel output, input behavior, and broader conformance remain untested. |
 | Safari / WebKit | **Partial, smoke tested with Playwright WebKit 18.2.** Hello exits successfully. The installed engine lacks WebGPU and OffscreenCanvas worker transfer; graphics programs stop with an explicit limitation. This does not establish native Safari behavior. |
 | Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The build target is `wasm32-unknown-unknown`. The browser buffers the complete `.awb` as an `ArrayBuffer`, copies it into WASM linear memory, then `Bundle::from_bytes` copies each file into the in-memory VFS. No 4 GB pressure test, memory64 build, or large-asset streaming test has run; this is a source-level assessment, not a browser measurement. |
 
