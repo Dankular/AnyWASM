@@ -174,8 +174,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
       `WM_LBUTTONDOWN`, scales mouse coordinates from the CSS client area to the 1040x807 guest
       window, and exercises `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`. `test/browser/target.mjs`
-      verifies W/S/A/D movement, cursor-aimed movement up and down, and Tab map regeneration in the
-      selected Diligent maze; browser input skips hidden top-level helper windows. Add XInput
+      verifies W/S/A/D movement, cursor-aimed movement in all four directions, a flashlight response,
+      and Tab map regeneration in the selected Diligent maze; browser input skips hidden top-level
+      helper windows. Add XInput
       (Gamepad API), DirectInput, raw input, cursor capture/pointer lock.
 - [~] **Registry**: `advapi32!RegOpenKeyExA` recognizes predefined roots, returns the root for an
       empty subkey, and reports missing subkeys while no registry data store exists. Target probes
@@ -305,7 +306,8 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       build succeeded; the current
       analyzer reports 84 missing imports across its EXE and three DLLs; an older analyzer snapshot
       reported 349, but those totals are not directly comparable. The browser test now verifies all
-      four WASD directions and cursor-aimed movement up and down;
+      four WASD directions and cursor-aimed movement in all four directions, plus the flashlight's
+      visible response to a held left click;
       guest pointer coordinates account for canvas borders and the CSS-to-window scale, and
       `TrackMouseEvent(TME_LEAVE)` produces `WM_MOUSELEAVE`. Its
       `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Scheduler
@@ -326,9 +328,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       bundle and saves PNGs for the initial frame, W movement, and Tab map regeneration. Browser
       input is routed past GLFW's hidden helper window; D3D11 `Flush1` signals the optional guest idle
       event, and event-query `GetData` completes in the ordered command-stream model. The seed-1
-      target verifies W/S/A/D and cursor-aimed movement up/down; measurements are saved in
+      target verifies W/S/A/D, cursor-aimed movement in all directions, and flashlight illumination;
+      measurements are saved in
       `docs/target-data/glfwdemo-seed1-input-directions.json` and
-      `docs/target-data/glfwdemo-seed1-mouse-aim.json`. A deterministic seed-1 native D3D11 capture
+      `docs/target-data/glfwdemo-seed1-mouse-aim.json` and
+      `docs/target-data/glfwdemo-seed1-flashlight.json`. A deterministic seed-1 native D3D11 capture
       is visually compared with the browser frame in `docs/TARGETS.md`;
       `--check-uav` reads the target's 128x128 R32_FLOAT SDF and records finite-value, sign, and range
       checks there. These do not establish pixel equivalence or end-to-end rendering correctness. The

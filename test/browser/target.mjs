@@ -13,6 +13,7 @@ const outputPath = resolve(options.find((argument) => !argument.startsWith('--')
 const checkMovement = options.includes('--check-movement');
 const checkDirections = options.includes('--check-directions');
 const checkAim = options.includes('--check-aim');
+const checkFlashlight = options.includes('--check-flashlight');
 const checkMapReset = options.includes('--check-map-reset');
 const checkUav = options.includes('--check-uav');
 if (!process.argv[2] || !existsSync(bundlePath)) {
@@ -148,12 +149,21 @@ try {
     await page.waitForFunction(() => window.__pixels, null, { timeout: 30_000 });
     return page.evaluate(() => {
       const p = window.__pixels, d = p.data;
-      let xTotal = 0, yTotal = 0, count = 0;
+      let xTotal = 0, yTotal = 0, count = 0, luminance = 0, brightPixels = 0;
       for (let y = 0; y < p.height; y++) for (let x = 0; x < p.width; x++) {
         const i = (y * p.width + x) * 4;
         if (d[i + 1] > 180 && d[i] < 70 && d[i + 2] < 120 && d[i + 3]) { xTotal += x; yTotal += y; count++; }
+        const luma = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        luminance += luma;
+        if (luma > 16) brightPixels++;
       }
-      return { width: p.width, height: p.height, greenMarker: count ? { x: xTotal / count, y: yTotal / count, pixels: count } : null };
+      return {
+        width: p.width,
+        height: p.height,
+        greenMarker: count ? { x: xTotal / count, y: yTotal / count, pixels: count } : null,
+        meanLuminance: luminance / (p.width * p.height),
+        brightPixels,
+      };
     });
   };
   let movement;
@@ -255,7 +265,12 @@ try {
     assert.ok(bounds, 'the target canvas should be visible for mouse aiming');
     let before = (await capturePixels()).greenMarker;
     aim = { before, directions: [] };
-    for (const direction of [{ name: 'up', dx: 0, dy: -1 }, { name: 'down', dx: 0, dy: 1 }]) {
+    for (const direction of [
+      { name: 'up', dx: 0, dy: -1 },
+      { name: 'down', dx: 0, dy: 1 },
+      { name: 'left', dx: -1, dy: 0 },
+      { name: 'right', dx: 1, dy: 0 },
+    ]) {
       const playerX = bounds.x + before.x * bounds.width / result.width;
       const playerY = bounds.y + before.y * bounds.height / result.height;
       await page.mouse.move(playerX + direction.dx * bounds.width * 0.2, playerY + direction.dy * bounds.height * 0.2);
@@ -274,7 +289,32 @@ try {
     }
     writeFileSync(outputPath.replace(/\.png$/i, '.aim.json'), `${JSON.stringify(aim, null, 2)}\n`);
   }
-  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
+  let flashlight;
+  if (checkFlashlight) {
+    const bounds = await page.locator('#screen').boundingBox();
+    assert.ok(bounds, 'the target canvas should be visible for flashlight input');
+    const before = await capturePixels();
+    const marker = before.greenMarker || result.greenMarker;
+    const x = bounds.x + marker.x * bounds.width / result.width + bounds.width * 0.2;
+    const y = bounds.y + marker.y * bounds.height / result.height;
+    await page.mouse.move(x, y);
+    await page.waitForTimeout(100);
+    const dark = await capturePixels();
+    await page.mouse.down({ button: 'left' });
+    await page.waitForTimeout(1000);
+    const lit = await capturePixels();
+    await page.mouse.up({ button: 'left' });
+    flashlight = {
+      before: { meanLuminance: dark.meanLuminance, brightPixels: dark.brightPixels },
+      after: { meanLuminance: lit.meanLuminance, brightPixels: lit.brightPixels },
+      meanLuminanceDelta: lit.meanLuminance - dark.meanLuminance,
+      brightPixelDelta: lit.brightPixels - dark.brightPixels,
+    };
+    assert.ok(flashlight.brightPixelDelta > 100,
+      `holding the left mouse button should illuminate the maze: ${JSON.stringify(flashlight)}`);
+    writeFileSync(outputPath.replace(/\.png$/i, '.flashlight.json'), `${JSON.stringify(flashlight, null, 2)}\n`);
+  }
+  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, flashlight, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
 } finally {
   await browser?.close();
   server.kill();

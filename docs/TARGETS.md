@@ -495,7 +495,7 @@ $bundle = "$env:TEMP\anywasm-glfwdemo-frame-measure.awb"
 $env:CHROMIUM = 'C:\Users\sysadmin\AppData\Local\ms-playwright\chromium-1234\chrome-win64\chrome.exe'
 $env:REQUIRE_TARGET_MOVEMENT = '1'
 $env:REQUIRE_TARGET_MAP_RESET = '1'
-node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-directions --check-aim --check-map-reset --check-uav
+node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-directions --check-aim --check-flashlight --check-map-reset --check-uav
 ```
 
 On 2026-10-11, the latest Chromium 151.0.7922.34 replay produced a capture at 1040x807 with 5 draws,
@@ -517,10 +517,13 @@ Mouse coordinates are scaled from the canvas content area (excluding its border)
 the fixture verifies that the center of a 320x240 CSS canvas maps to `(520,404)` in a 1040x807 guest
 window. The guest also requests `TrackMouseEvent(TME_LEAVE)` and receives `WM_MOUSELEAVE` when the
 pointer exits the canvas. With this fix, holding W for 500 ms moves the green player marker 2.5 pixels
-upward. The seed-1 replay additionally checks W/S/A/D and cursor-aimed Space movement up and down;
-the marker moves 2.5 pixels in the expected direction for each action. Exact measurements are saved
-in [`target-data/glfwdemo-seed1-input-directions.json`](target-data/glfwdemo-seed1-input-directions.json)
-and [`target-data/glfwdemo-seed1-mouse-aim.json`](target-data/glfwdemo-seed1-mouse-aim.json). Pressing Tab
+upward. The seed-1 replay additionally checks W/S/A/D and cursor-aimed Space movement in all four
+directions; the marker moves 2.2–2.5 pixels in the expected direction for each action. Holding the
+left button for one second increases pixels above luminance 16 from 3,955 to 5,751 (1,796 more);
+this verifies a visible flashlight response for this seed and aim direction. Measurements are saved
+in [`target-data/glfwdemo-seed1-input-directions.json`](target-data/glfwdemo-seed1-input-directions.json),
+[`target-data/glfwdemo-seed1-mouse-aim.json`](target-data/glfwdemo-seed1-mouse-aim.json), and
+[`target-data/glfwdemo-seed1-flashlight.json`](target-data/glfwdemo-seed1-flashlight.json). Pressing Tab
 regenerates the map; 165,601 of 839,280 pixels changed (19.7%), and the target issued a second compute
 dispatch. This reset path exposed Diligent's `ID3D11DeviceContext3::Flush1` followed by an idle-event
 wait and an event-query polling loop. `Flush1` now signals its optional guest event, and D3D11 event
@@ -568,17 +571,18 @@ The standalone 4x4 R32_FLOAT fixture also reads all 16 written values as 0.25. T
 selected target's SDF output for one deterministic state; it does not establish other UAV
 formats/readback paths, all gameplay states, or game acceptance.
 
-This verifies all four keyboard movement directions, cursor-aimed Space movement up/down, and map
-regeneration in the selected target. Its deterministic seed-1 SDF UAV has a bounded independent
-readback. Flashlight appearance, other gameplay states, and a full playthrough remain unverified; no
-real-game acceptance pass is claimed. The default
+This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
+directions, a flashlight response for one seed/aim direction, and map regeneration in the selected
+target. Its deterministic seed-1 SDF UAV has a bounded independent readback. Other gameplay states
+and a full playthrough remain unverified; no real-game acceptance pass is claimed. The default
 250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
 is diagnostic test routing only.
 
 ## Next evidence needed
 
-- Complete a controlled playthrough before making a gameplay acceptance claim. Flashlight appearance,
-  other gameplay states, other UAV formats, and general staging readback remain untested.
+- Complete a controlled playthrough before making a gameplay acceptance claim. Flashlight behavior
+  outside the single seeded check, other gameplay states, other UAV formats, and general staging
+  readback remain untested.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current
@@ -595,6 +599,6 @@ is diagnostic test routing only.
   PE unwind primitives, the selected C++ catch path, D3D11 UAV binding, and constant-buffer ranges
   have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
   compute dispatch, draw, and repeated present calls. The browser target replay now verifies host
-  rendering, all four movement directions, cursor-aimed Space movement up/down, and Tab map
-  regeneration; native comparison, independent UAV readback, and gameplay acceptance remain bounded
-  to the specific evidence above.
+  rendering, all four movement directions, cursor-aimed Space movement in all four directions, a
+  seeded flashlight response, and Tab map regeneration; native comparison, independent UAV readback,
+  and gameplay acceptance remain bounded to the specific evidence above.

@@ -1,0 +1,12 @@
+{
+  "before": {
+    "meanLuminance": 0.819895109858929,
+    "brightPixels": 3955
+  },
+  "after": {
+    "meanLuminance": 0.9462037053227769,
+    "brightPixels": 5751
+  },
+  "meanLuminanceDelta": 0.12630859546384787,
+  "brightPixelDelta": 1796
+}
