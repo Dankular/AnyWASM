@@ -58,8 +58,11 @@
   160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC); Rust commits only a valid exact
   instruction count. Compile/trap/invalid-count failures retry through the interpreter. The JS
   wrapper caches up to 256 generated modules and validates bytes if an ID is reused. Rust tests,
-  `test/wasm_smoke.mjs` (including generated execution and one-instruction budgets), and the
-  headless Chrome worker suite pass. This is a mechanism prototype, not a throughput win: no
+  `test/wasm_smoke.mjs` (including generated execution, one-instruction budgets, and a generated vs
+  `{ jit: false }` comparison of compute status, exit code, stdout/stderr, and retired count) pass.
+  The smoke also forces one host module-compile failure and confirms safe interpreter fallback. The
+  headless Chrome worker suite passes. Final register/memory comparisons remain open. This is a
+  mechanism prototype, not a throughput win: no
   register-register/partial-width MOV, NOP, LEA, memory operations, arithmetic, SIMD, or control
   flow is emitted. Full JIT/interpreter state differential, cache-pressure and CSP checks, browser
   engine matrix, and real-game performance remain open.

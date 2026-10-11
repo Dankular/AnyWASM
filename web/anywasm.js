@@ -20,8 +20,11 @@ export class AnyWasm {
     this.jitStats = jitStats;
   }
 
-  /** Instantiate from raw WASM bytes (Uint8Array/ArrayBuffer) or a Response/URL string. */
-  static async create(source) {
+  /**
+   * Instantiate from raw WASM bytes (Uint8Array/ArrayBuffer) or a Response/URL string.
+   * Set `{ jit: false }` to run emitted candidates through the interpreter fallback.
+   */
+  static async create(source, { jit = true } = {}) {
     let bytes = source;
     if (typeof source === 'string') bytes = await (await fetch(source)).arrayBuffer();
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
@@ -32,6 +35,10 @@ export class AnyWasm {
       anywasm: {
         run_emitted_block(id, modulePtr, moduleLen, statePtr, budget) {
           try {
+            if (!jit) {
+              jitStats.fallbacks++;
+              return -1;
+            }
             const memory = instance.exports.memory;
             const moduleView = new Uint8Array(memory.buffer, modulePtr >>> 0, moduleLen >>> 0);
             let cached = modules.get(id >>> 0);

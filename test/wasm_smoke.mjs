@@ -22,23 +22,60 @@ function pack(exe, extra = []) {
   return readFileSync(out);
 }
 
-async function runExe(exe, extra = []) {
-  const w = await AnyWasm.create(wasm);
-  w.load(pack(exe, extra));
+async function runBundle(bundle, runtimeOptions = {}) {
+  const w = await AnyWasm.create(wasm, runtimeOptions);
+  w.load(bundle);
   let out = '', err = '';
   const r = w.runToEnd({ onOutput: (s, t) => (s === 'stdout' ? (out += t) : (err += t)) });
   return { ...r, out, err, instr: w.instructions(), jitStats: w.jitStats };
 }
 
+async function runExe(exe, extra = [], runtimeOptions = {}) {
+  return runBundle(pack(exe, extra), runtimeOptions);
+}
+
 let r = await runExe('fixtures/hello.exe');
 check('hello.exe exits 0 with greeting', r.status === Status.EXITED && r.exitCode === 0 && r.out === 'Hello from a Windows PE running inside AnyWASM!\r\n', JSON.stringify(r));
 
-r = await runExe('fixtures/compute.exe');
+const computeBundle = pack('fixtures/compute.exe');
+r = await runBundle(computeBundle);
 check('compute.exe (heap, SSE2, indirect calls)', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('primes<20000=2262') && r.out.includes('fp=609') && r.out.includes('gpa=ok'), JSON.stringify(r));
 check('compute.exe executes generated WebAssembly blocks', r.jitStats.executions > 0 && r.jitStats.compilations > 0 && r.jitStats.fallbacks === 0, JSON.stringify(r.jitStats));
 
+const interpreted = await runBundle(computeBundle, { jit: false });
+check('compute.exe matches generated execution with interpreter fallback',
+  r.status === interpreted.status && r.exitCode === interpreted.exitCode && r.out === interpreted.out && r.err === interpreted.err && r.instr === interpreted.instr,
+  JSON.stringify({ generated: { status: r.status, exitCode: r.exitCode, out: r.out, err: r.err, instr: r.instr }, interpreter: { status: interpreted.status, exitCode: interpreted.exitCode, out: interpreted.out, err: interpreted.err, instr: interpreted.instr } }));
+check('JIT opt-out uses interpreter fallback without compiling modules',
+  interpreted.jitStats.executions === 0 && interpreted.jitStats.compilations === 0 && interpreted.jitStats.fallbacks > 0,
+  JSON.stringify(interpreted.jitStats));
+
+const compileFailureWasm = await AnyWasm.create(wasm);
+compileFailureWasm.load(computeBundle);
+const NativeModule = WebAssembly.Module;
+let forcedCompileFailures = 0;
+WebAssembly.Module = function (bytes) {
+  if (forcedCompileFailures === 0) {
+    forcedCompileFailures++;
+    throw new WebAssembly.CompileError('forced emitted-module compile failure');
+  }
+  return new NativeModule(bytes);
+};
+let compileFailureOut = '', compileFailureErr = '', compileFailureRun;
+try {
+  compileFailureRun = compileFailureWasm.runToEnd({ onOutput: (s, t) => (s === 'stdout' ? (compileFailureOut += t) : (compileFailureErr += t)) });
+} finally {
+  WebAssembly.Module = NativeModule;
+}
+check('host compile failure falls back safely and resumes emitted execution',
+  forcedCompileFailures === 1 && compileFailureWasm.jitStats.fallbacks === 1 && compileFailureWasm.jitStats.executions > 0 &&
+    compileFailureRun.status === r.status && compileFailureRun.exitCode === r.exitCode &&
+    compileFailureOut === r.out && compileFailureErr === r.err && compileFailureWasm.instructions() === r.instr,
+  JSON.stringify({ forcedCompileFailures, jitStats: compileFailureWasm.jitStats, status: compileFailureRun.status,
+    exitCode: compileFailureRun.exitCode, instr: compileFailureWasm.instructions() }));
+
 const budgetWasm = await AnyWasm.create(wasm);
-budgetWasm.load(pack('fixtures/compute.exe'));
+budgetWasm.load(computeBundle);
 let budgetOkay = true;
 for (let i = 0; i < 50_000 && budgetWasm.jitStats?.executions === 0; i++) {
   const before = budgetWasm.instructions();

@@ -89,8 +89,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
 - [~] **Correctness checks**: Rust emitter tests cover prefix limits and immediate-width semantics;
       the WASM smoke runs `compute.exe`, checks its expected output, confirms generated executions,
-      and checks `run(1)` retirement limits. Full JIT/interpreter/host differential and whole-process
-      register/memory comparisons are still open.
+      and checks `run(1)` retirement limits. The same compute bundle now matches between generated
+      execution and `{ jit: false }` interpreter fallback for status, exit code, stdout/stderr, and
+      retired count; a forced host compile failure also falls back safely. Final registers/memory and
+      the full JIT/interpreter/host differential remain unverified.
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
 - [~] **Browser check**: the rebuilt runtime passes the headless Chrome worker, input, and WebGPU
