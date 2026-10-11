@@ -336,6 +336,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       is visually compared with the browser frame in `docs/TARGETS.md`;
       `--check-uav` reads the target's 128x128 R32_FLOAT SDF and records finite-value, sign, and range
       checks there. These do not establish pixel equivalence or end-to-end rendering correctness. The
+      general Release bundle uses `std::random_device` for map generation; its flashlight threshold
+      varies between launches and failed once in an unseeded replay. Keep the stored flashlight claim
+      scoped to its seeded build and aim direction; see `docs/TARGETS.md`. The
       normal worker slice still stops in a synchronous callback that cannot resume, and no gameplay
       or end-to-end game acceptance pass is claimed; see `docs/TARGETS.md` for exact evidence and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible

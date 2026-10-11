@@ -533,6 +533,15 @@ run reached 128 presents and 2 dispatches with no WebGPU validation errors. The 
 are saved at [after W](images/glfwdemo-first-frame.after-w.png) and
 [after Tab](images/glfwdemo-first-frame.after-tab.png).
 
+The general `Release` bundle command above uses a map binary whose `GenerateMap` seeds `std::mt19937`
+from `std::random_device`; each process launch can therefore produce a different maze. On 2026-10-11,
+two runs of the same packed bundle produced 3,744 and 4,048 negative texels in the SDF. The full
+input/flashlight command failed its 100-bright-pixel flashlight threshold on one map (36 additional
+bright pixels); the other input, map-reset, and SDF checks passed on a separate launch. The stored
++1,796-pixel flashlight result above is from the separately seeded build and does not make the
+random-bundle flashlight check deterministic. Exact hashes and measurements are in
+[`target-data/glfwdemo-random-run-flashlight.json`](target-data/glfwdemo-random-run-flashlight.json).
+
 ![GLFW Demo after W moves the player](images/glfwdemo-first-frame.after-w.png)
 
 ![GLFW Demo after Tab regenerates the maze](images/glfwdemo-first-frame.after-tab.png)

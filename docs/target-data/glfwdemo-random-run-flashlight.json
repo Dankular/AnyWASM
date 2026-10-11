@@ -1,0 +1,55 @@
+{
+  "generated_utc": "2026-10-11T22:42:58Z",
+  "binary": {
+    "path": "target-eval/DiligentBuild-GLFWDemo-staticcrt/DiligentSamples/Samples/GLFWDemo/Release/GLFWDemo.exe",
+    "sha256": "A8C9CABD3F16B31583443D5303873E767412ECB7A5C8E2DBCC6A5491FBA73939"
+  },
+  "bundle": {
+    "sha256": "80424591A078B3B6959F8ADAAF4E2917B91A846B6EBB38835BABA3B31CD84116",
+    "map_generation": "Game.cpp initializes the map generator from std::random_device"
+  },
+  "replays": [
+    {
+      "flags": [
+        "--check-movement",
+        "--check-directions",
+        "--check-aim",
+        "--check-flashlight",
+        "--check-map-reset",
+        "--check-uav"
+      ],
+      "result": "failed at the flashlight bright-pixel threshold after movement and aim assertions passed",
+      "initial_sdf_negative_texels": 3744,
+      "flashlight": {
+        "bright_pixels_before": 4359,
+        "bright_pixels_after": 4395,
+        "bright_pixel_delta": 36,
+        "mean_luminance_before": 0.8187147331075367,
+        "mean_luminance_after": 0.834045603377397,
+        "mean_luminance_delta": 0.015330870269860242,
+        "required_bright_pixel_delta": 100
+      }
+    },
+    {
+      "flags": [
+        "--check-movement",
+        "--check-directions",
+        "--check-aim",
+        "--check-map-reset",
+        "--check-uav"
+      ],
+      "result": "passed",
+      "initial_sdf_negative_texels": 4048,
+      "initial_sdf_finite_texels": 16384,
+      "initial_sdf_format": "r32float",
+      "initial_sdf_size": [
+        128,
+        128
+      ],
+      "map_reset_changed_pixel_fraction": 0.20687374892765228,
+      "dispatches_after_map_reset": 2,
+      "webgpu_validation_errors": 0
+    }
+  ],
+  "interpretation": "The same bundle produced different SDF wall counts on separate process launches. The flashlight threshold is not repeatable with this random-map binary; the separate seed-1 flashlight report remains limited to its seeded build and aim direction."
+}
