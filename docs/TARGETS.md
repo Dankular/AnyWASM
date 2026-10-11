@@ -623,6 +623,6 @@ is diagnostic test routing only.
   have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
   compute dispatch, draw, and repeated present calls. The browser target replay now verifies host
   rendering, all four movement directions, cursor-aimed Space movement in all four directions, a
-  seeded flashlight response, and Tab map regeneration; native comparison, independent UAV readback,
-  and one full seed-1 maze traversal; broad gameplay acceptance remains open and evidence remains
-  bounded to the specific cases above.
+  seeded flashlight response, Tab map regeneration, and one full seed-1 maze traversal. Native
+  comparison and independent UAV readback remain bounded to the recorded cases, and broad gameplay
+  acceptance remains open.

@@ -239,9 +239,8 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       read back with all finite values inside the shader's ±4 bound, and a controlled seed-1 browser
       replay traverses the maze to its teleport; other UAV formats, pixel equivalence, graphics
       states, other gameplay states, and broad game acceptance remain unverified. Target-driven Tab
-      map reset is
-      pixel-checked after adding D3D11 `Flush1` event signaling and event-query completion; other
-      query types are not supported. Structured/raw-buffer UAVs, geometry/hull/domain
+      map reset is pixel-checked after adding D3D11 `Flush1` event signaling and event-query
+      completion; other query types are not supported. Structured/raw-buffer UAVs, geometry/hull/domain
       shaders, MSAA (forced to 1 sample), general staging read-back, deferred
       contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
       feature-level reporting remain open.
