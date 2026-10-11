@@ -186,7 +186,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       `GetCurrentDirectoryA/W`, `GetFullPathNameA/W`, and relative file operations have guest
       regression coverage. Directories are inferred from VFS file paths or tracked when created;
       `CreateDirectoryA/W` support empty directories and require an existing parent, with guest
-      regression coverage. `SetFileAttributesA/W` remain unimplemented.
+      regression coverage. CLI `run` gives synchronous guest callbacks the full remaining
+      `--max-steps` budget and accounts for retired instructions across frame stops; its regression
+      callback runs for more than the former 2,000,000-instruction internal slice.
+      `SetFileAttributesA/W` remain unimplemented.
       `analyze --json` now adds `schemaVersion: 1` while preserving existing top-level fields. Its
       `preflight` summary separates known blockers from potentially unused missing imports and
       explicitly does not guarantee runtime success. The JSON serializer escapes control characters.
@@ -258,10 +261,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 
 ## 6. Productisation (after a real target runs)
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
-      import blockers in `docs/TARGETS.md`. These are preliminary targets: the tutorial renderer
-      choice was not launched, the samples have not run through AnyWASM, and Asteroids needs a
-      separate Intel-origin code/assets redistribution review. The Apache-2.0 GLFW Demo maze is now
-      the selected game candidate. A separate D3D11-only `/MT` build succeeded; the current
+      import blockers in `docs/TARGETS.md`. Both tutorials now have D3D11 first-stop AnyWASM traces
+      and reach virtual device discovery/creation, then stop at the unresolved MSVCP140
+      `basic_ios<char>` constructor; neither reaches shaders or `Present`. Asteroids remains
+      static-analysis only and needs a separate Intel-origin code/assets redistribution review.
+      The Apache-2.0 GLFW Demo maze is now the selected game candidate. A separate D3D11-only `/MT`
+      build succeeded; the current
       analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
       `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Cooperative
       scheduling now resumes the selected target beyond its condition-variable waits. After
@@ -272,8 +277,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       guest `Draw` and `IDXGISwapChain2::Present` calls. Target-grounded VEX/BMI handlers and D3D11
       UAV/constant-buffer-range command records moved execution through these paths. The replay was
       stopped after confirming repeated guest presents; WebGPU compute dispatch and host-rendered
-      pixels remain unverified. No end-to-end game acceptance pass is claimed; see `docs/TARGETS.md`
-      for the exact trace and next steps.
+      pixels remain unverified. A later headless Chromium probe reached the WebGPU path only with a
+      test-only 1,000,000,000-instruction worker slice; render pipelines were invalid and the
+      captured canvas was black. The normal worker slice still stops in a synchronous callback that
+      cannot resume. No end-to-end game acceptance pass is claimed; see `docs/TARGETS.md` for the
+      exact trace and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the

@@ -462,20 +462,23 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
     p.load_exe(&name, Some(&cmd))?;
     let mut left = o.max_steps;
     let stop = loop {
-        let chunk = left.min(2_000_000);
-        let s = p.run(chunk);
+        if left == 0 {
+            break Stop::StepLimit;
+        }
+        // Guest callbacks cannot suspend at a budget boundary, so don't split the user's cap.
+        let before = p.retired_instructions;
+        let s = p.run(left);
+        left = left.saturating_sub(p.retired_instructions.saturating_sub(before));
         std::io::stdout().write_all(&p.take_stdout()).ok();
         std::io::stderr().write_all(&p.take_stderr()).ok();
         match s {
-            Stop::StepLimit => {
-                left -= chunk;
-                if left == 0 {
-                    break Stop::StepLimit;
-                }
-            }
+            Stop::StepLimit => break Stop::StepLimit,
             // No display attached: a presented frame needs no host work, keep going.
             Stop::Frame => {
                 p.extra.gpu.buf.clear();
+                if left == 0 {
+                    break Stop::StepLimit;
+                }
             }
             other => break other,
         }

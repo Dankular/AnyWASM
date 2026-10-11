@@ -1,8 +1,9 @@
 # Windows target evaluation
 
-These are analysis fixtures for measuring real Win64 program import coverage. They are not yet
-runtime acceptance passes: `anywasm analyze` found unresolved imports for every executable, and none
-has been run through AnyWASM or pixel-verified.
+These are analysis fixtures for measuring real Win64 program import coverage. `anywasm analyze`
+found unresolved imports for every executable. Both D3D11 tutorials now have first-stop runtime
+traces through AnyWASM, but neither reached shader creation, Present, or pixel verification;
+Asteroids has not been run. None is a runtime acceptance pass.
 
 ## Sources and build
 
@@ -77,14 +78,42 @@ which declares Apache-2.0 for the project while listing third-party dependencies
 and the [Asteroids README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/Asteroids/README.md)
 for the source programs and their stated rendering modes.
 
-`analyze` reports statically imported symbols. The Diligent tutorials present a device-selection
-dialog; these binaries were analyzed, but the D3D11 path was not launched. Asteroids was analyzed
+`analyze` reports statically imported symbols. The Diligent tutorials offer a device-selection
+dialog, so the runtime traces passed `--mode d3d11`; both reached virtual D3D11 device discovery and
+creation before stopping at the first unresolved MSVC C++ runtime import. Asteroids was analyzed
 only; it was not run through AnyWASM. A missing symbol is a blocker if the guest calls it; the
 report does not prove every import is reached on a selected rendering path. These counts prioritize
-implementation work but do not replace a runtime trace. The tutorials are samples, not games, and
-all three programs remain preliminary candidates, not acceptance runs. Asteroids also remains
-outside the redistributable acceptance set until its Intel-origin code and sample media have a
-documented licence review.
+implementation work but do not replace runtime traces. The tutorials are samples, not games, and all
+three programs remain preliminary candidates, not acceptance runs. Asteroids also remains outside
+the redistributable acceptance set until its Intel-origin code and sample media have a documented
+licence review.
+
+### First D3D11 tutorial runtime stops
+
+The dynamic-runtime Release outputs were run with the selected D3D11 backend and a 500,000,000-step
+cap. Both stopped before reaching the cap. Their traces pass adapter enumeration, `D3D11CreateDevice`,
+and `ID3D11Device1::CheckFeatureSupport`, then stop at the same imported MSVCP140 constructor:
+`??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ`. The HLE trace labels the missing thunk
+`unknown!` because that import is not implemented; the analyzer maps it to `MSVCP140.dll`.
+
+| Program | AnyWASM stop | Import caller | Last reached D3D11 path |
+|---|---|---:|---|
+| `Tutorial01_HelloTriangle.exe` | exit 120, unimplemented `basic_ios<char>` constructor | `0x140003320` | `D3D11CreateDevice`, feature queries, adapter/output enumeration |
+| `Tutorial03_Texturing.exe` | exit 120, unimplemented `basic_ios<char>` constructor | `0x140004660` | `D3D11CreateDevice`, feature queries, adapter/output enumeration |
+
+Reproduction from the repository root (adjust `$exe` for each tutorial):
+
+```powershell
+$exe = 'D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial01_HelloTriangle\Release\Tutorial01_HelloTriangle.exe'
+$dir = Split-Path -Parent $exe
+.\target\debug\anywasm.exe run $exe --dir $dir --trace-imports --max-steps 500000000 -- --mode d3d11
+```
+
+The CLI now passes its full remaining step budget to each `Process::run` call and charges actual
+retired instructions across frame stops. A regression fixture exercises a guest monitor callback
+that exceeds the former 2,000,000-instruction internal slice. This removes an artificial CLI stop;
+it does not make callbacks resumable when the configured run budget itself expires. These tutorial
+traces did not reach shader compilation, guest `Present`, browser WebGPU execution, or visible pixels.
 
 ## Selected game candidate: DiligentSamples GLFW Demo
 
@@ -377,9 +406,26 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 [Microsoft D3DCompiler redistribution guidance](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/packaging/packaging-framework-packages?view=gdk-2604),
 [Microsoft Visual C++ redistribution terms](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170).
 
+### Browser attempt with the selected Diligent target
+
+On 2026-10-11, the rebuilt `web/anywasm_wasm.wasm` and the D3D11-only `/MT` `GLFWDemo.awb`
+were served to headless Chromium. The normal worker run slice is 250,000 instructions; this
+attempt stopped after 8,524,265 aggregate guest instructions. The diagnostic was
+`synchronous guest callback exhausted the run budget; its continuation cannot be resumed`.
+The synchronous callback path still cannot suspend and resume across worker slices.
+
+For diagnosis only, a Playwright response route temporarily changed the served worker's run
+slice to 1,000,000,000 instructions; no repository runtime code was changed for this probe. The
+guest advanced through its first roughly 580-million-instruction frame and the browser observed
+30 or more guest `Present` stops. WebGPU reported invalid render pipelines followed by invalid
+command buffers. A 1040x807 readback contained only transparent black pixels. The page did not
+provide a successful completion status, and no target image was verified. The exact first shader
+or pipeline validation cause still needs to be captured and diagnosed. This probe does not establish
+that the target renders correctly or passes gameplay acceptance.
+
 ## Next evidence needed
 
-- Connect the selected target's emitted command stream to the browser WebGPU executor and capture
+- Diagnose the selected target's first WebGPU render-pipeline validation error, then capture
   host-visible GLFW Demo pixels. The new compute fixture covers only a small single-float UAV
   shader; the target's SDF shader, its additional bindings/instructions, and gameplay are unverified.
 - Continue to distinguish guest `Draw`/`Present` calls and virtual HLE objects from observed host
@@ -387,9 +433,9 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 - Extend the virtual registry only from observed target paths and required values. The current
   `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
   registry query, create, write, or persisted-value behavior.
-- Trace each tutorial executable on its D3D11 path and record the first runtime blocker, distinguishing
-  imports reached on that path from static-only imports. The tutorials still report 12 missing
-  USER32 symbols and 4 missing IMM32 symbols each.
+- Continue the tutorial traces from the reached `MSVCP140.dll` `basic_ios<char>` constructor only
+  after defining the required C++ stream-state semantics; each tutorial still has many other static
+  MSVC runtime imports. Their current D3D11 traces do not reach shader creation or Present.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
 - The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has

@@ -3,6 +3,27 @@
 
 use core::panic::PanicInfo;
 
+#[cfg(callback_budget)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn EnumDisplayMonitors(
+        dc: *mut core::ffi::c_void,
+        clip: *const core::ffi::c_void,
+        callback: extern "system" fn(
+            monitor: *mut core::ffi::c_void,
+            dc: *mut core::ffi::c_void,
+            rect: *mut core::ffi::c_void,
+            data: isize,
+        ) -> i32,
+        data: isize,
+    ) -> i32;
+}
+
+#[cfg(callback_budget)]
+static mut CALLBACK_DONE: u32 = 0;
+#[cfg(callback_budget)]
+static mut CHECKSUM: u64 = 0;
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     loop {
@@ -40,7 +61,9 @@ fn run_workload() {
             }
         }
     }
-    unsafe { core::hint::black_box(memory.add(2048).read_volatile()); }
+    unsafe {
+        core::hint::black_box(memory.add(2048).read_volatile());
+    }
 }
 
 #[cfg(bench_sse)]
@@ -60,11 +83,56 @@ fn run_workload() {
     core::hint::black_box(lanes);
 }
 
-#[cfg(not(any(bench_call, bench_memory, bench_sse)))]
-compile_error!("select one benchmark workload with --cfg bench_call, bench_memory, or bench_sse");
+#[cfg(callback_budget)]
+extern "system" fn monitor_callback(
+    _monitor: *mut core::ffi::c_void,
+    _dc: *mut core::ffi::c_void,
+    _rect: *mut core::ffi::c_void,
+    _data: isize,
+) -> i32 {
+    for i in 0..800_000u64 {
+        unsafe {
+            let checksum = core::ptr::addr_of_mut!(CHECKSUM);
+            checksum.write_volatile(checksum.read_volatile().wrapping_add(i));
+        }
+    }
+    unsafe { core::ptr::addr_of_mut!(CALLBACK_DONE).write_volatile(1) };
+    1
+}
 
+#[cfg(callback_budget)]
+fn run_workload() -> u32 {
+    let result = unsafe {
+        EnumDisplayMonitors(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            monitor_callback,
+            0x1234,
+        )
+    };
+    let done = unsafe { core::ptr::addr_of!(CALLBACK_DONE).read_volatile() };
+    let checksum = unsafe { core::ptr::addr_of!(CHECKSUM).read_volatile() };
+    if result != 0 && done == 1 && checksum != 0 {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(not(any(bench_call, bench_memory, bench_sse, callback_budget)))]
+compile_error!(
+    "select one workload with --cfg bench_call, bench_memory, bench_sse, or callback_budget"
+);
+
+#[cfg(not(callback_budget))]
 #[no_mangle]
 pub extern "system" fn mainCRTStartup() -> u32 {
     run_workload();
     0
+}
+
+#[cfg(callback_budget)]
+#[no_mangle]
+pub extern "system" fn mainCRTStartup() -> u32 {
+    run_workload()
 }

@@ -23,7 +23,10 @@
   bundles retain that guest directory, and the WASM loader restores it; relative Win32 and CRT file
   paths resolve against process state. Old bundles default to `C:\`. The same executables run through
   the **WebAssembly build** under Node (`test/wasm_smoke.mjs`) with output identical to native, and in
-  **headless Chromium** through the real page and worker (`test/browser/run.mjs`).
+  **headless Chromium** through the real page and worker (`test/browser/run.mjs`). CLI `run` passes
+  the remaining `--max-steps` budget to synchronous callbacks and accounts for retired instructions
+  at frame stops; an integration fixture verifies a callback longer than the former 2,000,000-step
+  slice completes.
 - **Direct3D 11 -> WebGPU, end to end.** A mingw-compiled Win64 program using the real `d3d11.h`
   COM API (window class + `CreateWindowEx`, `D3D11CreateDeviceAndSwapChain`, buffers, DXBC shaders,
   input layout, `Map`/`Unmap`, `Present`) runs in the interpreter; COM vtables are generated from the
@@ -145,6 +148,10 @@
   and 32-bit PE support need a representative target and dedicated design/verification before
   implementation.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
+  `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` have now been run with `--mode d3d11` under
+  AnyWASM. Both reach virtual D3D11 device discovery/creation before stopping at the first unresolved
+  `MSVCP140.dll` `basic_ios<char>` constructor. They do not reach shader creation, guest `Present`,
+  or pixel verification; Asteroids remains analyzer-only pending licence review.
   A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
   down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
   queries. The bounded AnyWASM run resumes past condition-variable waits, initializes target static
@@ -154,7 +161,9 @@
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
   `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes
   one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and verifies a following
-  draw samples it into a pixel. The selected target's shader, command stream in the browser, host
+  draw samples it into a pixel. A headless Chromium probe attempted the selected target's browser
+  path: the normal worker slice stopped in a synchronous callback, and a test-only larger slice
+  reached invalid WebGPU render pipelines with a black canvas. The target's shader output, host
   rendering, and gameplay remain unverified. No real-game acceptance pass is claimed. See
   [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
 - The D3D11 textured fixture has Rust command-stream and WASM smoke coverage, and its tested WebGPU

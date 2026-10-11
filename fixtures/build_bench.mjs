@@ -1,4 +1,4 @@
-// Build small self-contained Win64 PE workloads used by test/bench.mjs.
+// Build small Win64 benchmark workloads and the CLI guest-callback budget regression fixture.
 import { copyFileSync, linkSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -27,6 +27,7 @@ try {
     ['bench_call', 'bench_call.exe'],
     ['bench_memory', 'bench_memory.exe'],
     ['bench_sse', 'bench_sse.exe'],
+    ['callback_budget', 'callback_budget.exe'],
   ]) {
     const output = join(buildDir, name);
     execFileSync('rustc', [
