@@ -287,13 +287,22 @@ unreached and its behavior has not been verified in this target.
 ### Current checkpoint after scheduler, CPU, and API slices
 
 The cooperative scheduler and synthetic regressions cover retaining and resuming guest contexts for
-condition-variable waits. The normal bounded target run still reaches
-`kernel32!SleepConditionVariableSRW` after finite thread callbacks and stops because the blocked guest
-continuation cannot be resumed. No host GLFW window or D3D11 renderer was observed in that run; the
-higher-cap guest traces below are separate evidence. Target-grounded static TLS support assigns the
-image's TLS slot from index zero, initializes private blocks from each module template, and
-saves/restores `TEB+0x58` per thread. The freestanding `static_tls_thread_test.exe` verifies template
-initialization and worker/main isolation.
+condition-variable waits. An earlier bounded run stopped at `kernel32!SleepConditionVariableSRW`
+because its blocked guest continuation could not be resumed. A fresh current-tree 30,000,000-step CLI
+replay reached the same call with `nested=0`, logged 13 `WakeAllConditionVariable` calls afterward,
+continued into D3DCompiler, and hit the instruction cap. Reproduction from the repository root:
+
+```powershell
+$release = 'D:\Dev Proj\WASM\target-eval\DiligentBuild-GLFWDemo-staticcrt\DiligentSamples\Samples\GLFWDemo\Release'
+.\target\debug\anywasm.exe run "$release\GLFWDemo.exe" --dir $release --trace-imports --max-steps 30000000 -- --mode d3d11
+```
+
+The trace is in `%TEMP%\anywasm-glfwdemo-bounded-recheck.log`. This run shows guest execution after
+the wait but does not prove that the blocked thread itself resumed. No host GLFW window or D3D11
+renderer was observed; the higher-cap guest traces below are separate evidence. Target-grounded
+static TLS support assigns the image's TLS slot from index zero, initializes private blocks from each
+module template, and saves/restores `TEB+0x58` per thread. The freestanding
+`static_tls_thread_test.exe` verifies template initialization and worker/main isolation.
 
 The next trace stopped at `GLFWDemo.exe+0x96d8` with a read fault at `0x4`. Its sequence loaded the
 TLS vector from `GS:[0x58]`, loaded slot zero, then dereferenced a null block. After the TLS fix, the

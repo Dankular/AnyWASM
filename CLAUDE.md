@@ -290,11 +290,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       build succeeded; the current
       analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
       `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Scheduler
-      regressions cover condition-variable wake/resume, but the normal bounded target run reaches
-      `SleepConditionVariableSRW` after finite thread callbacks and stops because the blocked guest
-      continuation cannot be resumed. A separate high-cap guest trace advanced beyond the waits; it
-      did not verify a host window or renderer. After target-grounded static TLS and VEXTRACTF128
-      support, a bounded trace first reached guest `ExitProcess(3)`. Target-grounded MSVC C++
+      regressions cover condition-variable wake/resume. An earlier bounded run stopped at
+      `SleepConditionVariableSRW` because its blocked guest continuation could not be resumed; a
+      fresh 30,000,000-step CLI replay reaches that call, continues after the wait, and hits its step
+      cap in D3DCompiler. A separate high-cap guest trace reached `Present` calls; none of these runs
+      verified a host window or renderer. After target-grounded static TLS and VEXTRACTF128 support,
+      a bounded trace first reached guest `ExitProcess(3)`. Target-grounded MSVC C++
       exception search and second-pass unwind now reach the
       catch. After the observed `HKCU`/`HKLM` Direct3D 12 registry probes, a 1,000,000,000-step
       traced replay reached `CreateComputeShader`, `CSSetUnorderedAccessViews`, `Dispatch`, then

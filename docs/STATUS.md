@@ -130,13 +130,14 @@
   Chromium, Firefox, and WebKit; generated-module page/worker checks pass in the same browser set.
 - Thread support uses a deterministic cooperative scheduler with saved CPU/stack/TEB TLS pointers,
   dynamic TLS/FLS maps, static PE TLS blocks, quantum rotation, resumable waits, events, mutexes,
-  semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. The
-  selected target's normal bounded run still reaches `SleepConditionVariableSRW` after finite thread
-  callbacks and stops because the blocked guest continuation cannot be resumed; a separate high-cap
-  guest trace reached later guest calls but verified no host window or renderer. Nested synchronous
-  callback scheduling and alertable waits remain unsupported. A synchronous callback cannot suspend
-  when its active run slice expires, so the runtime stops with a diagnostic instead of exceeding the
-  budget. PE64 unwind metadata and a selected version 1 unwind subset are tested,
+  semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. An earlier
+  bounded target run stopped at `SleepConditionVariableSRW` because its blocked guest continuation
+  could not be resumed. A fresh 30,000,000-step CLI replay continued after that call and hit the step
+  cap in D3DCompiler; a separate high-cap guest trace reached later guest calls. None of these runs
+  verified a host window or renderer. Nested synchronous callback scheduling and alertable waits
+  remain unsupported. A synchronous callback cannot suspend when its active run slice expires, so the
+  runtime stops with a diagnostic instead of exceeding the budget. PE64 unwind metadata and a
+  selected version 1 unwind subset are tested,
   including one target-grounded MSVC C++ catch; general SEH dispatch, vectored handlers, audio,
   DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL remain unsupported. GDI support is limited to
   virtual display DCs and basic caps.
@@ -182,12 +183,12 @@
   or pixel verification; Asteroids remains analyzer-only pending licence review.
   A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
   down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
-  queries. Scheduler regressions cover condition-variable resumption, but the normal bounded target
-  run still stops at `SleepConditionVariableSRW` because the blocked guest continuation cannot be
-  resumed. A separate high-cap guest trace initializes target static TLS, completes the selected MSVC
-  C++ `std::runtime_error` catch, reaches D3D11 shader/resource setup, and advances through guest
-  compute `Dispatch`, `Draw`, and repeated `IDXGISwapChain2::Present` calls. These guest calls do not
-  verify a host window or renderer. Native and WASM fixtures cover secure
+  queries. Scheduler regressions cover condition-variable resumption. An earlier bounded run stopped
+  at `SleepConditionVariableSRW`; a fresh 30,000,000-step CLI replay continued after the wait and hit
+  the cap in D3DCompiler. A separate high-cap guest trace initializes target static TLS, completes the
+  selected MSVC C++ `std::runtime_error` catch, reaches D3D11 shader/resource setup, and advances
+  through guest compute `Dispatch`, `Draw`, and repeated `IDXGISwapChain2::Present` calls. These guest
+  calls do not verify a host window or renderer. Native and WASM fixtures cover secure
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
   `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes
   one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and verifies a following
