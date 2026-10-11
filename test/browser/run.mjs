@@ -105,6 +105,31 @@ try {
   check('near the bottom-left vertex it is blue', at(140, 380)[2] > 200 && at(140, 380)[0] < 50, JSON.stringify(at(140, 380)));
   check('outside the triangle (left of the bottom-left vertex) is still the clear colour', near(at(100, 400), [0, 0, 51, 255]), JSON.stringify(at(100, 400)));
 
+  // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
+  await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
+  await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
+  const texText = await page.textContent('#term');
+  check('textured program ran to completion', texText.includes('frames=3') && /exited \(exit code 0\)/.test(await page.textContent('#stat')), texText);
+  const g2 = await page.evaluate(() => window.__gpuStats);
+  check('textured: 9 indexed draws, no validation errors', g2 && g2.draws >= 9 && g2.errors.length === 0, JSON.stringify(g2));
+  await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
+  await page.waitForFunction(() => window.__pixels, null, { timeout: 20000 });
+  const p2 = await page.evaluate(() => { const p = window.__pixels; return { w: p.width, h: p.height, data: Array.from(p.data) }; });
+  const at2 = (x, y) => { const i = (y * p2.w + x) * 4; return p2.data.slice(i, i + 4); };
+  const RED = [255, 0, 0, 255], GREEN = [0, 255, 0, 255], BLUE = [0, 0, 255, 255], WHITE = [255, 255, 255, 255], BG = [0, 0, 51, 255];
+  // Quad A: x 64..384, y 72..264, red.  Quad B: x 256..576, y 72..264, green, behind A.
+  check('near quad A only region is red', near(at2(100, 150), RED, 1), JSON.stringify(at2(100, 150)));
+  check('far quad B only region is green', near(at2(500, 150), GREEN, 1), JSON.stringify(at2(500, 150)));
+  check('overlap shows the NEAR quad (depth test; B drawn after A)', near(at2(320, 150), RED, 1), JSON.stringify(at2(320, 150)));
+  check('overlap edge: last column of A is red, first column right of A is green', near(at2(382, 150), RED, 1) && near(at2(387, 150), GREEN, 1), JSON.stringify([at2(382, 150), at2(387, 150)]));
+  // Quad C: x 128..512, y 312..456, whole 2x2 texture with point sampling: red green / blue white.
+  check('quad C top-left texel red', near(at2(200, 340), RED, 1), JSON.stringify(at2(200, 340)));
+  check('quad C top-right texel green', near(at2(440, 340), GREEN, 1), JSON.stringify(at2(440, 340)));
+  check('quad C bottom-left texel blue', near(at2(200, 430), BLUE, 1), JSON.stringify(at2(200, 430)));
+  check('quad C bottom-right texel white', near(at2(440, 430), WHITE, 1), JSON.stringify(at2(440, 430)));
+  check('background untouched', near(at2(10, 10), BG, 1) && near(at2(320, 290), BG, 1), JSON.stringify([at2(10, 10), at2(320, 290)]));
+  check('point sampling gives hard texel edge (no blend at the seam)', [at2(319, 340), at2(320, 340)].every((c) => near(c, RED, 1) || near(c, GREEN, 1)), JSON.stringify([at2(319, 340), at2(320, 340)]));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {

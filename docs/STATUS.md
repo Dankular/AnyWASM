@@ -45,8 +45,10 @@
 - No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
   no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
-  sampler state, mip generation, copies and instancing are implemented in the translator but only the
-  coloured-triangle path is pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
+  sampler state, mip generation, copies and instancing are implemented in the translator, but only two
+  paths are pixel-verified: the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
+  texture, D32_FLOAT depth test with the near quad drawn first, 16-bit indexed draws, 3 quads).
+  Blending, alpha-test, mips/filtering, instancing and copies are not pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
   (forced to 1 sample), staging read-back of GPU-written data, and `SV_` system values beyond the
   basics are not implemented.
 - **Test-environment limits (not product limits):** in the headless Chromium used here,

@@ -20,6 +20,7 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null; then
   x86_64-w64-mingw32-gcc -O2 -o crt_test.exe crt_test.c
   x86_64-w64-mingw32-gcc -O2 -o unimpl.exe unimpl.c
   x86_64-w64-mingw32-gcc -O2 -o d3d11_triangle.exe d3d11_triangle.c -ld3d11 -ldxgi -ldxguid -luser32  # shaders: node fixtures/gen_d3d_shaders.mjs
+  x86_64-w64-mingw32-gcc -O2 -o d3d11_textured.exe d3d11_textured.c -ld3d11 -ldxgi -ldxguid -luser32
 fi
 rm -f *.obj *.lib
 ls -l *.exe
