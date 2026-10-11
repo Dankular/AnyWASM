@@ -1,0 +1,18 @@
+{
+  "id": 12,
+  "resourceId": 10,
+  "width": 128,
+  "height": 128,
+  "format": "r32float",
+  "valueCount": 16384,
+  "finiteValues": 16384,
+  "negativeValues": 3776,
+  "positiveValues": 12608,
+  "min": -2.2360680103302,
+  "max": 4,
+  "samples": {
+    "topLeft": -1.4142135381698608,
+    "center": 2,
+    "bottomRight": -1.4142135381698608
+  }
+}

@@ -230,8 +230,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       The selected target's 1040x807 readback is saved in
       [`docs/images/glfwdemo-first-frame.png`](docs/images/glfwdemo-first-frame.png); SDF maze pixels
       are visible with no WebGPU validation errors. A deterministic seed-1 native D3D11 capture has
-      a bounded visual comparison in `docs/TARGETS.md`; pixel equivalence, independent target UAV
-      readback, other graphics states, and gameplay remain unverified. Target-driven Tab map reset is
+      a bounded visual comparison in `docs/TARGETS.md`. Its 128x128 R32_FLOAT SDF UAV is independently
+      read back with all finite values inside the shader's ±4 bound; other UAV formats, pixel
+      equivalence, graphics states, and gameplay remain unverified. Target-driven Tab map reset is
       pixel-checked after adding D3D11 `Flush1` event signaling and event-query completion; other
       query types are not supported. Structured/raw-buffer UAVs, geometry/hull/domain
       shaders, MSAA (forced to 1 sample), general staging read-back, deferred
@@ -321,9 +322,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       input is routed past GLFW's hidden helper window; D3D11 `Flush1` signals the optional guest idle
       event, and event-query `GetData` completes in the ordered command-stream model. A deterministic
       seed-1 native D3D11 capture is visually compared with the browser frame in `docs/TARGETS.md`;
-      this does not establish pixel equivalence or end-to-end rendering correctness. The normal
-      worker slice still stops in a synchronous callback that cannot resume, and no gameplay or
-      end-to-end game acceptance pass is claimed; see `docs/TARGETS.md` for exact evidence and limits.
+      `--check-uav` reads the target's 128x128 R32_FLOAT SDF and records finite-value, sign, and range
+      checks there. These do not establish pixel equivalence or end-to-end rendering correctness. The
+      normal worker slice still stops in a synchronous callback that cannot resume, and no gameplay
+      or end-to-end game acceptance pass is claimed; see `docs/TARGETS.md` for exact evidence and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the

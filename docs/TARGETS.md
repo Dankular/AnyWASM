@@ -495,7 +495,7 @@ $bundle = "$env:TEMP\anywasm-glfwdemo-frame-measure.awb"
 $env:CHROMIUM = 'C:\Users\sysadmin\AppData\Local\ms-playwright\chromium-1234\chrome-win64\chrome.exe'
 $env:REQUIRE_TARGET_MOVEMENT = '1'
 $env:REQUIRE_TARGET_MAP_RESET = '1'
-node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-map-reset
+node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-map-reset --check-uav
 ```
 
 On 2026-10-11, the latest Chromium 151.0.7922.34 replay produced a capture at 1040x807 with 5 draws,
@@ -536,25 +536,41 @@ replay of the same bundle rendered at 1040x807, with 6 draws, 1 compute dispatch
 in as [native](images/glfwdemo-native-seed1.png) and
 [WebGPU](images/glfwdemo-webgpu-seed1.png) images.
 
+The deterministic maze seed is reused on each map construction, so Tab produces the same maze in
+this bundle. The separate map-reset assertion uses the original random-seed build, where it verifies
+the regenerated map pixels and second compute dispatch.
+
 The capture hashes are SHA-256 `FF9CFF060A7179E9D489F13A76C6F9AA46DE3EDB88B9C1E9FAE163FFD4C07A3C`
 (native) and `9007C1DFD3ACEB3EA2776B653C6C46BAA45106BEFC57614C587194F878B58C84` (WebGPU). Centered
 crop comparison with FFmpeg gave 40.936 dB PSNR for 256x256 crops (browser origin 392,275; native
 origin 384,256), and 35.014 dB PSNR with 0.897977 SSIM for the 128x128 scene-focus crops (browser
 origin 456,339; native origin 448,320). Visual inspection confirms the same seed-1 wall layout,
 player, and teleport. These are bounded visual comparisons: the backbuffer sizes and capture phases
-differ, and they do not establish pixel equivalence, independently validate the target's compute
-UAV values, or verify gameplay.
+differ, and they do not establish pixel equivalence or verify gameplay.
 
-This verifies one movement direction and map regeneration in the selected target. The target's
-compute UAV values are not independently read back, other movement directions and turning are
+### Independent SDF UAV readback
+
+`test/browser/target.mjs --check-uav` copies the selected compute UAV texture to a mapped buffer and
+checks the output independently of the rendered backbuffer. The same seed-1 replay read view
+12/resource 10 as a 128x128 `r32float` texture: all 16,384 values were finite, 3,776 were negative
+and 12,608 positive, with a minimum of -2.236068 and maximum of 4.0. The target shader uses
+`RADIUS=8` and `DIST_SCALE=0.5`, so the observed range is within its signed ±4 distance bound.
+Sampled values at the top-left, center, and bottom-right were -1.414214, 2.0, and -1.414214. The
+report is saved in [`target-data/glfwdemo-sdf-seed1.json`](target-data/glfwdemo-sdf-seed1.json).
+The standalone 4x4 R32_FLOAT fixture also reads all 16 written values as 0.25. This verifies the
+selected target's SDF output for one deterministic state; it does not establish other UAV
+formats/readback paths, all gameplay states, or game acceptance.
+
+This verifies one movement direction and map regeneration in the selected target. Its deterministic
+seed-1 SDF UAV has a bounded independent readback; other movement directions and turning are
 unverified, and no full gameplay or real-game acceptance pass is claimed. The default
 250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
 is diagnostic test routing only.
 
 ## Next evidence needed
 
-- Independently inspect the compute UAV output. Verify movement in all directions and turning, then
-  complete a controlled playthrough before making a gameplay acceptance claim.
+- Verify movement in all directions and turning, then complete a controlled playthrough before
+  making a gameplay acceptance claim. Other UAV formats and general staging readback remain untested.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current

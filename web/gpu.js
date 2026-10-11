@@ -125,7 +125,7 @@ export class GpuExecutor {
     this.passKey = '';
     this.ring = null;
     this.ringOff = 0;
-    this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, errors: [] };
+    this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, lastComputeUavs: [], errors: [] };
     this.st = {
       vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
       cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
@@ -677,6 +677,10 @@ export class GpuExecutor {
       resolved[3].push({ binding, resource: view.view });
     }
 
+    this.stats.lastComputeUavs = [...groups[3].keys()]
+      .map((reg) => st.uav[reg]?.id)
+      .filter((id) => id !== undefined && id !== 0);
+
     const key = JSON.stringify([st.shader[2], layoutEntries]);
     let cached = this.computePipelines.get(key);
     if (!cached) {
@@ -915,5 +919,41 @@ export class GpuExecutor {
     }
     buf.unmap(); buf.destroy();
     return { width: t.width, height: t.height, data: out };
+  }
+
+  /** Read an R32_FLOAT texture, or the texture selected by one of its D3D11 views (for diagnostics). */
+  async readBackTexture(id) {
+    const view = this.views.get(id);
+    const resourceId = view?.resource ?? id;
+    const texture = this.res.get(resourceId);
+    if (!texture || texture.kind !== 'texture') throw new Error(`texture ${resourceId} is unavailable`);
+    const mip = view?.mip ?? 0;
+    const slice = view && (view.dim === 5 || view.dim === 4 && view.slices > 1) ? view.slice : 0;
+    const format = view ? this.viewFormat(view.format, texture) : texture.format;
+    if (format !== 'r32float') throw new Error(`texture readback supports R32_FLOAT only (got ${format})`);
+    const width = Math.max(1, texture.width >> mip);
+    const height = Math.max(1, texture.height >> mip);
+    const bytesPerRow = (width * 4 + 255) & ~255;
+    const buffer = this.device.createBuffer({
+      size: bytesPerRow * height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this.flush();
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: texture.gpu, mipLevel: mip, origin: { x: 0, y: 0, z: slice } },
+      { buffer, bytesPerRow, rowsPerImage: height },
+      { width, height, depthOrArrayLayers: 1 },
+    );
+    this.device.queue.submit([encoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const bytes = new Uint8Array(buffer.getMappedRange());
+    const data = new Float32Array(width * height);
+    for (let row = 0; row < height; row++) {
+      data.set(new Float32Array(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
+    }
+    buffer.unmap();
+    buffer.destroy();
+    return { id, resourceId, width, height, format, data };
   }
 }

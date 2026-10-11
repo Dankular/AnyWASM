@@ -2,15 +2,15 @@
 // supplied) replays the program's window/Direct3D command stream with WebGPU.
 //
 // In : {type:'start', wasm, bundle, canvas?, jitMinPrefix?}
-//      {type:'input', kind, a, b, c}  {type:'stop'}  {type:'capture'}
+//      {type:'input', kind, a, b, c}  {type:'stop'}  {type:'capture'}  {type:'readback-texture', id}
 // Out: {type:'ready'}  {type:'out', stream, text}  {type:'window', width, height, title}  {type:'status', ...}
-//      {type:'pixels', width, height, data}  {type:'gpu', draws, presents, pipelines, errors}
+//      {type:'pixels', width, height, data}  {type:'texture-readback', ...}  {type:'gpu', draws, presents, pipelines, errors}
 //      Terminal status includes JIT counters for runtime diagnostics.
 import { AnyWasm, Status } from './anywasm.js';
 import { ShaderTool } from './shaders.js';
 import { GpuExecutor } from './gpu.js';
 
-let w = null, exec = null, stopped = false, wake = null;
+let w = null, exec = null, stopped = false, wake = null, testMode = false;
 let graphicsUnavailableReason = '';
 const dec = new TextDecoder();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -18,9 +18,10 @@ const nextFrame = () => (typeof requestAnimationFrame === 'function' ? new Promi
 const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
-async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
+async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMinPrefix }) {
   stopped = false;
   wake = null;
+  testMode = !!requestedTestMode;
   exec?.device?.destroy();
   exec = null;
   graphicsUnavailableReason = canvas ? '' : 'OffscreenCanvas worker transfer is unsupported';
@@ -34,7 +35,7 @@ async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
     try {
       const tool = new ShaderTool(new URL('./shaders/', import.meta.url));
       await tool.init();
-      exec = new GpuExecutor(canvas, tool, log, { noPresent: !!testMode });
+      exec = new GpuExecutor(canvas, tool, log, { noPresent: testMode });
       exec.onWindow = (win) => postMessage({ type: 'window', ...win });
       await exec.init();
       postMessage({ type: 'gpuinfo', info: { ...exec.adapterInfo }, features: [...exec.features] });
@@ -93,6 +94,15 @@ onmessage = async (ev) => {
     } catch (e) {
       log('capture failed: ' + (e.stack || e.message));
       postMessage({ type: 'pixels', width: 0, height: 0, data: new Uint8Array(0), error: e.message });
+    }
+  } else if (m.type === 'readback-texture') {
+    try {
+      if (!testMode) throw new Error('texture readback is available only in test mode');
+      if (!exec) throw new Error('WebGPU executor is unavailable');
+      const result = await exec.readBackTexture(m.id);
+      postMessage({ type: 'texture-readback', ...result });
+    } catch (e) {
+      postMessage({ type: 'texture-readback', id: m.id, error: e.message });
     }
   }
 };

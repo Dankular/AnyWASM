@@ -415,16 +415,16 @@ try {
       const pixels = await gpu.readBackbuffer(1);
       const i = (32 * pixels.width + 32) * 4;
       const observedPixel = Array.from(pixels.data.slice(i, i + 4));
-      const output = gpu.res.get(3);
-      const readback = gpu.device.createBuffer({ size: 256 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const encoder = gpu.device.createCommandEncoder();
-      encoder.copyTextureToBuffer({ texture: output.gpu }, { buffer: readback, bytesPerRow: 256, rowsPerImage: 4 }, { width: 4, height: 4 });
-      gpu.device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(GPUMapMode.READ);
-      const mapped = new DataView(readback.getMappedRange());
-      const uavCenter = mapped.getFloat32(2 * 256 + 2 * 4, true);
-      readback.unmap();
-      const result = { pixel: observedPixel, uavCenter, stats: gpu.stats, errors: messages };
+      const readback = await gpu.readBackTexture(4); // read the texture through its D3D11 UAV view
+      const uavValues = Array.from(readback.data);
+      const uavCenter = uavValues[2 * readback.width + 2];
+      const result = {
+        pixel: observedPixel,
+        uavCenter,
+        uav: { width: readback.width, height: readback.height, format: readback.format, values: uavValues },
+        stats: gpu.stats,
+        errors: messages,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -439,6 +439,10 @@ try {
     JSON.stringify({ pixel: computeResult.pixel, uavCenter: computeResult.uavCenter, error: computeResult.error }));
   check('R32_FLOAT UAV contains the compute shader value', Math.abs(computeResult.uavCenter - 0.25) < 0.0001,
     JSON.stringify(computeResult.uavCenter));
+  check('R32_FLOAT texture readback returns all 16 UAV values',
+    computeResult.uav?.width === 4 && computeResult.uav.height === 4 && computeResult.uav.format === 'r32float'
+      && computeResult.uav.values.length === 16 && computeResult.uav.values.every((value) => Math.abs(value - 0.25) < 0.0001),
+    JSON.stringify(computeResult.uav));
 
   const drawParamsResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

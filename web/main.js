@@ -94,6 +94,8 @@ async function run(bundleBytes, label) {
       window.__gpuStats = m;
     } else if (m.type === 'pixels') {
       window.__pixels = m;
+    } else if (m.type === 'texture-readback') {
+      window.__textureReadback = m;
     } else if (m.type === 'status') {
       clearLoading();
       const names = { 0: 'stopped', 1: 'exited', 2: 'stopped at an unimplemented import', 3: 'crashed' };

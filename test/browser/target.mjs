@@ -12,6 +12,7 @@ const options = process.argv.slice(3);
 const outputPath = resolve(options.find((argument) => !argument.startsWith('--')) || 'target-first-frame.png');
 const checkMovement = options.includes('--check-movement');
 const checkMapReset = options.includes('--check-map-reset');
+const checkUav = options.includes('--check-uav');
 if (!process.argv[2] || !existsSync(bundlePath)) {
   throw new Error('usage: CHROMIUM=<browser> node test/browser/target.mjs <target.awb> [frame.png]');
 }
@@ -52,6 +53,54 @@ try {
   assert.ok(stats.dispatches > 0, 'the target should execute its compute dispatch');
   assert.ok(stats.draws > 0, 'the target should submit graphics draws');
   assert.deepEqual(stats.errors, [], 'the target frame should have no WebGPU validation errors');
+
+  let uavReadback;
+  if (checkUav) {
+    const viewId = stats.lastComputeUavs?.[0];
+    assert.ok(viewId, 'the last compute dispatch should report a bound UAV view');
+    await page.evaluate((id) => {
+      window.__textureReadback = null;
+      window.__worker?.postMessage({ type: 'readback-texture', id });
+    }, viewId);
+    await page.waitForFunction(() => window.__textureReadback, null, { timeout: 30_000 });
+    uavReadback = await page.evaluate(() => {
+      const result = window.__textureReadback;
+      if (result.error) return result;
+      const values = result.data;
+      let finiteValues = 0, negativeValues = 0, positiveValues = 0;
+      let min = Infinity, max = -Infinity;
+      for (const value of values) {
+        if (Number.isFinite(value)) finiteValues++;
+        if (value < 0) negativeValues++;
+        if (value > 0) positiveValues++;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+      }
+      const at = (x, y) => values[y * result.width + x];
+      return {
+        id: result.id,
+        resourceId: result.resourceId,
+        width: result.width,
+        height: result.height,
+        format: result.format,
+        valueCount: values.length,
+        finiteValues,
+        negativeValues,
+        positiveValues,
+        min,
+        max,
+        samples: { topLeft: at(0, 0), center: at(result.width >> 1, result.height >> 1), bottomRight: at(result.width - 1, result.height - 1) },
+      };
+    });
+    assert.equal(uavReadback.error, undefined, `target UAV readback should succeed: ${JSON.stringify(uavReadback)}`);
+    assert.equal(uavReadback.format, 'r32float', 'the target SDF UAV should use R32_FLOAT');
+    assert.equal(uavReadback.width, 128, 'the target SDF should be 128 texels wide');
+    assert.equal(uavReadback.height, 128, 'the target SDF should be 128 texels high');
+    assert.equal(uavReadback.finiteValues, 128 * 128, 'every target SDF texel should be finite');
+    assert.ok(uavReadback.negativeValues > 0 && uavReadback.positiveValues > 0, 'the SDF should contain wall and empty-space distances');
+    assert.ok(uavReadback.min >= -4.0001 && uavReadback.max <= 4.0001, 'SDF values should respect the shader radius bound');
+    writeFileSync(outputPath.replace(/\.png$/i, '.uav.json'), `${JSON.stringify(uavReadback, null, 2)}\n`);
+  }
 
   await page.evaluate(() => window.__worker?.postMessage({ type: 'capture' }));
   await page.waitForFunction(() => window.__pixels, null, { timeout: 30_000 });
@@ -173,7 +222,7 @@ try {
     }
     inputDiagnostics = await page.evaluate(() => ({ keys: window.__targetKeyEvents, status: document.querySelector('#stat')?.textContent, gpuStats: window.__gpuStats }));
   }
-  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, movement, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
+  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
 } finally {
   await browser?.close();
   server.kill();
