@@ -465,6 +465,69 @@ fn unhex(s: &str) -> Vec<u8> {
     (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
 }
 
+fn rep_case(count: u64, df: bool, rsi: u64, rdi: u64, rax: u64) -> Case {
+    let mut st = HState {
+        gpr: [0; 16],
+        rflags: 0x202 | (if df { DF } else { 0 }),
+        code: CODE,
+        xmm: [[0; 16]; 16],
+    };
+    st.gpr[RCX] = count;
+    st.gpr[RSI] = rsi;
+    st.gpr[RDI] = rdi;
+    st.gpr[RAX] = rax;
+    Case { st, data: vec![0; DATA_SPAN] }
+}
+
+fn rep_case_write(case: &mut Case, addr: u64, bytes: &[u8]) {
+    let off = (addr - DATA) as usize;
+    case.data[off..off + bytes.len()].copy_from_slice(bytes);
+}
+
+fn assert_rep_case_matches_host(asm: &str, code: &[u8], case: &Case) {
+    let host = run_host(code, case);
+    let emu = run_emu(code, case).unwrap_or_else(|e| panic!("{asm}: emulator error: {e}"));
+    let difference = compare(asm, case, &host, &emu);
+    assert!(difference.is_none(), "{asm}: {difference:?}");
+}
+
+fn deterministic_rep_cases_match_host() -> usize {
+    let movsb = "rep movsb byte ptr [rdi], byte ptr [rsi]";
+    let mut zero_count = rep_case(0, true, SCR, SCR + 0x100, 0);
+    zero_count.st.rflags |= CF | ZF;
+    rep_case_write(&mut zero_count, SCR, &[0x11, 0x22, 0x33]);
+    rep_case_write(&mut zero_count, SCR + 0x100, &[0xaa, 0xbb, 0xcc]);
+    assert_rep_case_matches_host(movsb, &[0xf3, 0xa4], &zero_count);
+
+    let mut backward = rep_case(3, true, SCR + 2, SCR + 0x102, 0);
+    rep_case_write(&mut backward, SCR, &[0x11, 0x22, 0x33]);
+    rep_case_write(&mut backward, SCR + 0x100, &[0xaa, 0xbb, 0xcc]);
+    assert_rep_case_matches_host(movsb, &[0xf3, 0xa4], &backward);
+
+    let mut stos = rep_case(3, true, 0, SCR + 0x102, 0x5a);
+    rep_case_write(&mut stos, SCR + 0x100, &[0xaa, 0xbb, 0xcc]);
+    assert_rep_case_matches_host("rep stosb byte ptr [rdi], al", &[0xf3, 0xaa], &stos);
+
+    let mut lods = rep_case(3, false, SCR, 0, 0x1122_3344_5566_7700);
+    rep_case_write(&mut lods, SCR, &[0x11, 0x22, 0x33]);
+    assert_rep_case_matches_host("rep lodsb al, byte ptr [rsi]", &[0xf3, 0xac], &lods);
+
+    let mut cmps = rep_case(3, false, SCR, SCR + 0x100, 0);
+    rep_case_write(&mut cmps, SCR, &[0x10, 0x20, 0x30]);
+    rep_case_write(&mut cmps, SCR + 0x100, &[0x10, 0x21, 0x30]);
+    assert_rep_case_matches_host(
+        "repe cmpsb byte ptr [rsi], byte ptr [rdi]",
+        &[0xf3, 0xa6],
+        &cmps,
+    );
+
+    let mut scas = rep_case(4, false, 0, SCR + 0x100, 0x21);
+    rep_case_write(&mut scas, SCR + 0x100, &[0x10, 0x20, 0x21, 0x30]);
+    assert_rep_case_matches_host("repne scasb al, byte ptr [rdi]", &[0xf2, 0xae], &scas);
+
+    6
+}
+
 #[test]
 fn corpus_matches_host_cpu() {
     setup_host();
@@ -504,7 +567,12 @@ fn corpus_matches_host_cpu() {
             }
         }
     }
-    eprintln!("differential: {ran} instructions x {trials} trials ({total} in corpus slice), {} failing instruction(s)", failures.len());
+    let rep_cases = if filter.is_none() {
+        deterministic_rep_cases_match_host()
+    } else {
+        0
+    };
+    eprintln!("differential: {ran} corpus instructions x {trials} trials + {rep_cases} deterministic REP cases ({total} corpus entries), {} failing instruction(s)", failures.len());
     let mut by_mn: BTreeMap<&str, Vec<(&String, &(usize, String))>> = BTreeMap::new();
     for (k, v) in &failures {
         by_mn.entry(mnemonic(k)).or_default().push((k, v));

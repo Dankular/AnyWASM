@@ -168,9 +168,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       approximation or document per-vendor differences.
 - [~] Extend the diff harness to control flow (jcc/call/ret/loop/string ops with REP), privileged-ish
       instructions used by user code (`rdtsc`, `cpuid`, `xgetbv`, `syscall` stubs), and multi-
-      instruction sequences. Added LOOP/Jcc and direct CALL/RET corpus rows with portable semantic
-      checks; the Linux-only host differential remains unrun here. Undefined flags/vendor-specific
-      behaviour must be excluded explicitly and documented (precedent: 16-bit shld/shrd count>16).
+      instruction sequences. Added LOOP/Jcc, direct CALL/RET, and REP string cases; portable REP
+      checks cover zero count, DF direction, and early termination. Linux-only host differential
+      cases are present but unrun here; broader widths/address-size cases remain. Undefined
+      flags/vendor-specific behaviour must be excluded and documented (e.g. 16-bit shld/shrd count>16).
 - [ ] Anti-debug/anti-cheat/DRM: out of scope unless a target requires it; flag as unsupported.
 
 ## 5. Tooling, CI, repo hygiene

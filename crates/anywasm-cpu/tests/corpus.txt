@@ -2732,3 +2732,4 @@ dd4610d9c0d9fbdd5e28dd5e30ddd8dbe3|fld qword ptr [rsi+16]; fld st(0); fsincos; f
 b90300000033c083c001e2fb83f8037502ffc0|mov ecx, 3; xor eax, eax; add eax, 1; loop -5; cmp eax, 3; jne +2; inc eax
 b90300000033c083c001e2fb83f8047505bb04000000|mov ecx, 3; xor eax, eax; add eax, 1; loop -5; cmp eax, 4; jne +5; mov ebx, 4
 b801000000e802000000eb0483c002c3|mov eax, 1; call +2; jmp +4; add eax, 2; ret
+f3ac|rep lodsb al, byte ptr [rsi]
