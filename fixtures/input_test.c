@@ -4,9 +4,17 @@ typedef void *HWND;
 typedef unsigned int UINT;
 typedef unsigned long DWORD;
 typedef unsigned long long WPARAM;
+typedef unsigned long long ULONG_PTR;
 typedef long long LPARAM;
 typedef long long LRESULT;
 typedef int BOOL;
+
+typedef struct {
+    DWORD cbSize;
+    DWORD dwFlags;
+    HWND hwndTrack;
+    DWORD dwHoverTime;
+} TRACKMOUSEEVENT;
 
 typedef LRESULT (__stdcall *WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
@@ -47,11 +55,15 @@ __declspec(dllimport) void __stdcall PostQuitMessage(int);
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD);
 __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned);
+__declspec(dllimport) BOOL __stdcall TrackMouseEvent(TRACKMOUSEEVENT *);
 
-enum { WM_NCCREATE = 0x0081, WM_KEYDOWN = 0x0100, WM_LBUTTONDOWN = 0x0201 };
+enum { WM_NCCREATE = 0x0081, WM_KEYDOWN = 0x0100, WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_MOUSELEAVE = 0x02a3 };
 
 static int saw_a_key;
+static int saw_scaled_mouse;
+static int saw_mouse_tracking;
 static int saw_left_down;
+static int saw_mouse_leave;
 static int reported;
 
 static void write_text(const char *text, DWORD length) {
@@ -60,8 +72,8 @@ static void write_text(const char *text, DWORD length) {
 }
 
 static void report_if_complete(void) {
-    static const char result[] = "guest input complete\r\n";
-    if (saw_a_key && saw_left_down && !reported) {
+    if (saw_a_key && saw_scaled_mouse && saw_mouse_tracking && saw_left_down && saw_mouse_leave && !reported) {
+        static const char result[] = "guest input complete\r\n";
         reported = 1;
         write_text(result, sizeof result - 1);
         PostQuitMessage(0);
@@ -75,6 +87,25 @@ static LRESULT __stdcall WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         static const char key[] = "guest saw keydown A\r\n";
         saw_a_key = 1;
         write_text(key, sizeof key - 1);
+    }
+    if (message == WM_MOUSEMOVE) {
+        const ULONG_PTR packed = (ULONG_PTR)lparam;
+        if ((packed & 0xffff) == 520 && ((packed >> 16) & 0xffff) == 404) {
+            static const char mouse_move[] = "guest saw scaled mousemove (520,404)\r\n";
+            static const char tracking[] = "guest TrackMouseEvent(TME_LEAVE) succeeded\r\n";
+            TRACKMOUSEEVENT request = { sizeof(TRACKMOUSEEVENT), 2, hwnd, 0 };
+            saw_scaled_mouse = 1;
+            write_text(mouse_move, sizeof mouse_move - 1);
+            if (TrackMouseEvent(&request)) {
+                saw_mouse_tracking = 1;
+                write_text(tracking, sizeof tracking - 1);
+            }
+        }
+    }
+    if (message == WM_MOUSELEAVE) {
+        static const char leave[] = "guest saw WM_MOUSELEAVE\r\n";
+        saw_mouse_leave = 1;
+        write_text(leave, sizeof leave - 1);
     }
     if (message == WM_LBUTTONDOWN) {
         static const char mouse[] = "guest saw left-down\r\n";
@@ -95,7 +126,7 @@ void mainCRTStartup(void) {
     DWORD written = 0;
     if (!RegisterClassExA(&wc))
         ExitProcess(2);
-    HWND window = CreateWindowExA(0, class_name, "input test", 0x00cf0000, 0, 0, 640, 480, 0, 0, 0, 0);
+    HWND window = CreateWindowExA(0, class_name, "input test", 0x00cf0000, 0, 0, 1040, 807, 0, 0, 0, 0);
     if (!window)
         ExitProcess(2);
     ShowWindow(window, 1);

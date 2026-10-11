@@ -26,6 +26,7 @@ MapVirtualKeyW
 ToUnicode
 SetCapture
 ReleaseCapture
+TrackMouseEvent
 GetMessageA
 TranslateMessage
 DispatchMessageA

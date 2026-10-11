@@ -11,6 +11,8 @@ const bundlePath = resolve(process.argv[2] || '');
 const options = process.argv.slice(3);
 const outputPath = resolve(options.find((argument) => !argument.startsWith('--')) || 'target-first-frame.png');
 const checkMovement = options.includes('--check-movement');
+const checkDirections = options.includes('--check-directions');
+const checkAim = options.includes('--check-aim');
 const checkMapReset = options.includes('--check-map-reset');
 const checkUav = options.includes('--check-uav');
 if (!process.argv[2] || !existsSync(bundlePath)) {
@@ -36,7 +38,7 @@ try {
     const source = original
       .replace('w.run(250_000)', 'w.run(1_000_000_000)')
       .replace('frames % 30 === 0', 'frames % 1 === 0')
-      .replace(inputBranch, "else if (m.type === 'input' && w) { console.log('[target-probe] input ' + m.kind + ':' + m.a); w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }");
+      .replace(inputBranch, "else if (m.type === 'input' && w) { console.log('[target-probe] input ' + m.kind + ':' + m.a + ':' + m.b); w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }");
     assert.notEqual(source, original, 'diagnostic worker overrides should match the current worker');
     await route.fulfill({ response, body: source, contentType: 'text/javascript' });
   });
@@ -157,7 +159,7 @@ try {
   let movement;
   let mapReset;
   let inputDiagnostics;
-  if (checkMovement || checkMapReset) {
+  if (checkMovement || checkDirections || checkMapReset) {
     assert.ok(result.greenMarker, 'the initial frame should show the green player marker');
     await page.evaluate(() => {
       window.__targetKeyEvents = [];
@@ -194,6 +196,30 @@ try {
         assert.ok(movement.key, `no WASD key moved the player marker: ${JSON.stringify(attempts)}`);
       }
     }
+    if (checkDirections) {
+      const directions = [
+        { key: 'w', name: 'W', dx: 0, dy: -1 },
+        { key: 's', name: 'S', dx: 0, dy: 1 },
+        { key: 'a', name: 'A', dx: -1, dy: 0 },
+        { key: 'd', name: 'D', dx: 1, dy: 0 },
+      ];
+      let before = result.greenMarker;
+      movement = { before, directions: [] };
+      for (const direction of directions) {
+        await page.keyboard.down(direction.key);
+        await page.waitForTimeout(500);
+        await page.keyboard.up(direction.key);
+        await page.waitForTimeout(100);
+        const after = (await capturePixels()).greenMarker;
+        const dx = after && before ? after.x - before.x : 0;
+        const dy = after && before ? after.y - before.y : 0;
+        const projected = dx * direction.dx + dy * direction.dy;
+        movement.directions.push({ key: direction.name, before, after, dx, dy, projected });
+        assert.ok(projected > 1, `${direction.name} should move the player in the expected screen direction: ${JSON.stringify(movement)}`);
+        before = after;
+      }
+      writeFileSync(outputPath.replace(/\.png$/i, '.directions.json'), `${JSON.stringify(movement, null, 2)}\n`);
+    }
     if (checkMapReset) {
       await capturePixels();
       await page.evaluate(() => { window.__mapBefore = new Uint8ClampedArray(window.__pixels.data); });
@@ -222,7 +248,33 @@ try {
     }
     inputDiagnostics = await page.evaluate(() => ({ keys: window.__targetKeyEvents, status: document.querySelector('#stat')?.textContent, gpuStats: window.__gpuStats }));
   }
-  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
+  let aim;
+  if (checkAim) {
+    await page.locator('#screen').focus();
+    const bounds = await page.locator('#screen').boundingBox();
+    assert.ok(bounds, 'the target canvas should be visible for mouse aiming');
+    let before = (await capturePixels()).greenMarker;
+    aim = { before, directions: [] };
+    for (const direction of [{ name: 'up', dx: 0, dy: -1 }, { name: 'down', dx: 0, dy: 1 }]) {
+      const playerX = bounds.x + before.x * bounds.width / result.width;
+      const playerY = bounds.y + before.y * bounds.height / result.height;
+      await page.mouse.move(playerX + direction.dx * bounds.width * 0.2, playerY + direction.dy * bounds.height * 0.2);
+      await page.waitForTimeout(100);
+      await page.keyboard.down('Space');
+      await page.waitForTimeout(500);
+      await page.keyboard.up('Space');
+      await page.waitForTimeout(100);
+      const after = (await capturePixels()).greenMarker;
+      const dx = after && before ? after.x - before.x : 0;
+      const dy = after && before ? after.y - before.y : 0;
+      const projected = dx * direction.dx + dy * direction.dy;
+      aim.directions.push({ direction: direction.name, before, after, dx, dy, projected });
+      assert.ok(projected > 1, `mouse aim ${direction.name} should move the player in that direction: ${JSON.stringify({ aim, workerDiagnostics })}`);
+      before = after;
+    }
+    writeFileSync(outputPath.replace(/\.png$/i, '.aim.json'), `${JSON.stringify(aim, null, 2)}\n`);
+  }
+  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
 } finally {
   await browser?.close();
   server.kill();

@@ -8,7 +8,7 @@
 use super::gpu::{op, Pk};
 use super::*;
 use crate::process::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const WM_CREATE: u64 = 0x0001;
 pub const WM_DESTROY: u64 = 0x0002;
@@ -34,8 +34,11 @@ pub const WM_RBUTTONUP: u64 = 0x0205;
 pub const WM_MBUTTONDOWN: u64 = 0x0207;
 pub const WM_MBUTTONUP: u64 = 0x0208;
 pub const WM_MOUSEWHEEL: u64 = 0x020a;
+pub const WM_MOUSELEAVE: u64 = 0x02a3;
 
 const PM_REMOVE: u64 = 1;
+const TME_LEAVE: u32 = 0x0000_0002;
+const TME_CANCEL: u32 = 0x8000_0000;
 const HWND_BASE: u64 = 0x0001_0010;
 const WS_CHILD: u32 = 0x4000_0000;
 
@@ -86,6 +89,7 @@ pub struct WinState {
     next_atom: u16,
     pub keys: Vec<u8>,
     pub cursor: (i32, i32),
+    pub mouse_tracking: HashSet<u64>,
     pub focus: u64,
     pub capture: u64,
     pub main_window: u64,
@@ -360,6 +364,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.extra.win.capture = 0;
             Ok(1)
         },
+        "TrackMouseEvent" => track_mouse_event,
         "SetFocus" => |p| {
             let h = p.arg(0);
             Ok(std::mem::replace(&mut p.extra.win.focus, h))
@@ -409,6 +414,32 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetDpiForWindow" | "GetDpiForSystem" => |_| Ok(96),
         _ => return None,
     })
+}
+
+/// Register or cancel the Win32 TME_LEAVE notification used by GLFW's Win32 backend.
+fn track_mouse_event(p: &mut Process) -> R {
+    let request = p.arg(0);
+    let size = p.rd32(request)?;
+    if size < 24 {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let flags = p.rd32(request + 4)?;
+    let hwnd = p.rd64(request + 8)?;
+    if flags != TME_LEAVE && flags != (TME_CANCEL | TME_LEAVE) && flags != TME_CANCEL {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    if !p.extra.win.windows.contains_key(&hwnd) {
+        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(0);
+    }
+    if flags & TME_CANCEL != 0 {
+        p.extra.win.mouse_tracking.remove(&hwnd);
+    } else {
+        p.extra.win.mouse_tracking.insert(hwnd);
+    }
+    Ok(1)
 }
 
 fn system_metric(index: u32) -> u64 {
@@ -956,6 +987,7 @@ fn destroy_window(p: &mut Process, h: u64) -> Result<(), Stop> {
     if !p.extra.win.windows.contains_key(&h) {
         return Ok(());
     }
+    p.extra.win.mouse_tracking.remove(&h);
     send(p, h, WM_DESTROY, 0, 0)?;
     send(p, h, WM_NCDESTROY, 0, 0)?;
     p.extra.win.windows.remove(&h);
@@ -1138,7 +1170,8 @@ fn input_target_window(win: &WinState) -> u64 {
 
 /// Translate a browser input event into window messages. Kinds:
 /// 0 key down (a=vk), 1 key up, 2 char (a=utf16), 3 mouse move (a=x,b=y), 4 button down (a=btn 0/1/2,b=x,c=y),
-/// 5 button up, 6 wheel (a=delta, b=x, c=y), 7 resize (a=w,b=h), 8 focus (a=1/0), 9 close request.
+/// 5 button up, 6 wheel (a=delta, b=x, c=y), 7 resize (a=w,b=h), 8 focus (a=1/0), 9 close request,
+/// 10 mouse leave.
 pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
     let h = input_target_window(&p.extra.win);
     if h == 0 {
@@ -1181,6 +1214,8 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
         }
         8 => post(p, h, if a != 0 { WM_SETFOCUS } else { WM_KILLFOCUS }, 0, 0),
         9 => post(p, h, WM_CLOSE, 0, 0),
+        10 if p.extra.win.mouse_tracking.remove(&h) => post(p, h, WM_MOUSELEAVE, 0, 0),
+        10 => {}
         _ => {}
     }
 }

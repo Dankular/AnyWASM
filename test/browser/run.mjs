@@ -244,11 +244,32 @@ try {
   check('load progress clears while a running guest waits for input',
     await idleLoadIndicator.count() === 1 && await idleLoadIndicator.isHidden());
   if (inputReady) {
+    await page.evaluate(() => {
+      window.__inputTrace = [];
+      const worker = window.__worker;
+      const post = worker.postMessage.bind(worker);
+      worker.postMessage = (message, transfer) => {
+        if (message?.type === 'input') window.__inputTrace.push(message);
+        return post(message, transfer);
+      };
+    });
     // Input delivery is independent of WebGPU; expose the canvas in browsers without a GPU adapter.
-    await page.locator('#screen').evaluate((canvas) => { canvas.hidden = false; });
+    await page.locator('#screen').evaluate((canvas) => {
+      canvas.hidden = false;
+      canvas.style.width = '320px';
+      canvas.style.height = '240px';
+    });
     await page.locator('#screen').focus();
     await page.keyboard.press('a');
-    await page.locator('#screen').click({ position: { x: 320, y: 240 } });
+    const inputCenter = await page.locator('#screen').evaluate((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: rect.left + canvas.clientLeft + canvas.clientWidth / 2,
+        y: rect.top + canvas.clientTop + canvas.clientHeight / 2,
+      };
+    });
+    await page.mouse.click(inputCenter.x, inputCenter.y);
+    await page.mouse.move(inputCenter.x + 500, inputCenter.y + 300);
     await page.waitForFunction(() => {
       const term = document.querySelector('#term')?.textContent || '';
       return term.includes('guest input complete') || document.getElementById('stat').dataset.status !== undefined;
@@ -256,7 +277,14 @@ try {
   }
   const inputText = await page.textContent('#term');
   const inputStat = await page.textContent('#stat');
+  const inputTrace = await page.evaluate(() => ({ trace: window.__inputTrace, aspectRatio: document.querySelector('#screen')?.style.aspectRatio }));
   check('guest observed WM_KEYDOWN(A)', inputText.includes('guest saw keydown A'), inputText);
+  check('guest mouse coordinates scale from the 320x240 canvas to the 1040x807 window',
+    inputText.includes('guest saw scaled mousemove (520,404)') &&
+      inputTrace.trace.some((event) => event.kind === 3 && event.a === 520 && event.b === 404) &&
+      inputTrace.aspectRatio === '1040 / 807', JSON.stringify({ inputText, inputTrace }));
+  check('guest TrackMouseEvent(TME_LEAVE) succeeds', inputText.includes('guest TrackMouseEvent(TME_LEAVE) succeeded'), inputText + inputStat);
+  check('guest receives WM_MOUSELEAVE after the pointer leaves the canvas', inputText.includes('guest saw WM_MOUSELEAVE'), inputText + inputStat);
   check('guest observed WM_LBUTTONDOWN', inputText.includes('guest saw left-down'), inputText);
   check('guest observed both input messages', inputText.includes('guest input complete'), inputText);
   check('guest input fixture exited zero', /exited \(exit code 0\)/.test(inputStat), inputStat);

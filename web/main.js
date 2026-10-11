@@ -75,7 +75,7 @@ async function run(bundleBytes, label) {
   const canvas = document.createElement('canvas');
   canvas.id = 'screen'; canvas.width = 640; canvas.height = 480; canvas.hidden = true; canvas.tabIndex = 0;
   old.replaceWith(canvas);
-  attachInput(canvas);
+  const setInputSize = attachInput(canvas);
   const off = typeof canvas.transferControlToOffscreen === 'function'
     ? canvas.transferControlToOffscreen()
     : null;
@@ -87,6 +87,7 @@ async function run(bundleBytes, label) {
     else if (m.type === 'window') {
       canvas.hidden = false;
       canvas.style.aspectRatio = `${m.width} / ${m.height}`;
+      setInputSize(m.width, m.height);
       if (m.title) document.title = `${m.title} - AnyWASM`;
     } else if (m.type === 'gpuinfo') {
       window.__gpuInfo = m;
@@ -133,17 +134,32 @@ async function run(bundleBytes, label) {
 }
 
 function attachInput(canvas) {
+  let guestWidth = canvas.width;
+  let guestHeight = canvas.height;
   const send = (kind, a = 0, b = 0, c = 0) => worker?.postMessage({ type: 'input', kind, a, b, c });
-  const pos = (e) => { const r = canvas.getBoundingClientRect(); return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)]; };
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const width = canvas.clientWidth || r.width;
+    const height = canvas.clientHeight || r.height;
+    return [
+      Math.round((e.clientX - r.left - canvas.clientLeft) * guestWidth / width),
+      Math.round((e.clientY - r.top - canvas.clientTop) * guestHeight / height),
+    ];
+  };
   canvas.addEventListener('keydown', (e) => { send(0, e.keyCode); if (e.key.length === 1) send(2, e.key.charCodeAt(0)); e.preventDefault(); });
   canvas.addEventListener('keyup', (e) => { send(1, e.keyCode); e.preventDefault(); });
   canvas.addEventListener('mousemove', (e) => { const [x, y] = pos(e); send(3, x, y); });
+  canvas.addEventListener('mouseleave', () => send(10));
   canvas.addEventListener('mousedown', (e) => { canvas.focus(); const [x, y] = pos(e); send(4, e.button, x, y); });
   canvas.addEventListener('mouseup', (e) => { const [x, y] = pos(e); send(5, e.button, x, y); });
   canvas.addEventListener('wheel', (e) => { const [x, y] = pos(e); send(6, -Math.sign(e.deltaY) * 120, x, y); e.preventDefault(); }, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('focus', () => send(8, 1));
   canvas.addEventListener('blur', () => send(8, 0));
+  return (width, height) => {
+    if (Number.isFinite(width) && width > 0) guestWidth = Math.round(width);
+    if (Number.isFinite(height) && height > 0) guestHeight = Math.round(height);
+  };
 }
 
 async function demo(name) {
