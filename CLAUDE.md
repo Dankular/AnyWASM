@@ -236,9 +236,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       instructions used by user code (`rdtsc`, `cpuid`, `xgetbv`, `syscall` stubs), and multi-
       instruction sequences. Added LOOP/Jcc, direct CALL/RET, and REP string cases; portable REP
       checks cover zero count, DF direction, operand widths 8/16/32/64, a 32-bit address-size
-      override, and early termination. Linux-only host differential cases cover byte-sized
-      operations and are present but unrun here. Undefined
-      flags/vendor-specific behaviour must be excluded and documented (e.g. 16-bit shld/shrd count>16).
+      override, and early termination. The target BZHI memory form now runs through the Linux host
+      differential corpus with deterministic index cases 0, 1, 31, 32, 33, 0x101, and 255; AF/PF
+      are masked because they are undefined. Linux-only byte-sized host differential cases remain
+      unrun locally. Undefined flags/vendor-specific behaviour must be excluded and documented
+      (e.g. 16-bit shld/shrd count>16).
 - [ ] Anti-debug/anti-cheat/DRM: out of scope unless a target requires it; flag as unsupported.
 
 ## 5. Tooling, CI, repo hygiene
