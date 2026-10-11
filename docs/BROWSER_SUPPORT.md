@@ -34,7 +34,7 @@ CSP deployment guide.
 | WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are checked by reading back the GPU back buffer in `?test=1` mode. A separate non-test-mode run captures the visible 640x480 triangle canvas and checks its clear colour and interpolated centre pixel. Other rendering paths and browser engines remain unverified. |
 | Firefox | **Partial, smoke tested.** Firefox 141.0 exits the hello fixture and completes the D3D11 triangle program in three frames. Pixel output, input behavior, and the broader conformance matrix remain untested. |
 | Safari / WebKit | **Partial, smoke tested with Playwright WebKit 18.2.** Hello exits successfully. The installed engine lacks WebGPU and OffscreenCanvas worker transfer; graphics programs stop with an explicit limitation. This does not establish native Safari behavior. |
-| Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The current fixtures do not exercise 4 GB memory pressure, memory64, or streaming of large asset sets. |
+| Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The build target is `wasm32-unknown-unknown`. The browser buffers the complete `.awb` as an `ArrayBuffer`, copies it into WASM linear memory, then `Bundle::from_bytes` copies each file into the in-memory VFS. No 4 GB pressure test, memory64 build, or large-asset streaming test has run; this is a source-level assessment, not a browser measurement. |
 
 The checked-in assertions establish their scope; they do not test the GLFW Demo or a real game.
 Firefox and WebKit have only smoke coverage outside Chromium. No full cross-browser support claim

@@ -164,8 +164,10 @@
   interpolated centre pixel. Other render paths and browser engines remain unverified.
 - Browser input (keyboard/mouse -> window messages) and the idle/frame scheduling in the worker are
   exercised by the Chromium browser suite. Firefox/Safari, visible canvas pixels outside the checked
-  triangle case, large-game memory limits, and asset streaming remain unverified; see
-  [`BROWSER_SUPPORT.md`](BROWSER_SUPPORT.md).
+  triangle case, large-game memory limits, and asset streaming remain unverified. The web build is
+  `wasm32-unknown-unknown`; the browser buffers the full `.awb`, copies it into WASM memory, and the
+  bundle parser duplicates its files into the VFS. This source audit does not measure peak memory;
+  see [`BROWSER_SUPPORT.md`](BROWSER_SUPPORT.md).
 - DLL/function imports with no host implementation are bound to a trap that stops the process with
   `Stop::Unimplemented{dll,name}` (and logs it) instead of guessing.
 - Anti-debugging, anti-cheat, and DRM behavior is not a supported compatibility target. No selected

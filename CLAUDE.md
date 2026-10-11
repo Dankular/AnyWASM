@@ -317,7 +317,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior, Firefox
       hello/triangle execution, and WebKit hello plus its OffscreenCanvas limitation are recorded in
       `docs/BROWSER_SUPPORT.md`. The D3D11 triangle canvas blit is screenshot-checked only in
-      Chromium. Large-game memory (4 GB / `memory64`) and asset streaming remain unverified.
+      Chromium. Large-game memory (4 GB / `memory64`) and asset streaming remain unverified. The
+      `wasm32-unknown-unknown` browser path buffers the full bundle, copies it into WASM memory, then
+      duplicates each file into the VFS; this source audit is not a peak-memory measurement.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship
       obligations are in `THIRD_PARTY.md`; legal review of the packaged combined work is still required.
 - [x] Legal/scope statement: user supplies their own legally obtained binaries.
