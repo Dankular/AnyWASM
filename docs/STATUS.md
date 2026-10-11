@@ -13,8 +13,9 @@
 - `anywasm-rt`: PE64 loader (relocations, imports, delay imports, validated `.pdata`, per-thread static TLS, TEB/PEB with loader lists,
   bundled DLLs) + host-implemented kernel32/ntdll/CRT. 31 end-to-end tests run **real Windows x64
   executables**: freestanding fixtures cover console I/O, relocated pointer tables, heap, SSE2 math,
-  indirect calls, GetProcAddress, thread synchronization, static TLS isolation, version checks, and
-  VFS paths; a mingw-w64 program imports the real `msvcrt.dll` (argv, qsort with guest callbacks,
+  indirect calls, GetProcAddress, thread synchronization, static TLS isolation, version checks,
+  relative VFS paths, and `CreateDirectoryA/W` including empty directories and error cases; a
+  mingw-w64 program imports the real `msvcrt.dll` (argv, qsort with guest callbacks,
   printf family, malloc/realloc, math, setjmp/longjmp, file I/O on the VFS, sscanf, atexit, exit
   code, stderr). The mingw program's output matches the same source compiled natively.
 - `printf` engine: unit tests for flags/width/precision/length modifiers/floats.

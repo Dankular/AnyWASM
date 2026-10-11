@@ -7,8 +7,11 @@ typedef struct _FILE FILE;
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int);
 __declspec(dllimport) int __stdcall SetCurrentDirectoryA(const char *);
 __declspec(dllimport) int __stdcall SetCurrentDirectoryW(const WCHAR *);
+__declspec(dllimport) int __stdcall CreateDirectoryA(const char *, void *);
+__declspec(dllimport) int __stdcall CreateDirectoryW(const WCHAR *, void *);
 __declspec(dllimport) DWORD __stdcall GetCurrentDirectoryA(DWORD, char *);
 __declspec(dllimport) DWORD __stdcall GetCurrentDirectoryW(DWORD, WCHAR *);
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
 __declspec(dllimport) DWORD __stdcall GetFullPathNameA(const char *, DWORD, char *, char **);
 __declspec(dllimport) void *__stdcall CreateFileW(const WCHAR *, DWORD, DWORD, void *, DWORD, DWORD, void *);
 __declspec(dllimport) int __stdcall CloseHandle(void *);
@@ -18,6 +21,9 @@ __declspec(dllimport) size_t __cdecl fread(void *, size_t, size_t, FILE *);
 __declspec(dllimport) int __cdecl fclose(FILE *);
 
 static const WCHAR workdir[] = {'C', ':', '\\', 'g', 'a', 'm', 'e', '\\', 'a', 's', 's', 'e', 't', 's', 0};
+static const WCHAR empty_dir[] = {'C', ':', '\\', 'g', 'a', 'm', 'e', '\\', 'a', 's', 's', 'e', 't', 's', '\\', 'e', 'm', 'p', 't', 'y', '_', 'w', 0};
+static const WCHAR child_w[] = {'c', 'h', 'i', 'l', 'd', '_', 'w', 0};
+static const WCHAR missing_parent[] = {'m', 'i', 's', 's', 'i', 'n', 'g', '\\', 'c', 'h', 'i', 'l', 'd', 0};
 static const WCHAR relative_file[] = {'c', 'o', 'n', 'f', 'i', 'g', '.', 't', 'x', 't', 0};
 static const WCHAR read_mode[] = {'r', 'b', 0};
 
@@ -50,6 +56,16 @@ void mainCRTStartup(void) {
     if (fread(contents, 1, 5, stream) != 5) ExitProcess(10);
     if (!same(contents, "vfs!!")) ExitProcess(11);
     if (fclose(stream) != 0) ExitProcess(12);
+
+    if (CreateDirectoryA("", 0) || GetLastError() != 3) ExitProcess(27);
+    if (!CreateDirectoryW(empty_dir, 0)) ExitProcess(19);
+    if (GetFileAttributesW(empty_dir) != 0x10) ExitProcess(20);
+    if (!SetCurrentDirectoryW(empty_dir)) ExitProcess(21);
+    if (!CreateDirectoryA("child_a", 0)) ExitProcess(22);
+    if (!CreateDirectoryW(child_w, 0)) ExitProcess(23);
+    if (CreateDirectoryA("child_a", 0) || GetLastError() != 183) ExitProcess(24);
+    if (CreateDirectoryW(missing_parent, 0) || GetLastError() != 3) ExitProcess(25);
+    if (!SetCurrentDirectoryA("..")) ExitProcess(26);
 
     if (SetCurrentDirectoryA("C:\\game\\missing")) ExitProcess(13);
     if (GetCurrentDirectoryA(32, cwd) != 14 || !same(cwd, "C:\\game\\assets")) ExitProcess(14);

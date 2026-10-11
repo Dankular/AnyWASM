@@ -16,6 +16,15 @@ QueryPerformanceFrequency
 GetTickCount64
 GetLastError
 SetLastError
+SetCurrentDirectoryA
+SetCurrentDirectoryW
+CreateDirectoryA
+CreateDirectoryW
+GetCurrentDirectoryA
+GetCurrentDirectoryW
+GetFullPathNameA
+CreateFileW
+GetFileAttributesW
 MultiByteToWideChar
 LCMapStringEx
 WideCharToMultiByte

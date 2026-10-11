@@ -1,9 +1,16 @@
 //! In-memory virtual file system keyed by lower-cased, `\`-normalised paths.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default, Clone)]
 pub struct Vfs {
     files: HashMap<String, Vec<u8>>,
+    directories: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreateDirError {
+    AlreadyExists,
+    PathNotFound,
 }
 
 fn without_device_prefix(path: &str) -> String {
@@ -129,14 +136,36 @@ impl Vfs {
     pub fn exists(&self, path: &str) -> bool {
         self.files.contains_key(&norm(path))
     }
-    /// Directories are inferred from file prefixes; empty directories are not represented.
+    /// Directories are inferred from file prefixes and tracked when created explicitly.
     pub fn is_dir(&self, path: &str) -> bool {
         let dir = norm(path);
         if dir.is_empty() {
             return true;
         }
+        if self.files.contains_key(&dir) {
+            return false;
+        }
+        if self.directories.contains(&dir) {
+            return true;
+        }
         let prefix = format!("{dir}\\");
         self.files.keys().any(|file| file.starts_with(&prefix))
+    }
+    /// Create one directory without creating missing parents.
+    pub fn create_dir(&mut self, path: &str) -> Result<(), CreateDirError> {
+        if path.is_empty() {
+            return Err(CreateDirError::PathNotFound);
+        }
+        let dir = norm(path);
+        if dir.is_empty() || self.exists(path) || self.is_dir(path) {
+            return Err(CreateDirError::AlreadyExists);
+        }
+        let parent = dir.rsplit_once('\\').map_or("", |(parent, _)| parent);
+        if !self.is_dir(parent) {
+            return Err(CreateDirError::PathNotFound);
+        }
+        self.directories.insert(dir);
+        Ok(())
     }
     pub fn remove(&mut self, path: &str) -> bool {
         self.files.remove(&norm(path)).is_some()
@@ -170,13 +199,36 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_directories_with_vfs_children() {
+    fn recognizes_file_backed_and_explicit_empty_directories() {
         let mut vfs = Vfs::new();
         vfs.insert("games\\data\\level.bin", vec![1]);
 
         assert!(vfs.is_dir("C:\\"));
         assert!(vfs.is_dir("games"));
         assert!(vfs.is_dir("C:\\games\\data"));
+        assert!(!vfs.is_dir("games\\data\\level.bin"));
         assert!(!vfs.is_dir("games\\missing"));
+        vfs.create_dir("games\\empty").unwrap();
+        assert!(vfs.is_dir("C:\\games\\empty"));
+        assert_eq!(
+            vfs.create_dir("games\\empty"),
+            Err(super::CreateDirError::AlreadyExists)
+        );
+        assert_eq!(
+            vfs.create_dir("missing\\child"),
+            Err(super::CreateDirError::PathNotFound)
+        );
+        assert_eq!(
+            vfs.create_dir("games\\data\\level.bin"),
+            Err(super::CreateDirError::AlreadyExists)
+        );
+        assert_eq!(
+            vfs.create_dir("games\\data\\level.bin\\child"),
+            Err(super::CreateDirError::PathNotFound)
+        );
+        assert_eq!(
+            vfs.create_dir(""),
+            Err(super::CreateDirError::PathNotFound)
+        );
     }
 }

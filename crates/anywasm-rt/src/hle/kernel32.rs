@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::process::*;
-use crate::vfs::{absolute, norm};
+use crate::vfs::{absolute, norm, CreateDirError};
 use anywasm_cpu::cpu::RSP;
 use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_X};
 
@@ -236,6 +236,14 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetFileAttributesW" => |p| {
             let s = p.read_wstr(p.arg(0))?;
             Ok(file_attrs(p, &s))
+        },
+        "CreateDirectoryA" => |p| {
+            let path = p.read_cstr(p.arg(0))?;
+            create_directory(p, &path)
+        },
+        "CreateDirectoryW" => |p| {
+            let path = p.read_wstr(p.arg(0))?;
+            create_directory(p, &path)
         },
         "GetCurrentDirectoryA" => |p| get_current_directory(p, false),
         "GetCurrentDirectoryW" => |p| get_current_directory(p, true),
@@ -1612,6 +1620,28 @@ fn file_attrs(p: &Process, path: &str) -> u64 {
         0x10
     } else {
         0xffff_ffff
+    }
+}
+
+fn create_directory(p: &mut Process, path: &str) -> R {
+    if path.is_empty() {
+        p.set_last_error(ERROR_PATH_NOT_FOUND);
+        return Ok(0);
+    }
+    let absolute_path = absolute(path, &p.current_directory);
+    match p.vfs.create_dir(&absolute_path) {
+        Ok(()) => {
+            p.set_last_error(0);
+            Ok(1)
+        }
+        Err(CreateDirError::AlreadyExists) => {
+            p.set_last_error(ERROR_ALREADY_EXISTS);
+            Ok(0)
+        }
+        Err(CreateDirError::PathNotFound) => {
+            p.set_last_error(ERROR_PATH_NOT_FOUND);
+            Ok(0)
+        }
     }
 }
 

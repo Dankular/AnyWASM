@@ -194,6 +194,9 @@ check('static PE TLS initializes and remains isolated across WASM guest threads'
 const cwdDataDir = join(tempDir, 'cwd_data');
 mkdirSync(join(cwdDataDir, 'game', 'assets'), { recursive: true });
 writeFileSync(join(cwdDataDir, 'game', 'assets', 'config.txt'), 'vfs!!');
+r = await runExe('fixtures/cwd_test.exe', ['--dir', cwdDataDir, '--cwd', 'C:\\']);
+check('CreateDirectoryA/W create and enter empty directories under WASM',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 r = await runExe('fixtures/cwd_bundle_test.exe', ['--dir', cwdDataDir, '--cwd', 'C:\\game\\assets']);
 check('.awb current directory is restored by the WASM loader and resolves relative paths',
   r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));

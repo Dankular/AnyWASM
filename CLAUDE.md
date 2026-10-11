@@ -184,8 +184,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       a guest current directory, resolves relative Win32 and CRT file paths against it, and `.awb`
       bundles persist it. Older bundles default to `C:\`. `SetCurrentDirectoryA/W`,
       `GetCurrentDirectoryA/W`, `GetFullPathNameA/W`, and relative file operations have guest
-      regression coverage. Directories are inferred from VFS file paths, so empty directories cannot
-      be selected. `CreateDirectoryA/W` and `SetFileAttributesA/W` remain unimplemented.
+      regression coverage. Directories are inferred from VFS file paths or tracked when created;
+      `CreateDirectoryA/W` support empty directories and require an existing parent, with guest
+      regression coverage. `SetFileAttributesA/W` remain unimplemented.
       `analyze --json` now adds `schemaVersion: 1` while preserving existing top-level fields. Its
       `preflight` summary separates known blockers from potentially unused missing imports and
       explicitly does not guarantee runtime success. The JSON serializer escapes control characters.
