@@ -147,10 +147,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       sections, SRW locks, condition waits/wakes/timeouts, `Sleep`, and resume of blocked threads.
       Static TLS images loaded after guest-thread creation fail explicitly. Nested synchronous
       callback scheduling and alertable waits remain unsupported; this is not parallel execution.
-      The selected target passes its condition-wait path and its observed MSVC C++ exception catch.
-      Afterward it probes `HKCU` and `HKLM` at `Software\Microsoft\Direct3D\Direct3D12`; a
-      100,000,000-step replay then reaches the step cap while imports continue to alternate between
-      `HeapAlloc` and `TlsGetValue`. No host renderer or frame has been observed.
+      The target's wait result is not fully verified: an earlier bounded replay stopped at
+      `SleepConditionVariableSRW`, while a fresh 30,000,000-step replay continued after that call
+      into D3DCompiler and hit its cap. The latter does not prove which guest thread resumed. A
+      separate 1,000,000,000-step guest trace reaches its observed MSVC C++ exception catch and later
+      guest `Dispatch`, `Draw`, and `Present` calls. It does not verify a host renderer or frame.
 - [~] **SEH / C++ exceptions**: PE32+ `.pdata` entries are parsed and validated;
       `RtlLookupFunctionEntry` and a tested `RtlVirtualUnwind` subset support leaf frames, common
       version 1 unwind opcodes, handler metadata, and chained records. Target-grounded frame search,
@@ -161,11 +162,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       `VerifyVersionInfoA/W`, `PathFileExistsA/W`, and cooperative wait support alongside the
       earlier `InitializeSListHead`, `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
       `EnumDisplaySettingsW`, plus `advapi32!SystemFunction036` and `RtlPcToFileHeader`. The
-      selected target passes version checks, creates virtual window and D3D objects, resolves
-      `RenderStates.json`, continues past condition-variable waits, and catches its MSVC C++
-      `std::runtime_error`. The target then probes Direct3D12 registry paths and reaches the
-      100,000,000-step cap. Shader creation, `Present`, unreached imports, and host window/device
-      behavior remain open.
+      selected target passes version checks, creates virtual window and D3D objects, and resolves
+      `RenderStates.json`. The 30,000,000-step trace proceeds after `SleepConditionVariableSRW` but
+      does not prove that the blocked thread resumed. Separate higher-cap traces catch its MSVC C++
+      `std::runtime_error`, probe Direct3D12 registry paths, and reach guest D3D11 calls. Host
+      window/device behavior and actual rendering remain unverified; see `docs/TARGETS.md`.
 - [~] **GDI / gdi32**: virtual display DC creation and basic display capabilities are available;
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
