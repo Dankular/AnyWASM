@@ -176,8 +176,10 @@ fallback; dynamic WASM code generation is not implemented):
       game as an end-to-end acceptance target.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
-      `unimpl.exe` fixture. Single-file/static-site export and load progress remain open. This
-      fixture does not satisfy the real-target acceptance gate above.
+      `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
+      runtime fetch and confirms the indicator clears once an input fixture reaches its message
+      loop. Single-file/static-site export remains open. These fixtures do not satisfy the
+      real-target acceptance gate above.
 - [ ] Browser support matrix (WebGPU features/limits, Safari/Firefox), memory limits of large
       games (4 GB WASM memory / `memory64`), asset streaming.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship

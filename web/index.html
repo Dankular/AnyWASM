@@ -24,6 +24,9 @@
   #term { background:#000; color:#d6d6d6; border:1px solid var(--line); border-radius:6px; padding:12px; min-height:240px; max-height:480px; overflow:auto; white-space:pre-wrap; word-break:break-word; font:13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
   #term .err { color:#ff8b8b; }
   #stat { margin-top:8px; color:var(--dim); font-variant-numeric: tabular-nums; }
+  #loading { display:flex; align-items:center; gap:10px; margin-top:8px; color:var(--dim); }
+  #loading[hidden] { display:none; }
+  #loading progress { width:120px; accent-color:var(--acc); }
   #diagnostic { display:grid; gap:4px; margin-top:10px; padding:12px; border:1px solid var(--bad); border-radius:6px; background:var(--panel); }
   #diagnostic[hidden] { display:none; }
   #diagnostic code { color:var(--bad); font:13px/1.45 ui-monospace, Menlo, Consolas, monospace; overflow-wrap:anywhere; }
@@ -48,6 +51,10 @@
 
   <div id="term" aria-live="polite" role="log"></div>
   <div id="stat"></div>
+  <div id="loading" role="status" aria-live="polite" hidden>
+    <progress aria-label="Loading program"></progress>
+    <span id="load-message"></span>
+  </div>
   <div id="diagnostic" role="alert" hidden></div>
   <canvas id="screen" width="640" height="480" hidden></canvas>
 </main>

@@ -2,7 +2,7 @@
 // supplied) replays the program's window/Direct3D command stream with WebGPU.
 //
 // In : {type:'start', wasm, bundle, canvas?}  {type:'input', kind, a, b, c}  {type:'stop'}  {type:'capture'}
-// Out: {type:'out', stream, text}  {type:'window', width, height, title}  {type:'status', ...}
+// Out: {type:'ready'}  {type:'out', stream, text}  {type:'window', width, height, title}  {type:'status', ...}
 //      {type:'pixels', width, height, data}  {type:'gpu', draws, presents, pipelines, errors}
 import { AnyWasm, Status } from './anywasm.js';
 import { ShaderTool } from './shaders.js';
@@ -34,6 +34,7 @@ async function start({ wasm, bundle, canvas, testMode }) {
       exec = null;
     }
   }
+  postMessage({ type: 'ready' });
   const t0 = performance.now();
   let status = Status.RUNNING;
   let frames = 0;

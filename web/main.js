@@ -2,6 +2,8 @@ const $ = (id) => document.getElementById(id);
 const term = $('term');
 const stat = $('stat');
 const diagnostic = $('diagnostic');
+const loading = $('loading');
+const loadMessage = $('load-message');
 let worker = null;
 
 function capabilities() {
@@ -25,6 +27,24 @@ function print(text, cls) {
   term.scrollTop = term.scrollHeight;
 }
 
+function showLoading(message) {
+  loadMessage.textContent = message;
+  loading.hidden = false;
+}
+
+function clearLoading() {
+  loading.hidden = true;
+  loadMessage.textContent = '';
+}
+
+function failLoading(label, message) {
+  clearLoading();
+  stat.textContent = `${label}: ${message}`;
+  stat.dataset.status = '3';
+  stat.dataset.exit = '-1';
+  $('stop').disabled = true;
+}
+
 async function run(bundleBytes, label) {
   if (worker) worker.terminate();
   term.textContent = '';
@@ -33,7 +53,16 @@ async function run(bundleBytes, label) {
   diagnostic.replaceChildren();
   delete stat.dataset.status;
   $('stop').disabled = false;
-  const wasm = await (await fetch(new URL('./anywasm_wasm.wasm', import.meta.url))).arrayBuffer();
+  showLoading('Loading WebAssembly runtime…');
+  let wasm;
+  try {
+    const response = await fetch(new URL('./anywasm_wasm.wasm', import.meta.url));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    wasm = await response.arrayBuffer();
+  } catch (e) {
+    failLoading(label, `could not load WebAssembly runtime (${e.message})`);
+    return;
+  }
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   window.__worker = worker; // exposed for automated tests
 
@@ -47,7 +76,8 @@ async function run(bundleBytes, label) {
 
   worker.onmessage = (ev) => {
     const m = ev.data;
-    if (m.type === 'out') print(m.text, m.stream === 'stderr' ? 'err' : '');
+    if (m.type === 'ready') clearLoading();
+    else if (m.type === 'out') print(m.text, m.stream === 'stderr' ? 'err' : '');
     else if (m.type === 'window') {
       canvas.hidden = false;
       canvas.style.aspectRatio = `${m.width} / ${m.height}`;
@@ -59,6 +89,7 @@ async function run(bundleBytes, label) {
     } else if (m.type === 'pixels') {
       window.__pixels = m;
     } else if (m.type === 'status') {
+      clearLoading();
       const names = { 0: 'stopped', 1: 'exited', 2: 'stopped at an unimplemented import', 3: 'crashed' };
       const detail = m.status === 1 ? `exit code ${m.exitCode}` : m.status === 2 ? '' : m.message;
       stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s${m.frames ? ' · ' + m.frames + ' frames' : ''}`;
@@ -77,7 +108,9 @@ async function run(bundleBytes, label) {
       $('stop').disabled = true;
     }
   };
+  worker.onerror = (e) => failLoading(label, `worker failed to start (${e.message || 'unknown error'})`);
   const testMode = new URLSearchParams(location.search).has('test');
+  showLoading('Starting guest program…');
   worker.postMessage({ type: 'start', wasm, bundle: bundleBytes, canvas: off, testMode }, [wasm, off]);
 }
 
@@ -96,15 +129,30 @@ function attachInput(canvas) {
 }
 
 async function demo(name) {
-  const res = await fetch(new URL(`./demo/${name}.awb`, import.meta.url));
-  if (!res.ok) { stat.textContent = `demo ${name}.awb not found - build it with: anywasm pack`; return; }
-  await run(new Uint8Array(await res.arrayBuffer()), `${name}.exe`);
+  showLoading(`Loading demo bundle ${name}.awb…`);
+  try {
+    const res = await fetch(new URL(`./demo/${name}.awb`, import.meta.url));
+    if (!res.ok) {
+      clearLoading();
+      stat.textContent = `demo ${name}.awb not found - build it with: anywasm pack`;
+      return;
+    }
+    await run(new Uint8Array(await res.arrayBuffer()), `${name}.exe`);
+  } catch (e) {
+    failLoading(`${name}.awb`, `could not load bundle (${e.message})`);
+  }
 }
 
 capabilities();
 $('file').addEventListener('change', async (e) => {
   const f = e.target.files[0];
-  if (f) await run(new Uint8Array(await f.arrayBuffer()), f.name);
+  if (!f) return;
+  showLoading(`Reading bundle ${f.name}…`);
+  try {
+    await run(new Uint8Array(await f.arrayBuffer()), f.name);
+  } catch (error) {
+    failLoading(f.name, `could not read bundle (${error.message})`);
+  }
 });
 $('demo-hello').addEventListener('click', () => demo('hello'));
 $('demo-crt').addEventListener('click', () => demo('crt_test'));

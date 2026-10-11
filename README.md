@@ -40,6 +40,9 @@ is bound to a trap that stops the program with the exact `dll!function` (never a
 When a browser run reaches one, the page shows the exact runtime message in an alert and points to
 `anywasm analyze <program.exe>` for the complete static import report. The analyzer lists imports;
 it does not establish that every listed import is reached during a particular run.
+The web loader shows an indeterminate progress indicator while it reads or fetches the bundle,
+loads the WebAssembly runtime, and starts the worker. It clears the indicator when the worker is
+ready to execute the guest.
 
 ## Tests
 

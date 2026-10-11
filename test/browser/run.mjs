@@ -56,12 +56,39 @@ try {
   page.on('console', (m) => logs.push(m.text()));
   page.on('pageerror', (e) => logs.push('PAGEERROR ' + e.message));
 
-  await page.goto('http://localhost:8099/index.html?run=hello');
-  await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
+  let releaseRuntimeFetch;
+  let runtimeFetchStartedResolve;
+  let runtimeFetchTimeout;
+  const runtimeFetchStarted = new Promise((resolve) => { runtimeFetchStartedResolve = resolve; });
+  const runtimeFetchGate = new Promise((resolve) => { releaseRuntimeFetch = resolve; });
+  await page.route('**/anywasm_wasm.wasm', async (route) => {
+    runtimeFetchStartedResolve();
+    await runtimeFetchGate;
+    await route.continue();
+  });
+  await page.goto('http://localhost:8099/index.html');
+  await page.locator('#demo-hello').click();
+  const reachedRuntimeFetch = await Promise.race([
+    runtimeFetchStarted.then(() => true),
+    new Promise((resolve) => { runtimeFetchTimeout = setTimeout(() => resolve(false), 8000); }),
+  ]);
+  clearTimeout(runtimeFetchTimeout);
+  const loading = page.locator('#loading');
+  const loadingCount = await loading.count();
+  const loadingText = loadingCount ? await loading.textContent() : null;
+  const loadingRole = loadingCount ? await loading.getAttribute('role') : null;
+  const progressVisible = loadingCount ? await loading.locator('progress').isVisible() : false;
+  check('browser shows accessible load progress while the runtime download is pending',
+    reachedRuntimeFetch && loadingCount === 1 && loadingRole === 'status' && await loading.isVisible() && progressVisible && /Loading WebAssembly runtime/.test(loadingText || ''),
+    JSON.stringify({ loadingText, loadingRole, progressVisible }));
+  releaseRuntimeFetch();
+  await page.unroute('**/anywasm_wasm.wasm');
+  if (reachedRuntimeFetch) await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
   const text = await page.textContent('#term');
   const stat = await page.textContent('#stat');
   check('hello.exe output shown in the page', text.includes('Hello from a Windows PE running inside AnyWASM!'), text);
   check('status shows clean exit', /exited \(exit code 0\)/.test(stat), stat);
+  check('load progress clears after the guest reports its status', loadingCount === 1 && await loading.isHidden());
 
   await page.goto('http://localhost:8099/index.html?run=crt_test');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
@@ -94,6 +121,9 @@ try {
   const inputReady = await page.evaluate(() => document.querySelector('#term').textContent.includes('guest input ready'));
   const inputReadyDiag = await page.evaluate(() => ({ term: document.querySelector('#term').textContent, stat: document.getElementById('stat').textContent, caps: document.getElementById('caps').textContent }));
   check('input fixture reached its message loop', inputReady, JSON.stringify(inputReadyDiag));
+  const idleLoadIndicator = page.locator('#loading');
+  check('load progress clears while a running guest waits for input',
+    await idleLoadIndicator.count() === 1 && await idleLoadIndicator.isHidden());
   if (inputReady) {
     // Input delivery is independent of WebGPU; expose the canvas in browsers without a GPU adapter.
     await page.locator('#screen').evaluate((canvas) => { canvas.hidden = false; });
