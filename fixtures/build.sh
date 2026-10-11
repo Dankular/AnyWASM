@@ -13,6 +13,7 @@ build() {  # name, subsystem, extra libs...
   lld-link /nologo /subsystem:$sub /entry:mainCRTStartup /nodefaultlib /dynamicbase /base:0x140000000 /out:$n.exe $n.obj "$@"
 }
 build hello console kernel32.lib
+build system_random_test console kernel32.lib
 build multibyte_test console kernel32.lib
 build lcmap_test console kernel32.lib
 build verconditionmask_test console kernel32.lib

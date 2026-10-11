@@ -19,6 +19,7 @@ pub const DIR_EXPORT: usize = 0;
 pub const DIR_IMPORT: usize = 1;
 pub const DIR_RESOURCE: usize = 2;
 pub const DIR_BASERELOC: usize = 5;
+pub const DIR_EXCEPTION: usize = 3;
 pub const DIR_TLS: usize = 9;
 pub const DIR_DELAY_IMPORT: usize = 13;
 pub const DIR_COM_DESCRIPTOR: usize = 14;
@@ -139,6 +140,13 @@ pub struct Reloc {
     pub kind: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeFunction {
+    pub begin_address: u32,
+    pub end_address: u32,
+    pub unwind_info_address: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Tls {
     pub start_raw_data: u64,
@@ -245,7 +253,9 @@ impl<'a> Pe<'a> {
         let mut sections = Vec::with_capacity(nsections);
         for i in 0..nsections {
             let o = sec_off + i * 40;
-            let raw = data.get(o..o + 40).ok_or(Error::Truncated("section header"))?;
+            let raw = data
+                .get(o..o + 40)
+                .ok_or(Error::Truncated("section header"))?;
             let end = raw[..8].iter().position(|&b| b == 0).unwrap_or(8);
             sections.push(Section {
                 name: String::from_utf8_lossy(&raw[..end]).into_owned(),
@@ -359,7 +369,11 @@ impl<'a> Pe<'a> {
             let dll = self.cstr_at_rva(name_rva)?;
             let lookup = if oft != 0 { oft } else { first_thunk };
             let entries = self.read_thunks(lookup, first_thunk)?;
-            out.push(ImportDll { dll, entries, delayed: false });
+            out.push(ImportDll {
+                dll,
+                entries,
+                delayed: false,
+            });
             desc += 20;
             if out.len() > 4096 {
                 return Err(Error::Malformed("import table not terminated"));
@@ -389,7 +403,11 @@ impl<'a> Pe<'a> {
             }
             let dll = self.cstr_at_rva(name_rva)?;
             let entries = self.read_thunks(int, iat)?;
-            out.push(ImportDll { dll, entries, delayed: true });
+            out.push(ImportDll {
+                dll,
+                entries,
+                delayed: true,
+            });
             desc += 32;
             if out.len() > 4096 {
                 return Err(Error::Malformed("delay-import table not terminated"));
@@ -424,9 +442,15 @@ impl<'a> Pe<'a> {
                 ImportName::Ordinal((raw & 0xffff) as u16)
             } else {
                 let hn = (raw & 0x7fff_ffff) as u32;
-                ImportName::Name { hint: self.u16_at_rva(hn)?, name: self.cstr_at_rva(hn + 2)? }
+                ImportName::Name {
+                    hint: self.u16_at_rva(hn)?,
+                    name: self.cstr_at_rva(hn + 2)?,
+                }
             };
-            out.push(ImportEntry { name, iat_rva: iat_rva + i * stride });
+            out.push(ImportEntry {
+                name,
+                iat_rva: iat_rva + i * stride,
+            });
             i += 1;
             if i > 1_000_000 {
                 return Err(Error::Malformed("import thunk list not terminated"));
@@ -469,7 +493,12 @@ impl<'a> Pe<'a> {
             } else {
                 None
             };
-            out.push(Export { name, ordinal: (ord_base as usize + i) as u16, rva, forwarder });
+            out.push(Export {
+                name,
+                ordinal: (ord_base as usize + i) as u16,
+                rva,
+                forwarder,
+            });
         }
         Ok(out)
     }
@@ -494,7 +523,10 @@ impl<'a> Pe<'a> {
                 if kind == REL_BASED_ABSOLUTE {
                     continue;
                 }
-                out.push(Reloc { rva: page + (e & 0x0fff) as u32, kind });
+                out.push(Reloc {
+                    rva: page + (e & 0x0fff) as u32,
+                    kind,
+                });
             }
             pos += blk;
         }
@@ -529,7 +561,9 @@ impl<'a> Pe<'a> {
 
     /// TLS callback VAs (null-terminated array in the image).
     pub fn tls_callbacks(&self) -> Result<Vec<u64>> {
-        let Some(t) = self.tls()? else { return Ok(Vec::new()) };
+        let Some(t) = self.tls()? else {
+            return Ok(Vec::new());
+        };
         if t.callbacks_addr == 0 {
             return Ok(Vec::new());
         }
@@ -548,6 +582,43 @@ impl<'a> Pe<'a> {
         }
         Ok(out)
     }
+
+    /// Win64 `.pdata` function entries from the PE exception directory.
+    pub fn runtime_functions(&self) -> Result<Vec<RuntimeFunction>> {
+        if !self.is_64 {
+            return Ok(Vec::new());
+        }
+        let dir = self.dirs[DIR_EXCEPTION];
+        if dir.rva == 0 || dir.size == 0 {
+            return Ok(Vec::new());
+        }
+        if dir.size % 12 != 0 {
+            return Err(Error::Malformed(
+                "exception directory size is not a multiple of 12",
+            ));
+        }
+        let bytes = self.slice_at_rva(dir.rva, dir.size as usize)?;
+        let mut functions = Vec::with_capacity((dir.size / 12) as usize);
+        let mut previous_begin = None;
+        for entry in bytes.chunks_exact(12) {
+            let function = RuntimeFunction {
+                begin_address: u32::from_le_bytes(entry[0..4].try_into().unwrap()),
+                end_address: u32::from_le_bytes(entry[4..8].try_into().unwrap()),
+                unwind_info_address: u32::from_le_bytes(entry[8..12].try_into().unwrap()),
+            };
+            if function.begin_address >= function.end_address
+                || function.unwind_info_address == 0
+                || previous_begin.is_some_and(|previous| function.begin_address <= previous)
+            {
+                return Err(Error::Malformed(
+                    "invalid or unsorted runtime function table",
+                ));
+            }
+            previous_begin = Some(function.begin_address);
+            functions.push(function);
+        }
+        Ok(functions)
+    }
 }
 
 /// Lower-case a DLL name and strip a trailing `.dll` — the canonical key used for lookups.
@@ -560,6 +631,91 @@ pub fn canonical_dll(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn pe_with_runtime_functions(entries: &[(u32, u32, u32)], dir_size: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x400];
+        let put16 = |bytes: &mut [u8], offset: usize, value: u16| {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        };
+        let put32 = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        bytes[0..2].copy_from_slice(b"MZ");
+        put32(&mut bytes, 0x3c, 0x80);
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        put16(&mut bytes, 0x84, MACHINE_AMD64);
+        put16(&mut bytes, 0x86, 1);
+        put16(&mut bytes, 0x94, 0xf0);
+        let opt = 0x98;
+        put16(&mut bytes, opt, 0x20b);
+        put64(&mut bytes, opt + 24, 0x1400_0000_0);
+        put32(&mut bytes, opt + 32, 0x1000);
+        put32(&mut bytes, opt + 36, 0x200);
+        put32(&mut bytes, opt + 56, 0x2000);
+        put32(&mut bytes, opt + 60, 0x200);
+        put16(&mut bytes, opt + 68, SUBSYSTEM_WINDOWS_CUI);
+        put32(&mut bytes, opt + 108, 16);
+        put32(&mut bytes, opt + 112 + DIR_EXCEPTION * 8, 0x1000);
+        put32(&mut bytes, opt + 116 + DIR_EXCEPTION * 8, dir_size);
+        let sec = opt + 0xf0;
+        bytes[sec..sec + 6].copy_from_slice(b".pdata");
+        put32(&mut bytes, sec + 8, 0x1000);
+        put32(&mut bytes, sec + 12, 0x1000);
+        put32(&mut bytes, sec + 16, 0x200);
+        put32(&mut bytes, sec + 20, 0x200);
+        put32(&mut bytes, sec + 36, SCN_MEM_READ);
+        for (index, (begin, end, unwind)) in entries.iter().enumerate() {
+            let offset = 0x200 + index * 12;
+            put32(&mut bytes, offset, *begin);
+            put32(&mut bytes, offset + 4, *end);
+            put32(&mut bytes, offset + 8, *unwind);
+        }
+        bytes
+    }
+
+    fn put64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn parses_sorted_pe64_runtime_function_entries() {
+        let bytes = pe_with_runtime_functions(&[(0x100, 0x120, 0x300), (0x120, 0x140, 0x310)], 24);
+        let pe = Pe::parse(&bytes).unwrap();
+
+        assert_eq!(
+            pe.runtime_functions().unwrap(),
+            vec![
+                RuntimeFunction {
+                    begin_address: 0x100,
+                    end_address: 0x120,
+                    unwind_info_address: 0x300,
+                },
+                RuntimeFunction {
+                    begin_address: 0x120,
+                    end_address: 0x140,
+                    unwind_info_address: 0x310,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_unsorted_runtime_function_tables() {
+        let malformed_bytes = pe_with_runtime_functions(&[], 13);
+        let malformed = Pe::parse(&malformed_bytes).unwrap();
+        assert_eq!(
+            malformed.runtime_functions().unwrap_err(),
+            Error::Malformed("exception directory size is not a multiple of 12")
+        );
+
+        let unsorted_bytes =
+            pe_with_runtime_functions(&[(0x120, 0x140, 0x310), (0x100, 0x120, 0x300)], 24);
+        let unsorted = Pe::parse(&unsorted_bytes).unwrap();
+        assert_eq!(
+            unsorted.runtime_functions().unwrap_err(),
+            Error::Malformed("invalid or unsorted runtime function table")
+        );
+    }
+
     #[test]
     fn rejects_garbage() {
         assert!(Pe::parse(b"").is_err());
@@ -568,7 +724,10 @@ mod tests {
         mz[0] = b'M';
         mz[1] = b'Z';
         mz[0x3c] = 0x80;
-        assert_eq!(Pe::parse(&mz).unwrap_err(), Error::BadMagic("missing PE signature"));
+        assert_eq!(
+            Pe::parse(&mz).unwrap_err(),
+            Error::BadMagic("missing PE signature")
+        );
     }
 
     #[test]
@@ -591,7 +750,10 @@ mod tests {
     #[test]
     fn canonical_names() {
         assert_eq!(canonical_dll("KERNEL32.dll"), "kernel32");
-        assert_eq!(canonical_dll("api-ms-win-crt-runtime-l1-1-0.dll"), "api-ms-win-crt-runtime-l1-1-0");
+        assert_eq!(
+            canonical_dll("api-ms-win-crt-runtime-l1-1-0.dll"),
+            "api-ms-win-crt-runtime-l1-1-0"
+        );
         assert_eq!(canonical_dll("d3d11"), "d3d11");
     }
 }

@@ -130,6 +130,9 @@ pub struct Module {
     pub is_dll: bool,
     pub exports: HashMap<String, u64>,
     pub ordinals: HashMap<u16, u64>,
+    /// PE32+ exception directory and its validated, sorted `.pdata` entries.
+    pub exception_table_rva: u32,
+    pub runtime_functions: Vec<anywasm_pe::RuntimeFunction>,
     /// Provided by the host (reimplemented library); `group` selects the function table.
     pub hle_group: Option<&'static str>,
 }
@@ -989,6 +992,8 @@ impl Process {
             is_dll: true,
             exports: HashMap::new(),
             ordinals: HashMap::new(),
+            exception_table_rva: 0,
+            runtime_functions: Vec::new(),
             hle_group: Some(group),
         });
         self.modules.len() - 1
@@ -1106,6 +1111,10 @@ impl Process {
                 pe.machine
             ));
         }
+        let runtime_functions = pe
+            .runtime_functions()
+            .map_err(|error| format!("{path}: {error}"))?;
+        let exception_table_rva = pe.dirs[anywasm_pe::DIR_EXCEPTION].rva;
         let size = align_up(pe.size_of_image as u64, 0x1000);
         let base = if self.range_free(pe.image_base, size) {
             pe.image_base
@@ -1199,6 +1208,8 @@ impl Process {
             is_dll,
             exports,
             ordinals,
+            exception_table_rva,
+            runtime_functions,
             hle_group: None,
         });
         self.add_ldr_entry(idx);

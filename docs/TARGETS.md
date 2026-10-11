@@ -231,7 +231,7 @@ checkpoint. GLFW's Win32 window-creation path is also known from
 source inspection to call `SHELL32!DragAcceptFiles` unconditionally; that later call remains
 unreached and its behavior has not been verified in this target.
 
-### Current checkpoint after scheduler and CPU slices
+### Current checkpoint after scheduler, CPU, and API slices
 
 The cooperative scheduler now retains and resumes guest contexts through the target's condition
 waits. Target-grounded static TLS support assigns the image's TLS slot from index zero, initializes
@@ -244,19 +244,28 @@ trace advanced to `GLFWDemo.exe+0x36b3`, bytes `C4 E3 7D 19 C0 01` (`VEXTRACTF12
 target-specific implementation now extracts the upper 128-bit lane, and the following indirect
 callback runs.
 
-With the same 30,000,000-step cap, the latest run reaches virtual `CreateWindowExW`,
+With the same 30,000,000-step cap, the target reaches virtual `CreateWindowExW`,
 `D3D11CreateDevice`, swap-chain/resource setup, repeated condition-variable waits, and
-`PathFileExistsW` for `C:\RenderStates.json`. It then makes several `LoadLibraryExW` and
-`GetProcAddress` calls and reaches guest `kernel32!ExitProcess` with status 3. This is a guest exit,
-not an AnyWASM decode or import stop. Opt-in exit tracing records the return address
-`0x14007dc14` (the call is at `GLFWDemo.exe+0x7dc0e`); the reason this branch passes status 3 to
-`ExitProcess` remains unknown. The trace does not reach shader creation or `Present`. Although the
-HLE creates virtual window, device, and swap-chain objects, no host window, host graphics device,
-displayed frame, or game acceptance has been verified.
+`PathFileExistsW` for `C:\RenderStates.json`. A prior replay then reached `ExitProcess(3)` after
+late-bound library resolution. Adding `advapi32!SystemFunction036` and `kernel32!RtlPcToFileHeader`
+moved the trace beyond that branch. The current replay reaches `kernel32!RaiseException` with code
+`0xe06d7363`, flags `1`, four arguments, and caller `0x14006c3bf` (`GLFWDemo.exe+0x6c3bf`). The
+exception parameters contain MSVC C++ EH magic `0x19930520`, an exception object, ThrowInfo at
+`0x1400dcb08`, and image base `0x140000000`; the ThrowInfo type descriptors identify
+`std::runtime_error` and `std::exception`.
+
+PE32+ exception tables are now parsed and validated; this image has 2,092 `.pdata` records, including
+2,089 version 1 and 3 version 2 unwind records. `RtlLookupFunctionEntry` and a tested version 1
+`RtlVirtualUnwind` subset are implemented. Version 2 records fail explicitly. The target has not yet
+called these helpers after throwing: frame search, guest language-handler invocation, second-pass
+unwind, and `RtlUnwindEx` remain unimplemented, so `RaiseException` still stops loudly.
+The trace does not reach shader creation or `Present`. Although the HLE creates virtual window,
+device, and swap-chain objects, no host window, host graphics device, displayed frame, or game
+acceptance has been verified.
 
 Reproduction used the Release output directory as the VFS root, `--trace-imports`, and
 `--max-steps 30000000`. The import trace was captured in the task environment under
-`%TEMP%\anywasm-glfwdemo-vextractf128.log`; it is not a repository artifact.
+`%TEMP%\anywasm-glfwdemo-unwind-primitives.log`; it is not a repository artifact.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -267,10 +276,10 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 
 ## Next evidence needed
 
-- Isolate why the selected GLFW Demo exits with status 3 after `LoadLibraryExW`/`GetProcAddress`
-  activity; capture
-  shader compilation/resource/presentation calls if the target advances. Continue to distinguish
-  virtual HLE window/device objects from observed host rendering.
+- Implement and verify frame search, guest language-handler calls, and second-pass unwinding for the
+  selected MSVC C++ throw, adding version 2 support if the walked frames require one of the target's
+  three version 2 records. Then capture shader compilation/resource/presentation calls if the target
+  advances. Continue to distinguish virtual HLE window/device objects from observed host rendering.
 - Trace each tutorial executable on its D3D11 path and record the first runtime blocker, distinguishing
   imports reached on that path from static-only imports. The tutorials still report 12 missing
   USER32 symbols and 4 missing IMM32 symbols each.
@@ -278,7 +287,7 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
   media have a documented licence review.
 - The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has
   96 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
-  linking. Conversion, version, path, scheduler, static TLS, and target-specific AVX/BMI checkpoints
-  are covered by regressions. The current bounded trace reaches guest `ExitProcess(3)` after virtual
-  D3D setup and dynamic library resolution calls. The cause, shader compilation, presentation, host
-  rendering, and gameplay acceptance remain unverified.
+  linking. Conversion, version, path, scheduler, static TLS, target-specific AVX/BMI, secure random,
+  and PE unwind primitive checkpoints have regressions. The current bounded trace stops at an
+  undispatched MSVC C++ `std::runtime_error`; shader compilation, presentation, host rendering, and
+  gameplay acceptance remain unverified.

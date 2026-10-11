@@ -1,7 +1,7 @@
 # Status (work in progress)
 
 ## Verified (tests pass; run `cargo test`)
-- `anywasm-pe`: PE32/PE32+ parser. 9 tests, values cross-checked against `llvm-readobj` on
+- `anywasm-pe`: PE32/PE32+ parser. 11 tests, values cross-checked against `llvm-readobj` on
   clang/lld-link-built fixtures (`fixtures/build.sh`).
 - `anywasm-cpu`: paged memory, decoder, integer/SSE..SSE4.2/x87 interpreter.
   **Differential test against the host CPU** (`tests/diff.rs`): 2,730 llvm-mc-assembled corpus
@@ -10,7 +10,7 @@
   one case: 16-bit `shld/shrd` with count > 16, which the SDM calls undefined and vendors differ
   on (the first CI run caught this; that range is now excluded from the corpus and the interpreter
   keeps the Intel behaviour, documented in `exec.rs`).
-- `anywasm-rt`: PE64 loader (relocations, imports, delay imports, per-thread static TLS, TEB/PEB with loader lists,
+- `anywasm-rt`: PE64 loader (relocations, imports, delay imports, validated `.pdata`, per-thread static TLS, TEB/PEB with loader lists,
   bundled DLLs) + host-implemented kernel32/ntdll/CRT. 31 end-to-end tests run **real Windows x64
   executables**: freestanding fixtures cover console I/O, relocated pointer tables, heap, SSE2 math,
   indirect calls, GetProcAddress, thread synchronization, static TLS isolation, version checks, and
@@ -120,17 +120,20 @@
 
 ## Remaining target-level and project work
 - The section 1–6 checklist in `CLAUDE.md` tracks unfinished JIT, runtime, graphics, CPU, and
-  productisation work. Broad items such as threading, SEH, more D3D11 coverage, AVX, and 32-bit PE
-  support need a representative target and dedicated design/verification before implementation.
+  productisation work. Broad items such as additional SEH/C++ dispatch, more D3D11 coverage, AVX,
+  and 32-bit PE support need a representative target and dedicated design/verification before
+  implementation.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
   down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
   queries. The bounded AnyWASM run now resumes past condition-variable waits, initializes target
   static TLS, reaches the target's VEXTRACTF128 callback, creates virtual window/device/swap-chain
-  objects, and reaches guest `ExitProcess(3)` after later initialization; trace diagnostics record
-  the caller return address `0x14007dc14`. It does not reach shader creation or `Present`; no host
-  window, renderer, or real-game acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for
-  exact traces and next steps.
+  objects, and reaches `RaiseException(0xe06d7363)` for an MSVC C++ `std::runtime_error` after the
+  `SystemFunction036` and `RtlPcToFileHeader` fixes. Native and WASM fixtures cover secure
+  `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
+  `RtlVirtualUnwind` subset are in place. Guest exception search/dispatch remains open.
+  The trace does not reach shader creation or `Present`; no host window, renderer, or real-game
+  acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
   pixel-verified.

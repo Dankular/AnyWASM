@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { AnyWasm, Status } from '../web/anywasm.js';
+import { fillCryptoRandom } from '../web/entropy.js';
 import { runJitCachePressure } from './jit_cache_pressure.mjs';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -16,6 +17,28 @@ const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-smoke-'));
 process.on('exit', () => rmSync(tempDir, { recursive: true, force: true }));
 let failures = 0;
 const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : ' :: ' + detail}`); if (!ok) failures++; };
+
+const entropyMemory = new WebAssembly.Memory({ initial: 2 });
+const entropyChunks = [];
+const entropyFilled = fillCryptoRandom(entropyMemory, 32, 65_539, {
+  getRandomValues(view) {
+    entropyChunks.push(view.byteLength);
+    view.fill(entropyChunks.length);
+    return view;
+  },
+});
+const entropyBytes = new Uint8Array(entropyMemory.buffer, 32, 65_539);
+check('Web Crypto helper fills oversized requests in valid chunks',
+  entropyFilled === 1 && JSON.stringify(entropyChunks) === '[65536,3]' &&
+    entropyBytes[0] === 1 && entropyBytes[65_535] === 1 && entropyBytes[65_536] === 2 && entropyBytes[65_538] === 2,
+  JSON.stringify({ entropyChunks, first: entropyBytes[0], boundary: entropyBytes[65_536] }));
+check('Web Crypto helper accepts zero length without a provider',
+  fillCryptoRandom(null, 0xffff_ffff, 0, null) === 1);
+let entropyFailureCalls = 0;
+check('Web Crypto helper fails closed for missing entropy and invalid memory',
+  fillCryptoRandom(entropyMemory, 0, 8, null) === 0 &&
+    fillCryptoRandom(entropyMemory, 131_071, 2, { getRandomValues() { entropyFailureCalls++; } }) === 0 &&
+    entropyFailureCalls === 0);
 
 const helloReport = JSON.parse(execFileSync(cliPath, ['analyze', join(repoRoot, 'fixtures/hello.exe'), '--json'], { cwd: repoRoot, encoding: 'utf8' }));
 const legacyAnalyzeFields = ['machine', 'subsystem', 'dll', 'dotnet', 'imageBase', 'implemented', 'missing', 'features', 'blockers', 'imports'];
@@ -71,6 +94,9 @@ async function runExe(exe, extra = [], runtimeOptions = {}) {
 
 let r = await runExe('fixtures/hello.exe');
 check('hello.exe exits 0 with greeting', r.status === Status.EXITED && r.exitCode === 0 && r.out === 'Hello from a Windows PE running inside AnyWASM!\r\n', JSON.stringify(r));
+
+r = await runExe('fixtures/system_random_test.exe');
+check('SystemFunction036 resolves and fills through the WASM host', r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 
 const computeBundle = pack('fixtures/compute.exe');
 r = await runBundle(computeBundle, { jitMinPrefix: 1 });

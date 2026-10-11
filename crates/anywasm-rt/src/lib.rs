@@ -6,10 +6,11 @@
 //! exact `dll!function` (instead of guessing), so compatibility gaps are explicit.
 
 pub mod bundle;
+mod exception;
 pub mod hle;
 pub mod process;
 pub mod vfs;
 
-pub use process::{Process, RunResult, Stop};
 pub use bundle::Bundle;
+pub use process::{Process, RunResult, Stop};
 pub use vfs::Vfs;

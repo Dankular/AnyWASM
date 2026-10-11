@@ -39,9 +39,11 @@ const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-browser-'));
 const unimplBundle = join(tempDir, 'unimpl.awb');
 const computeBundle = join(tempDir, 'compute.awb');
+const systemRandomBundle = join(tempDir, 'system_random.awb');
 const cliPath = join(repoRoot, 'target', 'debug', `anywasm${process.platform === 'win32' ? '.exe' : ''}`);
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'unimpl.exe'), '-o', unimplBundle], { cwd: repoRoot, stdio: 'ignore' });
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'compute.exe'), '-o', computeBundle], { cwd: repoRoot, stdio: 'ignore' });
+execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'system_random_test.exe'), '-o', systemRandomBundle], { cwd: repoRoot, stdio: 'ignore' });
 
 const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 800));
@@ -91,6 +93,17 @@ try {
   check('hello.exe output shown in the page', text.includes('Hello from a Windows PE running inside AnyWASM!'), text);
   check('status shows clean exit', /exited \(exit code 0\)/.test(stat), stat);
   check('load progress clears after the guest reports its status', loadingCount === 1 && await loading.isHidden());
+
+  const systemRandomBrowser = await page.evaluate(async (bundle) => {
+    const { AnyWasm, Status } = await import('/anywasm.js');
+    const wasm = await (await fetch('/anywasm_wasm.wasm')).arrayBuffer();
+    const runtime = await AnyWasm.create(wasm);
+    runtime.load(new Uint8Array(bundle));
+    return { ...runtime.runToEnd(), exited: Status.EXITED };
+  }, Array.from(readFileSync(systemRandomBundle)));
+  check('Chrome Web Crypto supplies SystemFunction036 to the guest',
+    systemRandomBrowser.status === systemRandomBrowser.exited && systemRandomBrowser.exitCode === 0,
+    JSON.stringify(systemRandomBrowser));
 
   const computeBytes = Array.from(readFileSync(computeBundle));
   const jitBrowser = await page.evaluate(async (bundle) => {

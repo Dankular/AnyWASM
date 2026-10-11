@@ -3,6 +3,7 @@
 //! Imports are bound by *name*; DLL names are mapped to a group with [`group_of`] (so
 //! `api-ms-win-crt-stdio-l1-1-0.dll`, `ucrtbase.dll` and `msvcrt.dll` all share the `crt` group).
 
+pub mod advapi32;
 pub mod com;
 pub mod crt;
 pub mod d3d11;
@@ -90,6 +91,7 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "kernel32" => kernel32::lookup(name).or_else(|| ntdll::lookup(name)),
         "ntdll" => ntdll::lookup(name).or_else(|| crt::lookup(name)),
         "crt" => crt::lookup(name),
+        "advapi32" => advapi32::lookup(name),
         "user32" => user32::lookup(name),
         "gdi32" => gdi::lookup(name),
         "shell32" => shell32::lookup(name),
@@ -128,6 +130,16 @@ pub fn data_cell(p: &mut Process, key: &str, size: u64) -> u64 {
     p.extra.data_next += (size + 15) & !15;
     p.extra.data_cells.insert(key.to_string(), a);
     a
+}
+
+#[cfg(test)]
+mod advapi32_hle_tests {
+    use super::lookup;
+
+    #[test]
+    fn systemfunction036_resolves_from_advapi32() {
+        assert!(lookup("advapi32", "SystemFunction036").is_some());
+    }
 }
 
 pub type R = Result<u64, Stop>;

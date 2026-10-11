@@ -1,5 +1,6 @@
 // AnyWASM runtime glue: loads the WASM module and drives a Windows x64 process inside it.
 // Works unchanged in browsers (main thread or worker) and Node >= 18.
+import { fillCryptoRandom } from './entropy.js';
 
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
@@ -39,6 +40,13 @@ export class AnyWasm {
     const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 };
     const imports = {
       anywasm: {
+        random_fill(pointer, length) {
+          try {
+            return fillCryptoRandom(instance.exports.memory, pointer, length);
+          } catch {
+            return 0;
+          }
+        },
         run_emitted_block(id, modulePtr, moduleLen, statePtr, budget, emittedInstructions, firstRegisterRegister) {
           try {
             if (!jit) {

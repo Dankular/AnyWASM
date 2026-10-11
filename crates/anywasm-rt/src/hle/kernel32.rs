@@ -3,6 +3,7 @@
 use super::*;
 use crate::process::*;
 use crate::vfs::{absolute, norm};
+use anywasm_cpu::cpu::RSP;
 use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_X};
 
 const INVALID_HANDLE: u64 = u64::MAX;
@@ -91,7 +92,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetUnhandledExceptionFilter" => |_| Ok(0),
         "UnhandledExceptionFilter" => |_| Ok(0),
         "SetErrorMode" | "SetThreadErrorMode" => |_| Ok(0),
-        "RaiseException" => |p| Err(Stop::Crash(format!("RaiseException code={:#x}", p.arg(0)))),
+        "RaiseException" => raise_exception,
         "RtlCaptureContext" => ntdll::rtl_capture_context,
         "IsProcessorFeaturePresent" => is_processor_feature_present,
         "GetSystemInfo" | "GetNativeSystemInfo" => get_system_info,
@@ -692,13 +693,50 @@ fn file_time(p: &Process) -> u64 {
 fn exit_process(p: &mut Process) -> R {
     let code = p.arg(0) as u32;
     if p.trace_imports {
-        let caller = p.mem.read_u64(p.cpu.gpr[anywasm_cpu::cpu::RSP]).unwrap_or(0);
+        let caller = p
+            .mem
+            .read_u64(p.cpu.gpr[anywasm_cpu::cpu::RSP])
+            .unwrap_or(0);
         p.stderr.extend_from_slice(
             format!("[process] ExitProcess code={code} caller={caller:#x}\n").as_bytes(),
         );
     }
     p.finish_exit(code).map(|_| 0)
 }
+
+fn raise_exception(p: &mut Process) -> R {
+    let (code, flags, arg_count, args_pointer) = (
+        p.arg(0) as u32,
+        p.arg(1) as u32,
+        (p.arg(2) as u32).min(15),
+        p.arg(3),
+    );
+    let arg_values = (0..arg_count)
+        .map(|index| {
+            p.mem
+                .read_u64(args_pointer.wrapping_add(index as u64 * 8))
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let caller = p.mem.read_u64(p.cpu.gpr[RSP]).unwrap_or(0);
+    if p.trace_imports {
+        let args = arg_values
+            .iter()
+            .map(|arg| format!("{arg:#x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        p.stderr.extend_from_slice(
+            format!(
+                "[seh] RaiseException code={code:#010x} flags={flags:#x} arg_count={arg_count} args=[{args}] caller={caller:#x}\n"
+            )
+            .as_bytes(),
+        );
+    }
+    Err(Stop::Crash(format!(
+        "RaiseException code={code:#x} flags={flags:#x} arg_count={arg_count} caller={caller:#x}"
+    )))
+}
+
 fn terminate_process(p: &mut Process) -> R {
     let (h, code) = (p.arg(0), p.arg(1) as u32);
     if h == u64::MAX || h == 0x1000 {
@@ -2216,6 +2254,37 @@ mod lc_map_string_tests {
         assert_eq!(fls_alloc(&mut p), Ok(0));
         assert_eq!(tls_alloc(&mut p), Ok(1));
         assert_eq!(fls_alloc(&mut p), Ok(1));
+    }
+
+    #[test]
+    fn raise_exception_trace_reports_flags_arguments_and_guest_caller() {
+        const BASE: u64 = 0x30000;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        let argument_array = BASE + 0x100;
+        let stack = BASE + 0x800;
+        p.wr64(argument_array, 0x1993_0520).unwrap();
+        p.wr64(argument_array + 8, BASE + 0x300).unwrap();
+        p.wr64(argument_array + 16, 0x5678).unwrap();
+        p.wr64(argument_array + 24, 0x9abc).unwrap();
+        p.wr64(stack, 0x1400_1234).unwrap();
+        p.cpu.gpr[RSP] = stack;
+        p.cpu.gpr[RCX] = 0xe06d_7363;
+        p.cpu.gpr[RDX] = 1;
+        p.cpu.gpr[R8] = 4;
+        p.cpu.gpr[R9] = argument_array;
+        p.trace_imports = true;
+
+        assert_eq!(
+            raise_exception(&mut p),
+            Err(Stop::Crash(
+                "RaiseException code=0xe06d7363 flags=0x1 arg_count=4 caller=0x14001234".into()
+            ))
+        );
+        assert_eq!(
+            String::from_utf8(p.take_stderr()).unwrap(),
+            "[seh] RaiseException code=0xe06d7363 flags=0x1 arg_count=4 args=[0x19930520, 0x30300, 0x5678, 0x9abc] caller=0x14001234\n"
+        );
     }
 
     #[test]

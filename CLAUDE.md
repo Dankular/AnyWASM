@@ -126,16 +126,23 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       sections, SRW locks, condition waits/wakes/timeouts, `Sleep`, and resume of blocked threads.
       Static TLS images loaded after guest-thread creation fail explicitly. Nested synchronous
       callback scheduling and alertable waits remain unsupported; this is not parallel execution.
-      The selected target passes its prior wait path and exits with guest status 3 after later
-      initialization; no host renderer or frame has been observed.
-- [ ] **SEH / C++ exceptions**: `.pdata` unwind tables, `RtlUnwindEx`/`RtlLookupFunctionEntry`,
-      `__C_specific_handler`, `RaiseException`, vectored handlers; guest faults → exceptions.
+      The selected target passes its condition-wait path. A previous run reached `ExitProcess(3)`,
+      but API fixes moved the current bounded run to an undispatched C++ exception. No host renderer
+      or frame has been observed.
+- [~] **SEH / C++ exceptions**: PE32+ `.pdata` entries are parsed and validated;
+      `RtlLookupFunctionEntry` and a tested `RtlVirtualUnwind` subset support leaf frames, common
+      version 1 unwind opcodes, handler metadata, and chained records. `RaiseException` still stops
+      on the selected target's MSVC C++ throw; frame search/second-pass unwind, `RtlUnwindEx`,
+      version 2 unwind records, language handlers, vectored handlers, and guest faults → exceptions
+      remain open.
 - [~] **More of kernel32/ntdll/user32/shlwapi**: target-grounded work adds
       `VerifyVersionInfoA/W`, `PathFileExistsA/W`, and cooperative wait support alongside the
       earlier `InitializeSListHead`, `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
-      `EnumDisplaySettingsW`. The selected target passes version checks, creates virtual window and
-      D3D objects, resolves `RenderStates.json`, and continues past condition-variable waits.
-      Unreached imports and host window/device behavior remain open.
+      `EnumDisplaySettingsW`, plus `advapi32!SystemFunction036` and `RtlPcToFileHeader`. The
+      selected target passes version checks, creates virtual window and D3D objects, resolves
+      `RenderStates.json`, and continues past condition-variable waits. Its current bounded run
+      reaches `RaiseException(0xe06d7363)` for an MSVC C++ `std::runtime_error`; exception dispatch,
+      unreached imports, and host window/device behavior remain open.
 - [~] **GDI / gdi32**: virtual display DC creation and basic display capabilities are available;
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
@@ -225,10 +232,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
       `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Cooperative
       scheduling now resumes the selected target beyond its condition-variable waits. After
-      target-grounded static TLS and VEXTRACTF128 support, its bounded run reaches guest
-      `ExitProcess(3)` during later initialization. No real host window, renderer, or frame has been
-      verified, so the end-to-end acceptance gate remains open; see `docs/TARGETS.md` for the exact
-      trace and next steps.
+      target-grounded static TLS and VEXTRACTF128 support, its bounded run first reached guest
+      `ExitProcess(3)`. The latest API fixes move it to `RaiseException(0xe06d7363)` for an MSVC C++
+      `std::runtime_error`; the exception is not dispatched yet. No real host window, renderer, or
+      frame has been verified, so the end-to-end acceptance gate remains open; see `docs/TARGETS.md`
+      for the exact trace and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
