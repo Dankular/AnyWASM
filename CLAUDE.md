@@ -181,8 +181,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       (IndexedDB/OPFS) — verify what is already implemented before starting each.
 - [ ] **32-bit PE (WoW64-style)**: needs a 32-bit decoder/execution mode, 32-bit TEB/PEB and
       32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
-- [ ] **DLL loading**: bundled DLLs are supported by the loader; verify behaviour with real
-      third-party DLLs (init order, `DllMain`, TLS callbacks, forwarded exports).
+- [~] **DLL loading**: the selected Diligent target maps and executes code from
+      `GraphicsEngineD3D11_64r.dll` and `D3Dcompiler_47.dll`; `DllMain` is invoked for bundled DLLs.
+      All four target images have TLS directories but no TLS callbacks, and none has forwarded
+      exports, so those behaviours are not verified. Source inspection shows initialization follows
+      module creation order (the importer is reserved before recursive dependency loading), not a
+      dependency-first order; TLS callback invocation is absent, and forwarded-export failures are
+      not surfaced. Verify these paths with a representative DLL before expanding support.
 - [x] **Packer/analyzer**: `--dir` recursively adds assets with preserved relative subpaths and
       `--args` embeds the caller's command line. `run` and `pack` accept `--cwd`; the process stores
       a guest current directory, resolves relative Win32 and CRT file paths against it, and `.awb`

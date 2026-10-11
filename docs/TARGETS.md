@@ -215,6 +215,28 @@ engine, and archiver. The EXE's current misses include 21 USER32, 10 GDI32, 8 KE
 SHELL32 symbols; the engine retains 14 imports, the archiver 12, and D3DCompiler 28. The archived
 JSON records each unresolved name.
 
+### Third-party DLL loading audit
+
+The current Release artifacts were inspected with the PE parser. `GLFWDemo.exe`,
+`GraphicsEngineD3D11_64r.dll`, `Archiver_64r.dll`, and `D3Dcompiler_47.dll` each have a TLS
+directory, but `Pe::tls_callbacks()` returns an empty list for all four. Their export tables contain
+no forwarded exports. These binaries therefore do not exercise either callback or forwarder
+handling.
+
+A 30,000,000-instruction AnyWASM replay with `--mode d3d11` reached `user32!CreateWindowExW` and
+`d3d11!D3D11CreateDevice`, then executed code in the bundled D3D11 engine and `D3Dcompiler_47.dll`
+before reaching the step cap. This confirms that the selected target maps and executes code in those
+DLLs; it does not verify their initialization order. Source inspection shows `load_image` reserves a
+module before recursively loading its imports, while `run_dll_inits` invokes `DllMain` in module
+creation order. That order is not dependency-first. Static TLS data is initialized, but the loader
+does not invoke `Pe::tls_callbacks()`. Named forwarded exports are resolved opportunistically;
+ordinal forwarders are dropped, while failed named forwarders are omitted and only fail if later
+imported.
+
+The selected artifacts leave the callback and forwarder cases untested. Use a representative DLL
+that contains those features before claiming support; separately verify dependency-first `DllMain`
+ordering against that target.
+
 ### Bounded AnyWASM trial
 
 The EXE was run with the Release output directory as its VFS root so the companion DLLs and shader

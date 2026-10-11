@@ -137,6 +137,11 @@
   including one target-grounded MSVC C++ catch; general SEH dispatch, vectored handlers, audio,
   DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL remain unsupported. GDI support is limited to
   virtual display DCs and basic caps.
+- DLL initialization remains partial: bundled DLL `DllMain` calls follow module creation order,
+  static TLS data is initialized, but TLS callbacks are not invoked. Named forwarded exports are
+  resolved opportunistically, with failed names omitted. The selected Diligent EXE and three DLLs
+  have no TLS callbacks or forwarded exports, so they do not verify those paths; see
+  [`docs/TARGETS.md`](TARGETS.md).
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
   sampler state, mip generation, copies and instancing are implemented in the translator, but only two
   paths are pixel-verified: the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
