@@ -191,16 +191,20 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
       import blockers in `docs/TARGETS.md`. These are preliminary targets: the tutorial renderer
       choice was not launched, the samples have not run through AnyWASM, and Asteroids needs a
-      separate Intel-origin code/assets redistribution review. Still choose and run a redistributable
-      game as an end-to-end acceptance target.
+      separate Intel-origin code/assets redistribution review. The Apache-2.0 GLFW Demo maze is now
+      the selected game candidate; its D3D11-only build succeeded, but static analysis reports 134
+      unresolved imports in the EXE and 96 in the D3D11 engine DLL. It was not run, so the
+      end-to-end acceptance gate remains open. See `docs/TARGETS.md` for provenance and the next
+      smallest experiment.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
       runtime fetch and confirms the indicator clears once an input fixture reaches its message
       loop. Single-file/static-site export remains open. These fixtures do not satisfy the
       real-target acceptance gate above.
-- [ ] Browser support matrix (WebGPU features/limits, Safari/Firefox), memory limits of large
-      games (4 GB WASM memory / `memory64`), asset streaming.
+- [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior are recorded
+      in `docs/BROWSER_SUPPORT.md`; canvas-blit pixels, Firefox, Safari/WebKit, large-game memory
+      (4 GB / `memory64`), and asset streaming remain unverified.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship
       obligations are in `THIRD_PARTY.md`; legal review of the packaged combined work is still required.
 - [x] Legal/scope statement: user supplies their own legally obtained binaries.

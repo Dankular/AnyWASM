@@ -84,6 +84,86 @@ all three programs remain preliminary candidates, not acceptance runs. Asteroids
 outside the redistributable acceptance set until its Intel-origin code and sample media have a
 documented licence review.
 
+## Selected game candidate: DiligentSamples GLFW Demo
+
+The pinned DiligentSamples README describes GLFW Demo as a simple maze mini-game. The repository
+declares Apache-2.0 and says its contributions are free of IP encumbrances; it separately identifies
+GLFW as zlib-licensed. The demo builds GLFW statically (there is no `glfw3.dll` output), uses
+`GLFW_NO_API` for window/input, obtains the Win32 handle with `glfwGetWin32Window`, and loads the
+D3D11 backend through `LoadAndGetEngineFactoryD3D11`. Its maze is generated procedurally; CMake
+copies only `DrawMap.hlsl`, `GenerateSDF.hlsl`, `Structures.fxh`, and `RenderStates.json` to the
+target output. The `sdf_map.jpg` source image is not copied there. Microsoft documents
+`D3DCompiler_47.dll` as an application-local game redistributable. These source, asset, GLFW, and
+compiler-runtime terms make this the selected candidate for evaluation. It was chosen over
+Asteroids because upstream describes it as a mini-game, while Asteroids is an Intel-origin
+performance benchmark with a separate source/media review still open. The built files remain in
+the external temporary build tree and are not redistributed by AnyWASM. The output also imports the
+MSVC C++ runtime; Microsoft states that redistributing those runtime files is subject to the
+Visual Studio licence terms for a licensed Visual Studio user, so any later product bundle must
+follow those terms.
+
+Sources are pinned to DiligentEngine `efe5da2270c6edfc8b0d2e39e946b35acbeaa874`, DiligentCore
+`074060cfd1db73064d7a18cf40df86af6531520c`, and DiligentSamples
+`03a10e15e69c5ae1738a52175ae029f3f4275a90`. The sample README documents `--mode d3d11`; CMake
+reported D3D11 as the only supported backend with D3D12, OpenGL, and Vulkan disabled. It was built
+with Visual Studio 2022 x64 / Release in a temporary build directory outside this repository. The
+external checkout has the previously documented local CMake workarounds. The configure used a
+disconnected FetchContent mode and an empty NVAPI source override to avoid fetching an optional
+NVIDIA dependency. It enabled samples/tools and kept the archiver and render-state packager enabled
+because another generated sample target requires them at configure time.
+
+```powershell
+cmake -S '<external DiligentEngine checkout>' -B '<temporary build directory>' `
+  -G 'Visual Studio 17 2022' -A x64 `
+  -DDILIGENT_NO_DIRECT3D12=ON -DDILIGENT_NO_OPENGL=ON -DDILIGENT_NO_VULKAN=ON `
+  -DDILIGENT_BUILD_SAMPLES=ON -DDILIGENT_BUILD_TOOLS=ON -DDILIGENT_BUILD_FX=OFF `
+  -DDILIGENT_NO_SUPER_RESOLUTION=ON -DDILIGENT_NO_ARCHIVER=OFF `
+  -DDILIGENT_NO_RENDER_STATE_PACKAGER=OFF -DFETCHCONTENT_FULLY_DISCONNECTED=ON `
+  -DFETCHCONTENT_SOURCE_DIR_NVAPI='<empty local directory>'
+cmake --build '<temporary build directory>' --config Release --target GLFWDemo --parallel 4
+```
+
+| Output beside `GLFWDemo.exe` | Size (bytes) | Role |
+|---|---:|---|
+| `GLFWDemo.exe` | 656,384 | Win64 game executable |
+| `GraphicsEngineD3D11_64r.dll` | 1,011,200 | Diligent D3D11 backend |
+| `Archiver_64r.dll` | 785,920 | Copied Diligent support DLL; runtime use not established |
+| `D3Dcompiler_47.dll` | 4,740,688 | HLSL compiler dependency |
+| HLSL/FXH/JSON files | 11,999 total | Runtime shaders and render-state description |
+
+`anywasm analyze --json` was run separately on the executable and all three DLLs using AnyWASM
+`4b37b09` (the repository revision before this documentation update). These are static import counts;
+they do not show which imports are reached after D3D11 selection. The complete missing-symbol lists
+are preserved in [`target-imports/glfwdemo-d3d11.json`](target-imports/glfwdemo-d3d11.json).
+
+| Image | Implemented | Missing | Largest unresolved groups |
+|---|---:|---:|---|
+| `GLFWDemo.exe` | 153 | 134 | MSVCP140 64; USER32 36; GDI32 13; VCRUNTIME140 5 |
+| `GraphicsEngineD3D11_64r.dll` | 74 | 96 | MSVCP140 75; VCRUNTIME140 7; D3DCOMPILER_47 2; USER32 1; SHLWAPI 1 |
+| `Archiver_64r.dll` | 68 | 91 | MSVCP140 73; VCRUNTIME140 7; D3DCOMPILER_47 2; SHLWAPI 1 |
+| `D3Dcompiler_47.dll` | 103 | 28 | KERNEL32 15; ADVAPI32 12; RPCRT4 1 |
+
+Notable unresolved names include `RegisterRawInputDevices`, `GetRawInputData`, `SetPixelFormat`,
+`SwapBuffers`, and `D3DCompile`/`D3DReflect`, as well as large MSVC C++ runtime import sets. The
+executable has 134 statically unresolved imports and the selected D3D11 engine DLL has 96. The
+AnyWASM runtime's reached-import behavior was not attempted because this static unresolved-import
+surface is large. This candidate has not been run or behavior-verified and does not pass the
+real-target acceptance gate. A missing static import alone does not prove that a selected path
+reaches it.
+
+The next smallest experiment is to rebuild this target with the MSVC static runtime
+(`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`) and re-run all four analyses. That targets the dominant
+MSVCP140/VCRUNTIME140 import groups before any host API work. It will not address the executable's
+USER32/GDI32 surface or the D3D compiler DLL's KERNEL32/ADVAPI32 imports; those remain separate
+blockers if reached.
+
+Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
+[GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
+[GLFW Demo CMake](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo/CMakeLists.txt),
+[GLFW license](https://github.com/glfw/glfw/blob/master/LICENSE.md), and
+[Microsoft D3DCompiler redistribution guidance](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/packaging/packaging-framework-packages?view=gdk-2604),
+[Microsoft Visual C++ redistribution terms](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170).
+
 ## Next evidence needed
 
 - Trace each executable on its D3D11 path and record the first runtime blocker, distinguishing
@@ -92,5 +172,6 @@ documented licence review.
   IMM32 symbols.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
-- Replace or supplement the tutorials with a redistributable Win64 game once one can be built and
-  analyzed without importing a second graphics API that obscures D3D11-specific gaps.
+- The D3D11-only GLFW Demo is now the selected game candidate. Its statically unresolved import
+  surface needs to be reduced and re-analyzed before attempting a behavior run; do not count the
+  existing D3D11 fixtures as a game acceptance run.

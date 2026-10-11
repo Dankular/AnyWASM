@@ -1,0 +1,552 @@
+{
+  "generated_utc": "2026-10-11T09:47:46Z",
+  "analyzer": "anywasm analyze --json",
+  "anywasm_commit": "4b37b09d95f31e01848a2f4b4ee84d07bcee7009",
+  "diligentengine_commit": "efe5da2270c6edfc8b0d2e39e946b35acbeaa874",
+  "diligentcore_commit": "074060cfd1db73064d7a18cf40df86af6531520c",
+  "diligentsamples_commit": "03a10e15e69c5ae1738a52175ae029f3f4275a90",
+  "images": [
+    {
+      "image": "GLFWDemo.exe",
+      "implemented_count": 153,
+      "missing_count": 134,
+      "unresolved_imports": [
+        {
+          "dll": "api-ms-win-crt-heap-l1-1-0.dll",
+          "missing": [
+            "_callnewh"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-math-l1-1-0.dll",
+          "missing": [
+            "_dclass"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-runtime-l1-1-0.dll",
+          "missing": [
+            "strerror_s",
+            "_register_thread_local_exe_atexit_callback",
+            "_invoke_watson",
+            "terminate"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-stdio-l1-1-0.dll",
+          "missing": [
+            "_wfopen_s"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-string-l1-1-0.dll",
+          "missing": [
+            "wcscpy",
+            "wcscmp"
+          ]
+        },
+        {
+          "dll": "GDI32.dll",
+          "missing": [
+            "CreateBitmap",
+            "CreateRectRgn",
+            "DeleteObject",
+            "CreateDIBSection",
+            "CreateDCW",
+            "DeleteDC",
+            "GetDeviceCaps",
+            "GetDeviceGammaRamp",
+            "SetDeviceGammaRamp",
+            "ChoosePixelFormat",
+            "DescribePixelFormat",
+            "SetPixelFormat",
+            "SwapBuffers"
+          ]
+        },
+        {
+          "dll": "KERNEL32.dll",
+          "missing": [
+            "VerSetConditionMask",
+            "SleepConditionVariableSRW",
+            "SetThreadExecutionState"
+          ]
+        },
+        {
+          "dll": "MSVCP140.dll",
+          "missing": [
+            "??1?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "??1?$basic_ios@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "??0?$basic_iostream@_WU?$char_traits@_W@std@@@std@@QEAA@PEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@1@@Z",
+            "??0?$basic_ios@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+            "??0?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+            "?_Id_cnt@id@locale@std@@0HA",
+            "?id@?$ctype@_W@std@@2V0locale@2@A",
+            "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ",
+            "??0_Lockit@std@@QEAA@H@Z",
+            "??1_Lockit@std@@QEAA@XZ",
+            "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@N@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z",
+            "?_Syserror_map@std@@YAPEBDH@Z",
+            "?_Xbad_function_call@std@@YAXXZ",
+            "?setprecision@std@@YA?AU?$_Smanip@_J@1@_J@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@M@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z",
+            "??1?$basic_ostream@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z",
+            "?_Random_device@std@@YAIXZ",
+            "?_Xout_of_range@std@@YAXPEBD@Z",
+            "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+            "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+            "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ",
+            "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ",
+            "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z",
+            "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z",
+            "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z",
+            "?_Unlock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ",
+            "?showmanyc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JXZ",
+            "?uflow@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAGXZ",
+            "?xsgetn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEA_W_J@Z",
+            "?setbuf@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAPEAV12@PEA_W_J@Z",
+            "?sync@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAHXZ",
+            "?imbue@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAXAEBVlocale@2@@Z",
+            "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ",
+            "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z",
+            "?widen@?$ctype@_W@std@@QEBA_WD@Z",
+            "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ",
+            "?_Lock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ",
+            "??1?$basic_iostream@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ",
+            "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z",
+            "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ",
+            "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z",
+            "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "_Thrd_yield",
+            "?xsputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEB_W_J@Z",
+            "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+            "?_Xbad_alloc@std@@YAXXZ",
+            "?_Xlength_error@std@@YAXPEBD@Z",
+            "?uncaught_exception@std@@YA_NXZ",
+            "_Query_perf_counter",
+            "_Query_perf_frequency",
+            "?good@ios_base@std@@QEBA_NXZ",
+            "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+            "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z",
+            "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z",
+            "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z"
+          ]
+        },
+        {
+          "dll": "SHELL32.dll",
+          "missing": [
+            "DragFinish",
+            "DragQueryPoint",
+            "DragAcceptFiles",
+            "DragQueryFileW"
+          ]
+        },
+        {
+          "dll": "USER32.dll",
+          "missing": [
+            "TrackMouseEvent",
+            "GetWindowPlacement",
+            "GetRawInputDeviceList",
+            "GetRawInputDeviceInfoA",
+            "EnumDisplayMonitors",
+            "EnumDisplayDevicesW",
+            "EnumDisplaySettingsExW",
+            "EnumDisplaySettingsW",
+            "ChangeDisplaySettingsExW",
+            "ToUnicode",
+            "UnregisterDeviceNotification",
+            "RegisterDeviceNotificationW",
+            "RegisterRawInputDevices",
+            "GetRawInputData",
+            "CreateIconIndirect",
+            "DestroyIcon",
+            "GetClassLongPtrW",
+            "PtInRect",
+            "OffsetRect",
+            "SetRect",
+            "WindowFromPoint",
+            "RemovePropW",
+            "GetPropW",
+            "SetPropW",
+            "MsgWaitForMultipleObjects",
+            "MapVirtualKeyW",
+            "EmptyClipboard",
+            "GetClipboardData",
+            "SetClipboardData",
+            "CloseClipboard",
+            "OpenClipboard",
+            "SetWindowPlacement",
+            "FlashWindow",
+            "GetLayeredWindowAttributes",
+            "WaitMessage",
+            "GetMessageTime"
+          ]
+        },
+        {
+          "dll": "VCRUNTIME140.dll",
+          "missing": [
+            "_purecall",
+            "__current_exception_context",
+            "__current_exception",
+            "__std_exception_copy",
+            "__std_exception_destroy"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "GraphicsEngineD3D11_64r.dll",
+      "implemented_count": 74,
+      "missing_count": 96,
+      "unresolved_imports": [
+        {
+          "dll": "api-ms-win-crt-heap-l1-1-0.dll",
+          "missing": [
+            "_callnewh"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-math-l1-1-0.dll",
+          "missing": [
+            "_fdclass"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-runtime-l1-1-0.dll",
+          "missing": [
+            "terminate",
+            "_seh_filter_dll",
+            "strerror_s",
+            "_invoke_watson"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-stdio-l1-1-0.dll",
+          "missing": [
+            "_wfopen_s"
+          ]
+        },
+        {
+          "dll": "D3DCOMPILER_47.dll",
+          "missing": [
+            "D3DReflect",
+            "D3DCompile"
+          ]
+        },
+        {
+          "dll": "KERNEL32.dll",
+          "missing": [
+            "SleepConditionVariableSRW",
+            "VerSetConditionMask",
+            "VerifyVersionInfoW"
+          ]
+        },
+        {
+          "dll": "MSVCP140.dll",
+          "missing": [
+            "?showmanyc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JXZ",
+            "?_Unlock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ",
+            "?uflow@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAGXZ",
+            "?xsgetn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEA_W_J@Z",
+            "?xsputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEB_W_J@Z",
+            "?setbuf@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAPEAV12@PEA_W_J@Z",
+            "?sync@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAHXZ",
+            "?imbue@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAXAEBVlocale@2@@Z",
+            "??1?$basic_iostream@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "?_Lock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ",
+            "??1?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "??1?$basic_ios@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "??0?$basic_iostream@_WU?$char_traits@_W@std@@@std@@QEAA@PEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@1@@Z",
+            "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ",
+            "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z",
+            "?widen@?$ctype@_W@std@@QEBA_WD@Z",
+            "?_Xbad_function_call@std@@YAXXZ",
+            "_Thrd_id",
+            "??0?$basic_ios@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+            "??0?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@K@Z",
+            "_Query_perf_counter",
+            "?_Id_cnt@id@locale@std@@0HA",
+            "?id@?$ctype@_W@std@@2V0locale@2@A",
+            "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ",
+            "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            "_Thrd_join",
+            "_Cnd_wait",
+            "_Cnd_do_broadcast_at_thread_exit",
+            "_Cnd_signal",
+            "??0_Lockit@std@@QEAA@H@Z",
+            "_Thrd_yield",
+            "??1_Lockit@std@@QEAA@XZ",
+            "_Query_perf_frequency",
+            "?_Xinvalid_argument@std@@YAXPEBD@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z",
+            "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z",
+            "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBX@Z",
+            "_Mtx_unlock",
+            "_Mtx_lock",
+            "_Cnd_broadcast",
+            "?_Throw_Cpp_error@std@@YAXH@Z",
+            "_Thrd_hardware_concurrency",
+            "?uncaught_exception@std@@YA_NXZ",
+            "?_Xbad_alloc@std@@YAXXZ",
+            "?_Xout_of_range@std@@YAXPEBD@Z",
+            "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            "?_Xlength_error@std@@YAXPEBD@Z",
+            "?_Syserror_map@std@@YAPEBDH@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z",
+            "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+            "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+            "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ",
+            "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ",
+            "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z",
+            "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z",
+            "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z",
+            "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z",
+            "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+            "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+            "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ",
+            "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ",
+            "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z",
+            "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z",
+            "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z",
+            "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ",
+            "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z",
+            "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "?good@ios_base@std@@QEBA_NXZ"
+          ]
+        },
+        {
+          "dll": "SHLWAPI.dll",
+          "missing": [
+            "PathFileExistsW"
+          ]
+        },
+        {
+          "dll": "USER32.dll",
+          "missing": [
+            "GetDesktopWindow"
+          ]
+        },
+        {
+          "dll": "VCRUNTIME140.dll",
+          "missing": [
+            "_purecall",
+            "__std_exception_copy",
+            "__std_exception_destroy",
+            "__current_exception_context",
+            "__current_exception",
+            "__std_type_info_destroy_list",
+            "__std_type_info_compare"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "Archiver_64r.dll",
+      "implemented_count": 68,
+      "missing_count": 91,
+      "unresolved_imports": [
+        {
+          "dll": "api-ms-win-crt-heap-l1-1-0.dll",
+          "missing": [
+            "_callnewh"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-math-l1-1-0.dll",
+          "missing": [
+            "_fdclass"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-runtime-l1-1-0.dll",
+          "missing": [
+            "strerror_s",
+            "_invoke_watson",
+            "_seh_filter_dll",
+            "terminate"
+          ]
+        },
+        {
+          "dll": "api-ms-win-crt-stdio-l1-1-0.dll",
+          "missing": [
+            "_wfopen_s"
+          ]
+        },
+        {
+          "dll": "D3DCOMPILER_47.dll",
+          "missing": [
+            "D3DReflect",
+            "D3DCompile"
+          ]
+        },
+        {
+          "dll": "KERNEL32.dll",
+          "missing": [
+            "SleepConditionVariableSRW"
+          ]
+        },
+        {
+          "dll": "MSVCP140.dll",
+          "missing": [
+            "??0?$basic_ios@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+            "??0?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+            "??0?$basic_iostream@_WU?$char_traits@_W@std@@@std@@QEAA@PEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@1@@Z",
+            "??1?$basic_ios@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "??1?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "?_Xlength_error@std@@YAXPEBD@Z",
+            "?_Id_cnt@id@locale@std@@0HA",
+            "?id@?$ctype@_W@std@@2V0locale@2@A",
+            "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ",
+            "??0_Lockit@std@@QEAA@H@Z",
+            "??1_Lockit@std@@QEAA@XZ",
+            "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            "_Thrd_join",
+            "_Thrd_id",
+            "_Cnd_do_broadcast_at_thread_exit",
+            "_Cnd_signal",
+            "_Thrd_yield",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z",
+            "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z",
+            "?_Xinvalid_argument@std@@YAXPEBD@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z",
+            "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z",
+            "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z",
+            "?widen@?$ctype@_W@std@@QEBA_WD@Z",
+            "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z",
+            "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ",
+            "??1?$basic_iostream@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+            "?imbue@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAXAEBVlocale@2@@Z",
+            "?sync@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAHXZ",
+            "?setbuf@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAPEAV12@PEA_W_J@Z",
+            "?xsputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEB_W_J@Z",
+            "?xsgetn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEA_W_J@Z",
+            "?uflow@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAGXZ",
+            "?showmanyc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JXZ",
+            "?_Unlock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ",
+            "?uncaught_exception@std@@YA_NXZ",
+            "?_Xbad_alloc@std@@YAXXZ",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBX@Z",
+            "?_Syserror_map@std@@YAPEBDH@Z",
+            "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+            "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+            "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ",
+            "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ",
+            "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z",
+            "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z",
+            "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z",
+            "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z",
+            "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+            "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+            "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ",
+            "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ",
+            "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z",
+            "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z",
+            "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z",
+            "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ",
+            "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z",
+            "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            "?good@ios_base@std@@QEBA_NXZ",
+            "_Thrd_hardware_concurrency",
+            "?_Xout_of_range@std@@YAXPEBD@Z",
+            "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z",
+            "?_Throw_Cpp_error@std@@YAXH@Z",
+            "_Mtx_lock",
+            "_Mtx_unlock",
+            "_Cnd_wait",
+            "_Cnd_broadcast",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z",
+            "?_Xbad_function_call@std@@YAXXZ",
+            "?_Lock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ"
+          ]
+        },
+        {
+          "dll": "SHLWAPI.dll",
+          "missing": [
+            "PathFileExistsW"
+          ]
+        },
+        {
+          "dll": "VCRUNTIME140.dll",
+          "missing": [
+            "_purecall",
+            "__std_exception_copy",
+            "__std_exception_destroy",
+            "__std_type_info_compare",
+            "__current_exception_context",
+            "__current_exception",
+            "__std_type_info_destroy_list"
+          ]
+        }
+      ]
+    },
+    {
+      "image": "D3Dcompiler_47.dll",
+      "implemented_count": 103,
+      "missing_count": 28,
+      "unresolved_imports": [
+        {
+          "dll": "ADVAPI32.dll",
+          "missing": [
+            "CryptDestroyHash",
+            "CryptAcquireContextW",
+            "RegQueryValueExA",
+            "RegEnumKeyExA",
+            "RegOpenKeyExA",
+            "CryptGetHashParam",
+            "CryptCreateHash",
+            "CryptHashData",
+            "RegQueryValueExW",
+            "RegOpenKeyExW",
+            "RegCloseKey",
+            "CryptReleaseContext"
+          ]
+        },
+        {
+          "dll": "KERNEL32.dll",
+          "missing": [
+            "IsValidLocale",
+            "EnumSystemLocalesW",
+            "InterlockedFlushSList",
+            "RtlPcToFileHeader",
+            "UnmapViewOfFile",
+            "CreateFileMappingW",
+            "MapViewOfFile",
+            "DeviceIoControl",
+            "MapViewOfFileEx",
+            "CreateFileMappingA",
+            "ExpandEnvironmentStringsW",
+            "FindClose",
+            "FindFirstFileExW",
+            "FindNextFileW",
+            "GetDriveTypeW"
+          ]
+        },
+        {
+          "dll": "RPCRT4.dll",
+          "missing": [
+            "UuidCreate"
+          ]
+        }
+      ]
+    }
+  ]
+}
