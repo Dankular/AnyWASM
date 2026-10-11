@@ -58,14 +58,22 @@
   correctness checks. These are local benchmark samples, not a speedup claim. The earlier
   cached-block baseline above was collected separately (two runs); compare like-for-like only in
   future controlled runs.
-- Preliminary representative-target benchmark (`test/target_frame_bench.mjs`): Diligent GLFW Demo,
-  release WASM under Node 24.16.0/Windows x64, eight guest frame stops. The recorded first-frame
-  counts and timings were 576.57M / 42.28 s cached-only and 576.57M / 69.14 s with prefix 1, with
-  687,352 module compilations and 13.09M emitted-block executions. Review found that synchronous
-  guest callbacks and the yielding HLE instruction are missing from the aggregate counter, so these
-  counts and the claimed instruction cap are incomplete. Do not use them as a performance baseline
-  until accounting is fixed. The target command stream was not sent to WebGPU; no host pixels or game
-  performance were measured. Preliminary data and commands are in `docs/TARGETS.md`.
+- Representative-target guest-cost sample (`test/target_frame_bench.mjs`): Diligent GLFW Demo,
+  release WASM under Node 24.16.0/Windows x64, eight guest frame stops. Corrected process accounting
+  includes synchronous callbacks, yielding HLE calls, and instructions retired before a block fault.
+  In the final cached-only run, frame 1 used 580,777,731 instructions / 42.17 s; frames 2–8 each
+  used 3,200 instructions. With forced MOV emission, frame 1 used 580,776,966 / 67.69 s; frames
+  2–8 each used 3,200. Prefix 1 compiled 687,197 modules and executed 13,087,664 emitted blocks
+  with no fallbacks. The cold prefix-1 pass was 60.5% slower in this sample. A same-build cached-only
+  rerun differed by 638 first-frame instructions and 1.74 s, so more runs are needed to characterize
+  variation. A further run after the atexit-budget fix used 580,771,924 instructions / 51.37 s
+  cached-only and 580,774,467 / 76.18 s with prefix 1; both again reached eight frames. These
+  repeats show substantial elapsed-time variation, not a stable speed comparison.
+  These guest/HLE Node timings do not execute the target command stream through WebGPU and are not
+  host frame times or a product performance target. The runtime enforces the run-slice cap; a
+  synchronous callback that exhausts that slice fails loudly because it cannot be resumed, and an
+  atexit callback budget failure is propagated instead of becoming a clean exit. Full data and
+  reproduction commands are in `docs/TARGETS.md`.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 
@@ -104,7 +112,9 @@
 - Thread support uses a deterministic cooperative scheduler with saved CPU/stack/TEB TLS pointers,
   dynamic TLS/FLS maps, static PE TLS blocks, quantum rotation, resumable waits, events, mutexes,
   semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. Nested
-  synchronous callback scheduling and alertable waits remain unsupported. No SEH/C++ exception
+  synchronous callback scheduling and alertable waits remain unsupported. A synchronous callback
+  cannot suspend when its active run slice expires, so the runtime stops with a diagnostic instead
+  of exceeding the budget. No SEH/C++ exception
   unwinding, audio, DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL. GDI support is limited to
   virtual display DCs and basic caps.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and

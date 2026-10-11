@@ -28,7 +28,7 @@ function terminalState(wasm, status) {
 export async function measureFrameCosts(wasmBytes, bundleBytes, {
   frameCount = 8,
   maxGuestInstructions = 1_000_000_000,
-  sliceInstructions = 10_000_000,
+  sliceInstructions = maxGuestInstructions,
   jitMinPrefix = Number(process.env.ANYWASM_JIT_MIN_PREFIX ?? 65),
 } = {}) {
   positiveSafeInteger('frameCount', frameCount);
@@ -129,7 +129,7 @@ const HELP = `Usage: node test/target_frame_bench.mjs <bundle.awb> [options]
 Options:
   --frames N              Frame boundaries to collect (default: 8)
   --max-instructions N    Guest instruction cap (default: 1000000000)
-  --slice-instructions N  Instructions per runtime call (default: 10000000)
+  --slice-instructions N  Instructions per runtime call (default: --max-instructions)
   --jit-min-prefix N      MOV prefix threshold (default: ANYWASM_JIT_MIN_PREFIX or 65)
 `;
 

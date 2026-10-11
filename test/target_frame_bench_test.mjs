@@ -5,11 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { measureFrameCosts } from './target_frame_bench.mjs';
-import { Status } from '../web/anywasm.js';
+import { AnyWasm, Status } from '../web/anywasm.js';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-frame-test-'));
 try {
+  const staleWasm = new AnyWasm({ exports: { aw_icount: () => 123 } });
+  assert.throws(
+    () => staleWasm.retiredInstructions(),
+    /aw_retired_instructions.*rebuild/i,
+  );
+
   const bundlePath = join(tempDir, 'd3d11_triangle.awb');
   const cliPath = fileURLToPath(new URL(`../target/debug/anywasm${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
   const exePath = fileURLToPath(new URL('../fixtures/d3d11_triangle.exe', import.meta.url));
@@ -19,7 +25,6 @@ try {
   const result = await measureFrameCosts(wasm, bundle, {
     frameCount: 4,
     maxGuestInstructions: 2_000_000,
-    sliceInstructions: 10_000,
     jitMinPrefix: 65,
   });
 

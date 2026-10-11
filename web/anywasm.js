@@ -124,7 +124,12 @@ export class AnyWasm {
   }
   exitCode() { return this.x.aw_exit_code(); }
   instructions() { return Number(this.x.aw_icount()); }
-  retiredInstructions() { return Number(this.x.aw_retired_instructions?.() ?? this.x.aw_icount()); }
+  retiredInstructions() {
+    if (typeof this.x.aw_retired_instructions !== 'function') {
+      throw new Error('WASM runtime is missing aw_retired_instructions; rebuild the runtime');
+    }
+    return Number(this.x.aw_retired_instructions());
+  }
 
   pushStdin(bytes) {
     const n = bytes.byteLength;

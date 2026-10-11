@@ -307,48 +307,68 @@ imports, registry data store, and tutorial D3D11 paths also remain open.
 
 ### Guest instruction cost per present
 
-**Preliminary only; the instruction totals and cap below are incomplete.** Review of the runtime
-found that `Process::call_guest` runs synchronous guest callbacks outside `Process::run`, so callback
-instructions are missing from `retired_instructions`. In addition, `Process::run` does not charge an
-HLE call when it returns a frame stop. These gaps affect the reported per-frame totals and can let a
-callback loop run past the benchmark's requested instruction cap. Fix these before using the counts
-as a performance baseline; the elapsed Node times still describe the guest/HLE runs that completed.
+The process-wide `retired_instructions` counter now includes instructions executed in synchronous
+`Process::call_guest` callbacks, HLE instructions that return a frame stop, and successfully retired
+instructions before a later instruction in the same cached block faults. The JS wrapper requires
+the `aw_retired_instructions` export and fails clearly for a stale WASM module instead of falling
+back to the active-thread `aw_icount` counter.
 
-The new `test/target_frame_bench.mjs` drives the target until guest `Present` frame stops, reads the
-process-wide retired-instruction counter, and drains the recorded GPU stream at each stop. The
-reusable fixture regression requests four stops from `d3d11_triangle.exe`; it records the fixture's
-three frames and clean exit. A second fixture run caps execution at one guest instruction and
-confirms the benchmark stops at the cap without recording a frame.
+A synchronous callback still runs on the host stack and cannot suspend. If its callback does not
+return before the current `Process::run` budget expires, the runtime returns a diagnostic crash
+without exceeding that run budget; it cannot resume that callback on a later call. A GLFW Demo run
+with 10,000,000-instruction slices stopped at 10,000,000 instructions in such a callback. The frame
+benchmark therefore defaults to one run slice equal to its full instruction cap. This keeps the
+representative run bounded while giving its synchronous callbacks enough budget to return. It does
+not remove the runtime's continuation limitation for callers that deliberately request smaller
+slices.
 
-The representative run used Node `v24.16.0` on Windows x64 and the release WASM built at
-AnyWASM commit `1858e43`. The target bundle is the eight-file output of the D3D11-only `/MT` Release
-build documented above. Reproduction:
+The `test/target_frame_bench.mjs` benchmark drives the target until guest `Present` frame stops,
+reads the process-wide counter, and drains the recorded GPU stream at each stop. Its fixture
+regression requests four stops from `d3d11_triangle.exe`; it records all three frames followed by
+clean exit. A second fixture run caps execution at one guest instruction and confirms that no frame
+is recorded. Measurement starts after `.awb` loading; guest DLL initialization performed during
+loading is outside the frame deltas and elapsed frame times.
+
+The corrected representative runs used Node `v24.16.0` on Windows x64 and the release WASM from
+the accounting-fix working tree. The target bundle is the eight-file output of the D3D11-only `/MT`
+Release build documented above. Each run requested eight frames under a 1,000,000,000-instruction
+cap, with the default slice size equal to that cap. Reproduction:
 
 ```powershell
 $release = 'D:\Dev Proj\WASM\target-eval\DiligentBuild-GLFWDemo-staticcrt\DiligentSamples\Samples\GLFWDemo\Release'
 $bundle = "$env:TEMP\anywasm-glfwdemo-frame-measure.awb"
 .\target\debug\anywasm.exe pack "$release\GLFWDemo.exe" -o $bundle --dir $release
-node test/target_frame_bench.mjs $bundle --frames 8 --max-instructions 1000000000 --slice-instructions 10000000 --jit-min-prefix 65
-node test/target_frame_bench.mjs $bundle --frames 8 --max-instructions 1000000000 --slice-instructions 10000000 --jit-min-prefix 1
+node test/target_frame_bench.mjs $bundle --frames 8 --max-instructions 1000000000 --jit-min-prefix 65
+node test/target_frame_bench.mjs $bundle --frames 8 --max-instructions 1000000000 --jit-min-prefix 1
 ```
 
-The packed bundle contained 8 files (7,963,698 bytes); its SHA-256 matched a later independent
-repack. Both runs reached all eight requested guest `Present` stops, did not hit the instruction cap,
-and did not reach a terminal state. Frame 1 includes guest process initialization; frames 2–8 are
-steady presents. The values below are guest instructions retired across all guest threads and Node
-wall time to each stop:
+The packed bundle contained 8 files (7,963,698 bytes); its SHA-256 matched an independent repack.
+Both runs reached all eight guest `Present` stops, stayed below the cap, and did not reach a
+terminal state. Frame 1 includes the main guest initialization performed after bundle loading;
+frames 2–8 are subsequent presents. Counts are process-wide guest instructions. Times are Node wall
+time between the post-load start and each frame stop:
 
 | MOV prefix | First frame instructions / time | Frames 2–8 instructions each | Frames 2–8 time range / mean | Total instructions / elapsed | Emitter stats |
 |---:|---:|---:|---:|---:|---|
-| 65 (default, cached-only) | 576,571,219 / 42,284.38 ms | 3,199 | 0.197–0.466 ms / 0.246 ms | 576,593,612 / 42,286.11 ms | 0 compilations, 0 executions, 0 fallbacks |
-| 1 (forced emission) | 576,572,636 / 69,142.77 ms | 3,199 | 0.232–0.562 ms / 0.287 ms | 576,595,029 / 69,144.79 ms | 687,352 compilations, 13,087,679 executions, 0 fallbacks; 11,494,232 register-register hits |
+| 65 (default, cached-only) | 580,777,731 / 42,168.83 ms | 3,200 | 0.214–0.482 ms / 0.262 ms | 580,800,131 / 42,170.67 ms | 0 compilations, 0 executions, 0 fallbacks |
+| 1 (forced emission) | 580,776,966 / 67,687.26 ms | 3,200 | 0.242–0.527 ms / 0.293 ms | 580,799,366 / 67,689.33 ms | 687,197 compilations, 13,087,664 executions, 0 fallbacks; 11,494,229 register-register hits |
 
-Forced emission made the cold first-frame pass 63.5% slower in this run. Emitted blocks covered
-only the existing leading-MOV prototype; every fallback count was zero, but the result remains
-slower and does not justify enabling it. The benchmark runs the emulator guest and HLE in Node;
-draining the stream does not execute D3D11 commands through browser WebGPU. It therefore measures
-neither host-rendered frame time nor target FPS, shader pixels, gameplay, or a product performance
-target. The older 10–50x performance estimate remains unverified.
+Forced emission made the cold first-frame pass 60.5% slower in this run. Only the existing
+leading-MOV prototype was emitted; it made no fallback and did not improve this target sample. A
+cached-only rerun of the same final WASM and bundle used 580,777,093 first-frame instructions
+(580,799,493 total) and took 40,430.06 ms for the first frame, 638 fewer instructions and about
+1.74 s faster than the table's cached-only run. This small sample does not characterize the source
+of that variation. After the atexit-budget fix, the rebuilt WASM was measured again with the same
+bundle and command: cached-only retired 580,771,924 instructions / 51,371.36 ms on frame 1
+(580,794,324 total), while prefix 1 retired 580,774,467 / 76,179.10 ms (580,796,867 total).
+Both repeat runs reached eight frame stops, with 3,200 instructions on each later frame, and had no
+terminal state or cap hit. The latest cold emitted pass was about 48.3% slower than its cached-only
+pair; elapsed times varied substantially across repeats, so this remains diagnostic data rather
+than a stable performance comparison. The
+benchmark runs the guest and HLE in Node; draining the stream does not execute D3D11 commands
+through browser WebGPU. It measures neither host-rendered frame time nor target FPS, shader pixels,
+gameplay, or a product performance target. The older 10–50x performance estimate remains
+unverified.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),

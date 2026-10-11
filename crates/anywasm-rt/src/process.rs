@@ -23,6 +23,8 @@ pub const PARAMS_ADDR: u64 = 0x7ffd_0002_0000;
 pub const LDR_ADDR: u64 = 0x7ffd_0003_0000;
 pub const STACK_TOP: u64 = 0x7ff0_0010_0000;
 pub const HLE_MODULE_BASE: u64 = 0x7ffc_0000_0000;
+const CALLBACK_BUDGET_EXHAUSTED: &str =
+    "synchronous guest callback exhausted the run budget; its continuation cannot be resumed";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuestUnwind {
@@ -225,6 +227,7 @@ pub struct Process {
     pub wait_sequence: u64,
     pub quantum_used: u64,
     pub retired_instructions: u64,
+    active_run_budget: Option<u64>,
     pub srw_locks: HashMap<u64, SrwLockState>,
     pub critical_sections: HashMap<u64, CriticalSectionState>,
     pub atexit: Vec<u64>,
@@ -298,6 +301,7 @@ impl Process {
             wait_sequence: 0,
             quantum_used: 0,
             retired_instructions: 0,
+            active_run_budget: None,
             srw_locks: HashMap::new(),
             critical_sections: HashMap::new(),
             atexit: Vec::new(),
@@ -1522,6 +1526,7 @@ impl Process {
         self.cpu = saved;
         match r {
             Ok(()) => Ok(ret),
+            Err(Stop::StepLimit) => Err(Stop::Crash(CALLBACK_BUDGET_EXHAUSTED.into())),
             Err(Stop::Exit(c)) => {
                 self.exit_code = keep_exit.or(Some(c));
                 Err(Stop::Exit(c))
@@ -1535,6 +1540,7 @@ impl Process {
             if self.cpu.rip == RET_MAGIC {
                 return Ok(());
             }
+            self.ensure_run_budget(1)?;
             match self.step_once()? {
                 None => {}
                 Some(stop) => return Err(stop),
@@ -1546,26 +1552,53 @@ impl Process {
     fn step_once(&mut self) -> Result<Option<Stop>, Stop> {
         let rip = self.cpu.rip;
         if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
+            self.charge_retired(1)?;
             self.dispatch_thunk(rip)?;
             return Ok(self.yield_request.take());
         }
         match self.dcache.step(&mut self.cpu, &mut self.mem) {
-            Ok(()) => Ok(None),
+            Ok(()) => {
+                self.charge_retired(1)?;
+                Ok(None)
+            }
             Err(e) => Err(self.describe_exit(e)),
         }
+    }
+
+    fn ensure_run_budget(&self, count: u64) -> Result<(), Stop> {
+        if self
+            .active_run_budget
+            .is_some_and(|remaining| count > remaining)
+        {
+            Err(Stop::StepLimit)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn charge_retired(&mut self, count: u64) -> Result<(), Stop> {
+        self.ensure_run_budget(count)?;
+        if let Some(remaining) = self.active_run_budget.as_mut() {
+            *remaining -= count;
+            self.quantum_used = self.quantum_used.saturating_add(count);
+        }
+        self.retired_instructions = self.retired_instructions.saturating_add(count);
+        Ok(())
     }
 
     fn execute_slice(&mut self, max_instructions: u64) -> Result<(u64, Option<Stop>), Stop> {
         let rip = self.cpu.rip;
         if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
+            self.charge_retired(1)?;
             self.dispatch_thunk(rip)?;
             return Ok((1, self.yield_request.take()));
         }
-        match self
-            .block_cache
-            .execute(&mut self.cpu, &mut self.mem, max_instructions)
-        {
-            Ok(executed) => Ok((executed, None)),
+        let (executed, result) =
+            self.block_cache
+                .execute_counted(&mut self.cpu, &mut self.mem, max_instructions);
+        self.charge_retired(executed)?;
+        match result {
+            Ok(()) => Ok((executed, None)),
             Err(e) => Err(self.describe_exit(e)),
         }
     }
@@ -1683,7 +1716,11 @@ impl Process {
     pub fn finish_exit(&mut self, code: u32) -> Result<(), Stop> {
         if self.exit_code.is_none() {
             while let Some(f) = self.atexit.pop() {
-                let _ = self.call_guest(f, &[]);
+                if let Err(Stop::Crash(message)) = self.call_guest(f, &[]) {
+                    if message == CALLBACK_BUDGET_EXHAUSTED {
+                        return Err(Stop::Crash(message));
+                    }
+                }
             }
             self.exit_code = Some(code);
         }
@@ -1695,9 +1732,18 @@ impl Process {
         if let Some(c) = self.exit_code {
             return Stop::Exit(c);
         }
-        let mut remaining = max_steps;
+        if self.active_run_budget.is_some() {
+            return Stop::Crash("Process::run cannot be re-entered from a guest callback".into());
+        }
+        self.active_run_budget = Some(max_steps);
+        let result = self.run_with_budget();
+        self.active_run_budget = None;
+        result
+    }
+
+    fn run_with_budget(&mut self) -> RunResult {
         const THREAD_QUANTUM: u64 = 10_000;
-        while remaining != 0 {
+        while self.active_run_budget.unwrap_or(0) != 0 {
             self.refresh_waiters();
             if self.current_thread_state != ThreadState::Running
                 || self.schedule_requested
@@ -1714,7 +1760,10 @@ impl Process {
                     Err(stop) => return stop,
                 }
             }
-            let slice = remaining.min(THREAD_QUANTUM.saturating_sub(self.quantum_used).max(1));
+            let slice = self
+                .active_run_budget
+                .unwrap_or(0)
+                .min(THREAD_QUANTUM.saturating_sub(self.quantum_used).max(1));
             match self.execute_slice(slice) {
                 Ok((_, Some(stop))) => return stop,
                 Ok((executed, None)) => {
@@ -1724,14 +1773,8 @@ impl Process {
                             self.cpu.rip
                         ));
                     }
-                    remaining -= executed;
-                    self.retired_instructions = self.retired_instructions.saturating_add(executed);
-                    self.quantum_used = self.quantum_used.saturating_add(executed);
                 }
                 Err(Stop::ThreadExit(code)) if self.current_thread_is_guest => {
-                    remaining = remaining.saturating_sub(1);
-                    self.retired_instructions = self.retired_instructions.saturating_add(1);
-                    self.quantum_used = self.quantum_used.saturating_add(1);
                     self.exit_current_guest_thread(code);
                 }
                 Err(Stop::ThreadExit(code)) => {
@@ -1784,6 +1827,14 @@ pub fn base_name(path: &str) -> &str {
 mod scheduler_tests {
     use super::*;
 
+    const CALLBACK_ADDR: u64 = 0x20_000;
+
+    fn frame_after_callback(process: &mut Process) -> Result<u64, Stop> {
+        process.call_guest(CALLBACK_ADDR, &[])?;
+        process.yield_request = Some(Stop::Frame);
+        Ok(0)
+    }
+
     fn process_with_teb() -> Process {
         let mut process = Process::new(Vfs::new());
         assert!(process.mem.map(TEB_ADDR, 0x1000, PROT_RW));
@@ -1791,6 +1842,96 @@ mod scheduler_tests {
         process.mem.write_u64(TEB_ADDR + 0x10, 0x6000).unwrap();
         process.mem.write_u64(TEB_ADDR + 0x48, 0x1004).unwrap();
         process
+    }
+
+    #[test]
+    fn run_counts_nested_callback_and_yielding_hle_instructions() {
+        let mut process = process_with_teb();
+        let stack = 0x10_000;
+        assert!(process.mem.map(stack, 0x1000, PROT_RW));
+        assert!(process.mem.map(CALLBACK_ADDR, 0x1000, PROT_RWX));
+        process.mem.write_u8(CALLBACK_ADDR, 0xc3).unwrap(); // ret
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.cpu.rip = THUNK_BASE;
+        process.wr64(stack + 0x800, 0x30_000).unwrap();
+        process.thunks.push(Thunk {
+            group: "test",
+            name: "frame_after_callback".into(),
+            func: Some(frame_after_callback),
+        });
+        let original_cpu_icount = process.cpu.icount;
+
+        assert_eq!(process.run(2), Stop::Frame);
+        assert_eq!(process.retired_instructions, 2);
+        assert_eq!(process.cpu.icount, original_cpu_icount);
+    }
+
+    #[test]
+    fn synchronous_callback_cannot_run_past_the_active_budget() {
+        let mut process = process_with_teb();
+        let stack = 0x10_000;
+        assert!(process.mem.map(stack, 0x1000, PROT_RW));
+        assert!(process.mem.map(CALLBACK_ADDR, 0x1000, PROT_RWX));
+        process
+            .mem
+            .write_force(CALLBACK_ADDR, &[0xeb, 0xfe])
+            .unwrap(); // jmp to self
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.cpu.rip = THUNK_BASE;
+        process.wr64(stack + 0x800, 0x30_000).unwrap();
+        process.thunks.push(Thunk {
+            group: "test",
+            name: "nonterminating_callback".into(),
+            func: Some(frame_after_callback),
+        });
+
+        let stop = process.run(2);
+
+        assert!(matches!(
+            stop,
+            Stop::Crash(message) if message.contains("callback exhausted the run budget")
+        ));
+        assert_eq!(process.retired_instructions, 2);
+        assert_eq!(process.nested, 0);
+        assert!(process.active_run_budget.is_none());
+    }
+
+    #[test]
+    fn nonterminating_atexit_callback_reports_budget_exhaustion() {
+        let mut process = process_with_teb();
+        let stack = 0x10_000;
+        assert!(process.mem.map(stack, 0x1000, PROT_RW));
+        assert!(process.mem.map(CALLBACK_ADDR, 0x1000, PROT_RWX));
+        process
+            .mem
+            .write_force(CALLBACK_ADDR, &[0xeb, 0xfe])
+            .unwrap(); // jmp to self
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.cpu.gpr[RAX] = 0;
+        process.cpu.rip = EXIT_MAGIC;
+        process.atexit.push(CALLBACK_ADDR);
+
+        let stop = process.run(3);
+
+        assert!(matches!(
+            stop,
+            Stop::Crash(message) if message.contains("callback exhausted the run budget")
+        ));
+        assert_eq!(process.retired_instructions, 3);
+        assert_eq!(process.exit_code, None);
+        assert!(process.atexit.is_empty());
+    }
+
+    #[test]
+    fn run_preserves_retirement_count_before_a_later_block_fault() {
+        let mut process = process_with_teb();
+        let code = 0x20_000;
+        assert!(process.mem.map(code, 0x1000, PROT_RWX));
+        process.mem.write_force(code, &[0x90, 0xcc]).unwrap(); // nop; int3
+        process.cpu.rip = code;
+
+        assert!(matches!(process.run(10), Stop::Crash(_)));
+        assert_eq!(process.retired_instructions, 1);
     }
 
     #[test]

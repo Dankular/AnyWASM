@@ -81,3 +81,26 @@ Run `thread_sync_test.exe` through the existing WASM smoke helper and assert tha
 - [x] **Step 3: Update the JIT priority notes and queue issue #1/#5 based on the measured result; do not claim host rendering or game acceptance.**
 - [x] **Step 4: Run `git diff --check`, `cargo test --workspace`, `cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release`, `node test/wasm_smoke.mjs`, and the fixture frame benchmark.**
 
+### Task 4: Correct retirement and callback budget accounting
+
+**Review finding:** synchronous `call_guest` callbacks were outside the aggregate counter and could
+run beyond an individual `Process::run` slice; yielding HLE calls and completed instructions before
+a later block fault were also omitted.
+
+- [x] Add regressions for a callback plus frame HLE, a nonterminating callback at the active budget,
+      a block fault after one completed instruction, and a stale WASM module without the aggregate
+      export. The callback-count, block-fault, and stale-export regressions were observed failing
+      before their fixes; the budget regression passes against the bounded callback implementation.
+- [x] Count successful nested callback instructions, HLE thunk instructions, and completed block
+      instructions even when a later instruction faults. Keep `instructions()` as the active CPU's
+      `icount` and expose the process aggregate only through `retiredInstructions()`.
+- [x] Bound synchronous callbacks by the active `run` budget. Fail with a diagnostic if the callback
+      consumes that budget before returning, because its host-stack continuation cannot be resumed.
+      Make the benchmark's default slice equal its requested total cap; smaller explicit slices can
+      encounter this documented runtime limitation.
+- [x] Require `aw_retired_instructions` in the JS API instead of silently falling back to
+      `aw_icount` for stale WASM builds.
+- [x] Rebuild the release WASM, pass the workspace and WASM smoke suites, and rerun the fixture and
+      representative target benchmarks. Record the corrected results in `CLAUDE.md`,
+      `docs/STATUS.md`, `docs/TARGETS.md`, and GitHub issues #1 and #5.
+

@@ -1291,11 +1291,25 @@ impl BlockCache {
         mem: &mut Memory,
         max_instructions: u64,
     ) -> ExecResult<u64> {
+        let (executed, result) = self.execute_counted(cpu, mem, max_instructions);
+        result.map(|()| executed)
+    }
+
+    /// Execute a block while preserving the count completed before a later instruction faults.
+    pub fn execute_counted(
+        &mut self,
+        cpu: &mut Cpu,
+        mem: &mut Memory,
+        max_instructions: u64,
+    ) -> (u64, ExecResult<()>) {
         if max_instructions == 0 {
-            return Ok(0);
+            return (0, Ok(()));
         }
 
-        let block = self.get_cached_block(cpu.rip, mem)?;
+        let block = match self.get_cached_block(cpu.rip, mem) {
+            Ok(block) => block,
+            Err(error) => return (0, Err(error)),
+        };
         #[cfg(target_arch = "wasm32")]
         let (mut executed, start_index, interpreter_only) = match block.emitted.as_ref() {
             Some(emitted) => match emitted.execute(cpu, max_instructions) {
@@ -1314,9 +1328,13 @@ impl BlockCache {
             let before_rip = cpu.rip;
             let before_epoch = mem.code_epoch;
             if interpreter_only {
-                exec(cpu, mem, &cached.inst)?;
+                if let Err(error) = exec(cpu, mem, &cached.inst) {
+                    return (executed, Err(error));
+                }
             } else {
-                execute_cached(cpu, mem, cached)?;
+                if let Err(error) = execute_cached(cpu, mem, cached) {
+                    return (executed, Err(error));
+                }
             }
             executed += 1;
 
@@ -1328,7 +1346,7 @@ impl BlockCache {
                 break;
             }
         }
-        Ok(executed)
+        (executed, Ok(()))
     }
 
     fn get_cached_block(&mut self, start: u64, mem: &Memory) -> ExecResult<&CachedBlock> {
