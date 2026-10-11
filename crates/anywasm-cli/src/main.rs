@@ -135,26 +135,115 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
     Ok(r)
 }
 
+fn preflight_status(known_blockers: usize, missing_imports: usize) -> &'static str {
+    if known_blockers != 0 {
+        "blocked"
+    } else if missing_imports != 0 {
+        "review"
+    } else {
+        "no_known_blockers"
+    }
+}
+
+fn json_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\u{08}' => quoted.push_str("\\b"),
+            '\u{0c}' => quoted.push_str("\\f"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            c if c <= '\u{1f}' => quoted.push_str(&format!("\\u{:04x}", c as u32)),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{json_quote, preflight_status};
+
+    #[test]
+    fn json_quote_escapes_quotes_backslashes_and_control_characters() {
+        assert_eq!(
+            json_quote("quote\" slash\\ newline\n tab\t control\u{0001}"),
+            "\"quote\\\" slash\\\\ newline\\n tab\\t control\\u0001\""
+        );
+    }
+
+    #[test]
+    fn preflight_status_does_not_treat_missing_imports_as_definitive_blockers() {
+        assert_eq!(preflight_status(1, 2), "blocked");
+        assert_eq!(preflight_status(0, 2), "review");
+        assert_eq!(preflight_status(0, 0), "no_known_blockers");
+    }
+}
+
 fn print_report(r: &Report, json: bool) {
     let (imp, miss): (usize, usize) = r.imports.iter().fold((0, 0), |a, i| (a.0 + i.implemented.len(), a.1 + i.missing.len()));
     if json {
-        let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-        let list = |v: &[String]| format!("[{}]", v.iter().map(|s| q(s)).collect::<Vec<_>>().join(","));
+        let list = |v: &[String]| {
+            format!(
+                "[{}]",
+                v.iter()
+                    .map(|s| json_quote(s))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         let imports = r
             .imports
             .iter()
-            .map(|i| format!("{{\"dll\":{},\"bundled\":{},\"implemented\":{},\"missing\":{}}}", q(&i.dll), i.bundled, list(&i.implemented), list(&i.missing)))
+            .map(|i| {
+                format!(
+                    "{{\"dll\":{},\"bundled\":{},\"implemented\":{},\"missing\":{}}}",
+                    json_quote(&i.dll),
+                    i.bundled,
+                    list(&i.implemented),
+                    list(&i.missing)
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
-        let feats = r.features.iter().map(|f| q(f)).collect::<Vec<_>>().join(",");
-        let blockers = r.blockers.iter().map(|b| q(b)).collect::<Vec<_>>().join(",");
+        let feats = r
+            .features
+            .iter()
+            .map(|f| json_quote(f))
+            .collect::<Vec<_>>()
+            .join(",");
+        let blockers = list(&r.blockers);
+        let mut definitive_blocker_items = r.blockers.clone();
+        definitive_blocker_items.sort();
+        definitive_blocker_items.dedup();
+        let definitive_blockers = list(&definitive_blocker_items);
+        let potentially_unused = r
+            .imports
+            .iter()
+            .filter(|i| !i.missing.is_empty())
+            .map(|i| {
+                format!(
+                    "{{\"dll\":{},\"symbols\":{}}}",
+                    json_quote(&i.dll),
+                    list(&i.missing)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let preflight_status = preflight_status(r.blockers.len(), miss);
         println!(
-            "{{\"machine\":{},\"subsystem\":{},\"dll\":{},\"dotnet\":{},\"imageBase\":\"{:#x}\",\"implemented\":{imp},\"missing\":{miss},\"features\":[{feats}],\"blockers\":[{blockers}],\"imports\":[{imports}]}}",
-            q(&r.machine),
-            q(&r.subsystem),
+            "{{\"schemaVersion\":1,\"machine\":{},\"subsystem\":{},\"dll\":{},\"dotnet\":{},\"imageBase\":\"{:#x}\",\"implemented\":{imp},\"missing\":{miss},\"features\":[{feats}],\"blockers\":{blockers},\"imports\":[{imports}],\"preflight\":{{\"status\":{},\"staticOnly\":true,\"runtimeSuccessGuaranteed\":false,\"definitiveBlockers\":{definitive_blockers},\"potentiallyUnusedMissingImports\":[{potentially_unused}]}}}}",
+            json_quote(&r.machine),
+            json_quote(&r.subsystem),
             r.is_dll,
             r.is_dotnet,
-            r.image_base
+            r.image_base,
+            json_quote(preflight_status)
         );
         return;
     }

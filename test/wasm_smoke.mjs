@@ -17,6 +17,32 @@ process.on('exit', () => rmSync(tempDir, { recursive: true, force: true }));
 let failures = 0;
 const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : ' :: ' + detail}`); if (!ok) failures++; };
 
+const helloReport = JSON.parse(execFileSync(cliPath, ['analyze', join(repoRoot, 'fixtures/hello.exe'), '--json'], { cwd: repoRoot, encoding: 'utf8' }));
+const legacyAnalyzeFields = ['machine', 'subsystem', 'dll', 'dotnet', 'imageBase', 'implemented', 'missing', 'features', 'blockers', 'imports'];
+check('analyze --json v1 preserves the established report fields',
+  helloReport.schemaVersion === 1 && legacyAnalyzeFields.every((key) => Object.hasOwn(helloReport, key)),
+  JSON.stringify(helloReport));
+check('analyze --json v1 preserves legacy field types',
+  typeof helloReport.machine === 'string' && typeof helloReport.subsystem === 'string' &&
+    typeof helloReport.dll === 'boolean' && typeof helloReport.dotnet === 'boolean' &&
+    typeof helloReport.imageBase === 'string' && typeof helloReport.implemented === 'number' &&
+    typeof helloReport.missing === 'number' && Array.isArray(helloReport.features) &&
+    Array.isArray(helloReport.blockers) && Array.isArray(helloReport.imports),
+  JSON.stringify(helloReport));
+check('analyze preflight with no known blockers does not guarantee runtime success',
+  helloReport.preflight?.status === 'no_known_blockers' && helloReport.preflight.staticOnly === true &&
+    helloReport.preflight.runtimeSuccessGuaranteed === false && helloReport.preflight.definitiveBlockers.length === 0,
+  JSON.stringify(helloReport.preflight));
+
+const unimplReport = JSON.parse(execFileSync(cliPath, ['analyze', join(repoRoot, 'fixtures/unimpl.exe'), '--json'], { cwd: repoRoot, encoding: 'utf8' }));
+const potentiallyUnusedGroups = unimplReport.preflight?.potentiallyUnusedMissingImports ?? [];
+const missingImportGroup = potentiallyUnusedGroups.find((entry) => entry.symbols?.includes('CreateToolhelp32Snapshot'));
+check('analyze preflight separates potentially unused missing imports from known blockers',
+  unimplReport.preflight?.status === 'review' && unimplReport.preflight.staticOnly === true &&
+    unimplReport.preflight.runtimeSuccessGuaranteed === false && unimplReport.preflight.definitiveBlockers.length === 0 &&
+    unimplReport.missing === 1 && typeof missingImportGroup?.dll === 'string' && Array.isArray(missingImportGroup.symbols),
+  JSON.stringify(unimplReport.preflight));
+
 const jitPressure = await runJitCachePressure(AnyWasm);
 check('JIT cache evicts old modules after 256 entries and recompiles evicted code',
   jitPressure.firstStatus === 0 && jitPressure.probeStatus === 0 &&

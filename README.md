@@ -39,7 +39,12 @@ cargo run -p anywasm-cli -- run fixtures/crt_test.exe -- a "b c"
 is bound to a trap that stops the program with the exact `dll!function` (never a silent guess).
 When a browser run reaches one, the page shows the exact runtime message in an alert and points to
 `anywasm analyze <program.exe>` for the complete static import report. The analyzer lists imports;
-it does not establish that every listed import is reached during a particular run.
+it does not establish that every listed import is reached during a particular run. `analyze --json`
+uses `schemaVersion: 1` and preserves its existing top-level fields. Its `preflight` summary
+separates known blockers from imports that may be unused and sets `runtimeSuccessGuaranteed` to
+false because static analysis cannot prove that a program will run successfully. The preflight
+status is `blocked` when known blockers exist, `review` when only unresolved imports exist, and
+`no_known_blockers` otherwise; none of these statuses predicts guest execution.
 The web loader shows an indeterminate progress indicator while it reads or fetches the bundle,
 loads the WebAssembly runtime, and starts the worker. It clears the indicator when the worker is
 ready to execute the guest.

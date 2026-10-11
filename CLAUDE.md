@@ -154,10 +154,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       explicitly as unimplemented; `CreateDirectoryA/W` and `SetFileAttributesA/W` do too, since
       those handlers had been returning success without changing runtime state. `tests/hle_lookup.rs`
       guards all six imports. Current-directory state and relative path resolution remain open.
-      `analyze --json` is manually serialized and has no schema version; its `blockers` list covers
-      known incompatibilities, while unimplemented imports are only listed per DLL. Add a stable
-      versioned contract and a preflight summary without implying static analysis guarantees runtime
-      success.
+      `analyze --json` now adds `schemaVersion: 1` while preserving existing top-level fields. Its
+      `preflight` summary separates known blockers from potentially unused missing imports and
+      explicitly does not guarantee runtime success. The JSON serializer escapes control characters.
 
 ## 3. Graphics
 - [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor blending,
