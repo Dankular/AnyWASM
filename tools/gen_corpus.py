@@ -70,7 +70,9 @@ for m in ["shl", "shr", "sar", "rol", "ror", "rcl", "rcr"]:
 for m in ["shld", "shrd"]:
     for sz in (16, 32, 64):
         a, b = REGS[sz][0], REGS[sz][3]
-        for c in (1, 3, 7, 15, 31):
+        # 16-bit counts above 16 are architecturally undefined and differ between CPU vendors, so the
+        # corpus only contains the defined range for 16-bit operands.
+        for c in ((1, 3, 7, 15, 16) if sz == 16 else (1, 3, 7, 15, 31)):
             add(f"{m} {a}, {b}, {c}")
         add(f"{m} {a}, {b}, cl")
         add(f"{m} {PTR[sz]} [rsi+8], {b}, 5")

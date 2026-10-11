@@ -15,5 +15,9 @@ build hello console kernel32.lib
 build compute console kernel32.lib
 build reloc console kernel32.lib
 build d3dprobe windows kernel32.lib user32.lib d3d11.lib
+# Real CRT-linked program (needs gcc-mingw-w64-x86-64); output was cross-checked against a native build.
+if command -v x86_64-w64-mingw32-gcc >/dev/null; then
+  x86_64-w64-mingw32-gcc -O2 -o crt_test.exe crt_test.c
+fi
 rm -f *.obj *.lib
 ls -l *.exe

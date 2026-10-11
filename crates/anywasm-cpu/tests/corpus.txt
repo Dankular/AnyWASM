@@ -1207,7 +1207,7 @@ d35e08|rcr dword ptr [rsi+8], cl
 660fa4d803|shld ax, bx, 3
 660fa4d807|shld ax, bx, 7
 660fa4d80f|shld ax, bx, 15
-660fa4d81f|shld ax, bx, 31
+660fa4d810|shld ax, bx, 16
 660fa5d8|shld ax, bx, cl
 660fa45e0805|shld word ptr [rsi+8], bx, 5
 0fa4d801|shld eax, ebx, 1
@@ -1228,7 +1228,7 @@ d35e08|rcr dword ptr [rsi+8], cl
 660facd803|shrd ax, bx, 3
 660facd807|shrd ax, bx, 7
 660facd80f|shrd ax, bx, 15
-660facd81f|shrd ax, bx, 31
+660facd810|shrd ax, bx, 16
 660fadd8|shrd ax, bx, cl
 660fac5e0805|shrd word ptr [rsi+8], bx, 5
 0facd801|shrd eax, ebx, 1

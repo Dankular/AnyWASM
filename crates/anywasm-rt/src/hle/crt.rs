@@ -1,0 +1,1458 @@
+//! C runtime (msvcrt / ucrtbase / vcruntime) host implementation.
+
+use super::printf::{self, Args, SlotArgs, VaList};
+use super::*;
+use crate::process::*;
+use anywasm_cpu::cpu::*;
+
+pub enum FileKind {
+    Stdin,
+    Stdout,
+    Stderr,
+    Vfs { path: String, pos: usize, write: bool },
+}
+
+pub struct CFile {
+    pub kind: FileKind,
+    pub eof: bool,
+    pub err: bool,
+    pub ungot: Option<u8>,
+}
+
+const FILE_SIZE: u64 = 0x30;
+
+/// Data imports (variables): returns the guest address of the cell and initialises it.
+pub fn data_import(p: &mut Process, name: &str, size: u64) -> u64 {
+    let a = data_cell(p, name, size);
+    match name {
+        "__argc" => {
+            let argc = p.extra.argc.max(1) as u64;
+            let _ = p.wr32(a, argc as u32);
+        }
+        "__argv" | "_acmdln" | "_pgmptr" => {
+            let _ = ensure_args(p);
+            let v = if name == "__argv" { p.extra.argv } else if name == "_pgmptr" { p.extra.argv } else { p.extra.cmdline_a };
+            let _ = p.wr64(a, v);
+        }
+        "_iob" => {
+            let _ = ensure_iob(p);
+            // `_iob` is an array of FILE, not a pointer: callers take its address.
+            return p.extra.iob;
+        }
+        "_environ" => {
+            let _ = p.wr64(a, 0);
+        }
+        "__mb_cur_max" => {
+            let _ = p.wr32(a, 1);
+        }
+        "_winmajor" => {
+            let _ = p.wr32(a, 10);
+        }
+        _ => {}
+    }
+    a
+}
+
+fn ensure_iob(p: &mut Process) -> Result<u64, Stop> {
+    if p.extra.iob == 0 {
+        let a = kernel32::alloc_block(p, FILE_SIZE * 3, true);
+        p.extra.iob = a;
+        p.extra.files.insert(a, CFile { kind: FileKind::Stdin, eof: false, err: false, ungot: None });
+        p.extra.files.insert(a + FILE_SIZE, CFile { kind: FileKind::Stdout, eof: false, err: false, ungot: None });
+        p.extra.files.insert(a + 2 * FILE_SIZE, CFile { kind: FileKind::Stderr, eof: false, err: false, ungot: None });
+    }
+    Ok(p.extra.iob)
+}
+
+/// Build argc/argv from the command line (once).
+fn ensure_args(p: &mut Process) -> Result<(), Stop> {
+    if p.extra.argv != 0 {
+        return Ok(());
+    }
+    let args = split_command_line(&p.cmdline);
+    p.extra.argc = args.len() as u32;
+    let arr = kernel32::alloc_block(p, 8 * (args.len() as u64 + 1), true);
+    for (i, a) in args.iter().enumerate() {
+        let s = kernel32::alloc_block(p, a.len() as u64 + 1, true);
+        p.write_cstr(s, a)?;
+        p.wr64(arr + 8 * i as u64, s)?;
+    }
+    p.extra.argv = arr;
+    if p.extra.cmdline_a == 0 {
+        let c = p.cmdline.clone();
+        let a = kernel32::alloc_block(p, c.len() as u64 + 1, true);
+        p.write_cstr(a, &c)?;
+        p.extra.cmdline_a = a;
+    }
+    Ok(())
+}
+
+/// CommandLineToArgv-style splitting (quotes and backslash rules simplified to the common case).
+pub fn split_command_line(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut inq = false;
+    let mut any = false;
+    for ch in s.chars() {
+        match ch {
+            '"' => {
+                inq = !inq;
+                any = true;
+            }
+            c if c.is_whitespace() && !inq => {
+                if any || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn stream_write(p: &mut Process, fp: u64, data: &[u8]) -> Result<usize, Stop> {
+    ensure_iob(p)?;
+    let Some(f) = p.extra.files.get_mut(&fp) else {
+        return Ok(0);
+    };
+    match &mut f.kind {
+        FileKind::Stdout => p.stdout.extend_from_slice(data),
+        FileKind::Stderr => p.stderr.extend_from_slice(data),
+        FileKind::Stdin => return Ok(0),
+        FileKind::Vfs { path, pos, write } => {
+            if !*write {
+                f.err = true;
+                return Ok(0);
+            }
+            let (path, at) = (path.clone(), *pos);
+            *pos += data.len();
+            if let Some(file) = p.vfs.get_mut(&path) {
+                if file.len() < at + data.len() {
+                    file.resize(at + data.len(), 0);
+                }
+                file[at..at + data.len()].copy_from_slice(data);
+            }
+        }
+    }
+    Ok(data.len())
+}
+
+fn stream_read_byte(p: &mut Process, fp: u64) -> Option<u8> {
+    let f = p.extra.files.get_mut(&fp)?;
+    if let Some(b) = f.ungot.take() {
+        return Some(b);
+    }
+    match &mut f.kind {
+        FileKind::Stdin => {
+            let b = p.stdin.pop_front();
+            if b.is_none() {
+                f.eof = true;
+            }
+            b
+        }
+        FileKind::Vfs { path, pos, .. } => {
+            let b = p.vfs.get(path).and_then(|d| d.get(*pos).copied());
+            match b {
+                Some(_) => *pos += 1,
+                None => f.eof = true,
+            }
+            b
+        }
+        _ => None,
+    }
+}
+
+fn do_printf(p: &mut Process, fmt: u64, args: &mut dyn Args, wide: bool) -> Result<Vec<u8>, Stop> {
+    let f = if wide { p.read_wstr(fmt)?.into_bytes() } else { p.mem.read_cstr(fmt, 1 << 20).map_err(|e| Stop::Crash(format!("{e:?}")))? };
+    printf::format(p, &f, args, wide)
+}
+
+fn store_formatted(p: &mut Process, buf: u64, cap: Option<u64>, out: &[u8], wide: bool) -> Result<(), Stop> {
+    if buf == 0 {
+        return Ok(());
+    }
+    if wide {
+        let w: Vec<u16> = String::from_utf8_lossy(out).encode_utf16().collect();
+        let n = match cap {
+            Some(c) if c == 0 => return Ok(()),
+            Some(c) => (c as usize - 1).min(w.len()),
+            None => w.len(),
+        };
+        let mut raw: Vec<u8> = w[..n].iter().flat_map(|c| c.to_le_bytes()).collect();
+        raw.extend([0, 0]);
+        p.write_bytes(buf, &raw)
+    } else {
+        let n = match cap {
+            Some(0) => return Ok(()),
+            Some(c) => (c as usize - 1).min(out.len()),
+            None => out.len(),
+        };
+        let mut v = out[..n].to_vec();
+        v.push(0);
+        p.write_bytes(buf, &v)
+    }
+}
+
+fn len_for(out: &[u8], wide: bool) -> u64 {
+    if wide {
+        String::from_utf8_lossy(out).encode_utf16().count() as u64
+    } else {
+        out.len() as u64
+    }
+}
+
+pub fn lookup(name: &str) -> Option<HleFn> {
+    Some(match name {
+        // ── startup / process ──
+        "__set_app_type" | "_set_app_type" | "_set_fmode" | "_setmode" | "_set_new_mode" | "_set_invalid_parameter_handler" | "_set_abort_behavior" | "_set_error_mode" | "__setusermatherr" | "_fpreset" | "_configthreadlocale" | "_set_purecall_handler"
+        | "_crt_at_quick_exit" | "_initialize_narrow_environment" | "_initialize_wide_environment" | "__security_init_cookie" | "_seh_filter_exe" | "_controlfp_s" | "_clearfp" | "_statusfp" | "__lconv_init" | "_get_osfhandle"
+        | "_set_thread_local_invalid_parameter_handler" | "_CrtSetReportMode" | "_CrtSetReportFile" | "_invalid_parameter_noinfo" | "_invalid_parameter_noinfo_noreturn" => |_| Ok(0),
+        "_controlfp" => |_| Ok(0x9001f),
+        "_configure_narrow_argv" | "_configure_wide_argv" => |p| {
+            ensure_args(p)?;
+            Ok(0)
+        },
+        "__p__fmode" => |p| Ok(data_cell(p, "_fmode", 8)),
+        "__p__commode" => |p| Ok(data_cell(p, "_commode", 8)),
+        "__p___argc" => |p| {
+            ensure_args(p)?;
+            let a = data_cell(p, "__argc", 8);
+            p.wr32(a, p.extra.argc)?;
+            Ok(a)
+        },
+        "__p___argv" => |p| {
+            ensure_args(p)?;
+            let a = data_cell(p, "__argv", 8);
+            p.wr64(a, p.extra.argv)?;
+            Ok(a)
+        },
+        "__p__environ" | "__p__wenviron" => |p| {
+            let a = data_cell(p, "_environ", 8);
+            Ok(a)
+        },
+        "__p__acmdln" | "__p__pgmptr" => |p| {
+            ensure_args(p)?;
+            let a = data_cell(p, "_acmdln", 8);
+            p.wr64(a, p.extra.cmdline_a)?;
+            Ok(a)
+        },
+        "_get_initial_narrow_environment" | "_get_initial_wide_environment" => |p| Ok(data_cell(p, "_environ", 8)),
+        "__getmainargs" | "__wgetmainargs" => |p| {
+            ensure_args(p)?;
+            let (pargc, pargv, penv) = (p.arg(0), p.arg(1), p.arg(2));
+            p.wr32(pargc, p.extra.argc)?;
+            p.wr64(pargv, p.extra.argv)?;
+            let env = data_cell(p, "_environ", 8);
+            p.wr64(penv, env)?;
+            Ok(0)
+        },
+        "_get_narrow_winmain_command_line" => |p| {
+            ensure_args(p)?;
+            Ok(p.extra.cmdline_a)
+        },
+        "_initterm" => |p| initterm(p, false),
+        "_initterm_e" => |p| initterm(p, true),
+        "atexit" | "_crt_atexit" | "_onexit" => |p| {
+            let f = p.arg(0);
+            p.atexit.push(f);
+            Ok(if p.arg(0) != 0 { 0 } else { u64::MAX })
+        },
+        "_initialize_onexit_table" => |p| {
+            let t = p.arg(0);
+            if t != 0 {
+                p.wr64(t, 0)?;
+                p.wr64(t + 8, 0)?;
+                p.wr64(t + 16, 0)?;
+            }
+            Ok(0)
+        },
+        "_register_onexit_function" => |p| {
+            let f = p.arg(1);
+            p.atexit.push(f);
+            Ok(0)
+        },
+        "_execute_onexit_table" => |_| Ok(0),
+        "exit" | "_exit" | "quick_exit" | "_Exit" => |p| {
+            let c = p.arg(0) as u32;
+            p.finish_exit(c).map(|_| 0)
+        },
+        "_cexit" | "_c_exit" => |p| {
+            while let Some(f) = p.atexit.pop() {
+                p.call_guest(f, &[])?;
+            }
+            Ok(0)
+        },
+        "abort" | "_abort" => |p| {
+            p.stderr.extend_from_slice(b"abnormal program termination\n");
+            p.finish_exit(3).map(|_| 0)
+        },
+        "_amsg_exit" | "_wassert" | "_assert" => |p| {
+            let msg = if p.arg(0) > 0x1000 { p.read_cstr(p.arg(0)).unwrap_or_default() } else { String::new() };
+            p.stderr.extend_from_slice(format!("assertion/runtime error {msg}\n").as_bytes());
+            p.finish_exit(3).map(|_| 0)
+        },
+        "_errno" => |p| Ok(errno_cell(p)),
+        "__doserrno" => |p| Ok(errno_cell(p) + 4),
+        "_lock" | "_unlock" | "_lock_file" | "_unlock_file" | "_mlock" | "_munlock" => |_| Ok(0),
+        "_getpid" => |_| Ok(0x1000),
+        "___lc_codepage_func" | "__lc_codepage_func" => |_| Ok(1252),
+        "___lc_locale_name_func" => |_| Ok(0),
+        "localeconv" => |p| {
+            if p.extra.locale_cell == 0 {
+                let lc = kernel32::alloc_block(p, 128, true);
+                let dot = kernel32::alloc_block(p, 2, true);
+                p.write_cstr(dot, ".")?;
+                let empty = kernel32::alloc_block(p, 2, true);
+                p.wr64(lc, dot)?; // decimal_point
+                for i in 1..4 {
+                    p.wr64(lc + 8 * i, empty)?; // thousands_sep, grouping, int_curr_symbol
+                }
+                for i in 4..10 {
+                    p.wr64(lc + 8 * i, empty)?;
+                }
+                p.extra.locale_cell = lc;
+            }
+            Ok(p.extra.locale_cell)
+        },
+        "strerror" | "_strerror" => |p| {
+            let e = p.arg(0) as i32;
+            let msg = match e {
+                0 => "No error",
+                2 => "No such file or directory",
+                12 => "Not enough space",
+                13 => "Permission denied",
+                22 => "Invalid argument",
+                34 => "Result too large",
+                _ => "Unknown error",
+            };
+            let a = kernel32::alloc_block(p, msg.len() as u64 + 1, true);
+            p.write_cstr(a, msg)?;
+            Ok(a)
+        },
+        "signal" => |_| Ok(0),
+        "raise" => |p| Err(Stop::Crash(format!("raise({})", p.arg(0)))),
+        "_XcptFilter" => |_| Ok(0),
+        "__C_specific_handler" | "__CxxFrameHandler3" | "__CxxFrameHandler4" | "_CxxThrowException" | "__std_terminate" => |p| {
+            Err(Stop::Unimplemented { dll: "crt".into(), name: "structured/C++ exception handling".into() }.record(p))
+        },
+        "_setjmp" | "_setjmpex" | "setjmp" => setjmp,
+        "longjmp" => longjmp,
+        "_beginthreadex" | "_beginthread" => |p| Err(Stop::Unimplemented { dll: "crt".into(), name: "_beginthreadex (threads are not implemented yet)".into() }.record(p)),
+        // ── memory ──
+        "malloc" => |p| {
+            let n = p.arg(0);
+            Ok(kernel32::alloc_block(p, n, false))
+        },
+        "calloc" => |p| {
+            let n = p.arg(0).wrapping_mul(p.arg(1));
+            Ok(kernel32::alloc_block(p, n, true))
+        },
+        "realloc" => |p| {
+            let (a, n) = (p.arg(0), p.arg(1));
+            kernel32::realloc_block(p, a, n, 0)
+        },
+        "free" => |p| {
+            let a = p.arg(0);
+            if a != 0 {
+                kernel32::free_block(p, a);
+            }
+            Ok(0)
+        },
+        "_msize" => |p| Ok(p.heap.size_of(p.arg(0)).unwrap_or(0)),
+        "_aligned_malloc" => |p| {
+            let (n, al) = (p.arg(0), p.arg(1).max(16));
+            let raw = kernel32::alloc_block(p, n + al + 16, false);
+            if raw == 0 {
+                return Ok(0);
+            }
+            let a = (raw + 8 + al) & !(al - 1);
+            p.wr64(a - 8, raw)?;
+            Ok(a)
+        },
+        "_aligned_free" => |p| {
+            let a = p.arg(0);
+            if a != 0 {
+                let raw = p.rd64(a - 8)?;
+                kernel32::free_block(p, raw);
+            }
+            Ok(0)
+        },
+        "memcpy" | "memmove" => |p| {
+            let (d, s, n) = (p.arg(0), p.arg(1), p.arg(2) as usize);
+            let b = p.read_bytes(s, n)?;
+            p.write_bytes(d, &b)?;
+            Ok(d)
+        },
+        "memcpy_s" | "memmove_s" => |p| {
+            let (d, dn, s, n) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3) as usize);
+            if n as u64 > dn {
+                return Ok(34);
+            }
+            let b = p.read_bytes(s, n)?;
+            p.write_bytes(d, &b)?;
+            Ok(0)
+        },
+        "memset" => |p| {
+            let (d, v, n) = (p.arg(0), p.arg(1) as u8, p.arg(2) as usize);
+            p.write_bytes(d, &vec![v; n])?;
+            Ok(d)
+        },
+        "memcmp" | "_memicmp" => |p| {
+            let (a, b, n) = (p.arg(0), p.arg(1), p.arg(2) as usize);
+            let (x, y) = (p.read_bytes(a, n)?, p.read_bytes(b, n)?);
+            Ok(x.cmp(&y) as i32 as i64 as u64)
+        },
+        "memchr" => |p| {
+            let (a, c, n) = (p.arg(0), p.arg(1) as u8, p.arg(2) as usize);
+            let x = p.read_bytes(a, n)?;
+            Ok(x.iter().position(|&b| b == c).map(|i| a + i as u64).unwrap_or(0))
+        },
+        // ── strings ──
+        "strlen" => |p| Ok(p.mem.read_cstr(p.arg(0), 1 << 30).map_err(|e| Stop::Crash(format!("{e:?}")))?.len() as u64),
+        "strnlen" => |p| {
+            let (a, m) = (p.arg(0), p.arg(1) as usize);
+            Ok(p.mem.read_cstr(a, m).map_err(|e| Stop::Crash(format!("{e:?}")))?.len() as u64)
+        },
+        "strcmp" | "strncmp" | "_stricmp" | "_strnicmp" | "stricmp" | "strcmpi" | "_strcmpi" | "strncasecmp" | "strcasecmp" => strcmp_family,
+        "strcpy" => |p| {
+            let (d, s) = (p.arg(0), p.read_cstr_raw(p.arg(1))?);
+            p.write_bytes(d, &[s.as_slice(), &[0]].concat())?;
+            Ok(d)
+        },
+        "strcpy_s" => |p| {
+            let (d, n, s) = (p.arg(0), p.arg(1) as usize, p.read_cstr_raw(p.arg(2))?);
+            if s.len() + 1 > n {
+                return Ok(34);
+            }
+            p.write_bytes(d, &[s.as_slice(), &[0]].concat())?;
+            Ok(0)
+        },
+        "strncpy" => |p| {
+            let (d, s, n) = (p.arg(0), p.read_cstr_raw(p.arg(1))?, p.arg(2) as usize);
+            let mut v = s.clone();
+            v.truncate(n);
+            v.resize(n, 0);
+            p.write_bytes(d, &v)?;
+            Ok(d)
+        },
+        "strcat" => |p| {
+            let (d, s) = (p.arg(0), p.read_cstr_raw(p.arg(1))?);
+            let dl = p.read_cstr_raw(d)?.len() as u64;
+            p.write_bytes(d + dl, &[s.as_slice(), &[0]].concat())?;
+            Ok(d)
+        },
+        "strcat_s" => |p| {
+            let (d, n, s) = (p.arg(0), p.arg(1) as usize, p.read_cstr_raw(p.arg(2))?);
+            let dl = p.read_cstr_raw(d)?.len();
+            if dl + s.len() + 1 > n {
+                return Ok(34);
+            }
+            p.write_bytes(d + dl as u64, &[s.as_slice(), &[0]].concat())?;
+            Ok(0)
+        },
+        "strncat" => |p| {
+            let (d, s, n) = (p.arg(0), p.read_cstr_raw(p.arg(1))?, p.arg(2) as usize);
+            let dl = p.read_cstr_raw(d)?.len() as u64;
+            let take = &s[..s.len().min(n)];
+            p.write_bytes(d + dl, &[take, &[0]].concat())?;
+            Ok(d)
+        },
+        "strchr" => |p| {
+            let (a, c) = (p.arg(0), p.arg(1) as u8);
+            let s = p.read_cstr_raw(a)?;
+            if c == 0 {
+                return Ok(a + s.len() as u64);
+            }
+            Ok(s.iter().position(|&b| b == c).map(|i| a + i as u64).unwrap_or(0))
+        },
+        "strrchr" => |p| {
+            let (a, c) = (p.arg(0), p.arg(1) as u8);
+            let s = p.read_cstr_raw(a)?;
+            if c == 0 {
+                return Ok(a + s.len() as u64);
+            }
+            Ok(s.iter().rposition(|&b| b == c).map(|i| a + i as u64).unwrap_or(0))
+        },
+        "strstr" => |p| {
+            let (a, n) = (p.arg(0), p.read_cstr_raw(p.arg(1))?);
+            let s = p.read_cstr_raw(a)?;
+            if n.is_empty() {
+                return Ok(a);
+            }
+            Ok(s.windows(n.len()).position(|w| w == n.as_slice()).map(|i| a + i as u64).unwrap_or(0))
+        },
+        "strspn" | "strcspn" | "strpbrk" => |p| {
+            Err(Stop::Unimplemented { dll: "crt".into(), name: "strspn/strcspn/strpbrk".into() }.record(p))
+        },
+        "_strdup" | "strdup" => |p| {
+            let s = p.read_cstr_raw(p.arg(0))?;
+            let a = kernel32::alloc_block(p, s.len() as u64 + 1, true);
+            p.write_bytes(a, &[s.as_slice(), &[0]].concat())?;
+            Ok(a)
+        },
+        "strtok" => |p| {
+            let (s, delim) = (p.arg(0), p.read_cstr_raw(p.arg(1))?);
+            let mut cur = if s != 0 { s } else { p.extra.strtok_ptr };
+            if cur == 0 {
+                return Ok(0);
+            }
+            loop {
+                let c = p.rd8(cur)?;
+                if c == 0 {
+                    p.extra.strtok_ptr = 0;
+                    return Ok(0);
+                }
+                if !delim.contains(&c) {
+                    break;
+                }
+                cur += 1;
+            }
+            let start = cur;
+            loop {
+                let c = p.rd8(cur)?;
+                if c == 0 {
+                    p.extra.strtok_ptr = 0;
+                    break;
+                }
+                if delim.contains(&c) {
+                    p.wr8(cur, 0)?;
+                    p.extra.strtok_ptr = cur + 1;
+                    break;
+                }
+                cur += 1;
+            }
+            Ok(start)
+        },
+        "toupper" | "_toupper" => |p| Ok((p.arg(0) as u8).to_ascii_uppercase() as u64),
+        "tolower" | "_tolower" => |p| Ok((p.arg(0) as u8).to_ascii_lowercase() as u64),
+        "towupper" => |p| Ok(char::from_u32(p.arg(0) as u32).map(|c| c.to_uppercase().next().unwrap() as u64).unwrap_or(p.arg(0))),
+        "towlower" => |p| Ok(char::from_u32(p.arg(0) as u32).map(|c| c.to_lowercase().next().unwrap() as u64).unwrap_or(p.arg(0))),
+        "isalpha" | "iswalpha" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_alphabetic()) as u64),
+        "isdigit" | "iswdigit" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_digit()) as u64),
+        "isalnum" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_alphanumeric()) as u64),
+        "isspace" | "iswspace" => |p| Ok((p.arg(0) < 256 && matches!(p.arg(0) as u8, b' ' | b'\t'..=b'\r')) as u64),
+        "isupper" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_uppercase()) as u64),
+        "islower" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_lowercase()) as u64),
+        "ispunct" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_punctuation()) as u64),
+        "isxdigit" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_hexdigit()) as u64),
+        "isprint" => |p| Ok((p.arg(0) < 256 && ((p.arg(0) as u8).is_ascii_graphic() || p.arg(0) == 32)) as u64),
+        "iscntrl" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_control()) as u64),
+        "isgraph" => |p| Ok((p.arg(0) < 256 && (p.arg(0) as u8).is_ascii_graphic()) as u64),
+        "wcslen" => |p| Ok(p.read_wstr(p.arg(0))?.encode_utf16().count() as u64),
+        "__pctype_func" => |p| Ok(ctype_table(p)),
+        "___mb_cur_max_func" | "__mb_cur_max_func" => |_| Ok(1),
+        // ── numbers ──
+        "abs" => |p| Ok((p.arg(0) as i32).unsigned_abs() as u64),
+        "labs" | "llabs" | "_abs64" => |p| Ok((p.arg(0) as i64).unsigned_abs()),
+        "atoi" | "atol" => |p| Ok(parse_int(&p.read_cstr(p.arg(0))?, 10).0 as i32 as u32 as u64),
+        "atoll" | "_atoi64" => |p| Ok(parse_int(&p.read_cstr(p.arg(0))?, 10).0 as u64),
+        "atof" | "_atof_l" => |p| {
+            let s = p.read_cstr(p.arg(0))?;
+            p.set_retf(parse_float(&s).0);
+            Ok(0)
+        },
+        "strtol" | "strtoul" | "strtoll" | "strtoull" | "_strtoi64" | "_strtoui64" => strtol_family,
+        "strtod" => |p| {
+            let (s, end) = (p.arg(0), p.arg(1));
+            let st = p.read_cstr(s)?;
+            let (v, used) = parse_float(&st);
+            if end != 0 {
+                p.wr64(end, s + used as u64)?;
+            }
+            p.set_retf(v);
+            Ok(0)
+        },
+        "_itoa" | "itoa" | "_ltoa" | "_ultoa" | "_i64toa" | "_ui64toa" | "_itoa_s" => itoa_family,
+        "rand" => |p| {
+            p.extra.rand_state = p.extra.rand_state.wrapping_mul(214013).wrapping_add(2531011);
+            Ok(((p.extra.rand_state >> 16) & 0x7fff) as u64)
+        },
+        "srand" => |p| {
+            p.extra.rand_state = p.arg(0) as u32;
+            Ok(0)
+        },
+        "qsort" => qsort,
+        "bsearch" => bsearch,
+        // ── time ──
+        "time" | "_time64" | "_time32" => |p| {
+            let t = 1_767_225_600 + (p.cpu.icount + p.extra.sleep_adjust) / 100_000_000;
+            let out = p.arg(0);
+            if out != 0 {
+                p.wr64(out, t)?;
+            }
+            Ok(t)
+        },
+        "clock" => |p| Ok((p.cpu.icount + p.extra.sleep_adjust) / 100_000),
+        // ── math ──
+        "sqrt" | "sin" | "cos" | "tan" | "atan" | "asin" | "acos" | "sinh" | "cosh" | "tanh" | "exp" | "log" | "log10" | "log2" | "floor" | "ceil" | "fabs" | "round" | "trunc" | "cbrt" | "exp2" | "expm1" | "log1p" => math1,
+        "pow" | "atan2" | "fmod" | "hypot" | "fmin" | "fmax" | "copysign" => math2,
+        "sqrtf" | "sinf" | "cosf" | "tanf" | "atanf" | "asinf" | "acosf" | "expf" | "logf" | "log10f" | "log2f" | "floorf" | "ceilf" | "fabsf" | "roundf" | "truncf" | "sinhf" | "coshf" | "tanhf" => math1f,
+        "powf" | "atan2f" | "fmodf" | "hypotf" | "fminf" | "fmaxf" => math2f,
+        "ldexp" => |p| {
+            let (x, e) = (p.argf(0), p.arg(1) as i32);
+            p.set_retf(x * 2f64.powi(e));
+            Ok(0)
+        },
+        "frexp" => |p| {
+            let (x, pe) = (p.argf(0), p.arg(1));
+            let (m, e) = frexp(x);
+            p.wr32(pe, e as u32)?;
+            p.set_retf(m);
+            Ok(0)
+        },
+        "modf" => |p| {
+            let (x, pi) = (p.argf(0), p.arg(1));
+            p.wr64(pi, x.trunc().to_bits())?;
+            p.set_retf(x - x.trunc());
+            Ok(0)
+        },
+        "_finite" | "_isnan" | "_fpclassify" => |p| {
+            let x = p.argf(0);
+            Ok(match () {
+                _ => x.is_finite() as u64,
+            })
+        },
+        // ── stdio ──
+        "__acrt_iob_func" => |p| {
+            let i = p.arg(0);
+            let base = ensure_iob(p)?;
+            Ok(base + i * FILE_SIZE)
+        },
+        "__iob_func" => |p| ensure_iob(p),
+        "puts" => |p| {
+            let mut s = p.mem.read_cstr(p.arg(0), 1 << 20).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+            s.push(b'\n');
+            p.stdout.extend_from_slice(&s);
+            Ok(1)
+        },
+        "putchar" | "_putch" => |p| {
+            let c = p.arg(0) as u8;
+            p.stdout.push(c);
+            Ok(c as u64)
+        },
+        "fputs" => |p| {
+            let (s, fp) = (p.read_cstr_raw(p.arg(0))?, p.arg(1));
+            stream_write(p, fp, &s)?;
+            Ok(1)
+        },
+        "fputc" | "putc" | "_fputc_nolock" | "_putc_nolock" => |p| {
+            let (c, fp) = (p.arg(0) as u8, p.arg(1));
+            stream_write(p, fp, &[c])?;
+            Ok(c as u64)
+        },
+        "fwrite" | "_fwrite_nolock" => |p| {
+            let (buf, sz, n, fp) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
+            let data = p.read_bytes(buf, (sz * n) as usize)?;
+            let w = stream_write(p, fp, &data)?;
+            Ok(if sz == 0 { 0 } else { w as u64 / sz })
+        },
+        "fread" | "_fread_nolock" => |p| {
+            let (buf, sz, n, fp) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
+            let mut data = Vec::new();
+            for _ in 0..sz * n {
+                match stream_read_byte(p, fp) {
+                    Some(b) => data.push(b),
+                    None => break,
+                }
+            }
+            p.write_bytes(buf, &data)?;
+            Ok(if sz == 0 { 0 } else { data.len() as u64 / sz })
+        },
+        "fgetc" | "getc" | "_fgetc_nolock" => |p| {
+            let fp = p.arg(0);
+            Ok(stream_read_byte(p, fp).map(|b| b as u64).unwrap_or(0xffff_ffff))
+        },
+        "getchar" => |p| {
+            let fp = ensure_iob(p)?;
+            Ok(stream_read_byte(p, fp).map(|b| b as u64).unwrap_or(0xffff_ffff))
+        },
+        "ungetc" => |p| {
+            let (c, fp) = (p.arg(0) as u8, p.arg(1));
+            if let Some(f) = p.extra.files.get_mut(&fp) {
+                f.ungot = Some(c);
+            }
+            Ok(c as u64)
+        },
+        "fgets" => |p| {
+            let (buf, n, fp) = (p.arg(0), p.arg(1) as usize, p.arg(2));
+            let mut v = Vec::new();
+            while v.len() + 1 < n {
+                match stream_read_byte(p, fp) {
+                    Some(b) => {
+                        v.push(b);
+                        if b == b'\n' {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if v.is_empty() {
+                return Ok(0);
+            }
+            v.push(0);
+            p.write_bytes(buf, &v)?;
+            Ok(buf)
+        },
+        "fopen" => |p| {
+            let (name, mode) = (p.read_cstr(p.arg(0))?, p.read_cstr(p.arg(1))?);
+            fopen_impl(p, &name, &mode)
+        },
+        "fopen_s" => |p| {
+            let (out, name, mode) = (p.arg(0), p.read_cstr(p.arg(1))?, p.read_cstr(p.arg(2))?);
+            let fp = fopen_impl(p, &name, &mode)?;
+            p.wr64(out, fp)?;
+            Ok(if fp == 0 { 2 } else { 0 })
+        },
+        "fclose" => |p| {
+            let fp = p.arg(0);
+            Ok(p.extra.files.remove(&fp).is_some() as u64 ^ 1)
+        },
+        "fflush" | "_flushall" | "setvbuf" | "setbuf" | "_fflush_nolock" => |_| Ok(0),
+        "feof" => |p| Ok(p.extra.files.get(&p.arg(0)).map(|f| f.eof as u64).unwrap_or(1)),
+        "ferror" => |p| Ok(p.extra.files.get(&p.arg(0)).map(|f| f.err as u64).unwrap_or(1)),
+        "clearerr" => |p| {
+            if let Some(f) = p.extra.files.get_mut(&p.arg(0)) {
+                f.eof = false;
+                f.err = false;
+            }
+            Ok(0)
+        },
+        "fseek" | "_fseeki64" => |p| {
+            let (fp, off, whence) = (p.arg(0), p.arg(1) as i64, p.arg(2));
+            let len = match p.extra.files.get(&fp) {
+                Some(CFile { kind: FileKind::Vfs { path, .. }, .. }) => p.vfs.get(path).map(|d| d.len()).unwrap_or(0),
+                _ => return Ok(u64::MAX),
+            };
+            if let Some(CFile { kind: FileKind::Vfs { pos, .. }, eof, .. }) = p.extra.files.get_mut(&fp) {
+                let base = match whence {
+                    0 => 0i64,
+                    1 => *pos as i64,
+                    _ => len as i64,
+                };
+                *pos = (base + off).max(0) as usize;
+                *eof = false;
+            }
+            Ok(0)
+        },
+        "ftell" | "_ftelli64" => |p| match p.extra.files.get(&p.arg(0)) {
+            Some(CFile { kind: FileKind::Vfs { pos, .. }, .. }) => Ok(*pos as u64),
+            _ => Ok(u64::MAX),
+        },
+        "rewind" => |p| {
+            if let Some(CFile { kind: FileKind::Vfs { pos, .. }, eof, .. }) = p.extra.files.get_mut(&p.arg(0)) {
+                *pos = 0;
+                *eof = false;
+            }
+            Ok(0)
+        },
+        "remove" | "_unlink" => |p| {
+            let n = p.read_cstr(p.arg(0))?;
+            Ok(if p.vfs.remove(&n) { 0 } else { u64::MAX })
+        },
+        "printf" | "_printf" => |p| {
+            let out = do_printf(p, p.arg(0), &mut SlotArgs(1), false)?;
+            p.stdout.extend_from_slice(&out);
+            Ok(out.len() as u64)
+        },
+        "fprintf" => |p| {
+            let fp = p.arg(0);
+            let out = do_printf(p, p.arg(1), &mut SlotArgs(2), false)?;
+            stream_write(p, fp, &out)?;
+            Ok(out.len() as u64)
+        },
+        "sprintf" | "_sprintf" => |p| {
+            let buf = p.arg(0);
+            let out = do_printf(p, p.arg(1), &mut SlotArgs(2), false)?;
+            store_formatted(p, buf, None, &out, false)?;
+            Ok(out.len() as u64)
+        },
+        "snprintf" | "_snprintf" => |p| {
+            let (buf, n) = (p.arg(0), p.arg(1));
+            let out = do_printf(p, p.arg(2), &mut SlotArgs(3), false)?;
+            store_formatted(p, buf, Some(n), &out, false)?;
+            Ok(out.len() as u64)
+        },
+        "vprintf" => |p| {
+            let out = do_printf(p, p.arg(0), &mut VaList(p.arg(1)), false)?;
+            p.stdout.extend_from_slice(&out);
+            Ok(out.len() as u64)
+        },
+        "vfprintf" => |p| {
+            let fp = p.arg(0);
+            let out = do_printf(p, p.arg(1), &mut VaList(p.arg(2)), false)?;
+            stream_write(p, fp, &out)?;
+            Ok(out.len() as u64)
+        },
+        "vsprintf" => |p| {
+            let buf = p.arg(0);
+            let out = do_printf(p, p.arg(1), &mut VaList(p.arg(2)), false)?;
+            store_formatted(p, buf, None, &out, false)?;
+            Ok(out.len() as u64)
+        },
+        "vsnprintf" | "_vsnprintf" => |p| {
+            let (buf, n) = (p.arg(0), p.arg(1));
+            let out = do_printf(p, p.arg(2), &mut VaList(p.arg(3)), false)?;
+            store_formatted(p, buf, Some(n), &out, false)?;
+            Ok(out.len() as u64)
+        },
+        "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => |p| {
+            let wide = false;
+            let (fp, fmt, va) = (p.arg(1), p.arg(2), p.arg(4));
+            let out = do_printf(p, fmt, &mut VaList(va), wide)?;
+            stream_write(p, fp, &out)?;
+            Ok(out.len() as u64)
+        },
+        "__stdio_common_vsprintf" | "__stdio_common_vsnprintf_s" | "__stdio_common_vsprintf_s" => |p| {
+            // vsprintf: (opts, buf, len, fmt, locale, va); vsnprintf_s: (opts, buf, len, max, fmt, locale, va)
+            let snp = p.thunks_is_snprintf_s();
+            let (buf, len) = (p.arg(1), p.arg(2));
+            let (fmt, va) = if snp { (p.arg(4), p.arg(6)) } else { (p.arg(3), p.arg(5)) };
+            let out = do_printf(p, fmt, &mut VaList(va), false)?;
+            store_formatted(p, buf, Some(len), &out, false)?;
+            Ok(out.len() as u64)
+        },
+        "__stdio_common_vswprintf" | "__stdio_common_vswprintf_s" => |p| {
+            let (buf, len, fmt, va) = (p.arg(1), p.arg(2), p.arg(3), p.arg(5));
+            let out = do_printf(p, fmt, &mut VaList(va), true)?;
+            store_formatted(p, buf, Some(len), &out, true)?;
+            Ok(len_for(&out, true))
+        },
+        "sscanf" | "__stdio_common_vsscanf" => sscanf,
+        "getenv" | "_wgetenv" => |p| {
+            let k = p.read_cstr(p.arg(0))?;
+            match p.env.iter().find(|(a, _)| a.eq_ignore_ascii_case(&k)).map(|(_, v)| v.clone()) {
+                Some(v) => {
+                    let a = kernel32::alloc_block(p, v.len() as u64 + 1, true);
+                    p.write_cstr(a, &v)?;
+                    Ok(a)
+                }
+                None => Ok(0),
+            }
+        },
+        "_putenv" | "system" => |_| Ok(0),
+        "_fileno" => |p| Ok(match p.extra.files.get(&p.arg(0)) {
+            Some(CFile { kind: FileKind::Stdin, .. }) => 0,
+            Some(CFile { kind: FileKind::Stdout, .. }) => 1,
+            Some(CFile { kind: FileKind::Stderr, .. }) => 2,
+            _ => 3,
+        }),
+        "_isatty" => |p| Ok((p.arg(0) < 3) as u64),
+        "_write" => |p| {
+            let (fd, buf, n) = (p.arg(0), p.arg(1), p.arg(2) as usize);
+            let d = p.read_bytes(buf, n)?;
+            match fd {
+                1 => p.stdout.extend_from_slice(&d),
+                2 => p.stderr.extend_from_slice(&d),
+                _ => return Ok(u64::MAX),
+            }
+            Ok(n as u64)
+        },
+        _ => return None,
+    })
+}
+
+trait Rec {
+    fn record(self, p: &mut Process) -> Self;
+}
+impl Rec for Stop {
+    fn record(self, p: &mut Process) -> Self {
+        if let Stop::Unimplemented { dll, name } = &self {
+            p.unimplemented_log.push((dll.clone(), name.clone()));
+        }
+        self
+    }
+}
+
+impl Process {
+    pub fn read_cstr_raw(&self, a: u64) -> Result<Vec<u8>, Stop> {
+        self.mem.read_cstr(a, 1 << 24).map_err(|e| Stop::Crash(format!("read fault {a:#x}: {e:?}")))
+    }
+    /// The `__stdio_common_vsnprintf_s` variant takes one more argument; detect it from the
+    /// thunk currently executing.
+    pub fn thunks_is_snprintf_s(&self) -> bool {
+        let idx = ((self.cpu.rip.wrapping_sub(THUNK_BASE)) / 16) as usize;
+        self.thunks.get(idx).map(|t| t.name == "__stdio_common_vsnprintf_s").unwrap_or(false)
+    }
+}
+
+fn errno_cell(p: &mut Process) -> u64 {
+    if p.extra.errno_cell == 0 {
+        p.extra.errno_cell = data_cell(p, "errno", 16);
+    }
+    p.extra.errno_cell
+}
+
+fn ctype_table(p: &mut Process) -> u64 {
+    if p.extra.ctype_table == 0 {
+        // 257 u16 entries (index -1 .. 255); the returned pointer addresses entry 0.
+        let a = kernel32::alloc_block(p, 258 * 2, true);
+        for c in 0..256u32 {
+            let b = c as u8;
+            let mut t = 0u16;
+            if b.is_ascii_uppercase() {
+                t |= 0x1 | 0x100;
+            }
+            if b.is_ascii_lowercase() {
+                t |= 0x2 | 0x100;
+            }
+            if b.is_ascii_digit() {
+                t |= 0x4;
+            }
+            if matches!(b, b' ' | b'\t'..=b'\r') {
+                t |= 0x8;
+            }
+            if b.is_ascii_punctuation() {
+                t |= 0x10;
+            }
+            if b.is_ascii_control() {
+                t |= 0x20;
+            }
+            if b == b' ' {
+                t |= 0x40;
+            }
+            if b.is_ascii_hexdigit() {
+                t |= 0x80;
+            }
+            let _ = p.mem.write_u16(a + 2 + c as u64 * 2, t);
+        }
+        p.extra.ctype_table = a + 2;
+    }
+    p.extra.ctype_table
+}
+
+fn initterm(p: &mut Process, check: bool) -> R {
+    let (mut cur, end) = (p.arg(0), p.arg(1));
+    while cur < end {
+        let f = p.rd64(cur)?;
+        if f != 0 {
+            let r = p.call_guest(f, &[])?;
+            if check && (r as u32) != 0 {
+                return Ok(r & 0xffff_ffff);
+            }
+        }
+        cur += 8;
+    }
+    Ok(0)
+}
+
+fn strcmp_family(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    let (a, b) = (p.arg(0), p.arg(1));
+    let n = if name.contains('n') && name != "stricmp" && name != "_stricmp" && name != "strcmpi" && name != "_strcmpi" && name != "strcasecmp" { Some(p.arg(2) as usize) } else { None };
+    let ci = name.contains("icmp") || name.contains("case") || name.contains("cmpi");
+    let mut x = p.read_cstr_raw(a)?;
+    let mut y = p.read_cstr_raw(b)?;
+    if let Some(n) = n {
+        x.truncate(n);
+        y.truncate(n);
+    }
+    if ci {
+        x.make_ascii_lowercase();
+        y.make_ascii_lowercase();
+    }
+    Ok(x.cmp(&y) as i32 as i64 as u64)
+}
+
+fn parse_int(s: &str, base: u32) -> (i64, usize) {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && (b[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+        neg = b[i] == b'-';
+        i += 1;
+    }
+    let mut base = base;
+    if (base == 16 || base == 0) && i + 1 < b.len() && b[i] == b'0' && (b[i + 1] | 0x20) == b'x' {
+        base = 16;
+        i += 2;
+    } else if base == 0 {
+        base = if i < b.len() && b[i] == b'0' { 8 } else { 10 };
+    }
+    let mut v: i64 = 0;
+    let mut any = false;
+    while i < b.len() {
+        let d = match (b[i] as char).to_digit(36) {
+            Some(d) if d < base => d,
+            _ => break,
+        };
+        v = v.wrapping_mul(base as i64).wrapping_add(d as i64);
+        any = true;
+        i += 1;
+    }
+    if !any {
+        return (0, 0);
+    }
+    (if neg { v.wrapping_neg() } else { v }, i)
+}
+
+fn parse_float(s: &str) -> (f64, usize) {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && (b[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+        i += 1;
+    }
+    let lower = s[i..].to_ascii_lowercase();
+    if lower.starts_with("inf") {
+        let v = if b[start] == b'-' { f64::NEG_INFINITY } else { f64::INFINITY };
+        return (v, i + 3);
+    }
+    if lower.starts_with("nan") {
+        return (f64::NAN, i + 3);
+    }
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i < b.len() && (b[i] | 0x20) == b'e' {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'-' || b[j] == b'+') {
+            j += 1;
+        }
+        if j < b.len() && b[j].is_ascii_digit() {
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    match s[start..i].parse::<f64>() {
+        Ok(v) => (v, i),
+        Err(_) => (0.0, 0),
+    }
+}
+
+fn strtol_family(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    let (s, end, base) = (p.arg(0), p.arg(1), p.arg(2) as u32);
+    let st = p.read_cstr(s)?;
+    let (v, used) = parse_int(&st, base);
+    if end != 0 {
+        p.wr64(end, s + used as u64)?;
+    }
+    let long64 = name.contains("ll") || name.contains("64");
+    Ok(if long64 { v as u64 } else { v as i32 as u32 as u64 })
+}
+
+fn itoa_family(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    // _itoa(value, buf, radix)  /  _itoa_s(value, buf, size, radix)
+    let s_variant = name.ends_with("_s");
+    let (value, dst) = (p.arg(0), p.arg(1));
+    let radix = if s_variant { p.arg(3) as u32 } else { p.arg(2) as u32 };
+    let unsigned = name.contains("ul") || name.contains("ui64");
+    let wide64 = name.contains("64");
+    let v: i128 = match (unsigned, wide64) {
+        (true, true) => value as i128,
+        (true, false) => (value as u32) as i128,
+        (false, true) => (value as i64) as i128,
+        (false, false) => (value as i32) as i128,
+    };
+    let radix = if (2..=36).contains(&radix) { radix } else { 10 };
+    let mut n = v.unsigned_abs();
+    let mut d = Vec::new();
+    if n == 0 {
+        d.push(b'0');
+    }
+    while n > 0 {
+        d.push(std::char::from_digit((n % radix as u128) as u32, radix).unwrap() as u8);
+        n /= radix as u128;
+    }
+    if v < 0 && radix == 10 {
+        d.push(b'-');
+    }
+    d.reverse();
+    d.push(0);
+    if s_variant && (p.arg(2) as usize) < d.len() {
+        return Ok(34);
+    }
+    p.write_bytes(dst, &d)?;
+    Ok(if s_variant { 0 } else { dst })
+}
+
+fn qsort(p: &mut Process) -> R {
+    let (base, n, sz, cmp) = (p.arg(0), p.arg(1) as usize, p.arg(2) as usize, p.arg(3));
+    let mut items: Vec<Vec<u8>> = (0..n).map(|i| p.read_bytes(base + (i * sz) as u64, sz)).collect::<Result<_, _>>()?;
+    // Insertion into a scratch area so the comparator can be a guest function taking pointers.
+    let scratch = kernel32::alloc_block(p, (sz * 2) as u64, true);
+    let mut err: Option<Stop> = None;
+    // Merge sort with guest comparator calls.
+    fn msort(p: &mut Process, v: Vec<Vec<u8>>, scratch: u64, sz: usize, cmp: u64, err: &mut Option<Stop>) -> Vec<Vec<u8>> {
+        if v.len() <= 1 || err.is_some() {
+            return v;
+        }
+        let mid = v.len() / 2;
+        let (l, r) = (v[..mid].to_vec(), v[mid..].to_vec());
+        let l = msort(p, l, scratch, sz, cmp, err);
+        let r = msort(p, r, scratch, sz, cmp, err);
+        let mut out = Vec::with_capacity(l.len() + r.len());
+        let (mut i, mut j) = (0, 0);
+        while i < l.len() && j < r.len() {
+            if err.is_some() {
+                break;
+            }
+            let _ = p.write_bytes(scratch, &l[i]);
+            let _ = p.write_bytes(scratch + sz as u64, &r[j]);
+            match p.call_guest(cmp, &[scratch, scratch + sz as u64]) {
+                Ok(c) => {
+                    if (c as i32) <= 0 {
+                        out.push(l[i].clone());
+                        i += 1;
+                    } else {
+                        out.push(r[j].clone());
+                        j += 1;
+                    }
+                }
+                Err(e) => *err = Some(e),
+            }
+        }
+        out.extend_from_slice(&l[i..]);
+        out.extend_from_slice(&r[j..]);
+        out
+    }
+    items = msort(p, items, scratch, sz, cmp, &mut err);
+    kernel32::free_block(p, scratch);
+    if let Some(e) = err {
+        return Err(e);
+    }
+    for (i, it) in items.iter().enumerate() {
+        p.write_bytes(base + (i * sz) as u64, it)?;
+    }
+    Ok(0)
+}
+
+fn bsearch(p: &mut Process) -> R {
+    let (key, base, n, sz, cmp) = (p.arg(0), p.arg(1), p.arg(2) as usize, p.arg(3), p.arg(4));
+    let (mut lo, mut hi) = (0usize, n);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let elem = base + mid as u64 * sz;
+        let c = p.call_guest(cmp, &[key, elem])? as i32;
+        if c == 0 {
+            return Ok(elem);
+        } else if c < 0 {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Ok(0)
+}
+
+fn frexp(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    let e = x.abs().log2().floor() as i32 + 1;
+    let mut m = x / 2f64.powi(e);
+    let mut e = e;
+    if m.abs() >= 1.0 {
+        m /= 2.0;
+        e += 1;
+    }
+    if m.abs() < 0.5 {
+        m *= 2.0;
+        e -= 1;
+    }
+    (m, e)
+}
+
+fn math1(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    let x = p.argf(0);
+    let r = match name.as_str() {
+        "sqrt" => x.sqrt(),
+        "sin" => x.sin(),
+        "cos" => x.cos(),
+        "tan" => x.tan(),
+        "atan" => x.atan(),
+        "asin" => x.asin(),
+        "acos" => x.acos(),
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        "exp" => x.exp(),
+        "log" => x.ln(),
+        "log10" => x.log10(),
+        "log2" => x.log2(),
+        "floor" => x.floor(),
+        "ceil" => x.ceil(),
+        "fabs" => x.abs(),
+        "round" => x.round(),
+        "trunc" => x.trunc(),
+        "cbrt" => x.cbrt(),
+        "exp2" => x.exp2(),
+        "expm1" => x.exp_m1(),
+        "log1p" => x.ln_1p(),
+        _ => f64::NAN,
+    };
+    p.set_retf(r);
+    Ok(0)
+}
+
+fn math2(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    let (x, y) = (p.argf(0), p.argf(1));
+    let r = match name.as_str() {
+        "pow" => x.powf(y),
+        "atan2" => x.atan2(y),
+        "fmod" => x % y,
+        "hypot" => x.hypot(y),
+        "fmin" => x.min(y),
+        "fmax" => x.max(y),
+        "copysign" => x.copysign(y),
+        _ => f64::NAN,
+    };
+    p.set_retf(r);
+    Ok(0)
+}
+
+fn math1f(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    let x = f32::from_bits(p.cpu.xmm[0] as u32);
+    let r = match name.trim_end_matches('f') {
+        "sqrt" => x.sqrt(),
+        "sin" => x.sin(),
+        "cos" => x.cos(),
+        "tan" => x.tan(),
+        "atan" => x.atan(),
+        "asin" => x.asin(),
+        "acos" => x.acos(),
+        "exp" => x.exp(),
+        "log" => x.ln(),
+        "log10" => x.log10(),
+        "log2" => x.log2(),
+        "floor" => x.floor(),
+        "ceil" => x.ceil(),
+        "fabs" => x.abs(),
+        "round" => x.round(),
+        "trunc" => x.trunc(),
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        _ => f32::NAN,
+    };
+    p.set_retf32(r);
+    Ok(0)
+}
+
+fn math2f(p: &mut Process) -> R {
+    let name = {
+        let idx = ((p.cpu.rip - THUNK_BASE) / 16) as usize;
+        p.thunks[idx].name.clone()
+    };
+    let x = f32::from_bits(p.cpu.xmm[0] as u32);
+    let y = f32::from_bits(p.cpu.xmm[1] as u32);
+    let r = match name.trim_end_matches('f') {
+        "pow" => x.powf(y),
+        "atan2" => x.atan2(y),
+        "fmod" => x % y,
+        "hypot" => x.hypot(y),
+        "fmin" => x.min(y),
+        "fmax" => x.max(y),
+        _ => f32::NAN,
+    };
+    p.set_retf32(r);
+    Ok(0)
+}
+
+fn fopen_impl(p: &mut Process, name: &str, mode: &str) -> R {
+    let write = mode.contains('w') || mode.contains('a') || mode.contains('+');
+    let exists = p.vfs.exists(name);
+    if mode.starts_with('w') {
+        p.vfs.insert(name, Vec::new());
+    } else if !exists {
+        if mode.starts_with('a') {
+            p.vfs.insert(name, Vec::new());
+        } else {
+            return Ok(0);
+        }
+    }
+    let pos = if mode.starts_with('a') { p.vfs.get(name).map(|d| d.len()).unwrap_or(0) } else { 0 };
+    let fp = kernel32::alloc_block(p, FILE_SIZE, true);
+    p.extra.files.insert(fp, CFile { kind: FileKind::Vfs { path: crate::vfs::norm(name), pos, write }, eof: false, err: false, ungot: None });
+    Ok(fp)
+}
+
+/// Minimal sscanf: %d %i %u %x %ld %lld %f %lf %s %c %n and literal matching.
+fn sscanf(p: &mut Process) -> R {
+    let (s, f) = (p.read_cstr_raw(p.arg(0))?, p.read_cstr_raw(p.arg(1))?);
+    let mut si = 0usize;
+    let mut slot = 2usize;
+    let mut count = 0u64;
+    let mut fi = 0usize;
+    while fi < f.len() {
+        let c = f[fi];
+        if c.is_ascii_whitespace() {
+            while si < s.len() && s[si].is_ascii_whitespace() {
+                si += 1;
+            }
+            fi += 1;
+            continue;
+        }
+        if c != b'%' {
+            if si < s.len() && s[si] == c {
+                si += 1;
+                fi += 1;
+                continue;
+            }
+            break;
+        }
+        fi += 1;
+        let mut long = 0;
+        while fi < f.len() && matches!(f[fi], b'l' | b'h' | b'z' | b'L') {
+            if f[fi] == b'l' || f[fi] == b'z' || f[fi] == b'L' {
+                long += 1;
+            }
+            fi += 1;
+        }
+        let Some(&conv) = f.get(fi) else { break };
+        fi += 1;
+        while si < s.len() && s[si].is_ascii_whitespace() && conv != b'c' {
+            si += 1;
+        }
+        let rest = String::from_utf8_lossy(&s[si.min(s.len())..]).into_owned();
+        match conv {
+            b'd' | b'i' | b'u' | b'x' | b'X' => {
+                let base = if conv == b'x' || conv == b'X' { 16 } else if conv == b'i' { 0 } else { 10 };
+                let (v, used) = parse_int(&rest, base);
+                if used == 0 {
+                    break;
+                }
+                let dst = p.arg(slot);
+                slot += 1;
+                if long >= 1 { p.wr64(dst, v as u64)? } else { p.wr32(dst, v as u32)? }
+                si += used;
+                count += 1;
+            }
+            b'f' | b'e' | b'g' => {
+                let (v, used) = parse_float(&rest);
+                if used == 0 {
+                    break;
+                }
+                let dst = p.arg(slot);
+                slot += 1;
+                if long >= 1 { p.wr64(dst, v.to_bits())? } else { p.wr32(dst, (v as f32).to_bits())? }
+                si += used;
+                count += 1;
+            }
+            b's' => {
+                let end = s[si..].iter().position(|b| b.is_ascii_whitespace()).map(|i| si + i).unwrap_or(s.len());
+                if end == si {
+                    break;
+                }
+                let dst = p.arg(slot);
+                slot += 1;
+                let mut v = s[si..end].to_vec();
+                v.push(0);
+                p.write_bytes(dst, &v)?;
+                si = end;
+                count += 1;
+            }
+            b'c' => {
+                if si >= s.len() {
+                    break;
+                }
+                let dst = p.arg(slot);
+                slot += 1;
+                p.wr8(dst, s[si])?;
+                si += 1;
+                count += 1;
+            }
+            b'n' => {
+                let dst = p.arg(slot);
+                slot += 1;
+                p.wr32(dst, si as u32)?;
+            }
+            b'%' => {
+                if si < s.len() && s[si] == b'%' {
+                    si += 1;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    if count == 0 && si >= s.len() && !f.is_empty() {
+        return Ok(u64::MAX);
+    }
+    Ok(count)
+}
+
+// setjmp / longjmp ---------------------------------------------------------------------------
+// jmp_buf layout used here (our own, the program treats it as opaque): rbx rbp rdi rsi r12..r15
+// rsp rip xmm6..xmm15.
+
+fn setjmp(p: &mut Process) -> R {
+    let buf = p.arg(0);
+    let sp = p.cpu.gpr[RSP];
+    let ra = p.rd64(sp)?;
+    let regs = [p.cpu.gpr[RBX], p.cpu.gpr[RBP], p.cpu.gpr[RDI], p.cpu.gpr[RSI], p.cpu.gpr[12], p.cpu.gpr[13], p.cpu.gpr[14], p.cpu.gpr[15], sp + 8, ra];
+    for (i, r) in regs.iter().enumerate() {
+        p.wr64(buf + 8 * i as u64, *r)?;
+    }
+    for i in 0..10 {
+        let x = p.cpu.xmm[6 + i];
+        p.mem.write_u128(buf + 0x50 + 16 * i as u64, x).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+    }
+    Ok(0)
+}
+
+fn longjmp(p: &mut Process) -> R {
+    let (buf, val) = (p.arg(0), p.arg(1) as u32);
+    let mut regs = [0u64; 10];
+    for (i, r) in regs.iter_mut().enumerate() {
+        *r = p.rd64(buf + 8 * i as u64)?;
+    }
+    for i in 0..10 {
+        p.cpu.xmm[6 + i] = p.mem.read_u128(buf + 0x50 + 16 * i as u64).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+    }
+    p.cpu.gpr[RBX] = regs[0];
+    p.cpu.gpr[RBP] = regs[1];
+    p.cpu.gpr[RDI] = regs[2];
+    p.cpu.gpr[RSI] = regs[3];
+    p.cpu.gpr[12] = regs[4];
+    p.cpu.gpr[13] = regs[5];
+    p.cpu.gpr[14] = regs[6];
+    p.cpu.gpr[15] = regs[7];
+    p.cpu.gpr[RSP] = regs[8];
+    p.cpu.rip = regs[9];
+    p.cpu.gpr[RAX] = if val == 0 { 1 } else { val as u64 };
+    p.skip_ret = true;
+    Ok(0)
+}

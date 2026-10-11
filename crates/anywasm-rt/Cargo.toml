@@ -3,3 +3,8 @@ name = "anywasm-rt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Win64 process runtime: PE64 loader, TEB/PEB, import thunks and reimplemented system libraries on the anywasm-cpu core"
+
+[dependencies]
+anywasm-cpu.workspace = true
+anywasm-pe.workspace = true

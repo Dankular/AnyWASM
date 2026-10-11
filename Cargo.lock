@@ -20,6 +20,10 @@ version = "0.1.0"
 [[package]]
 name = "anywasm-rt"
 version = "0.1.0"
+dependencies = [
+ "anywasm-cpu",
+ "anywasm-pe",
+]
 
 [[package]]
 name = "anywasm-wasm"

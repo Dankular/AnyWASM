@@ -248,9 +248,10 @@ fn double_shift(cpu: &mut Cpu, left: bool, dst: u64, src: u64, count: u64, sz: u
         return dst;
     }
     if cnt > bits {
-        // Only reachable for 16-bit operands. Intel documents this as undefined; measured on
-        // hardware (80/80 random probes) it rotates the 32-bit dst:src (SHLD) / src:dst (SHRD)
-        // value by `cnt` and takes the corresponding half.
+        // Only reachable for 16-bit operands with count 17..=31. The SDM calls the result
+        // undefined and CPU vendors differ (an Intel Xeon rotated the 32-bit dst:src / src:dst
+        // value, 80/80 probes; a different CI machine disagreed). This follows the Intel
+        // behaviour; it is deliberately NOT asserted by the differential test.
         let res = if left {
             let w = ((dst as u32) << 16) | src as u32;
             (w.rotate_left(cnt) >> 16) as u64

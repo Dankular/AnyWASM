@@ -312,6 +312,11 @@ fn make_case(asm: &str, r: &mut Rng) -> Case {
         }
         st.gpr[RAX] = if bits == 8 { st.gpr[RAX] & 0xffff } else { st.gpr[RAX] };
     }
+    if matches!(m, "shld" | "shrd") && op_size_bits(asm) == 16 && asm.ends_with("cl") {
+        // 16-bit double shifts with count > 16 are undefined and vendor-specific (this passed on
+        // an Intel Xeon and failed on a CI runner); only test the defined range 0..=16.
+        st.gpr[RCX] = (st.gpr[RCX] & 0xff) % 17;
+    }
     if matches!(m, "bt" | "bts" | "btr" | "btc") && mem {
         st.gpr[RCX] &= 0xff;
     }
