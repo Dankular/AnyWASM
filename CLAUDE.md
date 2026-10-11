@@ -160,8 +160,11 @@ Design (proposal, **unverified** — nothing below is implemented):
       references against. The triangle/textured slices are covered; docs still evolve with verified work.
 
 ## 6. Productisation (after a real target runs)
-- [ ] Pick 2–3 real, redistributable/open-source Win64 D3D11 programs as acceptance targets and
-      run `anywasm analyze` on them; the blocker list becomes the backlog (don't guess).
+- [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
+      import blockers in `docs/TARGETS.md`. These are preliminary targets: the tutorial renderer
+      choice was not launched, the samples have not run through AnyWASM, and Asteroids needs a
+      separate Intel-origin code/assets redistribution review. Still choose and run a redistributable
+      game as an end-to-end acceptance target.
 - [ ] Packaging flow: single-file/static-site export of exe + assets + runtime; loading UI,
       progress, error reporting that surfaces the exact missing `dll!Symbol`.
 - [ ] Browser support matrix (WebGPU features/limits, Safari/Firefox), memory limits of large

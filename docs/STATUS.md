@@ -68,6 +68,10 @@
 - The section 1–6 checklist in `CLAUDE.md` tracks unfinished JIT, runtime, graphics, CPU, and
   productisation work. Broad items such as threading, SEH, more D3D11 coverage, AVX, and 32-bit PE
   support need a representative target and dedicated design/verification before implementation.
+- Three Diligent Win64 sample executables have been built and analyzed; each still has 100–116
+  unresolved imports. They are preliminary analysis targets, not run-ready acceptance targets. See
+  [`docs/TARGETS.md`](TARGETS.md) for pinned source revisions, build notes, import groups, and
+  redistribution caveats.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
   pixel-verified.
