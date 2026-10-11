@@ -1,7 +1,7 @@
 {
-  "generated_utc": "2026-10-11T11:22:57Z",
+  "generated_utc": "2026-10-11T22:23:29Z",
   "analyzer": "anywasm analyze --json",
-  "anywasm_commit": "54bc2a05aacf722810ad7e6c8556a9eab8599023",
+  "anywasm_commit": "976848159cb176945f9249ad85aa6ce7468dba3a",
   "diligentengine_commit": "efe5da2270c6edfc8b0d2e39e946b35acbeaa874",
   "diligentcore_commit": "074060cfd1db73064d7a18cf40df86af6531520c",
   "diligentsamples_commit": "03a10e15e69c5ae1738a52175ae029f3f4275a90",
@@ -16,8 +16,8 @@
   "images": [
     {
       "image": "GLFWDemo.exe",
-      "implemented_count": 162,
-      "missing_count": 42,
+      "implemented_count": 164,
+      "missing_count": 40,
       "unresolved_imports": [
         {
           "dll": "GDI32.dll",
@@ -42,7 +42,6 @@
             "FindFirstFileExW",
             "EnumSystemLocalesW",
             "IsValidLocale",
-            "RtlPcToFileHeader",
             "HeapQueryInformation",
             "SetThreadExecutionState"
           ]
@@ -58,7 +57,6 @@
         {
           "dll": "USER32.dll",
           "missing": [
-            "TrackMouseEvent",
             "GetRawInputDeviceList",
             "GetRawInputDeviceInfoA",
             "EnumDisplaySettingsExW",
@@ -85,35 +83,20 @@
     },
     {
       "image": "GraphicsEngineD3D11_64r.dll",
-      "implemented_count": 107,
-      "missing_count": 14,
+      "implemented_count": 112,
+      "missing_count": 9,
       "unresolved_imports": [
-        {
-          "dll": "D3DCOMPILER_47.dll",
-          "missing": [
-            "D3DReflect",
-            "D3DCompile"
-          ]
-        },
         {
           "dll": "KERNEL32.dll",
           "missing": [
             "InterlockedFlushSList",
-            "RtlPcToFileHeader",
             "FindClose",
             "FindFirstFileExW",
             "FindNextFileW",
             "IsValidLocale",
             "EnumSystemLocalesW",
-            "VerifyVersionInfoW",
             "FreeLibraryAndExitThread",
             "HeapQueryInformation"
-          ]
-        },
-        {
-          "dll": "SHLWAPI.dll",
-          "missing": [
-            "PathFileExistsW"
           ]
         },
         {
@@ -126,21 +109,13 @@
     },
     {
       "image": "Archiver_64r.dll",
-      "implemented_count": 100,
-      "missing_count": 12,
+      "implemented_count": 104,
+      "missing_count": 8,
       "unresolved_imports": [
-        {
-          "dll": "D3DCOMPILER_47.dll",
-          "missing": [
-            "D3DReflect",
-            "D3DCompile"
-          ]
-        },
         {
           "dll": "KERNEL32.dll",
           "missing": [
             "InterlockedFlushSList",
-            "RtlPcToFileHeader",
             "FindClose",
             "FindFirstFileExW",
             "FindNextFileW",
@@ -149,19 +124,13 @@
             "FreeLibraryAndExitThread",
             "HeapQueryInformation"
           ]
-        },
-        {
-          "dll": "SHLWAPI.dll",
-          "missing": [
-            "PathFileExistsW"
-          ]
         }
       ]
     },
     {
       "image": "D3Dcompiler_47.dll",
-      "implemented_count": 103,
-      "missing_count": 28,
+      "implemented_count": 104,
+      "missing_count": 27,
       "unresolved_imports": [
         {
           "dll": "ADVAPI32.dll",
@@ -170,7 +139,6 @@
             "CryptAcquireContextW",
             "RegQueryValueExA",
             "RegEnumKeyExA",
-            "RegOpenKeyExA",
             "CryptGetHashParam",
             "CryptCreateHash",
             "CryptHashData",
@@ -186,10 +154,10 @@
             "IsValidLocale",
             "EnumSystemLocalesW",
             "InterlockedFlushSList",
-            "RtlPcToFileHeader",
             "UnmapViewOfFile",
             "CreateFileMappingW",
             "MapViewOfFile",
+            "SetFileAttributesW",
             "DeviceIoControl",
             "MapViewOfFileEx",
             "CreateFileMappingA",

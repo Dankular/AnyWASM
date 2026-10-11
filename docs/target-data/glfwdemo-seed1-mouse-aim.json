@@ -1,0 +1,41 @@
+{
+  "before": {
+    "x": 519.5,
+    "y": 403,
+    "pixels": 16
+  },
+  "directions": [
+    {
+      "direction": "up",
+      "before": {
+        "x": 519.5,
+        "y": 403,
+        "pixels": 16
+      },
+      "after": {
+        "x": 519.5,
+        "y": 400.5,
+        "pixels": 16
+      },
+      "dx": 0,
+      "dy": -2.5,
+      "projected": 2.5
+    },
+    {
+      "direction": "down",
+      "before": {
+        "x": 519.5,
+        "y": 400.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 519.2105263157895,
+        "y": 403,
+        "pixels": 19
+      },
+      "dx": -0.28947368421052033,
+      "dy": 2.5,
+      "projected": 2.5
+    }
+  ]
+}

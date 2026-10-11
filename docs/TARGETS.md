@@ -204,15 +204,15 @@ list; its counts are not a like-for-like comparison with that older 349-miss sna
 
 | Image | Implemented | Missing | Largest unresolved groups |
 |---|---:|---:|---|
-| `GLFWDemo.exe` | 162 | 42 | USER32 21; GDI32 10; KERNEL32 8; SHELL32 3 |
-| `GraphicsEngineD3D11_64r.dll` | 107 | 14 | KERNEL32 10; D3DCOMPILER_47 2; SHLWAPI 1; USER32 1 |
-| `Archiver_64r.dll` | 100 | 12 | KERNEL32 9; D3DCOMPILER_47 2; SHLWAPI 1 |
-| `D3Dcompiler_47.dll` | 103 | 28 | KERNEL32 15; ADVAPI32 12; RPCRT4 1 |
-| **Aggregate** | **472** | **96** | |
+| `GLFWDemo.exe` | 164 | 40 | USER32 20; GDI32 10; KERNEL32 7; SHELL32 3 |
+| `GraphicsEngineD3D11_64r.dll` | 112 | 9 | KERNEL32 8; USER32 1 |
+| `Archiver_64r.dll` | 104 | 8 | KERNEL32 8 |
+| `D3Dcompiler_47.dll` | 104 | 27 | KERNEL32 15; ADVAPI32 11; RPCRT4 1 |
+| **Aggregate** | **484** | **84** | |
 
 The static runtime leaves no reported MSVCP140, VCRUNTIME140, or UCRT import misses in the EXE,
-engine, and archiver. The EXE's current misses include 21 USER32, 10 GDI32, 8 KERNEL32, and 3
-SHELL32 symbols; the engine retains 14 imports, the archiver 12, and D3DCompiler 28. The archived
+engine, and archiver. The EXE's current misses include 20 USER32, 10 GDI32, 7 KERNEL32, and 3
+SHELL32 symbols; the engine retains 9 imports, the archiver 8, and D3DCompiler 27. The archived
 JSON records each unresolved name.
 
 ### Third-party DLL loading audit
@@ -368,7 +368,7 @@ This is guest-side progress: the CLI records HLE commands, but does not execute 
 browser's WebGPU executor. A separate browser command-stream fixture now verifies a 4x4 R32_FLOAT
 UAV dispatch, reads back the `0.25` values, and samples the texture in a draw with pixel checks.
 That validates the narrow typed-UAV executor path; it does not run the selected target's command
-stream or verify its SDF shader, host-visible GLFW Demo pixels, or gameplay. The 96 static missing
+stream or verify its SDF shader, host-visible GLFW Demo pixels, or gameplay. The 84 static missing
 imports, registry data store, and tutorial D3D11 paths also remain open.
 
 ### Guest instruction cost per present
@@ -495,7 +495,7 @@ $bundle = "$env:TEMP\anywasm-glfwdemo-frame-measure.awb"
 $env:CHROMIUM = 'C:\Users\sysadmin\AppData\Local\ms-playwright\chromium-1234\chrome-win64\chrome.exe'
 $env:REQUIRE_TARGET_MOVEMENT = '1'
 $env:REQUIRE_TARGET_MAP_RESET = '1'
-node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-map-reset --check-uav
+node test/browser/target.mjs $bundle docs\images\glfwdemo-first-frame.png --check-movement --check-directions --check-aim --check-map-reset --check-uav
 ```
 
 On 2026-10-11, the latest Chromium 151.0.7922.34 replay produced a capture at 1040x807 with 5 draws,
@@ -513,7 +513,14 @@ clock during guest execution.
 The same target replay checks input through the rendered output. GLFW creates a hidden helper window
 before the visible game window, so routing browser input to the first top-level HWND silently dropped
 keys. The runtime now selects the focused visible window, or falls back to a visible top-level window.
-With this fix, holding W for 500 ms moves the green player marker 2.5 pixels upward. Pressing Tab
+Mouse coordinates are scaled from the canvas content area (excluding its border) to the guest window;
+the fixture verifies that the center of a 320x240 CSS canvas maps to `(520,404)` in a 1040x807 guest
+window. The guest also requests `TrackMouseEvent(TME_LEAVE)` and receives `WM_MOUSELEAVE` when the
+pointer exits the canvas. With this fix, holding W for 500 ms moves the green player marker 2.5 pixels
+upward. The seed-1 replay additionally checks W/S/A/D and cursor-aimed Space movement up and down;
+the marker moves 2.5 pixels in the expected direction for each action. Exact measurements are saved
+in [`target-data/glfwdemo-seed1-input-directions.json`](target-data/glfwdemo-seed1-input-directions.json)
+and [`target-data/glfwdemo-seed1-mouse-aim.json`](target-data/glfwdemo-seed1-mouse-aim.json). Pressing Tab
 regenerates the map; 165,601 of 839,280 pixels changed (19.7%), and the target issued a second compute
 dispatch. This reset path exposed Diligent's `ID3D11DeviceContext3::Flush1` followed by an idle-event
 wait and an event-query polling loop. `Flush1` now signals its optional guest event, and D3D11 event
@@ -561,16 +568,17 @@ The standalone 4x4 R32_FLOAT fixture also reads all 16 written values as 0.25. T
 selected target's SDF output for one deterministic state; it does not establish other UAV
 formats/readback paths, all gameplay states, or game acceptance.
 
-This verifies one movement direction and map regeneration in the selected target. Its deterministic
-seed-1 SDF UAV has a bounded independent readback; other movement directions and turning are
-unverified, and no full gameplay or real-game acceptance pass is claimed. The default
+This verifies all four keyboard movement directions, cursor-aimed Space movement up/down, and map
+regeneration in the selected target. Its deterministic seed-1 SDF UAV has a bounded independent
+readback. Flashlight appearance, other gameplay states, and a full playthrough remain unverified; no
+real-game acceptance pass is claimed. The default
 250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
 is diagnostic test routing only.
 
 ## Next evidence needed
 
-- Verify movement in all directions and turning, then complete a controlled playthrough before
-  making a gameplay acceptance claim. Other UAV formats and general staging readback remain untested.
+- Complete a controlled playthrough before making a gameplay acceptance claim. Flashlight appearance,
+  other gameplay states, other UAV formats, and general staging readback remain untested.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current
@@ -582,10 +590,11 @@ is diagnostic test routing only.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
 - The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has
-  96 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
+  84 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
   linking. Conversion, version, path, scheduler, static TLS, selected target VEX/BMI, secure random,
   PE unwind primitives, the selected C++ catch path, D3D11 UAV binding, and constant-buffer ranges
   have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
   compute dispatch, draw, and repeated present calls. The browser target replay now verifies host
-  rendering, W movement, and Tab map regeneration; native comparison, independent UAV readback, and
-  gameplay acceptance remain unverified.
+  rendering, all four movement directions, cursor-aimed Space movement up/down, and Tab map
+  regeneration; native comparison, independent UAV readback, and gameplay acceptance remain bounded
+  to the specific evidence above.

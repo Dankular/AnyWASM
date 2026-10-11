@@ -172,10 +172,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
-      `WM_LBUTTONDOWN` messages reach the guest. `test/browser/target.mjs` also verifies W moves
-      the selected Diligent maze player and Tab regenerates the map; browser input now skips hidden
-      top-level helper windows. Add XInput (Gamepad API), DirectInput, raw input, cursor capture/
-      pointer lock.
+      `WM_LBUTTONDOWN`, scales mouse coordinates from the CSS client area to the 1040x807 guest
+      window, and exercises `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`. `test/browser/target.mjs`
+      verifies W/S/A/D movement, cursor-aimed movement up and down, and Tab map regeneration in the
+      selected Diligent maze; browser input skips hidden top-level helper windows. Add XInput
+      (Gamepad API), DirectInput, raw input, cursor capture/pointer lock.
 - [~] **Registry**: `advapi32!RegOpenKeyExA` recognizes predefined roots, returns the root for an
       empty subkey, and reports missing subkeys while no registry data store exists. Target probes
       `HKCU` and `HKLM` at `Software\Microsoft\Direct3D\Direct3D12`; query/create/write APIs and
@@ -302,7 +303,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       static-analysis only and needs a separate Intel-origin code/assets redistribution review.
       The Apache-2.0 GLFW Demo maze is now the selected game candidate. A separate D3D11-only `/MT`
       build succeeded; the current
-      analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
+      analyzer reports 84 missing imports across its EXE and three DLLs; an older analyzer snapshot
+      reported 349, but those totals are not directly comparable. The browser test now verifies all
+      four WASD directions and cursor-aimed movement up and down;
+      guest pointer coordinates account for canvas borders and the CSS-to-window scale, and
+      `TrackMouseEvent(TME_LEAVE)` produces `WM_MOUSELEAVE`. Its
       `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Scheduler
       regressions cover condition-variable wake/resume. An earlier bounded run stopped at
       `SleepConditionVariableSRW` because its blocked guest continuation could not be resumed; a
@@ -320,8 +325,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       1040x807 SDF maze pixels; `test/browser/target.mjs` reproduces this against a caller-supplied
       bundle and saves PNGs for the initial frame, W movement, and Tab map regeneration. Browser
       input is routed past GLFW's hidden helper window; D3D11 `Flush1` signals the optional guest idle
-      event, and event-query `GetData` completes in the ordered command-stream model. A deterministic
-      seed-1 native D3D11 capture is visually compared with the browser frame in `docs/TARGETS.md`;
+      event, and event-query `GetData` completes in the ordered command-stream model. The seed-1
+      target verifies W/S/A/D and cursor-aimed movement up/down; measurements are saved in
+      `docs/target-data/glfwdemo-seed1-input-directions.json` and
+      `docs/target-data/glfwdemo-seed1-mouse-aim.json`. A deterministic seed-1 native D3D11 capture
+      is visually compared with the browser frame in `docs/TARGETS.md`;
       `--check-uav` reads the target's 128x128 R32_FLOAT SDF and records finite-value, sign, and range
       checks there. These do not establish pixel equivalence or end-to-end rendering correctness. The
       normal worker slice still stops in a synchronous callback that cannot resume, and no gameplay

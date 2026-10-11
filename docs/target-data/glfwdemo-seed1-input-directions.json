@@ -1,0 +1,73 @@
+{
+  "before": {
+    "x": 519.5,
+    "y": 403,
+    "pixels": 16
+  },
+  "directions": [
+    {
+      "key": "W",
+      "before": {
+        "x": 519.5,
+        "y": 403,
+        "pixels": 16
+      },
+      "after": {
+        "x": 519.5,
+        "y": 400.5,
+        "pixels": 16
+      },
+      "dx": 0,
+      "dy": -2.5,
+      "projected": 2.5
+    },
+    {
+      "key": "S",
+      "before": {
+        "x": 519.5,
+        "y": 400.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 519.5,
+        "y": 403,
+        "pixels": 16
+      },
+      "dx": 0,
+      "dy": 2.5,
+      "projected": 2.5
+    },
+    {
+      "key": "A",
+      "before": {
+        "x": 519.5,
+        "y": 403,
+        "pixels": 16
+      },
+      "after": {
+        "x": 517,
+        "y": 403,
+        "pixels": 21
+      },
+      "dx": -2.5,
+      "dy": 0,
+      "projected": 2.5
+    },
+    {
+      "key": "D",
+      "before": {
+        "x": 517,
+        "y": 403,
+        "pixels": 21
+      },
+      "after": {
+        "x": 519.5,
+        "y": 403,
+        "pixels": 16
+      },
+      "dx": 2.5,
+      "dy": 0,
+      "projected": 2.5
+    }
+  ]
+}
