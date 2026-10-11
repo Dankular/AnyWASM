@@ -30,9 +30,10 @@
   worst error 0/255, zero WebGPU validation errors.
 - Shader toolchain (`test/shaders.mjs`): HLSL -> DXBC -> SPIR-V -> WGSL with a fixed
   descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2).
-- Interpreter benchmark baseline (Node 24.16.0, Windows x64, release WASM, 3 rounds per workload):
-  median 24.2 M instr/s for `compute.exe`, 26.2 for call-heavy, 23.0 for memory-heavy, and 31.2
-  for SSE-float. The benchmark output is retained per commit by the WASM CI workflow.
+- Cached-block execution benchmark (Node 24.16.0, Windows x64, release WASM; two runs, six rounds
+  per workload): median 32.2 M instr/s for `compute.exe`, 26.1 for call-heavy, 28.1 for
+  memory-heavy, and 38.5 for SSE-float. The executor translates NOP-like, MOV and LEA operations;
+  other instructions use the interpreter. The benchmark output is retained per commit by WASM CI.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 
@@ -42,10 +43,9 @@
 - Not decoded: VEX/EVEX (AVX, BMI), MMX, AES/PCLMUL, 16-bit/segment modes. CPUID hides them.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
-- **Performance:** execution remains interpreter-only; the CPU crate now has a decoder-backed block
-  cache as JIT groundwork, but the run loop does not use it and no WASM code is generated. Measured
-  ~19 M guest instr/s in WASM under Node, ~3x better than before the instruction cache. Real games
-  need 10-50x more: a block-translating JIT to WASM is the main missing piece for playable speed.
+- **Performance:** the process run loop executes cached blocks with a translated NOP/MOV/LEA subset;
+  every other instruction falls back to the existing interpreter. No dynamic WASM code is emitted
+  yet. Real-game requirements remain unmeasured; the 10–50x speedup target is still an estimate.
 - No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
   no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and

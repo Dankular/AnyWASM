@@ -60,17 +60,17 @@ indexed draws) pixel-verified in headless Chromium; CI green through `bd6f0bd` (
 Status key: **[ ]** not started · **[~]** partial. Ordered by value toward "package a real game".
 
 ## 1. Block-translating JIT to WASM  (highest priority; performance)
-Why: the interpreter measures ~19 M guest instr/s (confirmed, `test/bench.mjs`, WASM under Node).
+Why: the cached-block executor now measures 32.2 M guest instr/s on `compute.exe` and 26.1–38.5 M
+on the call-heavy, memory-heavy and SSE-float fixtures (`test/bench.mjs`, release WASM under Node).
 I have **not** measured what a real game needs; the 10–50x figure in STATUS.md is an estimate.
 Measure first (e.g. instructions per frame of a representative program) before fixing a target.
 
-Design (proposal, **unverified** — decoder-backed block-cache groundwork exists; WASM code
-generation and execution are not implemented):
+Design (partial implementation — decoded blocks execute a small translated subset with interpreter
+fallback; dynamic WASM code generation is not implemented):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
-      loops) and record instr/s; keep as a regression gate.
-- [ ] **Block discovery** (decoded-block cache groundwork exists; JIT translation remains
-      unfinished): translate basic blocks keyed by guest RIP, using the existing decoder.
-      Reuse `Memory::exec_page_count` / `code_epoch` for self-modifying-code invalidation.
+      loops) and record instr/s in CI (report-only; no throughput threshold yet).
+- [x] **Block discovery**: decode and cache basic blocks keyed by guest RIP. `code_epoch` invalidates
+      cached blocks on executable-memory writes and protection changes.
 - [ ] **WASM emission**: emit a WASM module per block (or per trace) from Rust, instantiate via a
       host import (`WebAssembly.Module`/`Instance` from JS; the Rust core runs *inside* WASM, so
       compiled blocks must be called through an imported trampoline / `call_indirect` table).
@@ -83,8 +83,8 @@ generation and execution are not implemented):
 - [ ] **Exits**: direct block chaining for known targets; indirect jumps via hash lookup;
       `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`,
       `yield_request`, step limit/icount accounting must all keep working.
-- [ ] **Fallback**: any instruction not yet translated falls back to the interpreter for that block
-      (so the JIT can grow incrementally; never silently mis-translate).
+- [x] **Fallback**: instructions outside the translated NOP/MOV/LEA subset execute through the
+      existing interpreter; unsupported instructions are never silently translated.
 - [ ] **Correctness gate**: extend `tests/diff.rs` to run each corpus entry through the JIT as well
       as the interpreter and the host CPU; add a block-level differential (run whole fixtures with
       JIT on/off and compare registers/memory/output).

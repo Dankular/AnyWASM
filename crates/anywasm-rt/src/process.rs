@@ -4,7 +4,7 @@ use crate::hle;
 use crate::vfs::Vfs;
 use anywasm_cpu::cpu::*;
 use anywasm_cpu::mem::{PROT_R, PROT_RW, PROT_RWX, PROT_X};
-use anywasm_cpu::{Cpu, DecodeCache, Exit, Memory};
+use anywasm_cpu::{BlockCache, Cpu, DecodeCache, Exit, Memory};
 use anywasm_pe::{canonical_dll, ImportName, Pe};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -105,6 +105,7 @@ pub struct Process {
     /// Set by an HLE function to make `run` return after the current call completes.
     pub yield_request: Option<Stop>,
     pub dcache: DecodeCache,
+    pub block_cache: BlockCache,
     pub extra: hle::Extra,
 }
 
@@ -157,6 +158,7 @@ impl Process {
             skip_ret: false,
             yield_request: None,
             dcache: DecodeCache::new(),
+            block_cache: BlockCache::new(),
             extra: hle::Extra::default(),
         };
         p.handles.insert(0xfffffffffffffff5, Handle::Std(1)); // pseudo values never used directly
@@ -704,6 +706,18 @@ impl Process {
         }
     }
 
+    fn execute_slice(&mut self, max_instructions: u64) -> Result<(u64, Option<Stop>), Stop> {
+        let rip = self.cpu.rip;
+        if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
+            self.dispatch_thunk(rip)?;
+            return Ok((1, self.yield_request.take()));
+        }
+        match self.block_cache.execute(&mut self.cpu, &mut self.mem, max_instructions) {
+            Ok(executed) => Ok((executed, None)),
+            Err(e) => Err(self.describe_exit(e)),
+        }
+    }
+
     fn describe_exit(&self, e: Exit) -> Stop {
         let c = &self.cpu;
         Stop::Crash(format!(
@@ -770,11 +784,20 @@ impl Process {
         if let Some(c) = self.exit_code {
             return Stop::Exit(c);
         }
-        for _ in 0..max_steps {
-            match self.step_once() {
-                Ok(None) => {}
-                Ok(Some(s)) => return s,
-                Err(s) => return s,
+        let mut remaining = max_steps;
+        while remaining != 0 {
+            match self.execute_slice(remaining) {
+                Ok((_, Some(stop))) => return stop,
+                Ok((executed, None)) => {
+                    if executed == 0 {
+                        return Stop::Crash(format!(
+                            "block executor made no progress at rip={:#x}",
+                            self.cpu.rip
+                        ));
+                    }
+                    remaining -= executed;
+                }
+                Err(stop) => return stop,
             }
         }
         Stop::StepLimit

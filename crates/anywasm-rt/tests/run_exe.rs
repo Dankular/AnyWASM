@@ -1,4 +1,5 @@
 //! End-to-end: load real Windows x64 executables (built by fixtures/build.sh) and run them.
+use anywasm_cpu::mem::{PAGE_SIZE, PROT_RWX};
 use anywasm_rt::{Process, Stop, Vfs};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -22,6 +23,47 @@ fn hello_exe_prints_and_exits_zero() {
     let (stop, out, _, _) = run("hello.exe");
     assert_eq!(stop, Stop::Exit(0));
     assert_eq!(out, "Hello from a Windows PE running inside AnyWASM!\r\n");
+}
+
+#[test]
+fn process_run_honors_block_instruction_budget_and_icount() {
+    const CODE: u64 = 0x10000;
+    let mut p = Process::new(Vfs::new());
+    assert!(p.mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    p.mem.write_force(CODE, &[0x90, 0x90, 0xf4]).unwrap(); // nop; nop; hlt
+    p.cpu.rip = CODE;
+
+    assert_eq!(p.run(0), Stop::StepLimit);
+    assert_eq!(p.cpu.icount, 0);
+    assert_eq!(p.cpu.rip, CODE);
+
+    assert_eq!(p.run(1), Stop::StepLimit);
+    assert_eq!(p.cpu.icount, 1);
+    assert_eq!(p.cpu.rip, CODE + 1);
+
+    assert_eq!(p.run(1), Stop::StepLimit);
+    assert_eq!(p.cpu.icount, 2);
+    assert_eq!(p.cpu.rip, CODE + 2);
+
+    assert!(matches!(p.run(1), Stop::Crash(message) if message.contains("Halt")));
+    assert_eq!(p.cpu.icount, 2);
+}
+
+#[test]
+fn process_run_redecodes_after_guest_writes_to_executable_memory() {
+    const CODE: u64 = 0x10000;
+    let mut code = vec![0x48, 0xb8]; // mov rax, CODE + 13
+    code.extend_from_slice(&(CODE + 13).to_le_bytes());
+    code.extend_from_slice(&[0xc6, 0x00, 0xf4, 0x90, 0xf4]); // mov byte [rax], hlt; nop; hlt
+
+    let mut p = Process::new(Vfs::new());
+    assert!(p.mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    p.mem.write_force(CODE, &code).unwrap();
+    p.cpu.rip = CODE;
+
+    assert!(matches!(p.run(4), Stop::Crash(message) if message.contains("Halt")));
+    assert_eq!(p.cpu.icount, 2, "stale cached NOP must not execute");
+    assert_eq!(p.cpu.rip, CODE + 13);
 }
 
 #[test]

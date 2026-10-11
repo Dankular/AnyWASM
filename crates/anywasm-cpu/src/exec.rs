@@ -1040,15 +1040,46 @@ pub struct DecodedBlock {
     pub instructions: Vec<Inst>,
     pub fallthrough_rip: u64,
     pub terminated: bool,
+    /// A decode or execute-fetch error discovered after this block's valid instructions.
+    /// The executor surfaces it when execution reaches the recorded RIP.
+    pub deferred_exit: Option<(u64, Exit)>,
 }
 
 /// Cache of decoded basic blocks, invalidated whenever executable memory changes.
 pub struct BlockCache {
     code_epoch: Option<u64>,
-    blocks: HashMap<u64, DecodedBlock>,
+    blocks: HashMap<u64, CachedBlock>,
 }
 
 const MAX_CACHED_BLOCKS: usize = 1024;
+
+struct CachedBlock {
+    decoded: DecodedBlock,
+    instructions: Vec<CachedInstruction>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedInstruction {
+    inst: Inst,
+    op: CachedOp,
+}
+
+#[derive(Clone, Copy)]
+enum CachedOp {
+    NoOp,
+    Mov {
+        dst: Opnd,
+        src: Opnd,
+        size: u8,
+        imm: i64,
+    },
+    Lea {
+        dst: Opnd,
+        address: MemOp,
+        size: u8,
+    },
+    Interpreter,
+}
 
 impl Default for BlockCache {
     fn default() -> Self {
@@ -1069,6 +1100,48 @@ impl BlockCache {
     /// The block includes the first control-flow or terminal instruction. A linear block that
     /// reaches [`MAX_BLOCK_INSTRUCTIONS`] is returned with `terminated == false`.
     pub fn get_block(&mut self, start: u64, mem: &Memory) -> ExecResult<&DecodedBlock> {
+        Ok(&self.get_cached_block(start, mem)?.decoded)
+    }
+
+    /// Execute a decoded block up to `max_instructions` retired guest instructions.
+    ///
+    /// NOP-like instructions, register/immediate MOV, register/register MOV, and register LEA
+    /// execute through cached operations. Every other instruction uses the normal interpreter.
+    /// Execution stops at block boundaries, the instruction budget, unexpected control flow, or
+    /// any change to executable memory.
+    pub fn execute(
+        &mut self,
+        cpu: &mut Cpu,
+        mem: &mut Memory,
+        max_instructions: u64,
+    ) -> ExecResult<u64> {
+        if max_instructions == 0 {
+            return Ok(0);
+        }
+
+        let block = self.get_cached_block(cpu.rip, mem)?;
+        let mut executed = 0;
+        for cached in &block.instructions {
+            if executed == max_instructions {
+                break;
+            }
+            let before_rip = cpu.rip;
+            let before_epoch = mem.code_epoch;
+            execute_cached(cpu, mem, cached)?;
+            executed += 1;
+
+            let sequential_rip = before_rip.wrapping_add(cached.inst.len as u64);
+            if mem.code_epoch != before_epoch
+                || ends_basic_block(cached.inst.op)
+                || cpu.rip != sequential_rip
+            {
+                break;
+            }
+        }
+        Ok(executed)
+    }
+
+    fn get_cached_block(&mut self, start: u64, mem: &Memory) -> ExecResult<&CachedBlock> {
         if self.code_epoch != Some(mem.code_epoch) {
             self.blocks.clear();
             self.code_epoch = Some(mem.code_epoch);
@@ -1077,11 +1150,78 @@ impl BlockCache {
             if self.blocks.len() >= MAX_CACHED_BLOCKS {
                 self.blocks.clear();
             }
-            let block = decode_block(start, mem)?;
+            let decoded = decode_block(start, mem)?;
+            let instructions = decoded
+                .instructions
+                .iter()
+                .copied()
+                .map(translate_instruction)
+                .collect();
+            let block = CachedBlock {
+                decoded,
+                instructions,
+            };
             self.blocks.insert(start, block);
         }
         Ok(self.blocks.get(&start).unwrap())
     }
+}
+
+fn translate_instruction(inst: Inst) -> CachedInstruction {
+    let op = match inst.op {
+        Op::Nop | Op::Pause | Op::Fence | Op::Prefetch => CachedOp::NoOp,
+        Op::Mov
+            if matches!(inst.ops[0], Opnd::Gpr(_) | Opnd::GprHi(_))
+                && matches!(inst.ops[1], Opnd::Gpr(_) | Opnd::GprHi(_) | Opnd::Imm) =>
+        {
+            CachedOp::Mov {
+                dst: inst.ops[0],
+                src: inst.ops[1],
+                size: inst.osz,
+                imm: inst.imm,
+            }
+        }
+        Op::Lea => match (inst.ops[0], inst.ops[1]) {
+            (dst @ Opnd::Gpr(_), Opnd::Mem(address)) => CachedOp::Lea {
+                dst,
+                address,
+                size: inst.osz,
+            },
+            _ => CachedOp::Interpreter,
+        },
+        _ => CachedOp::Interpreter,
+    };
+    CachedInstruction { inst, op }
+}
+
+fn execute_cached(cpu: &mut Cpu, mem: &mut Memory, cached: &CachedInstruction) -> ExecResult<()> {
+    match cached.op {
+        CachedOp::NoOp => {}
+        CachedOp::Mov {
+            dst,
+            src,
+            size,
+            imm,
+        } => {
+            let value = rd(cpu, mem, &src, size, imm)?;
+            wr(cpu, mem, &dst, size, value)?;
+        }
+        CachedOp::Lea {
+            dst,
+            mut address,
+            size,
+        } => {
+            address.seg = 0;
+            let value = ea(cpu, &address);
+            wr(cpu, mem, &dst, size, value)?;
+        }
+        CachedOp::Interpreter => return exec(cpu, mem, &cached.inst),
+    }
+
+    cpu.rip = cpu.rip.wrapping_add(cached.inst.len as u64);
+    cpu.icount += 1;
+    cpu.tsc += 1;
+    Ok(())
 }
 
 fn decode_block(start: u64, mem: &Memory) -> ExecResult<DecodedBlock> {
@@ -1089,8 +1229,20 @@ fn decode_block(start: u64, mem: &Memory) -> ExecResult<DecodedBlock> {
     let mut instructions = Vec::with_capacity(MAX_BLOCK_INSTRUCTIONS);
     for _ in 0..MAX_BLOCK_INSTRUCTIONS {
         let mut buf = [0u8; 15];
-        let n = mem.fetch(rip, &mut buf)?;
-        let inst = decode(&buf[..n], rip).map_err(Exit::Decode)?;
+        let n = match mem.fetch(rip, &mut buf) {
+            Ok(n) => n,
+            Err(fault) if !instructions.is_empty() => {
+                return Ok(partial_block(start, instructions, rip, Exit::Fault(fault)));
+            }
+            Err(fault) => return Err(Exit::Fault(fault)),
+        };
+        let inst = match decode(&buf[..n], rip) {
+            Ok(inst) => inst,
+            Err(error) if !instructions.is_empty() => {
+                return Ok(partial_block(start, instructions, rip, Exit::Decode(error)));
+            }
+            Err(error) => return Err(Exit::Decode(error)),
+        };
         rip = rip.wrapping_add(inst.len as u64);
         let terminated = ends_basic_block(inst.op);
         instructions.push(inst);
@@ -1100,10 +1252,27 @@ fn decode_block(start: u64, mem: &Memory) -> ExecResult<DecodedBlock> {
                 instructions,
                 fallthrough_rip: rip,
                 terminated,
+                deferred_exit: None,
             });
         }
     }
-    Ok(DecodedBlock { start, instructions, fallthrough_rip: rip, terminated: false })
+    Ok(DecodedBlock {
+        start,
+        instructions,
+        fallthrough_rip: rip,
+        terminated: false,
+        deferred_exit: None,
+    })
+}
+
+fn partial_block(start: u64, instructions: Vec<Inst>, rip: u64, exit: Exit) -> DecodedBlock {
+    DecodedBlock {
+        start,
+        instructions,
+        fallthrough_rip: rip,
+        terminated: false,
+        deferred_exit: Some((rip, exit)),
+    }
 }
 
 fn ends_basic_block(op: Op) -> bool {
