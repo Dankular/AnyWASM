@@ -182,10 +182,14 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       `CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple render targets,
       cube/array/3D textures, depth-stencil ops/stencil, rasterizer state
       (cull/fill/scissor/bias), `GenerateMips`, constant-buffer packing edge cases.
-- [ ] **D3D11 unimplemented**: compute shaders + UAVs/structured/raw buffers, geometry/hull/domain
-      shaders, MSAA (forced to 1 sample), staging read-back of GPU-written data, queries,
-      deferred contexts/command lists, `SV_` system values beyond the basics, tiled resources,
-      feature levels reported honestly.
+- [~] **Compute shader target path**: D3D11 HLE now advertises typed UAV support for R32_FLOAT,
+      creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
+      buffer ranges, and emits dispatch commands. The selected Diligent demo reaches a guest
+      `Dispatch`, then guest `Draw` and `Present` calls. The WebGPU executor still does not bind
+      storage textures or execute compute pipelines, so no compute output or demo pixels are
+      verified. Structured/raw-buffer UAVs, geometry/hull/domain shaders, MSAA (forced to 1 sample),
+      staging read-back of GPU-written data, queries, deferred contexts/command lists, `SV_` system
+      values beyond the basics, tiled resources, and honest feature-level reporting remain open.
 - [ ] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; collect
       failing real-world shaders as test cases; consider shader/pipeline caching (IndexedDB) and
       async pipeline creation to avoid stalls.
@@ -202,8 +206,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
       VMOVDQA/DQU, VMOVSS/SD, VPXOR/VXORPS, VADDSS/VDIVSS, VCOMISS/VUCOMISS, VROUNDSS,
       VCVTSI2SS/VCVTTSS2SI, VEXTRACTF128, VZEROUPPER, ANDN, SHLX, SHRX, BZHI, VPBROADCASTD,
-      VPADDD, VMOVDQU, VMOVQ, and VPEXTRQ. These are exact target-grounded forms, not broad
-      AVX/AVX2/BMI2 support; remaining AVX/AVX2/BMI/FMA and AES/PCLMUL/MMX instructions are open.
+      VPADDD, VMOVDQU, VMOVQ, VPEXTRD/Q, VCMPEQSS, VBLENDVPS, VMOVD, and BLSI. These are exact
+      target-grounded forms, not broad AVX/AVX2/BMI2 support; remaining AVX/AVX2/BMI/FMA and
+      AES/PCLMUL/MMX instructions are open.
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
 - [ ] `rcpps`/`rsqrtps` return exact results (excluded from the diff corpus); match hardware
       approximation or document per-vendor differences.
@@ -240,10 +245,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       scheduling now resumes the selected target beyond its condition-variable waits. After
       target-grounded static TLS and VEXTRACTF128 support, its bounded run first reached guest
       `ExitProcess(3)`. Target-grounded MSVC C++ exception search and second-pass unwind now reach the
-      catch. The target then probes `Software\Microsoft\Direct3D\Direct3D12` under `HKCU` and
-      `HKLM`; a 100,000,000-step replay remains in repeated `HeapAlloc`/`TlsGetValue` imports. No real
-      host window, renderer, or frame has been verified, so the end-to-end acceptance gate remains
-      open; see `docs/TARGETS.md` for the exact trace and next steps.
+      catch. After the observed `HKCU`/`HKLM` Direct3D 12 registry probes, a 1,000,000,000-step
+      traced replay reached `CreateComputeShader`, `CSSetUnorderedAccessViews`, `Dispatch`, then
+      guest `Draw` and `IDXGISwapChain2::Present` calls. Target-grounded VEX/BMI handlers and D3D11
+      UAV/constant-buffer-range command records moved execution through these paths. The replay was
+      stopped after confirming repeated guest presents; WebGPU compute dispatch and host-rendered
+      pixels remain unverified. No end-to-end game acceptance pass is claimed; see `docs/TARGETS.md`
+      for the exact trace and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the

@@ -159,6 +159,7 @@ pub enum Op {
     Adcx,
     Adox,
     Andn,
+    Blsi,
     Bzhi,
     Shlx,
     Shrx,
@@ -224,7 +225,9 @@ pub enum Op {
     Vpbroadcastd,
     Vpaddd,
     Vfp(FpK, Prec),
+    Vblendvps,
     Vroundss,
+    Vcmpeqss,
     VcvtSi2Ss,
     Vzeroupper,
     Movss,
@@ -659,7 +662,30 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
     let vvvv_encoded = vex >> 3 & 0xf;
     let vvvv = (!vvvv_encoded) & 0xf;
     let l = vex & 4 != 0;
+    if map == 2 && opcode == 0xf3 && pp == 0 && !l {
+        let m = parse_modrm(d, pfx)?;
+        if m.reg != 3 {
+            return Err(DecodeError::Unsupported("VEX BLSI opcode extension"));
+        }
+        let mut i = blank(Op::Blsi);
+        i.osz = if pfx.w() { 8 } else { 4 };
+        i.ops = [Opnd::Gpr(vvvv), m.rm_opnd(RK::G, pfx), Opnd::None];
+        return Ok(i);
+    }
     if map == 3 {
+        if opcode == 0x4a && pp == 1 && !l && !pfx.w() {
+            let m = parse_modrm(d, pfx)?;
+            let mask = d.u8()?;
+            let mut i = blank(Op::Vblendvps);
+            i.osz = 16;
+            i.ops = [
+                m.reg_opnd(RK::X, pfx),
+                Opnd::Xmm(vvvv),
+                m.rm_opnd(RK::X, pfx),
+            ];
+            i.imm = (mask >> 4) as i64;
+            return Ok(i);
+        }
         if opcode == 0x19 && pp == 1 && l && !pfx.w() && vvvv_encoded == 0xf {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(Op::Vextractf128);
@@ -668,10 +694,11 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             i.imm = d.u8()? as i64;
             return Ok(i);
         }
-        if opcode == 0x16 && pp == 1 && pfx.w() && !l && vvvv_encoded == 0xf {
+        if opcode == 0x16 && pp == 1 && !l && vvvv_encoded == 0xf {
             let m = parse_modrm(d, pfx)?;
-            let mut i = blank(Op::Pextr(8));
-            i.osz = 8;
+            let bytes = if pfx.w() { 8 } else { 4 };
+            let mut i = blank(Op::Pextr(bytes));
+            i.osz = bytes;
             i.ops = [m.rm_opnd(RK::G, pfx), m.reg_opnd(RK::X, pfx), Opnd::None];
             i.imm = d.u8()? as i64;
             return Ok(i);
@@ -704,7 +731,7 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             (0xf2, 0) => blank(Op::Andn),
             (0xf5, 0) if !pfx.w() => blank(Op::Bzhi),
             (0xf7, 1) => blank(Op::Shlx),
-            (0xf7, 3) if !pfx.w() => blank(Op::Shrx),
+            (0xf7, 3) => blank(Op::Shrx),
             _ => return Err(DecodeError::Unsupported("VEX3 0F38 instruction")),
         };
         let m = parse_modrm(d, pfx)?;
@@ -731,11 +758,11 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         i.ops = [m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::G, pfx), Opnd::None];
         return Ok(i);
     }
-    if opcode == 0x7e && map == 1 && pp == 1 && !l && pfx.w() && vvvv_encoded == 0xf {
+    if opcode == 0x7e && map == 1 && pp == 1 && !l && vvvv_encoded == 0xf {
         let m = parse_modrm(d, pfx)?;
         let mut i = blank(Op::MovdFromX);
-        i.osz = 8;
-        i.rexw = true;
+        i.osz = if pfx.w() { 8 } else { 4 };
+        i.rexw = pfx.w();
         i.ops = [m.rm_opnd(RK::G, pfx), m.reg_opnd(RK::X, pfx), Opnd::None];
         return Ok(i);
     }
@@ -756,6 +783,21 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
                 Opnd::Xmm(vvvv),
                 m.rm_opnd(RK::G, pfx),
             ];
+            Ok(i)
+        }
+        0xc2 if pp == 2 && !l && !pfx.w() => {
+            let m = parse_modrm(d, pfx)?;
+            let predicate = d.u8()?;
+            if predicate != 0 {
+                return Err(DecodeError::Unsupported("VCMPSS predicate"));
+            }
+            let mut i = blank(Op::Vcmpeqss);
+            i.ops = [
+                m.reg_opnd(RK::X, pfx),
+                Opnd::Xmm(vvvv),
+                m.rm_opnd(RK::X, pfx),
+            ];
+            i.imm = predicate as i64;
             Ok(i)
         }
         0x2c if pp == 2 && !l && vvvv_encoded == 0xf => {

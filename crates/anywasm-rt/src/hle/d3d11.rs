@@ -19,6 +19,16 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 }
 
 const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
+const DXGI_FORMAT_R32_FLOAT: u32 = 41;
+const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
+
+fn format_support_flags(format: u32) -> u32 {
+    let mut flags = 0x0003_ffff; // common sampling, render-target and texture capabilities
+    if format == DXGI_FORMAT_R32_FLOAT {
+        flags |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
+    }
+    flags
+}
 
 fn ensure_device(p: &mut Process) {
     dxgi::ensure_singletons(p);
@@ -88,6 +98,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CreateRenderTargetView" => |p| create_view(p, ViewKind::Rtv),
         "CreateDepthStencilView" => |p| create_view(p, ViewKind::Dsv),
         "CreateShaderResourceView" => |p| create_view(p, ViewKind::Srv),
+        "CreateUnorderedAccessView" => |p| create_view(p, ViewKind::Uav),
         "CreateInputLayout" => create_input_layout,
         "CreateVertexShader" => |p| create_shader(p, 0, "ID3D11VertexShader"),
         "CreatePixelShader" => |p| create_shader(p, 1, "ID3D11PixelShader"),
@@ -110,8 +121,8 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             Ok(0)
         },
         "CheckFormatSupport" => |p| {
-            let out = p.arg(2);
-            p.wr32(out, 0x0003_ffff)?; // everything our WebGPU mapping can express
+            let (format, out) = (p.arg(1) as u32, p.arg(2));
+            p.wr32(out, format_support_flags(format))?;
             Ok(S_OK)
         },
         "CheckMultisampleQualityLevels" => |p| {
@@ -154,12 +165,16 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "VSSetConstantBuffers" => |p| set_slots(p, op::SET_CBUFFERS, 0),
         "PSSetConstantBuffers" => |p| set_slots(p, op::SET_CBUFFERS, 1),
         "CSSetConstantBuffers" => |p| set_slots(p, op::SET_CBUFFERS, 2),
+        "VSSetConstantBuffers1" => |p| set_slots1(p, 0),
+        "PSSetConstantBuffers1" => |p| set_slots1(p, 1),
+        "CSSetConstantBuffers1" => |p| set_slots1(p, 2),
         "VSSetShaderResources" => |p| set_slots(p, op::SET_SRVS, 0),
         "PSSetShaderResources" => |p| set_slots(p, op::SET_SRVS, 1),
         "CSSetShaderResources" => |p| set_slots(p, op::SET_SRVS, 2),
         "VSSetSamplers" => |p| set_slots(p, op::SET_SAMPLERS, 0),
         "PSSetSamplers" => |p| set_slots(p, op::SET_SAMPLERS, 1),
         "CSSetSamplers" => |p| set_slots(p, op::SET_SAMPLERS, 2),
+        "CSSetUnorderedAccessViews" => set_uavs,
         "OMSetRenderTargets" => om_set_render_targets,
         "OMSetBlendState" => |p| {
             let (b, f, mask) = (obj_id(p, p.arg(1)), p.arg(2), p.arg(3) as u32);
@@ -329,6 +344,44 @@ fn set_slots(p: &mut Process, opcode: u32, stage: u32) -> R {
     Ok(0)
 }
 
+fn set_slots1(p: &mut Process, stage: u32) -> R {
+    // (this, StartSlot, NumBuffers, ppBuffers, pFirstConstant, pNumConstants)
+    let (start, n, buffers, first, count) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3),
+        p.arg(4),
+        p.arg(5),
+    );
+    let mut pk = Pk::new().u32(stage).u32(start).u32(n);
+    for i in 0..n as u64 {
+        let buffer = if buffers != 0 { p.rd64(buffers + 8 * i)? } else { 0 };
+        let first_constant = if first != 0 { p.rd32(first + 4 * i)? } else { 0 };
+        let num_constants = if count != 0 { p.rd32(count + 4 * i)? } else { 0 };
+        pk = pk.u32(obj_id(p, buffer)).u32(first_constant).u32(num_constants);
+    }
+    p.extra.gpu.emit(op::SET_CBUFFERS1, pk);
+    Ok(0)
+}
+
+fn set_uavs(p: &mut Process) -> R {
+    // (this, StartSlot, NumUAVs, ppUAVs, pUAVInitialCounts)
+    let (start, n, views, counts) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3),
+        p.arg(4),
+    );
+    let mut pk = Pk::new().u32(start).u32(n);
+    for i in 0..n as u64 {
+        let view = if views != 0 { p.rd64(views + 8 * i)? } else { 0 };
+        let initial_count = if counts != 0 { p.rd32(counts + 4 * i)? } else { u32::MAX };
+        pk = pk.u32(obj_id(p, view)).u32(initial_count);
+    }
+    p.extra.gpu.emit(op::SET_UAVS, pk);
+    Ok(0)
+}
+
 fn ia_set_vertex_buffers(p: &mut Process) -> R {
     // (this, StartSlot, NumBuffers, ppVertexBuffers, pStrides, pOffsets)
     let (start, n, bufs, strides, offsets) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3), p.arg(4), p.arg(5));
@@ -457,11 +510,21 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
             }
+            (ViewKind::Uav, 4) => {
+                a = p.rd32(desc + 8)?; // MipSlice
+                b = 1;
+            }
             (ViewKind::Rtv, 5) | (ViewKind::Dsv, 4) => {
                 a = p.rd32(desc + 8)?;
                 b = 1;
                 c = p.rd32(desc + 12)?;
                 d = p.rd32(desc + 16)?;
+            }
+            (ViewKind::Uav, 5) => {
+                a = p.rd32(desc + 8)?; // MipSlice
+                b = 1;
+                c = p.rd32(desc + 12)?; // FirstArraySlice
+                d = p.rd32(desc + 16)?; // ArraySize
             }
             _ => {}
         }
@@ -801,4 +864,177 @@ fn get_desc(p: &mut Process) -> R {
         _ => {}
     }
     Ok(S_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_support_advertises_typed_uav_for_r32_float_only() {
+        const TYPED_UAV: u32 = 0x0200_0000;
+
+        assert_ne!(format_support_flags(41) & TYPED_UAV, 0); // DXGI_FORMAT_R32_FLOAT
+        assert_eq!(format_support_flags(54) & TYPED_UAV, 0); // DXGI_FORMAT_R16_FLOAT
+        assert_eq!(format_support_flags(61) & TYPED_UAV, 0); // DXGI_FORMAT_R8_UNORM
+    }
+
+    #[test]
+    fn create_unordered_access_view_tracks_texture2d_mip_slice() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        let resource = p.extra.gpu.new_id();
+        p.extra.com.res.insert(
+            resource,
+            ResInfo {
+                width: 32,
+                height: 32,
+                mips: 4,
+                array: 1,
+                format: DXGI_FORMAT_R32_FLOAT,
+                ..Default::default()
+            },
+        );
+        let texture = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: resource });
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let mut desc = Vec::new();
+        for value in [DXGI_FORMAT_R32_FLOAT, 4, 2, 0, 0] {
+            desc.extend(value.to_le_bytes());
+        }
+        p.write_bytes(DESC, &desc).unwrap(); // D3D11_UAV_DIMENSION_TEXTURE2D, MipSlice=2
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = DESC;
+        p.cpu.gpr[R9] = OUT;
+
+        let create_uav = method("ID3D11Device1", "CreateUnorderedAccessView").unwrap();
+        assert_eq!(create_uav(&mut p).unwrap(), S_OK);
+        let view = p.rd64(OUT).unwrap();
+        assert!(matches!(
+            kind_of(&p, view),
+            Some(Kind::View {
+                vk: ViewKind::Uav,
+                resource: id,
+                ..
+            }) if id == resource
+        ));
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands.last().unwrap();
+        assert_eq!(*opcode, op::CREATE_VIEW);
+        assert_eq!(u32::from_le_bytes(payload[4..8].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(payload[20..24].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(payload[24..28].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn cs_set_unordered_access_views_emits_view_ids_and_initial_counts() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const VIEWS: u64 = 0x10000;
+        const COUNTS: u64 = 0x11000;
+        const STACK: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        let mut view_ids = Vec::new();
+        let mut view_ptrs = Vec::new();
+        for _ in 0..2 {
+            let id = p.extra.gpu.new_id();
+            let ptr = create(
+                &mut p,
+                "ID3D11UnorderedAccessView",
+                Kind::View {
+                    vk: ViewKind::Uav,
+                    id,
+                    resource: 1,
+                },
+            );
+            view_ids.push(id);
+            view_ptrs.push(ptr);
+        }
+        for addr in [VIEWS, COUNTS, STACK] {
+            assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
+        }
+        for (i, ptr) in view_ptrs.iter().enumerate() {
+            p.wr64(VIEWS + 8 * i as u64, *ptr).unwrap();
+            p.wr32(COUNTS + 4 * i as u64, [u32::MAX, 0][i]).unwrap();
+        }
+        p.cpu.gpr[RSP] = STACK;
+        p.wr64(STACK + 8 + 8 * 4, COUNTS).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 3; // StartSlot
+        p.cpu.gpr[R8] = 2; // NumUAVs
+        p.cpu.gpr[R9] = VIEWS;
+
+        let bind = method("ID3D11DeviceContext3", "CSSetUnorderedAccessViews").unwrap();
+        assert_eq!(bind(&mut p).unwrap(), 0);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands.last().unwrap();
+        assert_eq!(*opcode, op::SET_UAVS);
+        assert_eq!(
+            payload
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![3, 2, view_ids[0], u32::MAX, view_ids[1], 0]
+        );
+    }
+
+    #[test]
+    fn vs_set_constant_buffers1_emits_buffer_ranges_in_shader_constants() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const BUFFERS: u64 = 0x10000;
+        const FIRST: u64 = 0x11000;
+        const COUNT: u64 = 0x12000;
+        const STACK: u64 = 0x13000;
+        let mut p = Process::new(Vfs::new());
+        let resource = p.extra.gpu.new_id();
+        p.extra.com.res.insert(
+            resource,
+            ResInfo {
+                is_buffer: true,
+                size: 4096,
+                ..Default::default()
+            },
+        );
+        let buffer = create(&mut p, "ID3D11Buffer", Kind::Buffer { id: resource });
+        for addr in [BUFFERS, FIRST, COUNT, STACK] {
+            assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
+        }
+        p.wr64(BUFFERS, buffer).unwrap();
+        p.wr32(FIRST, 32).unwrap();
+        p.wr32(COUNT, 16).unwrap();
+        p.cpu.gpr[RSP] = STACK;
+        p.wr64(STACK + 8 + 8 * 4, FIRST).unwrap();
+        p.wr64(STACK + 8 + 8 * 5, COUNT).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 2; // StartSlot
+        p.cpu.gpr[R8] = 1; // NumBuffers
+        p.cpu.gpr[R9] = BUFFERS;
+
+        let bind = method("ID3D11DeviceContext1", "VSSetConstantBuffers1").unwrap();
+        assert_eq!(bind(&mut p).unwrap(), 0);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands.last().unwrap();
+        assert_eq!(*opcode, op::SET_CBUFFERS1);
+        assert_eq!(
+            payload
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![0, 2, 1, resource, 32, 16]
+        );
+    }
 }

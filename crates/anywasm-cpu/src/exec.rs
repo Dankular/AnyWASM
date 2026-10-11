@@ -800,6 +800,15 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             cpu.set_flag(SF, result & sgn(sz) != 0);
             cpu.set_flag(PF, parity(result));
         }
+        Op::Blsi => {
+            let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
+            let result = source.wrapping_neg() & source & msk(sz);
+            wr(cpu, mem, &i.ops[0], sz, result)?;
+            cpu.set_flag(CF, source != 0);
+            cpu.set_flag(OF, false);
+            cpu.set_flag(SF, result & sgn(sz) != 0);
+            cpu.set_flag(ZF, result == 0);
+        }
         Op::Bzhi => {
             let source = rd(cpu, mem, &i.ops[1], 4, 0)? as u32;
             let index = (rd(cpu, mem, &i.ops[2], 4, 0)? as u32) & 0xff;

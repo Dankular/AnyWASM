@@ -46,6 +46,8 @@ pub mod op {
     pub const COPY_REGION: u32 = 40; // dst,dstSub,dx,dy,dz, src,srcSub, sx0,sy0,sz0,sx1,sy1,sz1, hasBox
     pub const RESIZE_SWAPCHAIN: u32 = 41; // id, texture, w, h, format
     pub const DISPATCH: u32 = 42; // x, y, z
+    pub const SET_UAVS: u32 = 43; // start, count, (view id, initial count) pairs
+    pub const SET_CBUFFERS1: u32 = 44; // stage, start, count, (buffer id, first constant, num constants) triples
 }
 
 #[derive(Default)]

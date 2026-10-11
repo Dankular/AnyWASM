@@ -1617,8 +1617,32 @@ impl Process {
         };
         let (group, name, func) = (t.group, t.name.clone(), t.func);
         if self.trace_imports {
-            self.stderr
-                .extend_from_slice(format!("[import] {group}!{name}\n").as_bytes());
+            let traced_args = match (group, name.as_str()) {
+                ("kernel32", "HeapAlloc") => Some(3),
+                ("kernel32", "TlsGetValue") => Some(1),
+                _ => None,
+            };
+            let line = if let Some(arg_count) = traced_args {
+                let args = (0..arg_count)
+                    .map(|index| format!("{:#x}", self.arg(index)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let caller = self.rd64(self.cpu.gpr[RSP]).unwrap_or(0);
+                let module = self
+                    .modules
+                    .iter()
+                    .find(|m| {
+                        m.hle_group.is_none() && caller >= m.base && caller < m.base + m.size
+                    })
+                    .map(|m| format!("{}+{:#x}", m.name, caller - m.base))
+                    .unwrap_or_else(|| "?".to_string());
+                format!(
+                    "[import] {group}!{name} args=[{args}] caller={caller:#x} module={module}\n"
+                )
+            } else {
+                format!("[import] {group}!{name}\n")
+            };
+            self.stderr.extend_from_slice(line.as_bytes());
         }
         let Some(f) = func else {
             self.unimplemented_log
@@ -1767,6 +1791,41 @@ mod scheduler_tests {
         process.mem.write_u64(TEB_ADDR + 0x10, 0x6000).unwrap();
         process.mem.write_u64(TEB_ADDR + 0x48, 0x1004).unwrap();
         process
+    }
+
+    #[test]
+    fn trace_imports_include_arguments_and_caller_for_tls_get_value() {
+        let mut process = process_with_teb();
+        let stack_base = 0x10000;
+        let stack = stack_base + 0x800;
+        assert!(process.mem.map(stack_base, 0x1000, PROT_RW));
+        process.trace_imports = true;
+        process.cpu.gpr[RCX] = 7;
+        process.cpu.gpr[RSP] = stack;
+        process.wr64(stack, 0x140001234).unwrap();
+        process.tls_slots.insert(7, 0x777);
+        process.modules.push(Module {
+            name: "fixture.dll".into(),
+            path: "C:\\fixture.dll".into(),
+            base: 0x140000000,
+            size: 0x10000,
+            entry: 0,
+            is_dll: true,
+            exports: HashMap::new(),
+            ordinals: HashMap::new(),
+            exception_table_rva: 0,
+            runtime_functions: Vec::new(),
+            hle_group: None,
+        });
+        let thunk = process.thunk_for("kernel32", "TlsGetValue", false).unwrap();
+
+        process.dispatch_thunk(thunk).unwrap();
+
+        let trace = String::from_utf8(process.stderr).unwrap();
+        assert!(trace.contains(
+            "[import] kernel32!TlsGetValue args=[0x7] caller=0x140001234 module=fixture.dll+0x1234"
+        ));
+        assert_eq!(process.cpu.gpr[RAX], 0x777);
     }
 
     #[test]

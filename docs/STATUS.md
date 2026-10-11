@@ -127,15 +127,14 @@
   A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
   down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
   queries. The bounded AnyWASM run resumes past condition-variable waits, initializes target static
-  TLS, reaches the target's VEXTRACTF128 callback, creates virtual window/device/swap-chain objects,
-  and completes the selected MSVC C++ `std::runtime_error` catch. It then probes
-  `Software\Microsoft\Direct3D\Direct3D12` under `HKCU` and `HKLM`; `RegOpenKeyExA` reports the
-  paths missing because AnyWASM has no registry data store. A 100,000,000-step replay remains in
-  repeated `HeapAlloc`/`TlsGetValue` imports until the cap. Native and WASM fixtures cover secure
+  TLS, completes the selected MSVC C++ `std::runtime_error` catch, and reaches D3D11 shader/resource
+  setup. Target-grounded CPU and HLE slices now carry it through a guest compute `Dispatch`, `Draw`,
+  and repeated `IDXGISwapChain2::Present` calls. Native and WASM fixtures cover secure
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
-  `RtlVirtualUnwind` subset are in place. General SEH remains open. The trace does not reach shader
-  creation or `Present`; no host window, renderer, or real-game acceptance pass is claimed. See
-  [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
+  `RtlVirtualUnwind` subset are in place. General SEH remains open. The browser WebGPU compute path
+  is still unimplemented, so the guest command trace does not verify host rendering or pixels. No
+  real-game acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for exact traces and next
+  steps.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
   pixel-verified.

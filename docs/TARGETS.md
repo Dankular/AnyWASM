@@ -267,13 +267,42 @@ return `ERROR_FILE_NOT_FOUND` (`2`). A replay capped at 100,000,000 instructions
 repeating stream of `kernel32!HeapAlloc` and `kernel32!TlsGetValue` imports until the step cap. This
 does not establish why the target has not reached shader creation.
 
-The trace does not reach shader creation or `Present`. Although the HLE creates virtual window,
-device, and swap-chain objects, no host window, host graphics device, displayed frame, or game
-acceptance has been verified.
+At this earlier checkpoint the trace did not reach shader creation or `Present`. Although the HLE
+created virtual window, device, and swap-chain objects, no host window, host graphics device,
+displayed frame, or game acceptance had been verified.
 
 Reproduction used the Release output directory as the VFS root, `--trace-imports`, and
 `--max-steps 100000000`. The import trace was captured in the task environment under
 `%TEMP%\anywasm-glfwdemo-regopen-100m.log`; it is not a repository artifact.
+
+### Current checkpoint: guest compute, draw, and present calls reached
+
+Target-grounded CPU regressions now cover additional instructions seen in `GraphicsEngineD3D11_64r.dll`:
+`VCMPEQSS` at RVA `0x17239`, `VBLENDVPS` at `0x1723e`, `VMOVD` at `0x17244`, 64-bit `SHRX` at
+`0x40b1a`, `BLSI` at `0x4e9f0`, and `VPEXTRD` at `0x4ef0b`. The decoders accept only the observed
+forms and have focused register, memory, flag, and vector-lane tests.
+
+The SDF setup's null texture path was traced to `CheckFormatSupport`: Diligent selects a texture
+format only when the returned flags include `D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW`.
+The HLE now advertises that bit for `DXGI_FORMAT_R32_FLOAT` only, creates 2D and 2D-array UAV views,
+records `CSSetUnorderedAccessViews` (including supplied initial counts), and records D3D11.1
+`*SetConstantBuffers1` ranges in 16-byte shader-constant units. Tests cover format selection, UAV
+mip-slice tracking, UAV command encoding, and constant-buffer range encoding. The browser executor
+records these bindings and aligns short or misaligned constant-buffer ranges for WebGPU.
+
+After these slices, a D3D11-only `/MT` replay reached `CreateComputeShader`,
+`CSSetShaderResources`, `CSSetSamplers`, `CSSetUnorderedAccessViews`, and the guest
+`ID3D11DeviceContext3::Dispatch`. It then reached the first-frame `Draw` and
+`IDXGISwapChain2::Present` calls. The trace contains no new unimplemented-import stop. The replay used
+`--max-steps 1000000000` and was manually interrupted after repeated guest presents to stop the
+unbounded demo loop; it did not exit normally or reach the step cap. The trace is in the task
+environment at `%TEMP%\anywasm-glfwdemo-cb1-3b.log` and is not a repository artifact.
+
+This is guest-side progress: the CLI records HLE commands, but does not execute them through the
+browser's WebGPU executor. `web/gpu.js` still logs that compute dispatch is unimplemented, so storage
+texture binding, compute pipeline execution, SDF output, host-visible window pixels, and gameplay
+acceptance remain unverified. The 96 static missing imports, registry data store, and tutorial D3D11
+paths also remain open.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -284,10 +313,11 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 
 ## Next evidence needed
 
-- Trace the repeated `HeapAlloc`/`TlsGetValue` imports with caller addresses and arguments to localize
-  the target's post-registry loop. Then capture shader compilation/resource/presentation calls if
-  the target advances. Continue to distinguish virtual HLE window/device objects from observed host
-  rendering.
+- Run the target's emitted command stream through the browser WebGPU executor. Add a target-shaped
+  compute/storage-texture fixture and pixel or GPU readback checks before claiming the compute path
+  works. The existing D3D11 textured fixture still covers only its tested graphics path.
+- Continue to distinguish guest `Draw`/`Present` calls and virtual HLE objects from observed host
+  rendering; no host-visible GLFW Demo frame has been captured.
 - Extend the virtual registry only from observed target paths and required values. The current
   `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
   registry query, create, write, or persisted-value behavior.
@@ -298,7 +328,8 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
   media have a documented licence review.
 - The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has
   96 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
-  linking. Conversion, version, path, scheduler, static TLS, target-specific AVX/BMI, secure random,
-  PE unwind primitives, and the selected C++ catch path have regressions. A 100,000,000-step trace
-  reaches the post-catch registry probes and then repeats `HeapAlloc`/`TlsGetValue` until the cap.
-  Shader compilation, presentation, host rendering, and gameplay acceptance remain unverified.
+  linking. Conversion, version, path, scheduler, static TLS, selected target VEX/BMI, secure random,
+  PE unwind primitives, the selected C++ catch path, D3D11 UAV binding, and constant-buffer ranges
+  have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
+  compute dispatch, draw, and repeated present calls. Browser shader execution, host rendering, and
+  gameplay acceptance remain unverified.

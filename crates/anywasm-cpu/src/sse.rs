@@ -791,6 +791,32 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             cpu.xmm[d] = fp_exec(k, pr, a, b);
             cpu.ymm_hi[d] = 0;
         }
+        Op::Vblendvps => {
+            let d = dst_n(&i.ops[0])?;
+            let first = src_x(cpu, mem, &i.ops[1], 16)?;
+            let second = src_x(cpu, mem, &i.ops[2], 16)?;
+            let mask = cpu.xmm[i.imm as usize];
+            let mut result = 0;
+            for lane in 0..4 {
+                let selected = if get(mask, 4, lane) as u32 & 0x8000_0000 != 0 {
+                    get(second, 4, lane)
+                } else {
+                    get(first, 4, lane)
+                };
+                put(&mut result, 4, lane, selected);
+            }
+            cpu.xmm[d] = result;
+            cpu.ymm_hi[d] = 0;
+        }
+        Op::Vcmpeqss => {
+            let d = dst_n(&i.ops[0])?;
+            let merge = src_x(cpu, mem, &i.ops[1], 16)?;
+            let source = src_x(cpu, mem, &i.ops[2], 4)?;
+            let equal = f32::from_bits(merge as u32) == f32::from_bits(source as u32);
+            let result = if equal { u32::MAX as u128 } else { 0 };
+            cpu.xmm[d] = (merge & !lane_mask(4)) | result;
+            cpu.ymm_hi[d] = 0;
+        }
         Op::Vroundss => {
             let d = dst_n(&i.ops[0])?;
             let merge = src_x(cpu, mem, &i.ops[1], 16)?;

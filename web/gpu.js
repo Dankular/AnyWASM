@@ -13,7 +13,7 @@ const OP = {
   SET_CBUFFERS: 18, SET_SRVS: 19, SET_SAMPLERS: 20, SET_RENDER_TARGETS: 21, SET_VIEWPORTS: 22, SET_SCISSORS: 23,
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
-  GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42,
+  GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -127,7 +127,7 @@ export class GpuExecutor {
     this.stats = { draws: 0, presents: 0, passes: 0, pipelines: 0, errors: [] };
     this.st = {
       vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
-      cb: [[], [], []], srv: [[], [], []], smp: [[], [], []], rtvs: [], dsv: 0,
+      cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
       viewports: [], scissors: [], blend: { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }, raster: 0, depth: { id: 0, ref: 0 },
     };
   }
@@ -284,7 +284,24 @@ export class GpuExecutor {
       case OP.SET_CBUFFERS: case OP.SET_SRVS: case OP.SET_SAMPLERS: {
         const arr = (op === OP.SET_CBUFFERS ? st.cb : op === OP.SET_SRVS ? st.srv : st.smp)[u(0)];
         const s = u(1), n = u(2);
-        for (let i = 0; i < n; i++) arr[s + i] = u(3 + i);
+        for (let i = 0; i < n; i++) {
+          arr[s + i] = u(3 + i);
+          if (op === OP.SET_CBUFFERS) st.cbRange[u(0)][s + i] = { first: 0, count: 0 };
+        }
+        break;
+      }
+      case OP.SET_CBUFFERS1: {
+        const stage = u(0), s = u(1), n = u(2);
+        for (let i = 0; i < n; i++) {
+          const at = 3 + i * 3;
+          st.cb[stage][s + i] = u(at);
+          st.cbRange[stage][s + i] = { first: u(at + 1), count: u(at + 2) };
+        }
+        break;
+      }
+      case OP.SET_UAVS: {
+        const s = u(0), n = u(1);
+        for (let i = 0; i < n; i++) st.uav[s + i] = { id: u(2 + i * 2), initialCount: u(3 + i * 2) };
         break;
       }
       case OP.SET_RENDER_TARGETS: { const n = u(0); st.rtvs = []; for (let i = 0; i < n; i++) st.rtvs.push(u(1 + i)); st.dsv = u(1 + n); break; }
@@ -488,14 +505,22 @@ export class GpuExecutor {
     for (const [reg, { d, vis }] of groups[0]) {
       const declared = Math.max(vs.cbSizes[reg] || 0, ps?.cbSizes[reg] || 0) || 65536;
       layoutEntries[0].push({ binding: reg, visibility: vis, buffer: { type: 'uniform' } });
-      const bufId = this.st.cb[(vis & GPUShaderStage.VERTEX) ? 0 : 1][reg] || this.st.cb[0][reg] || this.st.cb[1][reg] || 0;
+      const cbStages = (vis & GPUShaderStage.VERTEX) ? [0, 1] : [1, 0];
+      const cbStage = cbStages.find((stage) => this.st.cb[stage][reg]) ?? -1;
+      const bufId = cbStage >= 0 ? this.st.cb[cbStage][reg] : 0;
+      const range = cbStage >= 0 ? this.st.cbRange[cbStage][reg] || { first: 0, count: 0 } : { first: 0, count: 0 };
       const r = this.res.get(bufId);
-      let buffer = r?.gpu, size = declared;
-      if (!r || r.size < declared) {
-        // Bound buffer is missing or smaller than the shader declares: bind a zero-padded copy.
-        buffer = this.paddedBuffer(r, declared);
-      } else size = Math.min(declared, r.size);
-      resolved[0].push({ binding: reg, resource: { buffer, offset: 0, size: Math.max(16, (size + 15) & ~15) } });
+      const offset = range.first * 16;
+      const requested = range.count ? range.count * 16 : declared;
+      const available = r ? Math.max(0, r.size - offset) : 0;
+      const size = Math.min(requested, available);
+      let buffer = r?.gpu, bindingOffset = offset;
+      if (!r || offset % 256 !== 0 || size < declared) {
+        // WebGPU requires 256-byte uniform offsets. Copy misaligned or short D3D ranges to offset zero.
+        buffer = this.paddedBuffer(r, Math.max(declared, requested), offset);
+        bindingOffset = 0;
+      }
+      resolved[0].push({ binding: reg, resource: { buffer, offset: bindingOffset, size: Math.max(16, (Math.min(requested, available || requested) + 15) & ~15) } });
     }
     const samplerComparison = [];
     for (const [reg, { d, vis }] of groups[2]) {
@@ -565,7 +590,7 @@ export class GpuExecutor {
     this.stats.draws++;
   }
 
-  paddedBuffer(src, size) {
+  paddedBuffer(src, size, sourceOffset = 0) {
     const sz = Math.max(16, (size + 15) & ~15);
     const key = `${src ? 'b' : 'z'}${sz}`;
     if (!src) {
@@ -575,7 +600,8 @@ export class GpuExecutor {
     }
     const b = this.device.createBuffer({ size: sz, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.endPass();
-    this.encoder().copyBufferToBuffer(src.gpu, 0, b, 0, Math.min(src.size, sz));
+    const available = Math.max(0, src.size - sourceOffset);
+    if (available) this.encoder().copyBufferToBuffer(src.gpu, sourceOffset, b, 0, Math.min(available, sz));
     return b;
   }
 
