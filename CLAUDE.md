@@ -279,7 +279,7 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [x] Add WASM smoke regressions for condition-variable thread resumption and per-thread static PE
       TLS isolation.
 - [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
-- [~] Task list housekeeping: current open work is now queued in GitHub issues for [JIT](https://github.com/Dankular/AnyWASM/issues/1), [runtime](https://github.com/Dankular/AnyWASM/issues/2), [graphics](https://github.com/Dankular/AnyWASM/issues/3), [CPU](https://github.com/Dankular/AnyWASM/issues/4), and [productization](https://github.com/Dankular/AnyWASM/issues/5). Keep these grouped issues synchronized with this file's detailed checklists. Historical #5/#11/#6 references still cannot be mapped: the issue list was empty when inspected, and the old notes' broader status cannot be recovered.
+- [x] Task list housekeeping: current open work is queued in [JIT](https://github.com/Dankular/AnyWASM/issues/1), [runtime](https://github.com/Dankular/AnyWASM/issues/2), [graphics](https://github.com/Dankular/AnyWASM/issues/3), [CPU](https://github.com/Dankular/AnyWASM/issues/4), and [productization](https://github.com/Dankular/AnyWASM/issues/5); their open checklists match this file as of `bc434ba`. Update them alongside future checklist edits. Historical #5/#11/#6 references cannot be mapped because the prior issue list was empty and the old notes' broader status cannot be recovered.
 
 ## 6. Productisation (after a real target runs)
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
