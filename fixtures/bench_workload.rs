@@ -24,6 +24,52 @@ static mut CALLBACK_DONE: u32 = 0;
 #[cfg(callback_budget)]
 static mut CHECKSUM: u64 = 0;
 
+#[cfg(jit_state)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "movabs rax, 0x1122334455667788",
+    "mov rbx, rax",
+    "mov ecx, eax",
+    "mov rdx, rcx",
+    "mov r8d, 0xa1b2c3d4",
+    "mov r9, r8",
+    "lea r10, [rip + JIT_STATE_OUTPUT]",
+    "mov qword ptr [r10], rax",
+    "mov qword ptr [r10 + 8], rbx",
+    "mov qword ptr [r10 + 16], rcx",
+    "mov qword ptr [r10 + 24], rdx",
+    "mov qword ptr [r10 + 32], r8",
+    "mov qword ptr [r10 + 40], r9",
+    "movabs r11, 0x1122334455667788",
+    "cmp qword ptr [r10], r11",
+    "jne JIT_STATE_FAIL",
+    "cmp qword ptr [r10 + 8], r11",
+    "jne JIT_STATE_FAIL",
+    "mov r11d, 0x55667788",
+    "cmp qword ptr [r10 + 16], r11",
+    "jne JIT_STATE_FAIL",
+    "cmp qword ptr [r10 + 24], r11",
+    "jne JIT_STATE_FAIL",
+    "mov r11d, 0xa1b2c3d4",
+    "cmp qword ptr [r10 + 32], r11",
+    "jne JIT_STATE_FAIL",
+    "cmp qword ptr [r10 + 40], r11",
+    "jne JIT_STATE_FAIL",
+    "xor eax, eax",
+    "ret",
+    "JIT_STATE_FAIL:",
+    "mov eax, 1",
+    "ret",
+    ".data",
+    ".p2align 3",
+    ".globl JIT_STATE_OUTPUT",
+    "JIT_STATE_OUTPUT:",
+    ".quad 0, 0, 0, 0, 0, 0",
+    ".text",
+);
+
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     loop {
@@ -119,12 +165,12 @@ fn run_workload() -> u32 {
     }
 }
 
-#[cfg(not(any(bench_call, bench_memory, bench_sse, callback_budget)))]
+#[cfg(not(any(bench_call, bench_memory, bench_sse, callback_budget, jit_state)))]
 compile_error!(
-    "select one workload with --cfg bench_call, bench_memory, bench_sse, or callback_budget"
+    "select one workload with --cfg bench_call, bench_memory, bench_sse, callback_budget, or jit_state"
 );
 
-#[cfg(not(callback_budget))]
+#[cfg(not(any(callback_budget, jit_state)))]
 #[no_mangle]
 pub extern "system" fn mainCRTStartup() -> u32 {
     run_workload();

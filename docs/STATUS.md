@@ -108,12 +108,17 @@
   page after an emitted block has run, then verifies further emitted executions complete without
   fallback and preserve output/count parity. A dedicated browser-worker run forces the emitter,
   confirms register-register execution without fallback, and matches the page-realm output and
-  retired count. The standard worker, input, and WebGPU checks pass with the default gate. Final guest
-  register/memory comparisons remain open. This is a
+  retired count. The standard worker, input, and WebGPU checks pass with the default gate. A
+  `jit_state.exe` fixture executes six leading GPR MOVs, stores their values to guest memory, and
+  fails if those values differ; the WASM smoke compares emitted, cached-only, and interpreter
+  status, exit code, output, errors, and retired count, while Windows also runs the fixture natively.
+  This checks the fixture-observed MOV state and memory only; a full final-state differential remains
+  open. This is a
   mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
   memory MOVs, NOP, LEA, arithmetic,
-  SIMD, or control flow are not emitted. Full JIT/interpreter state differential, module-cache
-  pressure, CSP checks, browser engine matrix, and real-game performance remain open.
+  SIMD, or control flow are not emitted. Full JIT/interpreter state differential and real-game
+  performance remain open. Module-cache pressure and emitted-path CSP checks have passed in Node,
+  Chromium, Firefox, and WebKit; generated-module page/worker checks pass in the same browser set.
 - Thread support uses a deterministic cooperative scheduler with saved CPU/stack/TEB TLS pointers,
   dynamic TLS/FLS maps, static PE TLS blocks, quantum rotation, resumable waits, events, mutexes,
   semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. Nested

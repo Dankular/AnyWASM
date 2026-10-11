@@ -121,8 +121,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       and compares the same bundle with the default cached-only path and `{ jit: false }` for status,
       exit code, stdout/stderr, and retired count. A forced host compile failure also falls back
       safely. The Chrome suite also explicitly runs the emitted path and compares its compute output
-      and retired count with cached-only execution. Final registers/memory and the full
-      JIT/interpreter/host differential remain unverified.
+      and retired count with cached-only execution. A dedicated `jit_state.exe` starts with six
+      emitted GPR MOVs, stores their values through guest memory, and checks those values; the WASM
+      smoke compares emitted, cached-only, and interpreter status, exit code, output, and retired
+      count, while Windows also runs the same fixture natively. This verifies those MOV-produced
+      registers and checked memory values, but not arbitrary final process state or a full
+      JIT/interpreter/host differential.
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
 - [~] **Browser check**: the rebuilt runtime passes the headless Chromium worker, input, and WebGPU

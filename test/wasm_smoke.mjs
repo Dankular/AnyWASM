@@ -119,6 +119,27 @@ check('JIT opt-out uses interpreter fallback without compiling modules',
   interpreted.jitStats.executions === 0 && interpreted.jitStats.compilations === 0 && interpreted.jitStats.fallbacks > 0,
   JSON.stringify(interpreted.jitStats));
 
+const jitStateBundle = pack('fixtures/jit_state.exe');
+const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 1 });
+const cachedState = await runBundle(jitStateBundle);
+const interpretedState = await runBundle(jitStateBundle, { jit: false, jitMinPrefix: 1 });
+const sameJitState = (a, b) => a.status === b.status && a.exitCode === b.exitCode &&
+  a.out === b.out && a.err === b.err && a.instr === b.instr;
+check('JIT state fixture validates emitted GPR values after interpreter memory stores',
+  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.executions > 0 &&
+    emittedState.jitStats.registerRegisterHits > 0,
+  JSON.stringify({ status: emittedState.status, exitCode: emittedState.exitCode, jitStats: emittedState.jitStats }));
+check('emitted, cached-only, and interpreter paths agree on JIT register and memory state',
+  sameJitState(emittedState, cachedState) && sameJitState(emittedState, interpretedState),
+  JSON.stringify({ emitted: { status: emittedState.status, exitCode: emittedState.exitCode, instr: emittedState.instr },
+    cached: { status: cachedState.status, exitCode: cachedState.exitCode, instr: cachedState.instr },
+    interpreted: { status: interpretedState.status, exitCode: interpretedState.exitCode, instr: interpretedState.instr } }));
+if (process.platform === 'win32') {
+  const nativeState = spawnSync(join(repoRoot, 'fixtures/jit_state.exe'), [], { cwd: tempDir });
+  check('native host executes the same JIT state fixture', nativeState.status === 0,
+    nativeState.stderr?.toString() ?? 'no stderr');
+}
+
 const compileFailureWasm = await AnyWasm.create(wasm, { jitMinPrefix: 1 });
 compileFailureWasm.load(computeBundle);
 const NativeModule = WebAssembly.Module;
