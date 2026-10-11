@@ -55,7 +55,7 @@ partially exercised by `test/browser/cross-engine.mjs`; override browser paths w
 ## Verified state (see docs/STATUS.md for detail)
 CPU core differential-tested vs host (2,730 corpus entries); real mingw/msvcrt programs match native
 output; D3D11 triangle (216 px, worst error 0/255) and `d3d11_textured` (texels, D32 depth ordering,
-indexed draws) pixel-verified in headless Chromium; CI green through `bd6f0bd` (check later commits).
+indexed draws) pixel-verified in headless Chromium; Rust and WASM CI green through `86b3ee6`.
 
 ---
 
