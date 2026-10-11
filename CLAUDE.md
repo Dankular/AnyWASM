@@ -113,10 +113,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       browser per the capabilities line).
 - [ ] **SEH / C++ exceptions**: `.pdata` unwind tables, `RtlUnwindEx`/`RtlLookupFunctionEntry`,
       `__C_specific_handler`, `RaiseException`, vectored handlers; guest faults → exceptions.
-- [~] **More of kernel32/ntdll/user32**: `InitializeSListHead` now initializes a Win64 SList header
-      and is covered by a guest fixture. `docs/TARGETS.md` gives aggregate counts and blocker
-      categories, not individual missing symbols, so this API is not confirmed as a specific
-      Diligent target blocker.
+- [~] **More of kernel32/ntdll/user32**: target reports confirm `InitializeSListHead` is imported
+      and implemented in both tutorials; `USER32!GetCapture` is now implemented and guest-tested.
+      `SleepConditionVariableSRW` remains unresolved in all three reports and unimplemented until
+      the runtime has a guest-thread scheduler and wait model.
 - [ ] **GDI / gdi32**, common controls, message boxes, clipboard (as needed by real programs).
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and

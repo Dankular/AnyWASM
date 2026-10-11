@@ -74,6 +74,13 @@ fn initializes_empty_slist_header() {
 }
 
 #[test]
+fn get_capture_returns_the_current_window_handle() {
+    let (stop, out, _, _) = run("capture_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout so far: {out:?}");
+    assert_eq!(out, "");
+}
+
+#[test]
 fn reloc_exe_follows_relocated_pointer_tables() {
     let (stop, out, _, _) = run("reloc.exe");
     assert_eq!(stop, Stop::Exit(0));

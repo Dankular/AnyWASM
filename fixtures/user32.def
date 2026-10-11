@@ -5,6 +5,9 @@ RegisterClassExA
 CreateWindowExA
 ShowWindow
 UpdateWindow
+GetCapture
+SetCapture
+ReleaseCapture
 GetMessageA
 TranslateMessage
 DispatchMessageA

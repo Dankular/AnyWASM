@@ -287,6 +287,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.write_bytes(a, &k)?;
             Ok(1)
         },
+        // The runtime has one guest UI thread; this is its captured window handle.
+        "GetCapture" => |p| Ok(p.extra.win.capture),
         "SetCapture" => |p| {
             let h = p.arg(0);
             Ok(std::mem::replace(&mut p.extra.win.capture, h))
