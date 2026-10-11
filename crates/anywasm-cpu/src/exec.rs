@@ -704,6 +704,28 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             w!(0, full as u64);
             cpu.set_flag(flag, full >> (8 * sz as u32) != 0);
         }
+        Op::Andn => {
+            let dst = match i.ops[0] {
+                Opnd::Gpr(n) => n as usize,
+                _ => return Err(Exit::Undefined),
+            };
+            let a = rd(cpu, mem, &i.ops[1], sz, i.imm)?;
+            let b = rd(cpu, mem, &i.ops[2], sz, i.imm)?;
+            let result = !a & b & msk(sz);
+            cpu.gpr[dst] = result;
+            cpu.set_flag(CF, false);
+            cpu.set_flag(OF, false);
+            cpu.set_flag(ZF, result == 0);
+            cpu.set_flag(SF, result & sgn(sz) != 0);
+            cpu.set_flag(PF, parity(result));
+        }
+        Op::Shlx => {
+            let width = (i.osz * 8) as u32;
+            let value = rd(cpu, mem, &i.ops[1], i.osz, 0)?;
+            let count = (rd(cpu, mem, &i.ops[2], i.osz, 0)? & (width as u64 - 1)) as u32;
+            let result = value.wrapping_shl(count) & msk(i.osz);
+            wr(cpu, mem, &i.ops[0], i.osz, result)?;
+        }
         Op::Cmpxchg => {
             let dst = r!(0);
             let acc = cpu.gpr[RAX] & msk(sz);

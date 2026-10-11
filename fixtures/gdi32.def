@@ -1,0 +1,5 @@
+LIBRARY gdi32.dll
+EXPORTS
+CreateDCW
+DeleteDC
+GetDeviceCaps

@@ -62,7 +62,9 @@
 ## Known limits (not hidden)
 - x87 is modelled with f64, not 80-bit; transcendentals compared to 1e-9 relative tolerance.
 - rcpps/rsqrtps return exact reciprocals (excluded from the diff corpus).
-- Not decoded: VEX/EVEX (AVX, BMI), MMX, AES/PCLMUL, 16-bit/segment modes. CPUID hides them.
+- Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic, XOR,
+  rounding/conversion, `VZEROUPPER`, `ANDN`, and `SHLX` (see the exact list in `CLAUDE.md`). This is
+  not broad AVX/AVX2/BMI coverage; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (opt-in prototype, default disabled):** at a block entry, Rust emits a module for a
@@ -78,30 +80,35 @@
   default gate skips the fixture's short prefixes and forces one host module-compile failure with
   safe interpreter fallback. The headless Chrome suite also runs `compute.exe` through the opt-in
   emitter in the page realm, confirms emitted register-register MOV execution without fallback, and
-  compares output and retired count with cached-only execution. The standard worker, input, and
-  WebGPU checks pass with the default gate. Final register/memory comparisons remain open. This is a
+  compares output and retired count with cached-only execution. It also grows WASM memory by one
+  page after an emitted block has run, then verifies further emitted executions complete without
+  fallback and preserve output/count parity. A dedicated browser-worker run forces the emitter,
+  confirms register-register execution without fallback, and matches the page-realm output and
+  retired count. The standard worker, input, and WebGPU checks pass with the default gate. Final guest
+  register/memory comparisons remain open. This is a
   mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
   memory MOVs, NOP, LEA, arithmetic,
   SIMD, or control flow are not emitted. Full JIT/interpreter state differential, module-cache
-  pressure, CSP checks, forced-emitter worker execution, browser
-  engine matrix, and real-game performance remain open.
-- No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
-  no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.
+  pressure, CSP checks, browser engine matrix, and real-game performance remain open.
+- Thread support runs finite `CreateThread` callbacks inline with isolated TLS/FLS and thread
+  identity; `_beginthreadex`, resumable scheduling, blocking condition-variable waits, and real
+  synchronization remain unimplemented. No SEH/C++ exception unwinding, audio, DirectInput/XInput,
+  32-bit PE, D3D9/D3D12/OpenGL. GDI support is limited to virtual display DCs and basic caps.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
   sampler state, mip generation, copies and instancing are implemented in the translator, but only two
   paths are pixel-verified: the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
   texture, D32_FLOAT depth test with the near quad drawn first, 16-bit indexed draws, 3 quads).
-  Blending, alpha-test, mips/filtering, instancing and copies are not pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
+  The triangle's visible canvas screenshot also checks its clear colour and centre pixel. Blending,
+  alpha-test, mips/filtering, instancing and copies are not pixel-verified. Compute shaders/UAVs, geometry/tessellation, multisampling
   (forced to 1 sample), staging read-back of GPU-written data, and `SV_` system values beyond the
   basics are not implemented.
-- **Test-environment limits (not product limits):** in the headless Chromium used here,
-  `getCurrentTexture()` makes later `GPUBuffer.mapAsync` fail and screenshots do not capture WebGPU
-  canvases (both reproduced in a 10-line standalone page). So pixel verification runs in a test mode
-  that skips the final canvas blit (`?test=1`); **the blit to the visible canvas is built and passes
-  WebGPU validation but its pixels have not been verified here.**
+- **Pixel verification paths:** D3D11 back-buffer checks run in test mode (`?test=1`), which skips
+  swap-chain presentation so the test can map the back buffer directly. A separate Chromium run
+  without test mode captures the visible 640x480 canvas and checks the triangle's clear colour and
+  interpolated centre pixel. Other render paths and browser engines remain unverified.
 - Browser input (keyboard/mouse -> window messages) and the idle/frame scheduling in the worker are
-  exercised by the Chromium browser suite. Firefox/Safari, visible canvas pixel output, large-game
-  memory limits, and asset streaming remain unverified; see
+  exercised by the Chromium browser suite. Firefox/Safari, visible canvas pixels outside the checked
+  triangle case, large-game memory limits, and asset streaming remain unverified; see
   [`BROWSER_SUPPORT.md`](BROWSER_SUPPORT.md).
 - DLL/function imports with no host implementation are bound to a trap that stops the process with
   `Stop::Unimplemented{dll,name}` (and logs it) instead of guessing.
@@ -111,11 +118,12 @@
   productisation work. Broad items such as threading, SEH, more D3D11 coverage, AVX, and 32-bit PE
   support need a representative target and dedicated design/verification before implementation.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
-  A D3D11-only `/MT` build reduced the maze package's missing static imports from 349 to 122, but a
-  bounded AnyWASM run now passes CRT `MultiByteToWideChar` initialization and stops at a null write
-  in `LCMapStringEx` before window creation. The former has a guest regression covering the Win32
-  capacity contract and signed length parameters. No real-game acceptance pass is claimed. See
-  [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
+  A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
+  down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
+  queries. The bounded AnyWASM run reaches `SleepConditionVariableSRW` after finite thread callbacks,
+  then stops because the runtime cannot resume a blocked guest thread. No window or renderer has
+  been verified and no real-game acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for
+  exact traces and next steps.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
   pixel-verified.

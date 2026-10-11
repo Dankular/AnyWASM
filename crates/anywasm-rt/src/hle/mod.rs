@@ -8,9 +8,11 @@ pub mod crt;
 pub mod d3d11;
 pub mod dxgi;
 pub mod gpu;
+pub mod gdi;
 pub mod heap;
 pub mod kernel32;
 pub mod ntdll;
+pub mod shell32;
 pub mod printf;
 pub mod user32;
 pub mod vtables;
@@ -76,6 +78,8 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "ntdll" => ntdll::lookup(name).or_else(|| crt::lookup(name)),
         "crt" => crt::lookup(name),
         "user32" => user32::lookup(name),
+        "gdi32" => gdi::lookup(name),
+        "shell32" => shell32::lookup(name),
         "winmm" => user32::lookup_winmm(name),
         "d3d11" => d3d11::lookup(name),
         "dxgi" => dxgi::lookup(name),

@@ -11,6 +11,7 @@ const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+const ERROR_TIMEOUT: u32 = 1460;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const ERROR_PROC_NOT_FOUND: u32 = 127;
 const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -28,7 +29,25 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetCurrentProcess" => |_| Ok(u64::MAX),
         "GetCurrentThread" => |_| Ok(u64::MAX - 1),
         "GetCurrentProcessId" => |_| Ok(0x1000),
-        "GetCurrentThreadId" => |_| Ok(0x1004),
+        "GetCurrentThreadId" => |p| Ok(p.current_thread_id as u64),
+        "GetThreadId" => |p| {
+            let h = p.arg(0);
+            Ok(match p.handles.get(&h) {
+                Some(Handle::Thread { id, .. }) => *id as u64,
+                _ if h == u64::MAX - 1 => p.current_thread_id as u64,
+                _ => 0,
+            })
+        },
+        "GetExitCodeThread" => |p| {
+            let (h, out) = (p.arg(0), p.arg(1));
+            let code = match p.handles.get(&h) {
+                Some(Handle::Thread { exit_code: Some(code), .. }) => *code,
+                Some(Handle::Thread { .. }) => 259, // STILL_ACTIVE
+                _ => return Ok(0),
+            };
+            p.wr32(out, code)?;
+            Ok(1)
+        },
         "GetProcessId" => |_| Ok(0x1000),
         "InitializeSListHead" => |p| {
             // Win64 SLIST_HEADER is a 16-byte, 16-byte-aligned opaque structure.
@@ -70,6 +89,17 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GlobalMemoryStatusEx" => global_memory_status_ex,
         "GetVersion" => |_| Ok(0x4A61_0A00),
         "GetVersionExA" | "GetVersionExW" => get_version_ex,
+        "VerSetConditionMask" => |p| {
+            let (mut mask, type_mask, condition) = (p.arg(0), p.arg(1) as u32, (p.arg(2) as u8 as u64) & 7);
+            if type_mask != 0 {
+                let bit = 31 - type_mask.leading_zeros();
+                let shift = bit * 3;
+                if shift < 63 {
+                    mask = (mask & !(7u64 << shift)) | (condition << shift);
+                }
+            }
+            Ok(mask | (1u64 << 63))
+        },
         "GetComputerNameA" => |p| {
             let (b, n) = (p.arg(0), p.arg(1));
             p.write_cstr(b, "ANYWASM")?;
@@ -341,7 +371,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "TryEnterCriticalSection" => |_| Ok(1),
         "InitializeSRWLock" | "AcquireSRWLockExclusive" | "ReleaseSRWLockExclusive" | "AcquireSRWLockShared" | "ReleaseSRWLockShared" => |_| Ok(0),
         "TryAcquireSRWLockExclusive" | "TryAcquireSRWLockShared" => |_| Ok(1),
-        "InitializeConditionVariable" | "WakeConditionVariable" | "WakeAllConditionVariable" => |_| Ok(0),
+        "InitializeConditionVariable" => |_| Ok(0),
+        "WakeConditionVariable" | "WakeAllConditionVariable" => |_| Ok(0),
+        "SleepConditionVariableCS" | "SleepConditionVariableSRW" => sleep_condition_variable,
         "InitOnceExecuteOnce" => init_once_execute_once,
         "InitOnceBeginInitialize" => |p| {
             let (once, _fl, pending, _ctx) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
@@ -389,6 +421,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                         0x102
                     }
                 }
+                Some(Handle::Thread { exit_code, .. }) => if exit_code.is_some() { 0 } else { 0x102 },
                 _ => 0,
             })
         },
@@ -503,7 +536,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "FormatMessageA" | "FormatMessageW" => |_| Ok(0),
         // misc
         "Beep" => |_| Ok(1),
-        "CreateThread" => |p| Err(Stop::Unimplemented { dll: "kernel32".into(), name: format!("CreateThread (start={:#x}; threads are not implemented yet)", p.arg(2)) }),
+        "CreateThread" => create_thread,
+        "ResumeThread" => resume_thread,
+        "SuspendThread" => |p| {
+            if matches!(p.handles.get(&p.arg(0)), Some(Handle::Thread { .. })) { Ok(0) } else { Ok(u32::MAX as u64) }
+        },
         "GetThreadContext" | "SetThreadContext" => |_| Ok(0),
         "SetThreadPriority" | "SetPriorityClass" | "SetThreadAffinityMask" | "SetProcessAffinityMask" | "SetThreadDescription" => |_| Ok(1),
         "GetThreadPriority" => |_| Ok(0),
@@ -578,7 +615,63 @@ fn terminate_process(p: &mut Process) -> R {
 }
 fn exit_thread(p: &mut Process) -> R {
     let code = p.arg(0) as u32;
-    p.finish_exit(code).map(|_| 0)
+    if p.thread_call_depth != 0 {
+        Err(Stop::ThreadExit(code))
+    } else {
+        p.finish_exit(code).map(|_| 0)
+    }
+}
+
+fn create_thread(p: &mut Process) -> R {
+    let (start, parameter, flags, thread_id_ptr) = (p.arg(2), p.arg(3), p.arg(4) as u32, p.arg(5));
+    if start == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let id = p.next_thread_id;
+    p.next_thread_id = p.next_thread_id.wrapping_add(4).max(0x1008);
+    if thread_id_ptr != 0 {
+        p.wr32(thread_id_ptr, id)?;
+    }
+    let handle = p.new_handle(Handle::Thread { id, start, parameter, exit_code: None, suspended: flags & 4 != 0 });
+    if flags & 4 == 0 {
+        let code = p.call_guest_thread(id, start, parameter)?;
+        if let Some(Handle::Thread { exit_code, .. }) = p.handles.get_mut(&handle) {
+            *exit_code = Some(code);
+        }
+    }
+    Ok(handle)
+}
+
+fn resume_thread(p: &mut Process) -> R {
+    let h = p.arg(0);
+    let (id, start, parameter, suspended) = match p.handles.get(&h) {
+        Some(Handle::Thread { id, start, parameter, suspended, .. }) => (*id, *start, *parameter, *suspended),
+        _ => return Ok(u32::MAX as u64),
+    };
+    if !suspended {
+        return Ok(0);
+    }
+    if let Some(Handle::Thread { suspended, .. }) = p.handles.get_mut(&h) {
+        *suspended = false;
+    }
+    let code = p.call_guest_thread(id, start, parameter)?;
+    if let Some(Handle::Thread { exit_code, .. }) = p.handles.get_mut(&h) {
+        *exit_code = Some(code);
+    }
+    Ok(1)
+}
+
+fn sleep_condition_variable(p: &mut Process) -> R {
+    let timeout = p.arg(2) as u32;
+    if timeout == u32::MAX {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "SleepConditionVariable (blocking wait has no ready cooperative worker)".into(),
+        });
+    }
+    p.set_last_error(ERROR_TIMEOUT);
+    Ok(0)
 }
 
 fn is_processor_feature_present(p: &mut Process) -> R {
@@ -1208,6 +1301,9 @@ fn get_proc_address(p: &mut Process) -> R {
     let by_ordinal = name_ptr < 0x10000;
     let name = if by_ordinal { format!("#{name_ptr}") } else { p.read_cstr(name_ptr)? };
     if let Some(g) = m.hle_group {
+        if crate::hle::lookup(g, &name).is_some() {
+            return Ok(p.thunk_for(g, &name, true).unwrap());
+        }
         return match p.thunk_for(g, &name, false) {
             Some(a) => Ok(a),
             None => {
@@ -1344,8 +1440,13 @@ fn multi_byte_to_wide_char(p: &mut Process) -> R {
 }
 
 fn wide_char_to_multi_byte(p: &mut Process) -> R {
-    let (cp, _fl, src, n, dst, dn) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as i64, p.arg(4), p.arg(5) as usize);
-    let mut w = read_wide_n(p, src, n)?;
+    // Both length parameters are Win32 ints, not pointer-sized values.
+    let (cp, _fl, src, n, dst, dn) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as u32 as i32, p.arg(4), p.arg(5) as u32 as i32);
+    if n == 0 || n < -1 || dn < 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let mut w = read_wide_n(p, src, n as i64)?;
     if n < 0 {
         w.push(0);
     }
@@ -1357,7 +1458,7 @@ fn wide_char_to_multi_byte(p: &mut Process) -> R {
     if dn == 0 {
         return Ok(out.len() as u64);
     }
-    if out.len() > dn {
+    if out.len() > dn as usize {
         p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
         return Ok(0);
     }
@@ -1406,10 +1507,13 @@ fn get_string_type_w(p: &mut Process) -> R {
 }
 
 fn lc_map_string_w(p: &mut Process) -> R {
-    // LCMapStringW(locale, flags, src, srclen, dst, dstlen); LCMapStringEx has name first; both put
-    // flags at arg1 and src at arg2 / dst at arg4 for the W form which is what CRTs call.
-    let (flags, src, n, dst, dn) = (p.arg(1), p.arg(2), p.arg(3) as i64, p.arg(4), p.arg(5) as usize);
-    let mut w = read_wide_n(p, src, n)?;
+    // cchSrc and cchDest are Win32 ints; their unused upper bits may be dirty in 64-bit ABI slots.
+    let (flags, src, n, dst, dn) = (p.arg(1), p.arg(2), p.arg(3) as u32 as i32, p.arg(4), p.arg(5) as u32 as i32);
+    if n == 0 || n < -1 || dn < 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let mut w = read_wide_n(p, src, n as i64)?;
     if n < 0 {
         w.push(0);
     }
@@ -1424,10 +1528,54 @@ fn lc_map_string_w(p: &mut Process) -> R {
             *c = ch.to_lowercase().next().map(|x| x as u32 as u16).unwrap_or(*c);
         }
     }
-    if w.len() > dn {
+    if dst == 0 || w.len() > dn as usize {
+        p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
         return Ok(0);
     }
     let raw: Vec<u8> = w.iter().flat_map(|c| c.to_le_bytes()).collect();
     p.write_bytes(dst, &raw)?;
     Ok(w.len() as u64)
+}
+
+#[cfg(test)]
+mod lc_map_string_tests {
+    use super::*;
+    use anywasm_cpu::cpu::{RCX, RDX, R8, R9, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+    #[test]
+    fn zero_capacity_query_ignores_unspecified_upper_stack_bits() {
+        const BASE: u64 = 0x10000;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        p.write_wstr(BASE + 0x100, "abc").unwrap();
+
+        p.cpu.gpr[RSP] = BASE + 0x800;
+        p.cpu.gpr[RCX] = 0; // LCMapStringEx locale name
+        p.cpu.gpr[RDX] = 0x200; // LCMAP_UPPERCASE
+        p.cpu.gpr[R8] = BASE + 0x100;
+        p.cpu.gpr[R9] = 3; // cchSrc
+        p.wr64(BASE + 0x800 + 8 + 8 * 4, 0).unwrap(); // lpDestStr
+        p.wr64(BASE + 0x800 + 8 + 8 * 5, 0xdead_beef_0000_0000).unwrap(); // cchDest == 0
+
+        assert_eq!(lc_map_string_w(&mut p), Ok(3));
+    }
+
+    #[test]
+    fn wide_char_to_multi_byte_reads_signed_win32_lengths() {
+        const BASE: u64 = 0x20000;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        p.write_wstr(BASE + 0x100, "abc").unwrap();
+
+        p.cpu.gpr[RSP] = BASE + 0x800;
+        p.cpu.gpr[RCX] = 1252;
+        p.cpu.gpr[RDX] = 0;
+        p.cpu.gpr[R8] = BASE + 0x100;
+        p.cpu.gpr[R9] = 0xffff_ffff; // cchWideChar == -1, including the NUL terminator
+        p.wr64(BASE + 0x800 + 8 + 8 * 4, 0).unwrap(); // lpMultiByteStr
+        p.wr64(BASE + 0x800 + 8 + 8 * 5, 0x0000_7ff0_0000_0000).unwrap(); // cbMultiByte == 0
+
+        assert_eq!(wide_char_to_multi_byte(&mut p), Ok(4));
+    }
 }

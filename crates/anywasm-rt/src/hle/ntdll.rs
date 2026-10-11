@@ -8,6 +8,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
         "RtlCaptureContext" => rtl_capture_context,
         "RtlLookupFunctionEntry" => |_| Ok(0),
+        "RtlVerifyVersionInfo" => rtl_verify_version_info,
         "RtlAllocateHeap" => |p| {
             let n = p.arg(2);
             Ok(kernel32::alloc_block(p, n, true))
@@ -56,6 +57,67 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RtlUnwind" | "RtlUnwindEx" | "RtlVirtualUnwind" => |p| Err(Stop::Unimplemented { dll: "ntdll".into(), name: "RtlUnwind (exception unwinding is not implemented)".into() }.also(p)),
         _ => return None,
     })
+}
+
+fn rtl_verify_version_info(p: &mut Process) -> R {
+    const STATUS_INVALID_PARAMETER: u64 = 0xC000_000D;
+    const STATUS_REVISION_MISMATCH: u64 = 0xC000_0059;
+    const VER_TYPE_MASK: u32 = 0xFF;
+    const CONDITION_MASK_INITIALIZED: u64 = 1 << 63;
+
+    let (version, type_mask, condition_mask) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if version == 0 || type_mask == 0 || type_mask & !VER_TYPE_MASK != 0
+        || condition_mask & CONDITION_MASK_INITIALIZED == 0
+        || p.rd32(version)? < 284
+    {
+        return Ok(STATUS_INVALID_PARAMETER);
+    }
+
+    // (VER_* flag, RTL_OSVERSIONINFOEXW offset, width, host value)
+    let fields: [(u32, u64, u8, u64); 8] = [
+        (0x01, 4, 4, 10),    // major version
+        (0x02, 8, 4, 0),     // minor version
+        (0x04, 12, 4, 19045), // build number
+        (0x08, 16, 4, 2),    // platform ID
+        (0x10, 276, 2, 0),   // service pack major
+        (0x20, 278, 2, 0),   // service pack minor
+        (0x40, 280, 2, 0),   // product suite mask
+        (0x80, 282, 1, 1),   // product type (workstation)
+    ];
+
+    for (flag, offset, width, current) in fields {
+        if type_mask & flag == 0 {
+            continue;
+        }
+        let shift = flag.trailing_zeros() * 3;
+        let condition = ((condition_mask >> shift) & 7) as u8;
+        let requested = match width {
+            1 => p.rd8(version + offset)? as u64,
+            2 => p.rd16(version + offset)? as u64,
+            _ => p.rd32(version + offset)? as u64,
+        };
+
+        let matches = if flag == 0x40 {
+            match condition {
+                6 => current & requested == requested, // VER_AND
+                7 => current & requested != 0,          // VER_OR
+                _ => return Ok(STATUS_INVALID_PARAMETER),
+            }
+        } else {
+            match condition {
+                1 => current == requested, // VER_EQUAL
+                2 => current > requested,  // VER_GREATER
+                3 => current >= requested, // VER_GREATER_EQUAL
+                4 => current < requested,  // VER_LESS
+                5 => current <= requested, // VER_LESS_EQUAL
+                _ => return Ok(STATUS_INVALID_PARAMETER),
+            }
+        };
+        if !matches {
+            return Ok(STATUS_REVISION_MISMATCH);
+        }
+    }
+    Ok(0)
 }
 
 trait Also {

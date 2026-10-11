@@ -90,6 +90,7 @@ pub struct WinState {
     pub capture: u64,
     pub main_window: u64,
     pub timers: Vec<(u64, u64, u32, u64)>,
+    pub props: HashMap<(u64, String), u64>,
 }
 
 fn lc(s: &str) -> String {
@@ -141,11 +142,31 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             send(p, h, WM_SHOWWINDOW, (cmd != 0) as u64, 0)?;
             Ok(0)
         },
+        "GetWindowPlacement" => get_window_placement,
+        "SetWindowPlacement" => set_window_placement,
         "UpdateWindow" => |p| {
             let h = p.arg(0);
             paint_now(p, h)?;
             Ok(1)
         },
+        "RegisterDeviceNotificationW" => |p| {
+            let (recipient, filter, flags) = (p.arg(0), p.arg(1), p.arg(2) as u32);
+            if recipient == 0 || filter == 0 {
+                p.set_last_error(87); // ERROR_INVALID_PARAMETER
+                return Ok(0);
+            }
+            if flags & 1 == 0 && !p.extra.win.windows.contains_key(&recipient) {
+                p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+                return Ok(0);
+            }
+            Ok(p.new_handle(Handle::Other))
+        },
+        "UnregisterDeviceNotification" => |p| {
+            Ok(p.handles.remove(&p.arg(0)).is_some() as u64)
+        },
+        "EnumDisplayDevicesW" => enum_display_devices_w,
+        "EnumDisplaySettingsW" => enum_display_settings_w,
+        "EnumDisplayMonitors" => enum_display_monitors,
         "InvalidateRect" | "RedrawWindow" => |p| {
             let h = p.arg(0);
             if let Some(w) = p.extra.win.windows.get_mut(&h) {
@@ -174,6 +195,30 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             post(p, h, m, w, l);
             Ok(1)
         },
+        "SetPropA" => |p| set_prop(p, false),
+        "SetPropW" => |p| set_prop(p, true),
+        "GetPropA" => |p| get_prop(p, false, false),
+        "GetPropW" => |p| get_prop(p, true, false),
+        "RemovePropA" => |p| get_prop(p, false, true),
+        "RemovePropW" => |p| get_prop(p, true, true),
+        "OffsetRect" => offset_rect,
+        "InflateRect" => inflate_rect,
+        "IntersectRect" => intersect_rect,
+        "UnionRect" => union_rect,
+        "SetRect" => set_rect,
+        "SetRectEmpty" => set_rect_empty,
+        "CopyRect" => copy_rect,
+        "IsRectEmpty" => |p| {
+            let r = read_rect(p, p.arg(0))?;
+            Ok((r.0 >= r.2 || r.1 >= r.3) as u64)
+        },
+        "EqualRect" => |p| Ok((read_rect(p, p.arg(0))? == read_rect(p, p.arg(1))?) as u64),
+        "PtInRect" => |p| {
+            let r = read_rect(p, p.arg(0))?;
+            let point = p.arg(1);
+            let (x, y) = (point as u32 as i32, (point >> 32) as u32 as i32);
+            Ok((x >= r.0 && x < r.2 && y >= r.1 && y < r.3) as u64)
+        },
         "SendMessageA" | "SendMessageW" => |p| {
             let (h, m, w, l) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
             send(p, h, m, w, l)
@@ -194,7 +239,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             write_rect(p, r, x, y, x + w, y + ht)?;
             Ok(1)
         },
-        "AdjustWindowRect" | "AdjustWindowRectEx" => |_| Ok(1),
+        "AdjustWindowRect" => |p| adjust_window_rect(p, false, false),
+        "AdjustWindowRectEx" => |p| adjust_window_rect(p, true, false),
+        "AdjustWindowRectExForDpi" => |p| adjust_window_rect(p, true, true),
         "SetWindowPos" => |p| {
             let (h, x, y, cx, cy, flags) = (p.arg(0), p.arg(2) as i32, p.arg(3) as i32, p.arg(4) as i32, p.arg(5) as i32, p.arg(6));
             resize_window(p, h, (flags & 2 == 0).then_some((x, y)), (flags & 1 == 0).then_some((cx, cy)))?;
@@ -258,6 +305,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                 (w.parent == parent && w.style & WS_CHILD != 0 && w.control_id == id).then_some(h)
             }).unwrap_or(0))
         },
+        "MapVirtualKeyW" => map_virtual_key_w,
+        "ToUnicode" => to_unicode,
         "GetDC" | "GetWindowDC" => |p| Ok(0x7000_0000 + p.arg(0)),
         "ReleaseDC" | "DeleteDC" => |_| Ok(1),
         "BeginPaint" => |p| {
@@ -317,20 +366,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "GetFocus" | "GetForegroundWindow" | "GetActiveWindow" => |p| Ok(p.extra.win.main_window),
         "SetForegroundWindow" | "SetActiveWindow" | "BringWindowToTop" => |_| Ok(1),
-        "GetSystemMetrics" => |p| {
-            Ok(match p.arg(0) {
-                0 => 1920,
-                1 => 1080,
-                4 => 23,
-                5 | 6 => 1,
-                7 | 8 => 3,
-                15 => 20,
-                16 => 1920,
-                17 => 1057,
-                78 => 1920,
-                79 => 1080,
-                _ => 0,
-            })
+        "GetSystemMetrics" => |p| Ok(system_metric(p.arg(0) as u32)),
+        "GetSystemMetricsForDpi" => |p| {
+            let (index, dpi) = (p.arg(0) as u32, p.arg(1) as u32);
+            Ok(system_metric(index).saturating_mul(dpi as u64) / 96)
         },
         "MessageBoxA" => |p| {
             let (t, c) = (p.read_cstr(p.arg(1))?, p.read_cstr(p.arg(2))?);
@@ -372,11 +411,475 @@ pub fn lookup(name: &str) -> Option<HleFn> {
     })
 }
 
+fn system_metric(index: u32) -> u64 {
+    match index {
+        0 | 16 | 76 | 78 => 1920, // screen/fullscreen/virtual width
+        1 | 17 | 77 | 79 => 1080, // screen/fullscreen/virtual height
+        4 => 23,                  // caption height
+        5 | 6 => 1,               // border width / height
+        7 | 8 => 3,               // dialog frame width / height
+        13 | 14 => 32,            // cursor width / height
+        15 => 20,                 // menu height
+        28 => 112,                // minimum window width
+        29 => 27,                 // minimum window height
+        32 | 33 => 8,             // sizing frame width / height
+        80 => 1,                  // monitor count
+        _ => 0,
+    }
+}
+
+fn get_window_placement(p: &mut Process) -> R {
+    const WINDOWPLACEMENT_SIZE: u32 = 44;
+    let (hwnd, placement) = (p.arg(0), p.arg(1));
+    if placement == 0 || p.rd32(placement)? != WINDOWPLACEMENT_SIZE {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let Some((x, y, w, h)) = p.extra.win.windows.get(&hwnd).map(|win| (win.x, win.y, win.w, win.h)) else {
+        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(0);
+    };
+    p.wr32(placement + 4, 0)?;
+    p.wr32(placement + 8, 1)?; // SW_SHOWNORMAL
+    p.wr32(placement + 12, 0)?;
+    p.wr32(placement + 16, 0)?;
+    p.wr32(placement + 20, 0)?;
+    p.wr32(placement + 24, 0)?;
+    p.wr32(placement + 28, x as u32)?;
+    p.wr32(placement + 32, y as u32)?;
+    p.wr32(placement + 36, x.wrapping_add(w) as u32)?;
+    p.wr32(placement + 40, y.wrapping_add(h) as u32)?;
+    Ok(1)
+}
+
+fn set_window_placement(p: &mut Process) -> R {
+    const WINDOWPLACEMENT_SIZE: u32 = 44;
+    let (hwnd, placement) = (p.arg(0), p.arg(1));
+    if placement == 0 || p.rd32(placement)? != WINDOWPLACEMENT_SIZE {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let (left, top, right, bottom) = (
+        p.rd32(placement + 28)? as i32,
+        p.rd32(placement + 32)? as i32,
+        p.rd32(placement + 36)? as i32,
+        p.rd32(placement + 40)? as i32,
+    );
+    let visible = p.rd32(placement + 8)? != 0;
+    let Some(window) = p.extra.win.windows.get_mut(&hwnd) else {
+        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(0);
+    };
+    window.x = left;
+    window.y = top;
+    window.w = right.saturating_sub(left);
+    window.h = bottom.saturating_sub(top);
+    window.visible = visible;
+    window.needs_paint |= window.visible;
+    Ok(1)
+}
+
+fn adjust_window_rect(p: &mut Process, extended: bool, dpi_aware: bool) -> R {
+    let rect = p.arg(0);
+    if rect == 0 {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let (style, menu, ex_style) = (p.arg(1) as u32, p.arg(2) != 0, if extended { p.arg(3) as u32 } else { 0 });
+    let dpi = if dpi_aware { (p.arg(4) as u32).max(1) } else { 96 };
+    let scale = |v: u32| ((v as u64 * dpi as u64 + 48) / 96) as i32;
+    let thick = style & 0x0004_0000 != 0;
+    let border = style & (0x0080_0000 | 0x0040_0000) != 0;
+    let edge = ex_style & (0x0000_0200 | 0x0001_0000) != 0;
+    let x = scale(if thick { 8 } else if border { 1 } else { 0 }) + scale(edge as u32 * 2);
+    let mut y = scale(if thick { 8 } else if border { 1 } else { 0 }) + scale(edge as u32 * 2);
+    if style & 0x00c0_0000 != 0 {
+        y += scale(system_metric(4) as u32);
+    }
+    if menu {
+        y += scale(system_metric(15) as u32);
+    }
+    let (left, top, right, bottom) = (
+        p.rd32(rect)? as i32,
+        p.rd32(rect + 4)? as i32,
+        p.rd32(rect + 8)? as i32,
+        p.rd32(rect + 12)? as i32,
+    );
+    p.wr32(rect, left.wrapping_sub(x) as u32)?;
+    p.wr32(rect + 4, top.wrapping_sub(y) as u32)?;
+    p.wr32(rect + 8, right.wrapping_add(x) as u32)?;
+    p.wr32(rect + 12, bottom.wrapping_add(scale(if thick { 8 } else if border { 1 } else { 0 })) as u32)?;
+    Ok(1)
+}
+
+fn map_virtual_key_w(p: &mut Process) -> R {
+    let (code, map_type) = (p.arg(0) as u32, p.arg(1) as u32);
+    Ok(map_virtual_key(code, map_type) as u64)
+}
+
+fn enum_display_devices_w(p: &mut Process) -> R {
+    const DISPLAY_DEVICE_SIZE: u32 = 840;
+    let (device, index, out, flags) = (p.arg(0), p.arg(1) as u32, p.arg(2), p.arg(3) as u32);
+    if out == 0 || p.rd32(out)? < DISPLAY_DEVICE_SIZE {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    if index != 0 || flags & !1 != 0 {
+        return Ok(0);
+    }
+    if device != 0 {
+        let name = p.read_wstr(device)?;
+        if !name.eq_ignore_ascii_case("\\\\.\\DISPLAY1") {
+            return Ok(0);
+        }
+    }
+
+    p.write_bytes(out, &[0; DISPLAY_DEVICE_SIZE as usize])?;
+    p.wr32(out, DISPLAY_DEVICE_SIZE)?;
+    p.write_wstr(out + 4, "\\\\.\\DISPLAY1")?;
+    p.write_wstr(out + 68, "AnyWASM Virtual Display")?;
+    p.wr32(out + 324, 0x1 | 0x4)?; // ATTACHED_TO_DESKTOP | PRIMARY_DEVICE
+    if flags & 1 != 0 {
+        p.write_wstr(out + 328, "\\\\?\\DISPLAY#ANYWASM#0001")?;
+    }
+    Ok(1)
+}
+
+fn enum_display_settings_w(p: &mut Process) -> R {
+    const DEVMODEW_SIZE: u16 = 220;
+    let (device, mode_num, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if out == 0 || p.rd16(out + 68)? < DEVMODEW_SIZE {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    if device != 0 && !p.read_wstr(device)?.eq_ignore_ascii_case("\\\\.\\DISPLAY1") {
+        return Ok(0);
+    }
+
+    let (width, height, refresh) = match mode_num {
+        0xffff_ffff | 0 => (1920, 1080, 60), // current / registry mode
+        1 => (1280, 720, 60),
+        2 => (640, 480, 60),
+        _ => return Ok(0),
+    };
+    p.write_bytes(out, &[0; DEVMODEW_SIZE as usize])?;
+    p.write_wstr(out, "\\\\.\\DISPLAY1")?;
+    p.wr16(out + 64, 0x0401)?; // DM_SPECVERSION
+    p.wr16(out + 66, 1)?;
+    p.wr16(out + 68, DEVMODEW_SIZE)?;
+    p.wr32(out + 72, 0x007c_0000)?; // bits-per-pixel, width, height, flags, frequency
+    p.wr32(out + 168, 32)?;
+    p.wr32(out + 172, width)?;
+    p.wr32(out + 176, height)?;
+    p.wr32(out + 180, 0)?;
+    p.wr32(out + 184, refresh)?;
+    Ok(1)
+}
+
+fn enum_display_monitors(p: &mut Process) -> R {
+    let (hdc, clip, callback, data) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
+    if callback == 0 {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let (mut left, mut top, mut right, mut bottom) = (0i32, 0i32, 1920i32, 1080i32);
+    if clip != 0 {
+        let (clip_left, clip_top, clip_right, clip_bottom) = (
+            p.rd32(clip)? as i32,
+            p.rd32(clip + 4)? as i32,
+            p.rd32(clip + 8)? as i32,
+            p.rd32(clip + 12)? as i32,
+        );
+        left = left.max(clip_left);
+        top = top.max(clip_top);
+        right = right.min(clip_right);
+        bottom = bottom.min(clip_bottom);
+        if left >= right || top >= bottom {
+            return Ok(1);
+        }
+    }
+
+    let rect = super::kernel32::alloc_block(p, 16, true);
+    if rect == 0 {
+        return Ok(0);
+    }
+    p.wr32(rect, left as u32)?;
+    p.wr32(rect + 4, top as u32)?;
+    p.wr32(rect + 8, right as u32)?;
+    p.wr32(rect + 12, bottom as u32)?;
+    let result = p.call_guest(callback, &[0x5000, hdc, rect, data]);
+    super::kernel32::free_block(p, rect);
+    result?;
+    Ok(1)
+}
+
+fn to_unicode(p: &mut Process) -> R {
+    let (vk, scan, key_state, buffer, capacity, flags) = (
+        p.arg(0) as u32,
+        p.arg(1) as u32,
+        p.arg(2),
+        p.arg(3),
+        p.arg(4) as u32 as i32,
+        p.arg(5) as u32,
+    );
+    let _ = (scan, flags);
+    if capacity <= 0 || buffer == 0 {
+        return Ok(0);
+    }
+    let state: [u8; 256] = if key_state == 0 { [0; 256] } else { p.read_bytes(key_state, 256)?.try_into().unwrap() };
+    let shift = [0x10, 0xa0, 0xa1].iter().any(|&key| state[key] & 0x80 != 0);
+    let control = [0x11, 0xa2, 0xa3].iter().any(|&key| state[key] & 0x80 != 0);
+    let alt = [0x12, 0xa4, 0xa5].iter().any(|&key| state[key] & 0x80 != 0);
+    if control || alt {
+        return Ok(0);
+    }
+    let caps = state[0x14] & 1 != 0;
+    let Some(ch) = translate_us_key(vk, shift, caps) else { return Ok(0) };
+    p.wr16(buffer, ch)?;
+    Ok(1)
+}
+
+fn translate_us_key(vk: u32, shift: bool, caps: bool) -> Option<u16> {
+    if (0x41..=0x5a).contains(&vk) {
+        let upper = shift ^ caps;
+        return Some(if upper { vk as u16 } else { (vk + 0x20) as u16 });
+    }
+    if (0x30..=0x39).contains(&vk) {
+        let shifted = b")!@#$%^&*("[(vk - 0x30) as usize] as u16;
+        return Some(if shift { shifted } else { vk as u16 });
+    }
+    if (0x60..=0x69).contains(&vk) {
+        return Some((b'0' + (vk - 0x60) as u8) as u16);
+    }
+    Some(match vk {
+        0x08 => 0x0008,
+        0x09 => 0x0009,
+        0x0d => 0x000d,
+        0x20 => 0x0020,
+        0xba => if shift { b':' as u16 } else { b';' as u16 },
+        0xbb => if shift { b'+' as u16 } else { b'=' as u16 },
+        0xbc => if shift { b'<' as u16 } else { b',' as u16 },
+        0xbd => if shift { b'_' as u16 } else { b'-' as u16 },
+        0xbe => if shift { b'>' as u16 } else { b'.' as u16 },
+        0xbf => if shift { b'?' as u16 } else { b'/' as u16 },
+        0xc0 => if shift { b'~' as u16 } else { b'`' as u16 },
+        0xdb => if shift { b'{' as u16 } else { b'[' as u16 },
+        0xdc => if shift { b'|' as u16 } else { b'\\' as u16 },
+        0xdd => if shift { b'}' as u16 } else { b']' as u16 },
+        0xde => if shift { b'"' as u16 } else { b'\'' as u16 },
+        0xe2 => if shift { b'|' as u16 } else { b'\\' as u16 },
+        _ => return None,
+    })
+}
+
+fn map_virtual_key(code: u32, map_type: u32) -> u32 {
+    match map_type {
+        0 => vk_to_scan(code).map(|(scan, _)| scan as u32).unwrap_or(0),
+        1 => scan_to_vk(code, false),
+        2 => vk_to_char(code),
+        3 => scan_to_vk(code, true),
+        4 => vk_to_scan(code).map(|(scan, extended)| if extended { 0xe000 | scan as u32 } else { scan as u32 }).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn vk_to_scan(vk: u32) -> Option<(u8, bool)> {
+    const LETTERS: [u8; 26] = [0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c];
+    const KEYPAD: [u8; 10] = [0x52, 0x4f, 0x50, 0x51, 0x4b, 0x4c, 0x4d, 0x47, 0x48, 0x49];
+    if (0x41..=0x5a).contains(&vk) {
+        return Some((LETTERS[(vk - 0x41) as usize], false));
+    }
+    if (0x60..=0x69).contains(&vk) {
+        return Some((KEYPAD[(vk - 0x60) as usize], false));
+    }
+    if (0x70..=0x79).contains(&vk) {
+        return Some((0x3b + (vk - 0x70) as u8, false));
+    }
+    if (0x30..=0x39).contains(&vk) {
+        return Some((match vk { 0x30 => 0x0b, _ => 0x02 + (vk - 0x31) as u8 }, false));
+    }
+    Some(match vk {
+        0x08 => (0x0e, false), // backspace
+        0x09 => (0x0f, false), // tab
+        0x0d => (0x1c, false), // enter
+        0x10 | 0xa0 => (0x2a, false),
+        0xa1 => (0x36, false),
+        0x11 | 0xa2 => (0x1d, false),
+        0xa3 => (0x1d, true),
+        0x12 | 0xa4 => (0x38, false),
+        0xa5 => (0x38, true),
+        0x13 => (0x1d, true), // pause (E1)
+        0x14 => (0x3a, false), // caps lock
+        0x1b => (0x01, false), // escape
+        0x20 => (0x39, false), // space
+        0x21 => (0x49, false), // page up
+        0x22 => (0x51, false), // page down
+        0x23 => (0x4f, false), // end
+        0x24 => (0x47, false), // home
+        0x25 => (0x4b, false), // left
+        0x26 => (0x48, false), // up
+        0x27 => (0x4d, false), // right
+        0x28 => (0x50, false), // down
+        0x2c => (0x54, false), // print screen
+        0x2d => (0x52, false), // insert
+        0x2e => (0x53, false), // delete
+        0x5b => (0x5b, true),  // left Windows
+        0x5c => (0x5c, true),  // right Windows
+        0x5d => (0x5d, true),  // applications
+        0x6a => (0x37, false), // keypad multiply
+        0x6b => (0x4e, false), // keypad add
+        0x6d => (0x4a, false), // keypad subtract
+        0x6e => (0x53, false), // keypad decimal
+        0x6f => (0x35, true),  // keypad divide
+        0x7a => (0x57, false), // F11
+        0x7b => (0x58, false), // F12
+        0x90 => (0x45, false), // num lock
+        0x91 => (0x46, false), // scroll lock
+        0xba => (0x27, false), // OEM 1 ;
+        0xbb => (0x0d, false), // OEM plus
+        0xbc => (0x33, false), // OEM comma
+        0xbd => (0x0c, false), // OEM minus
+        0xbe => (0x34, false), // OEM period
+        0xbf => (0x35, false), // OEM 2 /
+        0xc0 => (0x29, false), // OEM 3 `
+        0xdb => (0x1a, false), // OEM 4 [
+        0xdc => (0x2b, false), // OEM 5 backslash
+        0xdd => (0x1b, false), // OEM 6 ]
+        0xde => (0x28, false), // OEM 7 '
+        0xe2 => (0x56, false), // OEM 102
+        _ => return None,
+    })
+}
+
+fn scan_to_vk(code: u32, distinguish: bool) -> u32 {
+    let prefix = (code >> 8) as u8;
+    let scan = code as u8;
+    if prefix != 0 && prefix != 0xe0 && prefix != 0xe1 {
+        return 0;
+    }
+    if prefix == 0xe1 && scan == 0x1d {
+        return 0x13; // pause
+    }
+    if prefix == 0xe0 {
+        return match scan {
+            0x1d => if distinguish { 0xa3 } else { 0x11 },
+            0x38 => if distinguish { 0xa5 } else { 0x12 },
+            0x47 => 0x24,
+            0x48 => 0x26,
+            0x49 => 0x21,
+            0x4b => 0x25,
+            0x4d => 0x27,
+            0x4f => 0x23,
+            0x50 => 0x28,
+            0x51 => 0x22,
+            0x52 => 0x2d,
+            0x53 => 0x2e,
+            0x5b => 0x5b,
+            0x5c => 0x5c,
+            0x5d => 0x5d,
+            _ => 0,
+        };
+    }
+    match scan {
+        0x2a => return if distinguish { 0xa0 } else { 0x10 },
+        0x36 => return if distinguish { 0xa1 } else { 0x10 },
+        0x1d => return if distinguish { 0xa2 } else { 0x11 },
+        0x38 => return if distinguish { 0xa4 } else { 0x12 },
+        _ => {}
+    }
+    (0..=0xff).find_map(|vk| vk_to_scan(vk).filter(|(s, extended)| *s == scan && !extended).map(|_| vk)).unwrap_or(0)
+}
+
+fn vk_to_char(vk: u32) -> u32 {
+    match vk {
+        0x30..=0x39 | 0x41..=0x5a => vk,
+        0x20 => 0x20,
+        0xba => b';' as u32,
+        0xbb => b'=' as u32,
+        0xbc => b',' as u32,
+        0xbd => b'-' as u32,
+        0xbe => b'.' as u32,
+        0xbf => b'/' as u32,
+        0xc0 => b'`' as u32,
+        0xdb => b'[' as u32,
+        0xdc => b'\\' as u32,
+        0xdd => b']' as u32,
+        0xde => b'\'' as u32,
+        0xe2 => b'\\' as u32,
+        _ => 0,
+    }
+}
+
 fn write_rect(p: &mut Process, a: u64, l: i32, t: i32, r: i32, b: i32) -> Result<(), Stop> {
     p.wr32(a, l as u32)?;
     p.wr32(a + 4, t as u32)?;
     p.wr32(a + 8, r as u32)?;
     p.wr32(a + 12, b as u32)
+}
+
+fn read_rect(p: &Process, a: u64) -> Result<(i32, i32, i32, i32), Stop> {
+    Ok((p.rd32(a)? as i32, p.rd32(a + 4)? as i32, p.rd32(a + 8)? as i32, p.rd32(a + 12)? as i32))
+}
+
+fn offset_rect(p: &mut Process) -> R {
+    let (a, dx, dy) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32);
+    let (l, t, r, b) = read_rect(p, a)?;
+    write_rect(p, a, l.wrapping_add(dx), t.wrapping_add(dy), r.wrapping_add(dx), b.wrapping_add(dy))?;
+    Ok(1)
+}
+
+fn inflate_rect(p: &mut Process) -> R {
+    let (a, dx, dy) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32);
+    let (l, t, r, b) = read_rect(p, a)?;
+    write_rect(p, a, l.wrapping_sub(dx), t.wrapping_sub(dy), r.wrapping_add(dx), b.wrapping_add(dy))?;
+    Ok(1)
+}
+
+fn intersect_rect(p: &mut Process) -> R {
+    let (dst, a, b) = (p.arg(0), p.arg(1), p.arg(2));
+    let (r1, r2) = (read_rect(p, a)?, read_rect(p, b)?);
+    let out = (r1.0.max(r2.0), r1.1.max(r2.1), r1.2.min(r2.2), r1.3.min(r2.3));
+    let nonempty = out.0 < out.2 && out.1 < out.3;
+    if nonempty {
+        write_rect(p, dst, out.0, out.1, out.2, out.3)?;
+    } else {
+        write_rect(p, dst, 0, 0, 0, 0)?;
+    }
+    Ok(nonempty as u64)
+}
+
+fn union_rect(p: &mut Process) -> R {
+    let (dst, a, b) = (p.arg(0), p.arg(1), p.arg(2));
+    let (r1, r2) = (read_rect(p, a)?, read_rect(p, b)?);
+    let empty1 = r1.0 >= r1.2 || r1.1 >= r1.3;
+    let empty2 = r2.0 >= r2.2 || r2.1 >= r2.3;
+    let out = match (empty1, empty2) {
+        (true, true) => (0, 0, 0, 0),
+        (true, false) => r2,
+        (false, true) => r1,
+        (false, false) => (r1.0.min(r2.0), r1.1.min(r2.1), r1.2.max(r2.2), r1.3.max(r2.3)),
+    };
+    write_rect(p, dst, out.0, out.1, out.2, out.3)?;
+    Ok((!empty1 || !empty2) as u64)
+}
+
+fn set_rect(p: &mut Process) -> R {
+    let (a, l, t, r, b) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32, p.arg(3) as i32, p.arg(4) as i32);
+    write_rect(p, a, l, t, r, b)?;
+    Ok(1)
+}
+
+fn set_rect_empty(p: &mut Process) -> R {
+    let a = p.arg(0);
+    write_rect(p, a, 0, 0, 0, 0)?;
+    Ok(1)
+}
+
+fn copy_rect(p: &mut Process) -> R {
+    let (dst, src) = (p.arg(0), p.arg(1));
+    let r = read_rect(p, src)?;
+    write_rect(p, dst, r.0, r.1, r.2, r.3)?;
+    Ok(1)
 }
 
 fn register_class(p: &mut Process, wide: bool, ex: bool) -> R {
@@ -456,10 +959,45 @@ fn destroy_window(p: &mut Process, h: u64) -> Result<(), Stop> {
     send(p, h, WM_DESTROY, 0, 0)?;
     send(p, h, WM_NCDESTROY, 0, 0)?;
     p.extra.win.windows.remove(&h);
+    p.extra.win.props.retain(|(hwnd, _), _| *hwnd != h);
     if p.extra.win.main_window == h {
         p.extra.win.main_window = 0;
     }
     Ok(())
+}
+
+fn prop_name(p: &Process, ptr: u64, wide: bool) -> Result<String, Stop> {
+    if ptr < 0x10000 {
+        Ok(format!("#{}", ptr as u16))
+    } else if wide {
+        p.read_wstr(ptr)
+    } else {
+        p.read_cstr(ptr)
+    }
+}
+
+fn set_prop(p: &mut Process, wide: bool) -> R {
+    let (hwnd, name_ptr, value) = (p.arg(0), p.arg(1), p.arg(2));
+    if name_ptr == 0 || !p.extra.win.windows.contains_key(&hwnd) {
+        p.set_last_error(if name_ptr == 0 { 87 } else { 1400 });
+        return Ok(0);
+    }
+    let name = prop_name(p, name_ptr, wide)?;
+    p.extra.win.props.insert((hwnd, name), value);
+    Ok(1)
+}
+
+fn get_prop(p: &mut Process, wide: bool, remove: bool) -> R {
+    let (hwnd, name_ptr) = (p.arg(0), p.arg(1));
+    if name_ptr == 0 {
+        return Ok(0);
+    }
+    let name = prop_name(p, name_ptr, wide)?;
+    Ok(if remove {
+        p.extra.win.props.remove(&(hwnd, name)).unwrap_or(0)
+    } else {
+        p.extra.win.props.get(&(hwnd, name)).copied().unwrap_or(0)
+    })
 }
 
 fn resize_window(p: &mut Process, h: u64, pos: Option<(i32, i32)>, size: Option<(i32, i32)>) -> Result<(), Stop> {

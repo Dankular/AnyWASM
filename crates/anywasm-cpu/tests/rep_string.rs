@@ -166,3 +166,189 @@ fn repne_scasb_stops_on_match_with_flags_from_match() {
     assert_eq!(cpu.rflags & DF, 0);
     assert_eq!(mem.read_vec(DST, 4).unwrap(), [0x10, 0x20, 0x21, 0x30]);
 }
+
+#[test]
+fn rep_movsw_copies_words_and_advances_by_operand_width() {
+    let (mut cpu, mut mem) = machine(&[0x66, 0xf3, 0xa5]);
+    let flags = 0x202 | CF | ZF;
+    cpu.rflags = flags;
+    cpu.gpr[RSI] = SRC;
+    cpu.gpr[RDI] = DST;
+    cpu.gpr[RCX] = 3;
+    mem.write_force(SRC, &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+        .unwrap();
+    mem.write_force(DST, &[0xaa; 6]).unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 3);
+
+    assert_eq!(cpu.gpr[RSI], SRC + 6);
+    assert_eq!(cpu.gpr[RDI], DST + 6);
+    assert_eq!(cpu.gpr[RCX], 0);
+    assert_eq!(cpu.rflags, flags);
+    assert_eq!(
+        mem.read_vec(DST, 6).unwrap(),
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]
+    );
+}
+
+#[test]
+fn rep_movsd_copies_dwords_and_advances_by_operand_width() {
+    let (mut cpu, mut mem) = machine(&[0xf3, 0xa5]);
+    let flags = 0x202 | CF | ZF;
+    cpu.rflags = flags;
+    cpu.gpr[RSI] = SRC;
+    cpu.gpr[RDI] = DST;
+    cpu.gpr[RCX] = 2;
+    mem.write_force(SRC, &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
+        .unwrap();
+    mem.write_force(DST, &[0xaa; 8]).unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 2);
+
+    assert_eq!(cpu.gpr[RSI], SRC + 8);
+    assert_eq!(cpu.gpr[RDI], DST + 8);
+    assert_eq!(cpu.gpr[RCX], 0);
+    assert_eq!(cpu.rflags, flags);
+    assert_eq!(
+        mem.read_vec(DST, 8).unwrap(),
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    );
+}
+
+#[test]
+fn rep_movsq_copies_qwords_and_advances_by_operand_width() {
+    let (mut cpu, mut mem) = machine(&[0xf3, 0x48, 0xa5]);
+    let flags = 0x202 | CF | ZF;
+    cpu.rflags = flags;
+    cpu.gpr[RSI] = SRC;
+    cpu.gpr[RDI] = DST;
+    cpu.gpr[RCX] = 2;
+    let source = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0,
+        0x10,
+    ];
+    mem.write_force(SRC, &source).unwrap();
+    mem.write_force(DST, &[0xaa; 16]).unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 3);
+
+    assert_eq!(cpu.gpr[RSI], SRC + 16);
+    assert_eq!(cpu.gpr[RDI], DST + 16);
+    assert_eq!(cpu.gpr[RCX], 0);
+    assert_eq!(cpu.rflags, flags);
+    assert_eq!(mem.read_vec(DST, 16).unwrap(), source);
+}
+
+#[test]
+fn rep_stosw_writes_ax_without_changing_flags() {
+    let (mut cpu, mut mem) = machine(&[0x66, 0xf3, 0xab]);
+    let flags = 0x202 | CF | ZF | DF;
+    cpu.rflags = flags;
+    cpu.gpr[RAX] = 0x1122_3344_5566_beef;
+    cpu.gpr[RDI] = DST + 4;
+    cpu.gpr[RCX] = 3;
+    mem.write_force(DST, &[0xaa; 6]).unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 3);
+
+    assert_eq!(cpu.gpr[RAX], 0x1122_3344_5566_beef);
+    assert_eq!(cpu.gpr[RDI], DST - 2);
+    assert_eq!(cpu.gpr[RCX], 0);
+    assert_eq!(cpu.rflags, flags);
+    assert_eq!(
+        mem.read_vec(DST, 6).unwrap(),
+        [0xef, 0xbe, 0xef, 0xbe, 0xef, 0xbe]
+    );
+}
+
+#[test]
+fn rep_lodsd_zero_extends_eax_after_the_last_load() {
+    let (mut cpu, mut mem) = machine(&[0xf3, 0xad]);
+    let flags = 0x202 | CF | ZF;
+    cpu.rflags = flags;
+    cpu.gpr[RAX] = 0x1122_3344_5566_7788;
+    cpu.gpr[RSI] = SRC;
+    cpu.gpr[RCX] = 2;
+    mem.write_force(SRC, &[0x11, 0x22, 0x33, 0x44, 0xaa, 0xbb, 0xcc, 0xdd])
+        .unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 2);
+
+    assert_eq!(cpu.gpr[RAX], 0x0000_0000_ddcc_bbaa);
+    assert_eq!(cpu.gpr[RSI], SRC + 8);
+    assert_eq!(cpu.gpr[RDI], 0);
+    assert_eq!(cpu.gpr[RCX], 0);
+    assert_eq!(cpu.rflags, flags);
+    assert_eq!(
+        mem.read_vec(SRC, 8).unwrap(),
+        [0x11, 0x22, 0x33, 0x44, 0xaa, 0xbb, 0xcc, 0xdd]
+    );
+}
+
+#[test]
+fn repe_cmpsq_uses_qword_comparison_for_early_termination() {
+    let (mut cpu, mut mem) = machine(&[0xf3, 0x48, 0xa7]);
+    cpu.gpr[RSI] = SRC;
+    cpu.gpr[RDI] = DST;
+    cpu.gpr[RCX] = 3;
+    let equal = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    let mismatch = [0x09, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    mem.write_force(SRC, &[equal, equal, equal].concat())
+        .unwrap();
+    mem.write_force(DST, &[equal, mismatch, equal].concat())
+        .unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 3);
+
+    assert_eq!(cpu.gpr[RSI], SRC + 16);
+    assert_eq!(cpu.gpr[RDI], DST + 16);
+    assert_eq!(cpu.gpr[RCX], 1);
+    assert_eq!(cpu.rflags & ARITH_FLAGS, CF | PF | AF | SF);
+    assert_eq!(
+        mem.read_vec(SRC, 24).unwrap(),
+        [equal, equal, equal].concat()
+    );
+    assert_eq!(
+        mem.read_vec(DST, 24).unwrap(),
+        [equal, mismatch, equal].concat()
+    );
+}
+
+#[test]
+fn repne_scasw_stops_on_word_match() {
+    let (mut cpu, mut mem) = machine(&[0x66, 0xf2, 0xaf]);
+    cpu.gpr[RAX] = 0x1234;
+    cpu.gpr[RDI] = DST;
+    cpu.gpr[RCX] = 4;
+    let bytes = [0x10, 0x00, 0x20, 0x00, 0x34, 0x12, 0x40, 0x00];
+    mem.write_force(DST, &bytes).unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 3);
+
+    assert_eq!(cpu.gpr[RAX], 0x1234);
+    assert_eq!(cpu.gpr[RDI], DST + 6);
+    assert_eq!(cpu.gpr[RCX], 1);
+    assert_eq!(cpu.rflags & ARITH_FLAGS, ZF | PF);
+    assert_eq!(mem.read_vec(DST, 8).unwrap(), bytes);
+}
+
+#[test]
+fn rep_movsd_with_address_size_override_uses_ecx_esi_and_edi() {
+    let (mut cpu, mut mem) = machine(&[0x67, 0xf3, 0xa5]);
+    let flags = 0x202 | CF | ZF;
+    cpu.rflags = flags;
+    cpu.gpr[RSI] = 0xdead_beef_0000_0000 | SRC;
+    cpu.gpr[RDI] = 0xcafe_babe_0000_0000 | DST;
+    cpu.gpr[RCX] = 0xaabb_ccdd_0000_0002;
+    let source = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    mem.write_force(SRC, &source).unwrap();
+    mem.write_force(DST, &[0xaa; 8]).unwrap();
+
+    let (cpu, mem) = execute(cpu, mem, 3);
+
+    assert_eq!(cpu.gpr[RSI], SRC + 8);
+    assert_eq!(cpu.gpr[RDI], DST + 8);
+    assert_eq!(cpu.gpr[RCX], 0);
+    assert_eq!(cpu.rflags, flags);
+    assert_eq!(mem.read_vec(DST, 8).unwrap(), source);
+}

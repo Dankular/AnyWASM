@@ -314,6 +314,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             eprintln!("\nanywasm: program is waiting for window input (no display attached to the CLI)");
             Ok(ExitCode::from(123))
         }
+        Stop::ThreadExit(code) => {
+            eprintln!("\nanywasm: internal thread exit escaped its worker context (code {code})");
+            Ok(ExitCode::from(1))
+        }
     }
 }
 

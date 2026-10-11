@@ -33,6 +33,20 @@ fn multibyte_to_wide_char_obeys_win32_lengths_and_buffer_contract() {
 }
 
 #[test]
+fn lc_map_string_ex_handles_count_only_and_nul_terminated_strings() {
+    let (stop, out, err, p) = run("lcmap_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn create_thread_runs_finite_worker_with_isolated_tls_and_thread_identity() {
+    let (stop, out, err, p) = run("thread_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
 fn process_run_honors_block_instruction_budget_and_icount() {
     const CODE: u64 = 0x10000;
     let mut p = Process::new(Vfs::new());
@@ -99,6 +113,90 @@ fn get_dlg_item_returns_direct_child_by_control_id() {
     let (stop, out, _, _) = run("getdlgitem_test.exe");
     assert_eq!(stop, Stop::Exit(0), "stdout so far: {out:?}");
     assert_eq!(out, "");
+}
+
+#[test]
+fn device_notification_registration_returns_a_closable_handle() {
+    let (stop, out, _, p) = run("device_notification_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn enum_display_devices_returns_virtual_adapter_and_monitor() {
+    let (stop, out, _, p) = run("enumdisplaydevices_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn enum_display_settings_returns_virtual_modes() {
+    let (stop, out, _, p) = run("enumdisplaysettings_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn enum_display_monitors_calls_guest_and_respects_clipping() {
+    let (stop, out, _, p) = run("enumdisplaymonitors_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn window_properties_round_trip_and_remove_by_name() {
+    let (stop, out, _, p) = run("windowprops_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn rectangle_helpers_update_signed_coordinates_and_intersections() {
+    let (stop, out, _, p) = run("rect_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn shell_drag_accept_files_is_available_for_windows() {
+    let (stop, out, _, p) = run("dragaccept_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn virtual_gdi_display_context_reports_display_caps() {
+    let (stop, out, _, p) = run("gdiprobe_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn map_virtual_key_w_maps_common_us_layout_codes() {
+    let (stop, out, _, p) = run("mapvirtualkey_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn to_unicode_uses_virtual_key_and_keyboard_state() {
+    let (stop, out, _, p) = run("tounicode_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn ver_set_condition_mask_sets_version_comparison_fields() {
+    let (stop, out, _, p) = run("verconditionmask_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn get_proc_address_resolves_implemented_ntdll_version_verification() {
+    let (stop, out, _, p) = run("verconditionmask_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
 }
 
 #[test]

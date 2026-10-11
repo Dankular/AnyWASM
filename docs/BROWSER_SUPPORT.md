@@ -13,7 +13,7 @@ run, so it does not establish visible-canvas pixel output.
 | Browser or feature | Evidence and current status |
 |---|---|
 | Chromium, headless | **Partial, exercised by the browser suite.** It drives the real page and worker; checks load progress and accessible unimplemented-import diagnostics; sends keyboard and mouse input to a guest window; and compares opt-in emitted execution with cached execution. |
-| WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are rendered and checked by reading back the GPU back buffer. The test uses `?test=1`, which skips the final canvas blit because this headless configuration cannot reliably map the buffer after `getCurrentTexture()` and screenshots do not capture WebGPU canvas pixels. Visible-canvas pixels are therefore unverified. |
+| WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are checked by reading back the GPU back buffer in `?test=1` mode. A separate non-test-mode run captures the visible 640x480 triangle canvas and checks its clear colour and interpolated centre pixel. Other rendering paths and browser engines remain unverified. |
 | Firefox | **Untested.** No Firefox launch or conformance run is in the harness. |
 | Safari / WebKit | **Untested.** No Safari or WebKit launch or conformance run is in the harness. |
 | Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The current fixtures do not exercise 4 GB memory pressure, memory64, or streaming of large asset sets. |

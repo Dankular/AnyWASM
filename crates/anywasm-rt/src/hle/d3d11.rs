@@ -26,6 +26,9 @@ fn ensure_device(p: &mut Process) {
         p.extra.com.device = create(p, "ID3D11Device1", Kind::Device);
         p.extra.com.context = create(p, "ID3D11DeviceContext1", Kind::Context);
     }
+    if p.extra.com.dxgi_device == 0 {
+        p.extra.com.dxgi_device = create(p, "IDXGIDevice1", Kind::Device);
+    }
 }
 
 fn create_device(p: &mut Process, with_swap_chain: bool) -> R {

@@ -95,6 +95,10 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
         }
         Stop::Frame => 4,
         Stop::Idle => 5,
+        Stop::ThreadExit(code) => {
+            s.message = format!("internal thread exit escaped its worker context (code {code})").into_bytes();
+            3
+        }
     }
 }
 

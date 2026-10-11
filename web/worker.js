@@ -1,9 +1,11 @@
 // Runs one Windows process inside a worker so the page stays responsive, and (if a canvas is
 // supplied) replays the program's window/Direct3D command stream with WebGPU.
 //
-// In : {type:'start', wasm, bundle, canvas?}  {type:'input', kind, a, b, c}  {type:'stop'}  {type:'capture'}
+// In : {type:'start', wasm, bundle, canvas?, jitMinPrefix?}
+//      {type:'input', kind, a, b, c}  {type:'stop'}  {type:'capture'}
 // Out: {type:'ready'}  {type:'out', stream, text}  {type:'window', width, height, title}  {type:'status', ...}
 //      {type:'pixels', width, height, data}  {type:'gpu', draws, presents, pipelines, errors}
+//      Terminal status includes JIT counters for runtime diagnostics.
 import { AnyWasm, Status } from './anywasm.js';
 import { ShaderTool } from './shaders.js';
 import { GpuExecutor } from './gpu.js';
@@ -15,8 +17,9 @@ const nextFrame = () => (typeof requestAnimationFrame === 'function' ? new Promi
 const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
-async function start({ wasm, bundle, canvas, testMode }) {
-  w = await AnyWasm.create(wasm);
+async function start({ wasm, bundle, canvas, testMode, jitMinPrefix }) {
+  const options = jitMinPrefix === undefined ? {} : { jitMinPrefix };
+  w = await AnyWasm.create(wasm, options);
   try { w.load(bundle); } catch (e) {
     postMessage({ type: 'status', status: Status.CRASHED, exitCode: -1, message: e.message, instructions: 0, mips: 0 });
     return;
@@ -56,7 +59,7 @@ async function start({ wasm, bundle, canvas, testMode }) {
   const dt = (performance.now() - t0) / 1000;
   const n = w.instructions();
   if (exec) postMessage({ type: 'gpu', ...exec.stats });
-  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: w.exitCode(), message: w.message(), instructions: n, mips: n / dt / 1e6, frames });
+  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: w.exitCode(), message: w.message(), instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats });
 }
 
 onmessage = async (ev) => {

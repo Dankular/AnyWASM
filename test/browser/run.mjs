@@ -105,9 +105,38 @@ try {
       });
       return { ...result, instr: runtime.instructions(), out, err, jitStats: runtime.jitStats };
     };
+    const executeAfterGrowth = async () => {
+      const runtime = await AnyWasm.create(wasm, { jitMinPrefix: 1 });
+      runtime.load(new Uint8Array(bundle));
+      const decoder = new TextDecoder();
+      let out = '', err = '', status = Status.RUNNING;
+      for (let i = 0; i < 50_000 && runtime.jitStats.executions === 0 && status === Status.RUNNING; i++) {
+        status = runtime.run(1);
+        out += decoder.decode(runtime.takeStdout());
+        err += decoder.decode(runtime.takeStderr());
+      }
+      const executionsBeforeGrowth = runtime.jitStats.executions;
+      const bytesBefore = runtime.x.memory.buffer.byteLength;
+      let bytesAfter = bytesBefore, growthError = '';
+      try {
+        runtime.x.memory.grow(1);
+        bytesAfter = runtime.x.memory.buffer.byteLength;
+      } catch (error) {
+        growthError = error.message;
+      }
+      const result = runtime.runToEnd({
+        onOutput(stream, text) { if (stream === 'stdout') out += text; else err += text; },
+      });
+      return {
+        ...result,
+        instr: runtime.instructions(), out, err, bytesBefore, bytesAfter, growthError,
+        executionsBeforeGrowth, jitStats: runtime.jitStats,
+      };
+    };
     return {
       emitted: await execute({ jitMinPrefix: 1 }),
       cached: await execute({}),
+      afterGrowth: await executeAfterGrowth(),
       exited: Status.EXITED,
     };
   }, computeBytes);
@@ -123,6 +152,49 @@ try {
       jitBrowser.cached.instr === jitBrowser.emitted.instr && jitBrowser.cached.jitStats.executions === 0 &&
       jitBrowser.cached.jitStats.compilations === 0 && jitBrowser.cached.jitStats.fallbacks === 0,
     JSON.stringify({ emitted: jitBrowser.emitted, cached: jitBrowser.cached }));
+  check('Chrome resumes cached emitted modules after WASM memory growth',
+    jitBrowser.afterGrowth.status === jitBrowser.exited && jitBrowser.afterGrowth.exitCode === 0 &&
+      jitBrowser.afterGrowth.bytesAfter === jitBrowser.afterGrowth.bytesBefore + 65_536 &&
+      jitBrowser.afterGrowth.executionsBeforeGrowth > 0 &&
+      jitBrowser.afterGrowth.jitStats.executions > jitBrowser.afterGrowth.executionsBeforeGrowth &&
+      jitBrowser.afterGrowth.jitStats.fallbacks === 0 && jitBrowser.afterGrowth.out === jitBrowser.emitted.out &&
+      jitBrowser.afterGrowth.err === jitBrowser.emitted.err && jitBrowser.afterGrowth.instr === jitBrowser.emitted.instr,
+    JSON.stringify(jitBrowser.afterGrowth));
+
+  const workerJit = await page.evaluate(async (bundle) => {
+    const wasm = await (await fetch('/anywasm_wasm.wasm')).arrayBuffer();
+    const guest = new Uint8Array(bundle);
+    const worker = new Worker('/worker.js', { type: 'module' });
+    try {
+      return await new Promise((resolve, reject) => {
+        let out = '', err = '';
+        const timeout = setTimeout(() => reject(new Error('emitted worker timed out')), 30_000);
+        worker.onerror = (event) => { clearTimeout(timeout); reject(new Error(event.message)); };
+        worker.onmessage = ({ data }) => {
+          if (data.type === 'out') {
+            if (data.stream === 'stdout') out += data.text;
+            else err += data.text;
+          } else if (data.type === 'status') {
+            clearTimeout(timeout);
+            resolve({ ...data, out, err });
+          }
+        };
+        worker.postMessage({ type: 'start', wasm, bundle: guest, jitMinPrefix: 1 }, [wasm, guest.buffer]);
+      });
+    } finally {
+      worker.terminate();
+    }
+  }, computeBytes);
+  check('Chrome worker executes opt-in emitted blocks without fallback',
+    workerJit.status === jitBrowser.exited && workerJit.exitCode === 0 &&
+      workerJit.jitStats?.executions > 0 && workerJit.jitStats?.registerRegisterHits > 0 &&
+      workerJit.jitStats?.fallbacks === 0 && workerJit.out.includes('primes<20000=2262') &&
+      workerJit.out.includes('fp=609') && workerJit.out.includes('gpa=ok'),
+    JSON.stringify(workerJit));
+  check('Chrome worker output and retired count match page-realm emitted execution',
+    workerJit.out === jitBrowser.emitted.out && workerJit.err === jitBrowser.emitted.err &&
+      workerJit.instructions === jitBrowser.emitted.instr,
+    JSON.stringify({ worker: workerJit, page: jitBrowser.emitted }));
 
   await page.goto('http://localhost:8099/index.html?run=crt_test');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
@@ -187,9 +259,7 @@ try {
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));
   check('no WebGPU validation errors', gpuStats && gpuStats.errors.length === 0, JSON.stringify(gpuStats?.errors));
-  // The page runs in test mode (`&test=1`): the executor does not touch the canvas texture, because in
-  // this headless Chromium build getCurrentTexture() breaks later mapAsync calls and screenshots do not
-  // capture WebGPU canvases at all (both reproduced in isolation). The back buffer is read directly.
+  // Test mode skips swap-chain presentation so this readback checks the D3D back buffer directly.
   await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
   await page.waitForFunction(() => window.__pixels, null, { timeout: 20000 });
   const px = await page.evaluate(() => { const p = window.__pixels; return { w: p.width, h: p.height, error: p.error, data: Array.from(p.data) }; });
@@ -219,6 +289,17 @@ try {
   check('near the bottom-right vertex it is green', at(500, 380)[1] > 200 && at(500, 380)[0] < 50, JSON.stringify(at(500, 380)));
   check('near the bottom-left vertex it is blue', at(140, 380)[2] > 200 && at(140, 380)[0] < 50, JSON.stringify(at(140, 380)));
   check('outside the triangle (left of the bottom-left vertex) is still the clear colour', near(at(100, 400), [0, 0, 51, 255]), JSON.stringify(at(100, 400)));
+
+  // Run without test mode to verify the actual swap-chain-to-canvas blit in a browser screenshot.
+  await page.goto('http://localhost:8099/index.html?run=d3d11_triangle');
+  await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
+  const canvasStats = await page.evaluate(() => window.__gpuStats);
+  check('canvas presentation completed without WebGPU validation errors', canvasStats && canvasStats.presents === 3 && canvasStats.errors.length === 0, JSON.stringify(canvasStats));
+  const canvasPixels = decodePng(await page.locator('#screen').screenshot());
+  const atCanvas = (x, y) => { const i = (y * canvasPixels.w + x) * 4; return Array.from(canvasPixels.data.slice(i, i + 4)); };
+  check('canvas screenshot is 640x480', canvasPixels.w === 640 && canvasPixels.h === 480, `${canvasPixels.w}x${canvasPixels.h}`);
+  check('canvas blit preserves the clear colour', near(atCanvas(10, 10), [0, 0, 51, 255], 2), JSON.stringify(atCanvas(10, 10)));
+  check('canvas blit presents the interpolated triangle', near(atCanvas(320, 288), [85, 85, 85, 255], 6), JSON.stringify(atCanvas(320, 288)));
 
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');

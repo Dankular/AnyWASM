@@ -93,6 +93,7 @@ pub struct ComState {
     pub res: HashMap<u32, ResInfo>,
     id_refs: HashMap<u32, u32>,
     pub device: u64,
+    pub dxgi_device: u64,
     pub context: u64,
     pub factory: u64,
     pub adapter: u64,
@@ -240,8 +241,10 @@ pub fn query_interface(p: &mut Process) -> R {
         p.wr64(out, 0)?;
         return Ok(E_NOINTERFACE);
     };
-    // Reuse the device/context/factory/adapter singletons so identity comparisons hold.
+    // Keep versioned D3D11 interfaces on their shared vtable, but use a separate vtable for
+    // IDXGIDevice: its method slots do not match ID3D11Device.
     let singleton = match kind {
+        Kind::Device if canonical(name) == "IDXGIDevice" => Some(p.extra.com.dxgi_device),
         Kind::Device => Some(p.extra.com.device),
         Kind::Context => Some(p.extra.com.context),
         _ => None,

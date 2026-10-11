@@ -83,6 +83,30 @@ fn src_x(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<u128> {
     })
 }
 
+fn src_ymm(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<(u128, u128)> {
+    Ok(match o {
+        Opnd::Xmm(n) => (
+            cpu.xmm[*n as usize],
+            if bytes == 32 { cpu.ymm_hi[*n as usize] } else { 0 },
+        ),
+        Opnd::Mem(m) => {
+            let raw = mem.read_vec(ea(cpu, m), bytes as usize)?;
+            let mut low = [0; 16];
+            low.copy_from_slice(&raw[..16]);
+            let low = u128::from_le_bytes(low);
+            let high = if bytes == 32 {
+                let mut high = [0; 16];
+                high.copy_from_slice(&raw[16..32]);
+                u128::from_le_bytes(high)
+            } else {
+                0
+            };
+            (low, high)
+        }
+        _ => return Err(Exit::Undefined),
+    })
+}
+
 fn dst_n(o: &Opnd) -> ExecResult<usize> {
     match o {
         Opnd::Xmm(n) => Ok(*n as usize),
@@ -612,6 +636,85 @@ fn pcmpstr(cpu: &mut Cpu, d: u128, s: u128, imm: u8, explicit: bool, want_mask: 
 pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
     let imm8 = i.imm as u8;
     match i.op {
+        Op::Vmovups | Op::Vmovdqu | Op::Vmovdqa => match (&i.ops[0], &i.ops[1]) {
+            (Opnd::Xmm(d), Opnd::Xmm(s)) => {
+                let (d, s) = (*d as usize, *s as usize);
+                let (lo, hi) = (cpu.xmm[s], if i.osz == 32 { cpu.ymm_hi[s] } else { 0 });
+                cpu.xmm[d] = lo;
+                cpu.ymm_hi[d] = hi;
+            }
+            (Opnd::Xmm(d), Opnd::Mem(m)) => {
+                let bytes = mem.read_vec(ea(cpu, m), i.osz as usize)?;
+                let mut lo = [0; 16];
+                lo.copy_from_slice(&bytes[..16]);
+                cpu.xmm[*d as usize] = u128::from_le_bytes(lo);
+                cpu.ymm_hi[*d as usize] = if i.osz == 32 {
+                    let mut hi = [0; 16];
+                    hi.copy_from_slice(&bytes[16..32]);
+                    u128::from_le_bytes(hi)
+                } else {
+                    0
+                };
+            }
+            (Opnd::Mem(m), Opnd::Xmm(s)) => {
+                let mut bytes = cpu.xmm[*s as usize].to_le_bytes().to_vec();
+                if i.osz == 32 {
+                    bytes.extend_from_slice(&cpu.ymm_hi[*s as usize].to_le_bytes());
+                }
+                mem.write_from(ea(cpu, m), &bytes)?;
+            }
+            _ => return Err(Exit::Undefined),
+        },
+        Op::Vmovss | Op::Vmovsd => {
+            let bytes = if i.op == Op::Vmovss { 4 } else { 8 };
+            let mask = lane_mask(bytes);
+            match (&i.ops[0], &i.ops[1], &i.ops[2]) {
+                (Opnd::Xmm(d), Opnd::Xmm(a), Opnd::Xmm(b)) => {
+                    let (a, b) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                    cpu.xmm[*d as usize] = (a & !mask) | (b & mask);
+                    cpu.ymm_hi[*d as usize] = 0;
+                }
+                (Opnd::Xmm(d), _, Opnd::Mem(m)) => {
+                    cpu.xmm[*d as usize] = read_mem(mem, ea(cpu, m), bytes)? as u128;
+                    cpu.ymm_hi[*d as usize] = 0;
+                }
+                (Opnd::Mem(m), Opnd::Xmm(s), _) => {
+                    write_mem(mem, ea(cpu, m), bytes, cpu.xmm[*s as usize] as u64)?;
+                }
+                _ => return Err(Exit::Undefined),
+            }
+        }
+        Op::Vpxor => {
+            let d = dst_n(&i.ops[0])?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], i.osz)?;
+            cpu.xmm[d] = a_lo ^ b_lo;
+            cpu.ymm_hi[d] = if i.osz == 32 { a_hi ^ b_hi } else { 0 };
+        }
+        Op::VcvtSi2Ss => {
+            let d = dst_n(&i.ops[0])?;
+            let source = rd(cpu, mem, &i.ops[2], i.ssz, 0)?;
+            let value = (sext(source, i.ssz) as f32).to_bits() as u128;
+            cpu.xmm[d] = (cpu.xmm[match i.ops[1] { Opnd::Xmm(n) => n as usize, _ => return Err(Exit::Undefined) }] & !lane_mask(4)) | value;
+            cpu.ymm_hi[d] = 0;
+        }
+        Op::Vfp(k, pr) => {
+            let d = dst_n(&i.ops[0])?;
+            let a = src_x(cpu, mem, &i.ops[1], 16)?;
+            let b = src_x(cpu, mem, &i.ops[2], 4)?;
+            cpu.xmm[d] = fp_exec(k, pr, a, b);
+            cpu.ymm_hi[d] = 0;
+        }
+        Op::Vroundss => {
+            let d = dst_n(&i.ops[0])?;
+            let merge = src_x(cpu, mem, &i.ops[1], 16)?;
+            let source = src_x(cpu, mem, &i.ops[2], 4)?;
+            let mode = if imm8 & 4 != 0 { rc(cpu) } else { (imm8 & 3) as u32 };
+            let result = (rnd(f32::from_bits(source as u32) as f64, mode) as f32).to_bits() as u128;
+            cpu.xmm[d] = (merge & !lane_mask(4)) | result;
+            cpu.ymm_hi[d] = 0;
+        }
+        Op::Vzeroupper => cpu.ymm_hi.fill(0),
         Op::MovVec => {
             let v = src_x(cpu, mem, &i.ops[1], 16)?;
             store_x(cpu, mem, &i.ops[0], v, 16)?;

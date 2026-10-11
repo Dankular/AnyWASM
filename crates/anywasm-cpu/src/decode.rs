@@ -1,4 +1,4 @@
-//! x86-64 instruction decoder (legacy + REX encodings; no VEX/EVEX yet).
+//! x86-64 instruction decoder (legacy + REX encodings and selected VEX forms; no EVEX yet).
 //!
 //! `decode` turns up to 15 bytes into an [`Inst`]. Operand convention: `ops[0]` is the
 //! destination (and first source for two-operand forms), `ops[1]` the source. SSE store forms
@@ -158,6 +158,8 @@ pub enum Op {
     Crc32,
     Adcx,
     Adox,
+    Andn,
+    Shlx,
     // control flow
     Jmp,
     JmpInd,
@@ -209,6 +211,16 @@ pub enum Op {
     X87,
     // SSE family
     MovVec,
+    Vmovups,
+    Vmovss,
+    Vmovsd,
+    Vmovdqu,
+    Vmovdqa,
+    Vpxor,
+    Vfp(FpK, Prec),
+    Vroundss,
+    VcvtSi2Ss,
+    Vzeroupper,
     Movss,
     Movsd,
     MovdToX,
@@ -287,7 +299,7 @@ pub struct MemOp {
 pub struct Inst {
     pub op: Op,
     pub len: u8,
-    /// Operand size in bytes (1, 2, 4, 8) for GPR operands.
+    /// Operand size in bytes (1, 2, 4, 8) for GPRs; 16 or 32 for VEX vector moves.
     pub osz: u8,
     /// Source operand size (movzx/movsx/crc32/cvt forms), otherwise equals `osz`.
     pub ssz: u8,
@@ -511,6 +523,40 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
         pfx.rex = opc;
         opc = d.u8()?;
     }
+    if opc == 0xc5 || opc == 0xc4 {
+        if pfx.rex != 0 || pfx.lock || pfx.opsz || pfx.adsz || pfx.rep != 0 || pfx.seg != 0 {
+            return Err(DecodeError::Unsupported("legacy prefix before VEX"));
+        }
+        let (map, vex, vex_pfx) = if opc == 0xc5 {
+            let vex = d.u8()?;
+            (1, vex, Pfx { rex: if vex & 0x80 == 0 { 0x04 } else { 0 }, ..Pfx::default() })
+        } else {
+            let vex2 = d.u8()?;
+            let vex = d.u8()?;
+            let map = vex2 & 0x1f;
+            if !matches!(map, 1 | 2 | 3) {
+                return Err(DecodeError::Unsupported("VEX3 opcode map"));
+            }
+            let rex = (((!vex2 >> 7) & 1) << 2)
+                | (((!vex2 >> 6) & 1) << 1)
+                | ((!vex2 >> 5) & 1)
+                | ((vex >> 4) & 8);
+            (map, vex, Pfx { rex, ..Pfx::default() })
+        };
+        let opcode = d.u8()?;
+        let mut i = decode_vex(&mut d, &vex_pfx, map, opcode, vex)?;
+        i.len = d.p as u8;
+        let next = rip.wrapping_add(i.len as u64);
+        for o in i.ops.iter_mut() {
+            if let Opnd::Mem(m) = o {
+                if m.base == 0xfe {
+                    m.base = 0xff;
+                    m.disp = next.wrapping_add(m.disp as u64) as i64;
+                }
+            }
+        }
+        return Ok(i);
+    }
     let osz: u8 = if pfx.w() { 8 } else if pfx.opsz { 2 } else { 4 };
     let mut i = if opc == 0x0f { decode_0f(&mut d, &pfx, osz)? } else { decode_1byte(&mut d, &pfx, opc, osz, rip)? };
     i.lock = pfx.lock;
@@ -534,6 +580,127 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
         i.imm = next.wrapping_add(i.imm as u64) as i64;
     }
     Ok(i)
+}
+
+fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
+    let pp = vex & 3;
+    let vvvv_encoded = vex >> 3 & 0xf;
+    let vvvv = (!vvvv_encoded) & 0xf;
+    let l = vex & 4 != 0;
+    if map == 3 {
+        if opcode != 0x0a || pp != 1 || l {
+            return Err(DecodeError::Unsupported("VEX3 0F3A instruction"));
+        }
+        let m = parse_modrm(d, pfx)?;
+        let mut i = blank(Op::Vroundss);
+        i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx)];
+        i.imm = d.u8()? as i64;
+        return Ok(i);
+    }
+    if map == 2 {
+        if l {
+            return Err(DecodeError::Unsupported("VEX3 0F38 instruction"));
+        }
+        let mut i = match (opcode, pp) {
+            (0xf2, 0) => blank(Op::Andn),
+            (0xf7, 1) => blank(Op::Shlx),
+            _ => return Err(DecodeError::Unsupported("VEX3 0F38 instruction")),
+        };
+        let m = parse_modrm(d, pfx)?;
+        i.osz = if pfx.w() { 8 } else { 4 };
+        i.ops = if opcode == 0xf2 {
+            [m.reg_opnd(RK::G, pfx), Opnd::Gpr(vvvv), m.rm_opnd(RK::G, pfx)]
+        } else {
+            [m.reg_opnd(RK::G, pfx), m.rm_opnd(RK::G, pfx), Opnd::Gpr(vvvv)]
+        };
+        return Ok(i);
+    }
+    match opcode {
+        0x2e | 0x2f if pp == 0 && vvvv_encoded == 0xf && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Comi(Prec::Ss, opcode == 0x2f));
+            i.ops = [m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::X, pfx), Opnd::None];
+            Ok(i)
+        }
+        0x2a if pp == 2 && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::VcvtSi2Ss);
+            i.ssz = if pfx.w() { 8 } else { 4 };
+            i.rexw = pfx.w();
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::G, pfx)];
+            Ok(i)
+        }
+        0x2c if pp == 2 && !l && vvvv_encoded == 0xf => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Cvt(CvtK::Tss2Si));
+            i.rexw = pfx.w();
+            i.osz = if pfx.w() { 8 } else { 4 };
+            i.ops = [m.reg_opnd(RK::G, pfx), m.rm_opnd(RK::X, pfx), Opnd::None];
+            Ok(i)
+        }
+        0x10 if pp == 2 && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vmovss);
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx)];
+            Ok(i)
+        }
+        0x11 if pp == 2 && !l && vvvv_encoded == 0xf => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vmovss);
+            i.ops = [m.rm_opnd(RK::X, pfx), m.reg_opnd(RK::X, pfx), Opnd::None];
+            Ok(i)
+        }
+        0x10 if pp == 3 && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vmovsd);
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx)];
+            Ok(i)
+        }
+        0x11 if pp == 3 && !l && vvvv_encoded == 0xf => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vmovsd);
+            i.ops = [m.rm_opnd(RK::X, pfx), m.reg_opnd(RK::X, pfx), Opnd::None];
+            Ok(i)
+        }
+        0x58 if pp == 2 && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vfp(FpK::Add, Prec::Ss));
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx)];
+            Ok(i)
+        }
+        0x5e if pp == 2 && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vfp(FpK::Div, Prec::Ss));
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx)];
+            Ok(i)
+        }
+        0x10 | 0x11 | 0x28 | 0x29 if pp == 0 && vvvv_encoded == 0xf => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vmovups);
+            i.osz = if l { 32 } else { 16 };
+            let (r, rm) = (m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::X, pfx));
+            i.ops = if matches!(opcode, 0x10 | 0x28) { [r, rm, Opnd::None] } else { [rm, r, Opnd::None] };
+            Ok(i)
+        }
+        0x6f | 0x7f if matches!(pp, 1 | 2) && vvvv_encoded == 0xf => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(if pp == 1 { Op::Vmovdqa } else { Op::Vmovdqu });
+            i.osz = if l { 32 } else { 16 };
+            let (r, rm) = (m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::X, pfx));
+            i.ops = if opcode == 0x6f { [r, rm, Opnd::None] } else { [rm, r, Opnd::None] };
+            Ok(i)
+        }
+        0xef | 0x57 if (opcode == 0xef && pp == 1) || (opcode == 0x57 && pp == 0) => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vpxor);
+            i.osz = if l { 32 } else { 16 };
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx)];
+            Ok(i)
+        }
+        0x77 if pp == 0 && vvvv_encoded == 0xf && !l => Ok(blank(Op::Vzeroupper)),
+        0x77 if pp == 0 && vvvv_encoded == 0xf => Err(DecodeError::Unsupported("VZEROALL")),
+        _ => Err(DecodeError::Unsupported("VEX2 instruction")),
+    }
 }
 
 fn imm_z(d: &mut Dec, osz: u8) -> R<i64> {

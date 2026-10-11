@@ -37,6 +37,8 @@ pub enum Stop {
     Frame,
     /// The guest is blocked waiting for a window message; push input, then call `run` again.
     Idle,
+    /// Internal control transfer used to return from an explicitly created guest thread.
+    ThreadExit(u32),
 }
 
 pub type RunResult = Stop;
@@ -67,6 +69,7 @@ pub enum Handle {
     Std(u32),
     File { path: String, pos: usize, write: bool },
     Event { signaled: bool, manual: bool },
+    Thread { id: u32, start: u64, parameter: u64, exit_code: Option<u32>, suspended: bool },
     Module(u64),
     Other,
 }
@@ -93,6 +96,11 @@ pub struct Process {
     pub tls_next: u32,
     pub fls: HashMap<u32, u64>,
     pub tls_slots: HashMap<u32, u64>,
+    pub thread_tls: HashMap<u32, HashMap<u32, u64>>,
+    pub thread_fls: HashMap<u32, HashMap<u32, u64>>,
+    pub current_thread_id: u32,
+    pub next_thread_id: u32,
+    pub thread_call_depth: u32,
     pub atexit: Vec<u64>,
     pub tick_ms: u64,
     pub qpc: u64,
@@ -148,6 +156,11 @@ impl Process {
             tls_next: 1,
             fls: HashMap::new(),
             tls_slots: HashMap::new(),
+            thread_tls: HashMap::new(),
+            thread_fls: HashMap::new(),
+            current_thread_id: 0x1004,
+            next_thread_id: 0x1008,
+            thread_call_depth: 0,
             atexit: Vec::new(),
             tick_ms: 0,
             qpc: 1_000_000,
@@ -681,15 +694,68 @@ impl Process {
         }
     }
 
+    /// Run a thread procedure on a private guest stack, cooperatively, until it returns.
+    /// This single-CPU model supports finite thread procedures; blocking or long-running
+    /// procedures stop with an explicit scheduler requirement instead of hanging the process.
+    pub fn call_guest_thread(&mut self, id: u32, addr: u64, parameter: u64) -> Result<u32, Stop> {
+        let saved_cpu = self.cpu.clone();
+        let saved_id = self.current_thread_id;
+        let saved_tid = self.rd64(TEB_ADDR + 0x48)?;
+        let saved_stack_base = self.rd64(TEB_ADDR + 0x08)?;
+        let saved_stack_limit = self.rd64(TEB_ADDR + 0x10)?;
+        let saved_last_error = self.rd32(TEB_ADDR + 0x68)?;
+        let saved_tls = std::mem::replace(&mut self.tls_slots, self.thread_tls.remove(&id).unwrap_or_default());
+        let saved_fls = std::mem::replace(&mut self.fls, self.thread_fls.remove(&id).unwrap_or_default());
+
+        let stack = self.alloc_virtual(0x10000, PROT_RW);
+        self.cpu = saved_cpu.clone();
+        self.cpu.gpr[RSP] = stack + 0x10000;
+        self.cpu.gs_base = TEB_ADDR;
+        self.current_thread_id = id;
+        self.wr64(TEB_ADDR + 0x08, stack + 0x10000)?;
+        self.wr64(TEB_ADDR + 0x10, stack)?;
+        self.wr64(TEB_ADDR + 0x48, id as u64)?;
+        self.wr32(TEB_ADDR + 0x68, 0)?;
+
+        self.thread_call_depth += 1;
+        let result = self.call_guest(addr, &[parameter]);
+        self.thread_call_depth -= 1;
+
+        let child_tls = std::mem::replace(&mut self.tls_slots, saved_tls);
+        let child_fls = std::mem::replace(&mut self.fls, saved_fls);
+        self.thread_tls.insert(id, child_tls);
+        self.thread_fls.insert(id, child_fls);
+        self.cpu = saved_cpu;
+        self.current_thread_id = saved_id;
+        self.wr64(TEB_ADDR + 0x08, saved_stack_base)?;
+        self.wr64(TEB_ADDR + 0x10, saved_stack_limit)?;
+        self.wr64(TEB_ADDR + 0x48, saved_tid)?;
+        self.wr32(TEB_ADDR + 0x68, saved_last_error)?;
+
+        match result {
+            Ok(code) => Ok(code as u32),
+            Err(Stop::ThreadExit(code)) => Ok(code),
+            Err(e) => Err(e),
+        }
+    }
+
     fn run_until_magic(&mut self) -> Result<(), Stop> {
+        let mut steps = 0u64;
         loop {
             if self.cpu.rip == RET_MAGIC {
                 return Ok(());
+            }
+            if self.thread_call_depth != 0 && steps >= 1_000_000 {
+                return Err(Stop::Unimplemented {
+                    dll: "kernel32".into(),
+                    name: "CreateThread callback did not return within the inline scheduling budget; cooperative blocking threads are not implemented".into(),
+                });
             }
             match self.step_once()? {
                 None => {}
                 Some(stop) => return Err(stop),
             }
+            steps += 1;
         }
     }
 

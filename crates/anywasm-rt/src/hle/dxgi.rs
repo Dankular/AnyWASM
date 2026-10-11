@@ -97,6 +97,7 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             p.wr64(out, a)?;
             Ok(S_OK)
         },
+        "GetDesc1" => get_adapter_desc1,
         "CheckInterfaceSupport" => |p| {
             let o = p.arg(2);
             if o != 0 {
@@ -133,6 +134,25 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
         },
         _ => return None,
     })
+}
+
+fn get_adapter_desc1(p: &mut Process) -> R {
+    let out = p.arg(1);
+    if out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    let mut b = vec![0u8; 312];
+    for (i, c) in "AnyWASM WebGPU adapter".encode_utf16().enumerate() {
+        b[2 * i..2 * i + 2].copy_from_slice(&c.to_le_bytes());
+    }
+    b[256..260].copy_from_slice(&0x1414u32.to_le_bytes()); // Microsoft software adapter
+    b[260..264].copy_from_slice(&0x8c00u32.to_le_bytes());
+    let memory = 4u64 << 30;
+    b[272..280].copy_from_slice(&memory.to_le_bytes());
+    b[288..296].copy_from_slice(&memory.to_le_bytes());
+    // Adapter LUID and flags remain zero for the single virtual adapter.
+    p.write_bytes(out, &b)?;
+    Ok(S_OK)
 }
 
 fn get_display_mode_list(p: &mut Process) -> R {

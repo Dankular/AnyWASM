@@ -45,8 +45,9 @@ bash fixtures/build.sh; node fixtures/gen_d3d_shaders.mjs   # rebuild fixtures /
 node fixtures/build_bench.mjs      # rebuild the call, memory, and SSE benchmark PE fixtures (Rust Windows target)
 ```
 Chromium path: highest `/opt/pw-browsers/chromium-NNNN/chrome-linux/chrome` (override with `CHROMIUM`).
-Test-environment caveat: in this headless Chromium `getCurrentTexture()` breaks later `mapAsync` and
-screenshots don't capture WebGPU canvases, so tests use `?test=1` (skips the canvas blit).
+The browser suite uses `?test=1` for direct back-buffer readback, and separately verifies the
+visible 640x480 triangle canvas by screenshot without test mode. Other browser engines remain
+untested.
 
 ## Verified state (see docs/STATUS.md for detail)
 CPU core differential-tested vs host (2,730 corpus entries); real mingw/msvcrt programs match native
@@ -105,23 +106,29 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
 - [~] **Browser check**: the rebuilt runtime passes the headless Chrome worker, input, and WebGPU
-      suite; a page-realm check also forces the opt-in emitter and compares it with cached-only
-      execution. CSP behavior, module-cache pressure, memory-growth stress, forced-emitter execution
-      in a worker, and other browser engines remain untested.
+      suite; page-realm and worker checks force the opt-in emitter and compare results with the
+      cached-only path. The page-realm check grows WASM memory by one page after emitted execution
+      begins and verifies the cached generated module resumes without fallback. CSP behavior,
+      module-cache pressure, and other browser engines remain untested.
 
 ## 2. Windows runtime coverage
-- [ ] **Threads**: `CreateThread`, `_beginthreadex`, TLS per thread, critical sections/events/
-      semaphores/`WaitForMultipleObjects`, `Sleep`. Needs a design decision (cooperative green
-      threads in one worker vs SharedArrayBuffer + Web Workers; SAB is available in the test
-      browser per the capabilities line).
+- [~] **Threads**: finite `CreateThread` callbacks run inline on a private guest stack with
+      separate TLS/FLS maps, thread ID, TEB stack bounds, last-error state, and exit status.
+      This is not a scheduler: `_beginthreadex` remains unimplemented, blocking/infinite
+      `SleepConditionVariableSRW/CS` stops as unimplemented, and critical sections, events,
+      semaphores, `WaitForMultipleObjects`, and `Sleep` still need real synchronization semantics.
+      Long-running callbacks stop at an instruction budget. Choose a scheduler model before adding
+      resumable or concurrent guest threads.
 - [ ] **SEH / C++ exceptions**: `.pdata` unwind tables, `RtlUnwindEx`/`RtlLookupFunctionEntry`,
       `__C_specific_handler`, `RaiseException`, vectored handlers; guest faults → exceptions.
 - [~] **More of kernel32/ntdll/user32**: target reports confirm `InitializeSListHead` is imported
-      and implemented in both tutorials; `GetCapture`, `IsWindowUnicode`, and `GetDlgItem` now cover
-      three reported USER32 imports. The tutorials still report 13 missing USER32 symbols each. The
-      three targets still import unresolved `SleepConditionVariableSRW`, which needs a guest-thread
-      scheduler and wait model before implementation.
-- [ ] **GDI / gdi32**, common controls, message boxes, clipboard (as needed by real programs).
+      and implemented in both tutorials; `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
+      `EnumDisplaySettingsW` cover reported USER32 imports. The tutorials now report 12 missing
+      USER32 symbols each. The target binaries also import `SleepConditionVariableSRW`; the HLE
+      stops explicitly on its infinite wait because a guest-thread scheduler and wait model are not
+      implemented.
+- [~] **GDI / gdi32**: virtual display DC creation and basic display capabilities are available;
+      drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
       `WM_LBUTTONDOWN` messages reach the guest; add XInput (Gamepad API), DirectInput, raw input,
@@ -152,8 +159,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [ ] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; collect
       failing real-world shaders as test cases; consider shader/pipeline caching (IndexedDB) and
       async pipeline creation to avoid stalls.
-- [ ] **Canvas blit pixels are unverified** in this environment (see caveat above). Verify on a
-      configuration where screenshots capture WebGPU, or via a different readback path.
+- [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
+      pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
+      canvas sizes, and browser engines still need coverage.
 - [ ] **Other APIs**: D3D9 (very common in older games), D3D12, DXGI flip-model/fullscreen/
       resize/vsync semantics, OpenGL (WGL), Vulkan. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
@@ -161,16 +169,19 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       canvas resize, HiDPI.
 
 ## 4. CPU correctness
-- [ ] **AVX/AVX2/BMI/FMA (VEX) and AES/PCLMUL/MMX**: not decoded; CPUID currently hides them.
-      Many modern binaries require AVX2 or BMI2 — decide whether to implement or keep hiding.
+- [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
+      VMOVDQA/DQU, VMOVSS/SD, VPXOR/VXORPS, VADDSS/VDIVSS, VCOMISS/VUCOMISS, VROUNDSS,
+      VCVTSI2SS/VCVTTSS2SI, VZEROUPPER, ANDN, and SHLX. This is a targeted subset, not AVX2/BMI2
+      support; the remaining AVX/AVX2/BMI/FMA and AES/PCLMUL/MMX instructions are still open.
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
 - [ ] `rcpps`/`rsqrtps` return exact results (excluded from the diff corpus); match hardware
       approximation or document per-vendor differences.
 - [~] Extend the diff harness to control flow (jcc/call/ret/loop/string ops with REP), privileged-ish
       instructions used by user code (`rdtsc`, `cpuid`, `xgetbv`, `syscall` stubs), and multi-
       instruction sequences. Added LOOP/Jcc, direct CALL/RET, and REP string cases; portable REP
-      checks cover zero count, DF direction, and early termination. Linux-only host differential
-      cases are present but unrun here; broader widths/address-size cases remain. Undefined
+      checks cover zero count, DF direction, operand widths 8/16/32/64, a 32-bit address-size
+      override, and early termination. Linux-only host differential cases cover byte-sized
+      operations and are present but unrun here. Undefined
       flags/vendor-specific behaviour must be excluded and documented (e.g. 16-bit shld/shrd count>16).
 - [ ] Anti-debug/anti-cheat/DRM: out of scope unless a target requires it; flag as unsupported.
 
@@ -192,11 +203,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       import blockers in `docs/TARGETS.md`. These are preliminary targets: the tutorial renderer
       choice was not launched, the samples have not run through AnyWASM, and Asteroids needs a
       separate Intel-origin code/assets redistribution review. The Apache-2.0 GLFW Demo maze is now
-      the selected game candidate. A separate D3D11-only `/MT` build succeeded and reduced total
-      missing imports from 349 to 122. Its `MultiByteToWideChar` size-query fault is fixed and
-      covered by a guest regression; the bounded AnyWASM run now stops at a null write in
-      `LCMapStringEx` before window creation. The end-to-end acceptance gate remains open; see
-      `docs/TARGETS.md` for exact reports and the next implementation.
+      the selected game candidate. A separate D3D11-only `/MT` build succeeded; the current
+      analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
+      `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. The bounded
+      AnyWASM run reaches `SleepConditionVariableSRW` after finite thread callbacks, then stops
+      because the scheduler cannot resume a blocked guest thread. The end-to-end acceptance gate
+      remains open; see `docs/TARGETS.md` for exact reports and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
@@ -204,8 +216,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       loop. Single-file/static-site export remains open. These fixtures do not satisfy the
       real-target acceptance gate above.
 - [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior are recorded
-      in `docs/BROWSER_SUPPORT.md`; canvas-blit pixels, Firefox, Safari/WebKit, large-game memory
-      (4 GB / `memory64`), and asset streaming remain unverified.
+      in `docs/BROWSER_SUPPORT.md`; the D3D11 triangle canvas blit is screenshot-checked in Chromium.
+      Firefox, Safari/WebKit, large-game memory (4 GB / `memory64`), and asset streaming remain
+      unverified.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship
       obligations are in `THIRD_PARTY.md`; legal review of the packaged combined work is still required.
 - [x] Legal/scope statement: user supplies their own legally obtained binaries.

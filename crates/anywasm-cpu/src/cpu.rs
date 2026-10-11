@@ -35,6 +35,8 @@ pub struct Cpu {
     pub gs_base: u64,
     /// XMM0..15 (low 128 bits of YMM).
     pub xmm: [u128; 16],
+    /// YMM0..15 upper 128 bits; legacy SSE instructions leave these unchanged.
+    pub ymm_hi: [u128; 16],
     pub mxcsr: u32,
     /// x87 state. Values are held as f64 (documented precision limitation: not 80-bit).
     pub fpu_st: [f64; 8],
@@ -57,6 +59,7 @@ impl Default for Cpu {
             fs_base: 0,
             gs_base: 0,
             xmm: [0; 16],
+            ymm_hi: [0; 16],
             mxcsr: 0x1f80,
             fpu_st: [0.0; 8],
             fpu_top: 0,

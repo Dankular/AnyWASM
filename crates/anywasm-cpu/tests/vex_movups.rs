@@ -1,0 +1,376 @@
+use anywasm_cpu::cpu::{Cpu, RAX, RSI, RSP};
+use anywasm_cpu::decode::{decode, Op, Opnd};
+use anywasm_cpu::exec::step;
+use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RW, PROT_RWX};
+
+#[test]
+fn decodes_target_vmovups_and_vzeroupper_encodings() {
+    let load = decode(&[0xc5, 0xfc, 0x10, 0x00], 0x1000).unwrap();
+    assert_eq!((load.op, load.len, load.osz), (Op::Vmovups, 4, 32));
+    assert_eq!(load.ops[0], Opnd::Xmm(0));
+    assert!(matches!(load.ops[1], Opnd::Mem(mem) if mem.base == RAX as u8));
+
+    let store = decode(&[0xc5, 0xfc, 0x11, 0x46, 0x10], 0x1000).unwrap();
+    assert_eq!((store.op, store.len, store.osz), (Op::Vmovups, 5, 32));
+    assert!(matches!(store.ops[0], Opnd::Mem(mem) if mem.base == RSI as u8 && mem.disp == 0x10));
+    assert_eq!(store.ops[1], Opnd::Xmm(0));
+
+    let zero = decode(&[0xc5, 0xf8, 0x77], 0x1000).unwrap();
+    assert_eq!((zero.op, zero.len), (Op::Vzeroupper, 3));
+}
+
+#[test]
+fn decodes_vex2_vmovdqu_load_and_store_encodings() {
+    let load = decode(&[0xc5, 0xfa, 0x6f, 0x05, 0x12, 0xcc, 0x10, 0x00], 0x1800_1016).unwrap();
+    assert_eq!((load.op, load.len, load.osz), (Op::Vmovdqu, 8, 16));
+    assert_eq!(load.ops[0], Opnd::Xmm(0));
+    assert!(matches!(load.ops[1], Opnd::Mem(mem) if mem.base == 0xff && mem.disp == 0x1810_dc30));
+
+    let store = decode(&[0xc5, 0xfa, 0x7f, 0x05, 0x78, 0x53, 0x12, 0x00], 0x1800_1028).unwrap();
+    assert_eq!((store.op, store.len, store.osz), (Op::Vmovdqu, 8, 16));
+    assert!(matches!(store.ops[0], Opnd::Mem(mem) if mem.base == 0xff && mem.disp == 0x1812_63a8));
+    assert_eq!(store.ops[1], Opnd::Xmm(0));
+
+    let xor = decode(&[0xc5, 0xf9, 0xef, 0xc0], 0x1800_46e0).unwrap();
+    assert_eq!((xor.op, xor.len, xor.osz), (Op::Vpxor, 4, 16));
+    assert_eq!(xor.ops[0], Opnd::Xmm(0));
+    assert_eq!(xor.ops[1], Opnd::Xmm(0));
+    assert_eq!(xor.ops[2], Opnd::Xmm(0));
+
+    let xorps = decode(&[0xc5, 0xf0, 0x57, 0xc9], 0x1800_b3b3a).unwrap();
+    assert_eq!((xorps.op, xorps.len, xorps.osz), (Op::Vpxor, 4, 16));
+    assert_eq!(xorps.ops[0], Opnd::Xmm(1));
+    assert_eq!(xorps.ops[1], Opnd::Xmm(1));
+    assert_eq!(xorps.ops[2], Opnd::Xmm(1));
+
+    let cvtsi = decode(&[0xc4, 0xe1, 0xf2, 0x2a, 0xc9], 0x1800_b3b40).unwrap();
+    assert_eq!((cvtsi.op, cvtsi.len, cvtsi.ssz, cvtsi.rexw), (Op::VcvtSi2Ss, 5, 8, true));
+    assert_eq!(cvtsi.ops[0], Opnd::Xmm(1));
+    assert_eq!(cvtsi.ops[1], Opnd::Xmm(1));
+    assert_eq!(cvtsi.ops[2], Opnd::Gpr(1));
+
+    let addss = decode(&[0xc5, 0xfa, 0x58, 0xc0], 0x1800_b3b81).unwrap();
+    assert_eq!((addss.op, addss.len), (Op::Vfp(anywasm_cpu::decode::FpK::Add, anywasm_cpu::decode::Prec::Ss), 4));
+    assert_eq!(addss.ops[0], Opnd::Xmm(0));
+    assert_eq!(addss.ops[1], Opnd::Xmm(0));
+    assert_eq!(addss.ops[2], Opnd::Xmm(0));
+
+    let divss = decode(&[0xc5, 0xf2, 0x5e, 0xc0], 0x1800_b3b85).unwrap();
+    assert_eq!((divss.op, divss.len), (Op::Vfp(anywasm_cpu::decode::FpK::Div, anywasm_cpu::decode::Prec::Ss), 4));
+    assert_eq!(divss.ops[0], Opnd::Xmm(0));
+    assert_eq!(divss.ops[1], Opnd::Xmm(1));
+    assert_eq!(divss.ops[2], Opnd::Xmm(0));
+
+    let comiss = decode(&[0xc5, 0xf8, 0x2f, 0x03], 0x1800_b3b89).unwrap();
+    assert_eq!((comiss.op, comiss.len), (Op::Comi(anywasm_cpu::decode::Prec::Ss, true), 4));
+    assert_eq!(comiss.ops[0], Opnd::Xmm(0));
+    assert!(matches!(comiss.ops[1], Opnd::Mem(mem) if mem.base == 3));
+
+    let vmovss = decode(&[0xc5, 0xfa, 0x10, 0x5b, 0x78], 0x1800_b3058).unwrap();
+    assert_eq!((vmovss.op, vmovss.len), (Op::Vmovss, 5));
+    assert_eq!(vmovss.ops[0], Opnd::Xmm(3));
+    assert!(matches!(vmovss.ops[2], Opnd::Mem(mem) if mem.base == 3 && mem.disp == 0x78));
+
+    let roundss = decode(&[0xc4, 0xe3, 0x71, 0x0a, 0xc8, 0x02], 0x1800_b309a).unwrap();
+    assert_eq!((roundss.op, roundss.len, roundss.imm), (Op::Vroundss, 6, 2));
+    assert_eq!(roundss.ops[0], Opnd::Xmm(1));
+    assert_eq!(roundss.ops[1], Opnd::Xmm(1));
+    assert_eq!(roundss.ops[2], Opnd::Xmm(0));
+
+    let vmovaps = decode(&[0xc5, 0xf8, 0x29, 0xb4, 0x24, 0xe0, 0x01, 0x00, 0x00], 0x1800_b4b0a).unwrap();
+    assert_eq!((vmovaps.op, vmovaps.len, vmovaps.osz), (Op::Vmovups, 9, 16));
+    assert!(matches!(vmovaps.ops[0], Opnd::Mem(mem) if mem.base == RSP as u8 && mem.disp == 0x1e0));
+    assert_eq!(vmovaps.ops[1], Opnd::Xmm(6));
+
+    let cvttss = decode(&[0xc4, 0x61, 0xfa, 0x2c, 0xc1], 0x1800_b30c6).unwrap();
+    assert_eq!((cvttss.op, cvttss.len, cvttss.osz, cvttss.rexw), (Op::Cvt(anywasm_cpu::decode::CvtK::Tss2Si), 5, 8, true));
+    assert_eq!(cvttss.ops[0], Opnd::Gpr(8));
+    assert_eq!(cvttss.ops[1], Opnd::Xmm(1));
+
+    let shlx = decode(&[0xc4, 0xc2, 0xf9, 0xf7, 0xc1], 0x1800_b3f4d).unwrap();
+    assert_eq!((shlx.op, shlx.len, shlx.osz), (Op::Shlx, 5, 8));
+    assert_eq!(shlx.ops[0], Opnd::Gpr(0));
+    assert_eq!(shlx.ops[1], Opnd::Gpr(9));
+    assert_eq!(shlx.ops[2], Opnd::Gpr(0));
+
+    let aligned_store = decode(&[0xc5, 0xf9, 0x7f, 0x44, 0x24, 0x40], 0x1800_7b57).unwrap();
+    assert_eq!((aligned_store.op, aligned_store.len, aligned_store.osz), (Op::Vmovdqa, 6, 16));
+    assert!(matches!(aligned_store.ops[0], Opnd::Mem(mem) if mem.base == RSP as u8 && mem.disp == 0x40));
+    assert_eq!(aligned_store.ops[1], Opnd::Xmm(0));
+
+    let vex3_load = decode(&[0xc4, 0xc1, 0x78, 0x10, 0x00], 0x1800_9671).unwrap();
+    assert_eq!((vex3_load.op, vex3_load.len, vex3_load.osz), (Op::Vmovups, 5, 16));
+    assert!(matches!(vex3_load.ops[1], Opnd::Mem(mem) if mem.base == 8));
+
+    let andn = decode(&[0xc4, 0xe2, 0xf8, 0xf2, 0xc9], 0x1800_b812a).unwrap();
+    assert_eq!(andn.len, 5);
+    assert_eq!(andn.osz, 8);
+    assert_eq!(andn.op, Op::Andn);
+    assert_eq!(andn.ops[0], Opnd::Gpr(1));
+    assert_eq!(andn.ops[1], Opnd::Gpr(0));
+    assert_eq!(andn.ops[2], Opnd::Gpr(1));
+}
+
+#[test]
+fn vex_vmovsd_load_store_and_register_form_match_target_encodings() {
+    let load = decode(&[0xc5, 0xfb, 0x10, 0x4d, 0xd8], 0x1800_526a).unwrap();
+    assert_eq!((load.op, load.len), (Op::Vmovsd, 5));
+    assert_eq!(load.ops[0], Opnd::Xmm(1));
+    assert!(matches!(load.ops[2], Opnd::Mem(mem) if mem.base == 5 && mem.disp == -40));
+
+    let store = decode(&[0xc4, 0xc1, 0x7b, 0x11, 0x48, 0x20], 0x1800_526f).unwrap();
+    assert_eq!((store.op, store.len), (Op::Vmovsd, 6));
+    assert!(matches!(store.ops[0], Opnd::Mem(mem) if mem.base == 8 && mem.disp == 0x20));
+    assert_eq!(store.ops[1], Opnd::Xmm(1));
+
+    let reg = decode(&[0xc5, 0xf3, 0x10, 0xca], 0x1000).unwrap();
+    assert_eq!((reg.op, reg.len), (Op::Vmovsd, 4));
+    assert_eq!(reg.ops[0], Opnd::Xmm(1));
+    assert_eq!(reg.ops[1], Opnd::Xmm(1));
+    assert_eq!(reg.ops[2], Opnd::Xmm(2));
+}
+
+#[test]
+fn vex_vmovsd_obeys_scalar_upper_lane_rules() {
+    const CODE: u64 = 0x5000;
+    const DATA: u64 = 0x6000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    assert!(mem.map(DATA, PAGE_SIZE, PROT_RW));
+    mem.write_force(CODE, &[
+        0xc5, 0xfb, 0x10, 0x08, // vmovsd xmm1, [rax]
+        0xc5, 0xeb, 0x10, 0xd9, // vmovsd xmm3, xmm2, xmm1
+        0xc4, 0xc1, 0x7b, 0x11, 0x18, // vmovsd [r8], xmm3
+    ]).unwrap();
+    mem.write_u64(DATA, 0x1122_3344_5566_7788).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.gpr[RAX] = DATA;
+    cpu.gpr[8] = DATA + 0x100;
+    cpu.xmm[1] = 0xffff_eeee_dddd_cccc_aaaa_bbbb_cccc_dddd;
+    cpu.xmm[2] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    cpu.ymm_hi[1] = u128::MAX;
+    cpu.ymm_hi[2] = u128::MAX;
+
+    for _ in 0..3 {
+        let result = step(&mut cpu, &mut mem);
+        assert!(result.is_ok(), "step failed at rip {:#x}: {result:?}", cpu.rip);
+    }
+    assert_eq!(cpu.xmm[3], 0x0123_4567_89ab_cdef_1122_3344_5566_7788);
+    assert_eq!(cpu.ymm_hi[3], 0);
+    assert_eq!(mem.read_u64(DATA + 0x100).unwrap(), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn vex_vmovss_load_store_and_register_form_follow_scalar_lane_rules() {
+    const CODE: u64 = 0x9000;
+    const DATA: u64 = 0xa000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    assert!(mem.map(DATA, PAGE_SIZE, PROT_RW));
+    mem.write_force(CODE, &[
+        0xc5, 0xfa, 0x10, 0x08, // vmovss xmm1, [rax]
+        0xc5, 0xea, 0x10, 0xd9, // vmovss xmm3, xmm2, xmm1
+        0xc4, 0xc1, 0x7a, 0x11, 0x18, // vmovss [r8], xmm3
+    ]).unwrap();
+    mem.write_u32(DATA, 3.5f32.to_bits()).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.gpr[RAX] = DATA;
+    cpu.gpr[8] = DATA + 0x100;
+    cpu.xmm[2] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    cpu.ymm_hi[1] = u128::MAX;
+    cpu.ymm_hi[3] = u128::MAX;
+
+    for _ in 0..3 {
+        step(&mut cpu, &mut mem).unwrap();
+    }
+
+    assert_eq!(cpu.xmm[1], 3.5f32.to_bits() as u128);
+    assert_eq!(cpu.xmm[3] as u32, 3.5f32.to_bits());
+    assert_eq!(cpu.xmm[3] >> 32, cpu.xmm[2] >> 32);
+    assert_eq!(cpu.ymm_hi[1], 0);
+    assert_eq!(cpu.ymm_hi[3], 0);
+    assert_eq!(mem.read_u32(DATA + 0x100).unwrap(), 3.5f32.to_bits());
+}
+
+#[test]
+fn vex_vcvtsi2ss_converts_signed_64_bit_integer_and_preserves_upper_xmm_lanes() {
+    const CODE: u64 = 0x7000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc4, 0xe1, 0xf2, 0x2a, 0xc9]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.gpr[1] = (-7i64) as u64;
+    cpu.xmm[1] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    cpu.ymm_hi[1] = u128::MAX;
+
+    step(&mut cpu, &mut mem).unwrap();
+
+    assert_eq!(cpu.xmm[1] as u32, (-7.0f32).to_bits());
+    assert_eq!(cpu.xmm[1] >> 32, 0x0123_4567_89ab_cdef_fedc_ba98);
+    assert_eq!(cpu.ymm_hi[1], 0);
+}
+
+#[test]
+fn vex_scalar_float_arithmetic_uses_three_sources_and_comiss_sets_flags() {
+    const CODE: u64 = 0x8000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[
+        0xc5, 0xf2, 0x58, 0xc2, // vaddss xmm0, xmm1, xmm2
+        0xc5, 0xea, 0x5e, 0xd9, // vdivss xmm3, xmm2, xmm1
+        0xc5, 0xf8, 0x2f, 0xda, // vcomiss xmm3, xmm2
+    ]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.xmm[0] = 0xaaaa_bbbb_cccc_dddd_eeee_ffff_0000_0000;
+    cpu.xmm[1] = 0x0123_4567_89ab_cdef_fedc_ba98_4120_0000; // 10.0f
+    cpu.xmm[2] = 0xfedc_ba98_7654_3210_0000_0000_4000_0000; // 2.0f
+    cpu.ymm_hi[0] = u128::MAX;
+    cpu.ymm_hi[3] = u128::MAX;
+
+    for _ in 0..3 {
+        let result = step(&mut cpu, &mut mem);
+        assert!(result.is_ok(), "step failed at rip {:#x}: {result:?}", cpu.rip);
+    }
+
+    assert_eq!(cpu.xmm[0] as u32, 12.0f32.to_bits());
+    assert_eq!(cpu.xmm[0] >> 32, cpu.xmm[1] >> 32);
+    assert_eq!(cpu.ymm_hi[0], 0);
+    assert!((f32::from_bits(cpu.xmm[3] as u32) - 0.2).abs() < 0.000001);
+    assert_eq!(cpu.xmm[3] >> 32, cpu.xmm[2] >> 32);
+    assert_eq!(cpu.ymm_hi[3], 0);
+    assert!(cpu.flag(anywasm_cpu::cpu::CF));
+    assert!(!cpu.flag(anywasm_cpu::cpu::ZF));
+    assert!(!cpu.flag(anywasm_cpu::cpu::PF));
+}
+
+#[test]
+fn vex_vroundss_uses_immediate_rounding_mode_and_merge_source() {
+    const CODE: u64 = 0xb000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc4, 0xe3, 0x71, 0x0a, 0xc8, 0x02]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.xmm[1] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    cpu.xmm[0] = 0xbfd8_0000; // -1.6875f
+    cpu.ymm_hi[1] = u128::MAX;
+
+    step(&mut cpu, &mut mem).unwrap();
+
+    assert_eq!(cpu.xmm[1] as u32, (-1.0f32).to_bits());
+    assert_eq!(cpu.xmm[1] >> 32, 0x0123_4567_89ab_cdef_fedc_ba98);
+    assert_eq!(cpu.ymm_hi[1], 0);
+}
+
+#[test]
+fn vex_vcvttss2si_truncates_to_signed_64_bit_gpr() {
+    const CODE: u64 = 0xc000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc4, 0x61, 0xfa, 0x2c, 0xc1]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.xmm[1] = (-2.75f32).to_bits() as u128;
+
+    step(&mut cpu, &mut mem).unwrap();
+
+    assert_eq!(cpu.gpr[8], (-2i64) as u64);
+}
+
+#[test]
+fn vex_shlx_uses_three_gpr_operands_without_changing_flags() {
+    const CODE: u64 = 0xd000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc4, 0xc2, 0xf9, 0xf7, 0xc1]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.gpr[0] = 7;
+    cpu.gpr[9] = 3;
+    cpu.rflags |= anywasm_cpu::cpu::CF | anywasm_cpu::cpu::ZF;
+
+    step(&mut cpu, &mut mem).unwrap();
+
+    assert_eq!(cpu.gpr[0], 384);
+    assert!(cpu.flag(anywasm_cpu::cpu::CF));
+    assert!(cpu.flag(anywasm_cpu::cpu::ZF));
+}
+
+#[test]
+fn ymm_unaligned_load_store_and_vzeroupper_preserve_expected_bytes() {
+    const CODE: u64 = 0x1000;
+    const DATA: u64 = 0x2000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    assert!(mem.map(DATA, PAGE_SIZE, PROT_RW));
+
+    // vmovups ymm0, [rax]; vmovups [rsi+0x10], ymm0; vzeroupper;
+    // vmovups [rsi+0x40], ymm0
+    let code = [
+        0xc5, 0xfc, 0x10, 0x00,
+        0xc5, 0xfc, 0x11, 0x46, 0x10,
+        0xc5, 0xf8, 0x77,
+        0xc5, 0xfc, 0x11, 0x46, 0x40,
+    ];
+    mem.write_force(CODE, &code).unwrap();
+
+    let source: [u8; 32] = core::array::from_fn(|i| i as u8 + 1);
+    mem.write_from(DATA, &source).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.gpr[RAX] = DATA;
+    cpu.gpr[RSI] = DATA + 0x100;
+
+    for _ in 0..4 {
+        let result = step(&mut cpu, &mut mem);
+        assert!(result.is_ok(), "VEX instruction failed: {result:?}");
+    }
+
+    assert_eq!(mem.read_vec(DATA + 0x110, 32).unwrap(), source);
+    let mut after_zero_upper = source[..16].to_vec();
+    after_zero_upper.extend([0; 16]);
+    assert_eq!(mem.read_vec(DATA + 0x140, 32).unwrap(), after_zero_upper);
+    assert_eq!(cpu.icount, 4);
+}
+
+#[test]
+fn vex_xor_supports_128_and_256_bit_register_forms() {
+    const CODE: u64 = 0x3000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc5, 0xfd, 0xef, 0xc1, 0xc5, 0xf1, 0xef, 0xd0]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.xmm[0] = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+    cpu.xmm[1] = 0xffee_ddcc_bbaa_9988_7766_5544_3322_1100;
+    cpu.ymm_hi[0] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    cpu.ymm_hi[1] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+
+    assert!(step(&mut cpu, &mut mem).is_ok());
+    assert_eq!(cpu.xmm[0], u128::MAX);
+    assert_eq!(cpu.ymm_hi[0], 0);
+    assert!(step(&mut cpu, &mut mem).is_ok());
+    assert_eq!(cpu.xmm[2], 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
+    assert_eq!(cpu.ymm_hi[2], 0);
+}
+
+#[test]
+fn vex3_andn_uses_vvvv_and_modrm_sources() {
+    const CODE: u64 = 0x4000;
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc4, 0xe2, 0xf8, 0xf2, 0xc9]).unwrap();
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.gpr[0] = 0x00ff_00ff_00ff_00ff;
+    cpu.gpr[1] = u64::MAX;
+    assert!(step(&mut cpu, &mut mem).is_ok());
+    assert_eq!(cpu.gpr[1], 0xff00_ff00_ff00_ff00);
+    assert!(!cpu.flag(anywasm_cpu::cpu::CF));
+    assert!(!cpu.flag(anywasm_cpu::cpu::OF));
+    assert!(!cpu.flag(anywasm_cpu::cpu::ZF));
+}

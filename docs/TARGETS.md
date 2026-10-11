@@ -21,9 +21,9 @@ are not part of this repository.
 
 ## Analyzer results
 
-Reports below were regenerated with `anywasm analyze <exe> --json` at AnyWASM commit
-`d4c5455cdf305b28e1bd4824df27229e4a89fbbc`. The binaries were read from the external build tree;
-none were copied into this repository:
+Reports below were refreshed with `anywasm analyze <exe> --json` after the HLE coverage updates in
+this branch. The binaries were read from the external build tree; none were copied into this
+repository. The final analyzer source revision is recorded with the committed static-runtime report.
 
 - `D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial01_HelloTriangle\Release\Tutorial01_HelloTriangle.exe`
 - `D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial03_Texturing\Release\Tutorial03_Texturing.exe`
@@ -36,9 +36,9 @@ The source-base revisions for these builds are pinned and verified: DiligentEngi
 
 | Program | What it exercises | Analyzer result | Missing blocker counts |
 |---|---|---:|---|
-| `Tutorial01_HelloTriangle.exe` | Win64 GUI triangle tutorial; built with D3D11 support and offers D3D11 at the device-selection dialog | 154 implemented, 96 missing | MSVCP140 65; USER32 13; IMM32 4; VCRUNTIME140 6; KERNEL32 1; SHELL32 1; UCRT API sets 6 |
-| `Tutorial03_Texturing.exe` | Win64 GUI textured cube tutorial; loads `DGLogo.png`; built with D3D11 support and offers D3D11 at the device-selection dialog | 155 implemented, 96 missing | MSVCP140 65; USER32 13; IMM32 4; VCRUNTIME140 6; KERNEL32 1; SHELL32 1; UCRT API sets 6 |
-| `Asteroids.exe` | Win64 50,000-asteroid benchmark; includes native and Diligent D3D11 and D3D12 modes | 137 implemented, 115 missing | MSVCP140 68; CONCRT140 17; NInput 9; VCRUNTIME140 6; D3D12 2; USER32 4; KERNEL32 1; UCRT API sets 8 |
+| `Tutorial01_HelloTriangle.exe` | Win64 GUI triangle tutorial; built with D3D11 support and offers D3D11 at the device-selection dialog | 157 implemented, 93 missing | MSVCP140 65; USER32 12; IMM32 4; VCRUNTIME140 6; SHELL32 1; UCRT API sets 5 |
+| `Tutorial03_Texturing.exe` | Win64 GUI textured cube tutorial; loads `DGLogo.png`; built with D3D11 support and offers D3D11 at the device-selection dialog | 158 implemented, 93 missing | MSVCP140 65; USER32 12; IMM32 4; VCRUNTIME140 6; SHELL32 1; UCRT API sets 5 |
+| `Asteroids.exe` | Win64 50,000-asteroid benchmark; includes native and Diligent D3D11 and D3D12 modes | 141 implemented, 111 missing | MSVCP140 68; CONCRT140 17; NInput 9; VCRUNTIME140 6; D3D12 2; USER32 2; UCRT API sets 7 |
 
 ### Exact missing imports
 
@@ -47,8 +47,7 @@ the D3D12 and NInput DLLs do not appear in either tutorial's import report.
 
 | DLL | Tutorial01_HelloTriangle | Tutorial03_Texturing | Asteroids |
 |---|---|---|---|
-| `KERNEL32.dll` | `SleepConditionVariableSRW` | `SleepConditionVariableSRW` | `SleepConditionVariableSRW` |
-| `USER32.dll` | `TrackMouseEvent`, `GetKeyboardLayout`, `GetDesktopWindow`, `EndDialog`, `LoadBitmapW`, `EnumDisplaySettingsW`, `DialogBoxParamW`, `GetMessageExtraInfo`, `SetClipboardData`, `GetClipboardData`, `EmptyClipboard`, `CloseClipboard`, `OpenClipboard` | Same 13 symbols as Tutorial01_HelloTriangle | `GetWindowPlacement`, `EnableMouseInPointer`, `SetWindowPlacement`, `GetPointerInfo` |
+| `USER32.dll` | `TrackMouseEvent`, `GetKeyboardLayout`, `GetDesktopWindow`, `EndDialog`, `LoadBitmapW`, `DialogBoxParamW`, `GetMessageExtraInfo`, `SetClipboardData`, `GetClipboardData`, `EmptyClipboard`, `CloseClipboard`, `OpenClipboard` | Same 12 symbols as Tutorial01_HelloTriangle | `EnableMouseInPointer`, `GetPointerInfo` |
 | `IMM32.dll` | `ImmSetCandidateWindow`, `ImmReleaseContext`, `ImmGetContext`, `ImmSetCompositionWindow` | Same 4 symbols as Tutorial01_HelloTriangle | — |
 | `SHELL32.dll` | `ShellExecuteW` | `ShellExecuteW` | — |
 | `d3d12.dll` | — | — | `D3D12SerializeRootSignature`, ordinal `#101` |
@@ -56,11 +55,14 @@ the D3D12 and NInput DLLs do not appear in either tutorial's import report.
 | `api-ms-win-crt-heap-l1-1-0.dll` | `_callnewh` | `_callnewh` | `_callnewh` |
 | `api-ms-win-crt-math-l1-1-0.dll` | — | — | `ilogbf`, `scalbnf` |
 | `api-ms-win-crt-runtime-l1-1-0.dll` | `_register_thread_local_exe_atexit_callback`, `strerror_s`, `_invoke_watson`, `terminate` | `_register_thread_local_exe_atexit_callback`, `strerror_s`, `_invoke_watson`, `terminate` | `_register_thread_local_exe_atexit_callback`, `strerror_s`, `_invoke_watson`, `terminate` |
-| `api-ms-win-crt-stdio-l1-1-0.dll` | `_wfopen_s` | `_wfopen_s` | `_wfopen_s` |
 | `VCRUNTIME140.dll` | `__intrinsic_setjmp`, `_purecall`, `__std_exception_destroy`, `__std_exception_copy`, `__current_exception`, `__current_exception_context` | Same 6 symbols as Tutorial01_HelloTriangle | Same 6 symbols as Tutorial01_HelloTriangle |
 
 All three reports also import `VCRUNTIME140_1.dll`; its single imported symbol is implemented in
 each. Other imported `api-ms-win-crt-*` symbols are implemented.
+
+`SleepConditionVariableSRW` is now recognized by the HLE and therefore is not a static missing
+import. At runtime, its infinite wait stops explicitly because no guest-thread scheduler can resume
+the waiting thread; this is the current GLFW Demo trace blocker below.
 
 | Runtime group | Tutorial01_HelloTriangle | Tutorial03_Texturing | Asteroids | Aggregate missing |
 |---|---:|---:|---:|---:|
@@ -164,22 +166,25 @@ from the prior external build were passed as disconnected FetchContent overrides
 D3D11 as the only enabled graphics backend, and the Release `GLFWDemo` target built successfully.
 No binary was copied into this repository.
 
-The full static-runtime analyzer output is in
+The current static-runtime analyzer output is in
 [`target-imports/glfwdemo-d3d11-staticcrt.json`](target-imports/glfwdemo-d3d11-staticcrt.json).
-Counts below compare that build with the earlier dynamic-runtime build above:
+The earlier dynamic-runtime report remains in
+[`target-imports/glfwdemo-d3d11.json`](target-imports/glfwdemo-d3d11.json), generated with an older
+analyzer implementation. The current static-runtime report is therefore the authoritative blocker
+list; its counts are not a like-for-like comparison with that older 349-miss snapshot.
 
-| Image | Total missing | MSVCP140 | VCRUNTIME140 | UCRT API sets (`api-ms-win-crt-*`) | Other missing |
-|---|---:|---:|---:|---:|---:|
-| `GLFWDemo.exe` | 134 -> 63 | 64 -> 0 | 5 -> 0 | 9 -> 0 | 56 -> 63 |
-| `GraphicsEngineD3D11_64r.dll` | 96 -> 17 | 75 -> 0 | 7 -> 0 | 7 -> 0 | 7 -> 17 |
-| `Archiver_64r.dll` | 91 -> 14 | 73 -> 0 | 7 -> 0 | 7 -> 0 | 4 -> 14 |
-| `D3Dcompiler_47.dll` | 28 -> 28 | 0 -> 0 | 0 -> 0 | 0 -> 0 | 28 -> 28 |
-| **Total** | **349 -> 122** | **212 -> 0** | **19 -> 0** | **23 -> 0** | **95 -> 122** |
+| Image | Implemented | Missing | Largest unresolved groups |
+|---|---:|---:|---|
+| `GLFWDemo.exe` | 162 | 42 | USER32 21; GDI32 10; KERNEL32 8; SHELL32 3 |
+| `GraphicsEngineD3D11_64r.dll` | 107 | 14 | KERNEL32 10; D3DCOMPILER_47 2; SHLWAPI 1; USER32 1 |
+| `Archiver_64r.dll` | 100 | 12 | KERNEL32 9; D3DCOMPILER_47 2; SHLWAPI 1 |
+| `D3Dcompiler_47.dll` | 103 | 28 | KERNEL32 15; ADVAPI32 12; RPCRT4 1 |
+| **Aggregate** | **472** | **96** | |
 
-The static runtime removes all reported MSVCP140, VCRUNTIME140, and UCRT import misses from the EXE,
-engine, and archiver. KERNEL32 misses increase from 22 to 49 because the static runtime brings in
-additional APIs. The EXE still has 36 USER32, 13 GDI32, 10 KERNEL32, and 4 SHELL32 missing imports;
-the engine retains 17 imports, the archiver 14, and D3DCompiler 28.
+The static runtime leaves no reported MSVCP140, VCRUNTIME140, or UCRT import misses in the EXE,
+engine, and archiver. The EXE's current misses include 21 USER32, 10 GDI32, 8 KERNEL32, and 3
+SHELL32 symbols; the engine retains 14 imports, the archiver 12, and D3DCompiler 28. The archived
+JSON records each unresolved name.
 
 ### Bounded AnyWASM trial
 
@@ -214,13 +219,17 @@ map each code to each null-buffer case.
 After that fix, the same bounded game run passed the conversion calls and reached a second null
 write in `kernel32!LCMapStringEx`. The last captured call was
 `(NULL, 512, src, 256, NULL, 0xbf00be00000000)`: `cchDest` is again a zero 32-bit count-only query,
-but the current LCMap HLE reads the full stack slot and tries to write 512 bytes to address zero.
+but at the time of that trace the LCMap HLE read the full stack slot and tried to write 512 bytes
+to address zero.
 Microsoft documents `cchDest=0` as a count-only query that does not use `lpDestStr`
 ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-lcmapstringex)).
-No GLFW window or D3D11 renderer was observed, and no game behavior was verified. This is the next
-localized blocker. GLFW's Win32 window-creation path is also known from source inspection to call
-the still-unimplemented `SHELL32!DragAcceptFiles` unconditionally; that later dependency remains
-unreached.
+That LCMap count-query fault has since been addressed: the current bounded trace passes the
+`LCMapStringEx` call and reaches thread creation. Thread creation executes finite callbacks, then
+the runtime reaches `kernel32!SleepConditionVariableSRW` after finite inline thread callbacks and
+stops explicitly because no scheduler can resume the blocked thread. No GLFW window or D3D11
+renderer was observed, and no game behavior was verified. GLFW's Win32 window-creation path is also known from
+source inspection to call `SHELL32!DragAcceptFiles` unconditionally; that later call remains
+unreached and its behavior has not been verified in this target.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -232,13 +241,16 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 ## Next evidence needed
 
 - Trace each executable on its D3D11 path and record the first runtime blocker, distinguishing
-  imports reached on that path from static-only imports. `GetCapture`, `IsWindowUnicode`, and
-  `GetDlgItem` are implemented; each tutorial still reports 13 missing USER32 symbols and 4 missing
-  IMM32 symbols.
+  imports reached on that path from static-only imports. The tutorials now report 12 missing USER32
+  symbols and 4 missing IMM32 symbols each; the current `/MT` game trace reaches an unsupported
+  infinite condition-variable wait before window creation.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
-- The D3D11-only GLFW Demo is the selected game candidate. Its `/MT` build reduces reported misses
-  from 349 to 122. The `MultiByteToWideChar` size-query fault is fixed and covered by a guest
-  regression; the current run stops at an analogous `LCMapStringEx` null write before window
-  creation. Fix and test that reached path next, then implement the known GLFW
-  `SHELL32!DragAcceptFiles` dependency before attempting gameplay verification.
+- The D3D11-only GLFW Demo is the selected game candidate. The current `/MT` analyzer report has 96
+  missing imports across the EXE and three DLLs; the archived prior report had 122 after static
+  linking. The `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered by
+  guest regressions. The current trace reaches finite thread callbacks and then stops at the
+  unsupported infinite `SleepConditionVariableSRW` wait. Implement a resumable scheduler and retest
+  that path before continuing toward window creation. No window or renderer has been verified; the
+  known `SHELL32!DragAcceptFiles` call remains a later unreached checkpoint before gameplay
+  verification.

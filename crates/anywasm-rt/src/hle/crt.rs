@@ -708,6 +708,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr64(out, fp)?;
             Ok(if fp == 0 { 2 } else { 0 })
         },
+        "_wfopen_s" => |p| {
+            let (out, name, mode) = (p.arg(0), p.read_wstr(p.arg(1))?, p.read_wstr(p.arg(2))?);
+            let fp = fopen_impl(p, &name, &mode)?;
+            p.wr64(out, fp)?;
+            Ok(if fp == 0 { 2 } else { 0 })
+        },
         "fclose" => |p| {
             let fp = p.arg(0);
             Ok(p.extra.files.remove(&fp).is_some() as u64 ^ 1)

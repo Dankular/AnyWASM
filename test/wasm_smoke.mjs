@@ -115,6 +115,22 @@ r = await runExe('fixtures/multibyte_test.exe');
 check('MultiByteToWideChar handles sizing, null/short buffers, invalid lengths, and NUL input',
   r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 
+r = await runExe('fixtures/lcmap_test.exe');
+check('LCMapStringEx handles count-only sizing and NUL-terminated case mapping',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
+r = await runExe('fixtures/mapvirtualkey_test.exe');
+check('MapVirtualKeyW maps common US-layout scan codes and characters',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
+r = await runExe('fixtures/tounicode_test.exe');
+check('ToUnicode translates common keys from the supplied state',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
+r = await runExe('fixtures/verconditionmask_test.exe');
+check('VerSetConditionMask encodes version comparison conditions',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
 r = await runExe('fixtures/d3dprobe.exe');
 check('d3dprobe.exe (D3D11CreateDevice + MessageBoxA) runs to completion', r.status === Status.EXITED && r.exitCode === 0 && r.err.includes('[MessageBox] probe: ok'), JSON.stringify(r));
 
