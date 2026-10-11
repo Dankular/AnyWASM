@@ -37,6 +37,9 @@ cargo run -p anywasm-cli -- run fixtures/crt_test.exe -- a "b c"
 
 `analyze` reports, per DLL, which imported functions have a host implementation. Anything missing
 is bound to a trap that stops the program with the exact `dll!function` (never a silent guess).
+When a browser run reaches one, the page shows the exact runtime message in an alert and points to
+`anywasm analyze <program.exe>` for the complete static import report. The analyzer lists imports;
+it does not establish that every listed import is reached during a particular run.
 
 ## Tests
 

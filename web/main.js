@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const term = $('term');
 const stat = $('stat');
+const diagnostic = $('diagnostic');
 let worker = null;
 
 function capabilities() {
@@ -28,6 +29,8 @@ async function run(bundleBytes, label) {
   if (worker) worker.terminate();
   term.textContent = '';
   stat.textContent = `Starting ${label}…`;
+  diagnostic.hidden = true;
+  diagnostic.replaceChildren();
   delete stat.dataset.status;
   $('stop').disabled = false;
   const wasm = await (await fetch(new URL('./anywasm_wasm.wasm', import.meta.url))).arrayBuffer();
@@ -57,8 +60,18 @@ async function run(bundleBytes, label) {
       window.__pixels = m;
     } else if (m.type === 'status') {
       const names = { 0: 'stopped', 1: 'exited', 2: 'stopped at an unimplemented import', 3: 'crashed' };
-      const detail = m.status === 1 ? `exit code ${m.exitCode}` : m.message;
+      const detail = m.status === 1 ? `exit code ${m.exitCode}` : m.status === 2 ? '' : m.message;
       stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s${m.frames ? ' · ' + m.frames + ' frames' : ''}`;
+      if (m.status === 2) {
+        const title = document.createElement('strong');
+        title.textContent = 'Stopped at an unimplemented import';
+        const message = document.createElement('code');
+        message.textContent = m.message || 'Import name unavailable.';
+        const guidance = document.createElement('span');
+        guidance.textContent = 'Run anywasm analyze <program.exe> to see all statically imported symbols.';
+        diagnostic.replaceChildren(title, message, guidance);
+        diagnostic.hidden = false;
+      }
       stat.dataset.status = String(m.status);
       stat.dataset.exit = String(m.exitCode);
       $('stop').disabled = true;

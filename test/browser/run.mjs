@@ -29,11 +29,19 @@ function decodePng(buf) {
 }
 
 
-import { spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: fileURLToPath(new URL('../../', import.meta.url)), stdio: 'ignore' });
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-browser-'));
+const unimplBundle = join(tempDir, 'unimpl.awb');
+const cliPath = join(repoRoot, 'target', 'debug', `anywasm${process.platform === 'win32' ? '.exe' : ''}`);
+execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'unimpl.exe'), '-o', unimplBundle], { cwd: repoRoot, stdio: 'ignore' });
+
+const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 800));
 let failures = 0;
 const check = (n, ok, d = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}${ok ? '' : ' :: ' + d}`); if (!ok) failures++; };
@@ -61,6 +69,21 @@ try {
   check('crt_test.exe full output in the page', t2.includes('sscanf=3 x+y=46 word=hello') && t2.includes('atexit handler ran') && t2.includes('arg2=second arg'), t2);
   check('crt_test.exe stderr shown', t2.includes('to stderr'), t2);
   check('crt_test.exe exit code 7', (await page.getAttribute('#stat', 'data-exit')) === '7');
+
+  // A user-supplied .awb with an unsupported import should show an accessible, actionable error.
+  await page.goto('http://localhost:8099/index.html');
+  await page.locator('#file').setInputFiles(unimplBundle);
+  await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
+  const diagnostic = page.locator('#diagnostic');
+  const diagnosticText = await diagnostic.textContent().catch(() => null);
+  const diagnosticRole = await diagnostic.getAttribute('role').catch(() => null);
+  const diagnosticVisible = await diagnostic.isVisible().catch(() => false);
+  check('unsupported import has an accessible alert with the exact runtime message',
+    diagnosticVisible && diagnosticRole === 'alert' && diagnosticText?.includes('unimplemented import kernel32!CreateToolhelp32Snapshot'),
+    JSON.stringify({ diagnosticText, diagnosticRole, diagnosticVisible }));
+  check('unsupported import alert points to the analyzer for the full import list',
+    diagnosticText?.includes('anywasm analyze <program.exe>'), diagnosticText || 'no diagnostic');
+  check('unsupported import remains a stopped run', (await page.getAttribute('#stat', 'data-status')) === '2');
 
   // ── Browser key + mouse events must reach the guest window procedure ──
   await page.goto('http://localhost:8099/index.html?run=input_test');
@@ -171,6 +194,7 @@ try {
 } finally {
   await browser.close();
   server.kill();
+  rmSync(tempDir, { recursive: true, force: true });
 }
 console.log(failures ? `\n${failures} FAILED` : '\nbrowser tests passed');
 process.exit(failures ? 1 : 0);

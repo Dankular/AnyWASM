@@ -170,8 +170,10 @@ generation and execution are not implemented):
       choice was not launched, the samples have not run through AnyWASM, and Asteroids needs a
       separate Intel-origin code/assets redistribution review. Still choose and run a redistributable
       game as an end-to-end acceptance target.
-- [ ] Packaging flow: single-file/static-site export of exe + assets + runtime; loading UI,
-      progress, error reporting that surfaces the exact missing `dll!Symbol`.
+- [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
+      alert with the exact runtime message and `anywasm analyze` guidance; verified with the
+      `unimpl.exe` fixture. Single-file/static-site export and load progress remain open. This
+      fixture does not satisfy the real-target acceptance gate above.
 - [ ] Browser support matrix (WebGPU features/limits, Safari/Firefox), memory limits of large
       games (4 GB WASM memory / `memory64`), asset streaming.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship
