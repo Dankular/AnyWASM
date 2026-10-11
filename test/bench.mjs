@@ -36,7 +36,7 @@ try {
         throw new Error(`${name} did not exit cleanly: status=${r.status}, exit=${r.exitCode}, message=${r.message}`);
       }
       const jit = w.jitStats;
-      console.log(`  round ${round}: status=${r.status} exit=${r.exitCode} ${n.toLocaleString()} instr in ${dt.toFixed(2)}s = ${(n / dt / 1e6).toFixed(1)} M instr/s; emitted=${jit.executions} modules=${jit.compilations} fallback=${jit.fallbacks}`);
+      console.log(`  round ${round}: status=${r.status} exit=${r.exitCode} ${n.toLocaleString()} instr in ${dt.toFixed(2)}s = ${(n / dt / 1e6).toFixed(1)} M instr/s; emitted=${jit.executions} modules=${jit.compilations} regreg=${jit.registerRegisterHits} fallback=${jit.fallbacks}`);
     }
   }
 } finally {

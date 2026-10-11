@@ -36,13 +36,15 @@
   operations; other instructions use the interpreter. These figures predate dynamic WASM emission
   and are not performance measurements of the emitted path. The benchmark output is retained per
   commit by WASM CI.
-- First emitted-path sample (`node test/bench.mjs`, Node 24.16.0/Windows x64, one run with three
-  rounds): medians were 22.9 M instr/s compute, 15.0 call-heavy, 25.5 memory-heavy, and 38.5
-  SSE-float. The benchmark now prints emitted-call/module/fallback counts: compute exercised 60,007
-  emitted calls across 16 modules; call-heavy exercised 500,000 calls from one module; memory/SSE
-  did not enter the supported subset. This is not an apples-to-apples comparison with the earlier
-  six-round/two-run baseline. It shows no demonstrated speedup yet; the frequent host trampoline
-  cost is a likely contributor and needs isolated measurement or batching.
+- Dynamic-emitter sample after adding register-register MOV (`node test/bench.mjs`, Node 24.16.0/
+  Windows x64, one run with three rounds): medians were 14.4 M instr/s compute, 14.5 call-heavy,
+  12.9 memory-heavy, and 32.1 SSE-float. Counters showed 343,561 emitted calls across 22 modules
+  for compute (283,554 calls retired a register-register MOV), 500,000 calls/one module for
+  call-heavy, 262,016 calls/one module for memory-heavy (all retired a register-register MOV), and
+  no emitted calls for SSE-float. The preceding immediate-only sample under the same three-round
+  harness measured 22.9/15.0/25.5/38.5 M instr/s. These are single-run samples, not a controlled
+  A/B; they show no speedup claim is supported. Host trampoline cost and larger emitted blocks may
+  contribute and need isolated measurement or batching.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 
@@ -53,7 +55,8 @@
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (first verified slice):** at a block entry, Rust emits a module for a
-  leading sequence of 32-bit/64-bit register-immediate MOVs. The module imports the main runtime's
+  leading sequence of 32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs. Register-to-register 32-bit
+  moves zero-extend; self-moves retire normally. The module imports the main runtime's
   memory and runs through `anywasm.run_emitted_block` in `web/anywasm.js`. It mutates a copied
   160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC); Rust commits only a valid exact
   instruction count. Compile/trap/invalid-count failures retry through the interpreter. The JS
@@ -62,9 +65,9 @@
   `{ jit: false }` comparison of compute status, exit code, stdout/stderr, and retired count) pass.
   The smoke also forces one host module-compile failure and confirms safe interpreter fallback. The
   headless Chrome worker suite passes. Final register/memory comparisons remain open. This is a
-  mechanism prototype, not a throughput win: no
-  register-register/partial-width MOV, NOP, LEA, memory operations, arithmetic, SIMD, or control
-  flow is emitted. Full JIT/interpreter state differential, cache-pressure and CSP checks, browser
+  mechanism prototype, not a throughput win: partial-width and memory MOVs, NOP, LEA, arithmetic,
+  SIMD, or control flow are not emitted. Full JIT/interpreter state differential, cache-pressure
+  and CSP checks, browser
   engine matrix, and real-game performance remain open.
 - No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
   no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.

@@ -13,7 +13,7 @@ function bytesEqual(a, b) {
 
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0 }) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 }) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
     /** Counts calls routed through the dynamic WebAssembly trampoline. */
@@ -30,10 +30,10 @@ export class AnyWasm {
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
     let instance;
     const modules = new Map();
-    const jitStats = { compilations: 0, executions: 0, fallbacks: 0 };
+    const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 };
     const imports = {
       anywasm: {
-        run_emitted_block(id, modulePtr, moduleLen, statePtr, budget) {
+        run_emitted_block(id, modulePtr, moduleLen, statePtr, budget, emittedInstructions, firstRegisterRegister) {
           try {
             if (!jit) {
               jitStats.fallbacks++;
@@ -52,7 +52,16 @@ export class AnyWasm {
               jitStats.compilations++;
             }
             const executed = cached.run(statePtr, budget);
-            if (executed > 0 && executed <= (budget >>> 0)) jitStats.executions++;
+            const expected = Math.min(budget >>> 0, emittedInstructions >>> 0);
+            if (executed !== expected) {
+              jitStats.fallbacks++;
+              return -1;
+            }
+            jitStats.executions++;
+            const firstRegisterMove = firstRegisterRegister >>> 0;
+            if (firstRegisterMove !== 0xffff_ffff && executed > firstRegisterMove) {
+              jitStats.registerRegisterHits++;
+            }
             return executed;
           } catch {
             // The Rust side passed a copied CPU state, so the interpreter can retry safely.

@@ -66,7 +66,7 @@ I have **not** measured what a real game needs; the 10–50x figure in STATUS.md
 Measure first (e.g. instructions per frame of a representative program) before fixing a target.
 
 Design (partial implementation; the verified dynamic-emission scope is a leading run of 32-bit or
-64-bit register-immediate MOV instructions at a block entry):
+64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [x] **Block discovery**: decode and cache basic blocks keyed by guest RIP. `code_epoch` invalidates
@@ -84,14 +84,15 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [ ] **Exits**: direct block chaining for known targets; indirect jumps via hash lookup;
       `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`,
       `yield_request`, step limit/icount accounting must all keep working.
-- [x] **Fallback**: only 32-bit and 64-bit GPR-immediate MOVs at a block's beginning are emitted.
-      Partial-width/register-register MOVs and all remaining instructions use the interpreter.
-      Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
-- [~] **Correctness checks**: Rust emitter tests cover prefix limits and immediate-width semantics;
-      the WASM smoke runs `compute.exe`, checks its expected output, confirms generated executions,
-      and checks `run(1)` retirement limits. The same compute bundle now matches between generated
-      execution and `{ jit: false }` interpreter fallback for status, exit code, stdout/stderr, and
-      retired count; a forced host compile failure also falls back safely. Final registers/memory and
+- [x] **Fallback**: only 32-bit and 64-bit GPR-immediate or GPR-to-GPR MOVs at a block's beginning
+      are emitted. Partial-width and memory MOVs and all remaining instructions use the interpreter.
+      32-bit register moves zero-extend; self-moves still advance RIP/count/TSC. Compile/trap/
+      invalid-count failures retry from the untouched live CPU snapshot.
+- [~] **Correctness checks**: Rust emitter tests cover prefix limits, 32-bit zero-extension,
+      64-bit copies, and self-move retirement. The WASM smoke confirms generated
+      register-register MOV execution, checks `compute.exe` output and `run(1)` retirement limits,
+      and compares the same bundle with `{ jit: false }` for status, exit code, stdout/stderr, and
+      retired count. A forced host compile failure also falls back safely. Final registers/memory and
       the full JIT/interpreter/host differential remain unverified.
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.

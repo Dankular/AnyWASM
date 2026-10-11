@@ -54,9 +54,15 @@ impl JitState {
 }
 
 #[derive(Clone, Copy)]
-struct MovImmediate {
+enum MovSource {
+    Immediate(u64),
+    Register { index: u8, zero_extend: bool },
+}
+
+#[derive(Clone, Copy)]
+struct MovInstruction {
     dst: u8,
-    value: u64,
+    source: MovSource,
     len: u8,
 }
 
@@ -66,6 +72,7 @@ pub struct EmittedBlock {
     id: u32,
     wasm: Vec<u8>,
     instructions: usize,
+    first_register_register: Option<u32>,
 }
 
 impl EmittedBlock {
@@ -91,6 +98,8 @@ impl EmittedBlock {
                 self.wasm.len() as u32,
                 &mut state,
                 budget,
+                self.instructions as u32,
+                self.first_register_register.unwrap_or(u32::MAX),
             )
         };
         let expected = (budget as usize).min(self.instructions);
@@ -102,45 +111,65 @@ impl EmittedBlock {
     }
 }
 
-/// Emit a module for the leading register-immediate MOV instructions in a decoded block.
+/// Emit a module for the leading immediate and register-register MOV instructions in a block.
 ///
-/// Only 32-bit and 64-bit GPR destinations are included. All other encodings and instructions
-/// stop the emitted prefix and remain on the interpreter path.
-pub fn emit_register_immediate_mov_block(
-    id: u32,
-    start: u64,
-    instructions: &[Inst],
-) -> Option<EmittedBlock> {
-    let mut moves = Vec::new();
+/// Only 32-bit and 64-bit GPR operands are included. All other encodings and instructions stop
+/// the emitted prefix and remain on the interpreter path.
+pub fn emit_mov_block(id: u32, start: u64, instructions: &[Inst]) -> Option<EmittedBlock> {
+    let mut moves: Vec<MovInstruction> = Vec::new();
     for inst in instructions {
         if inst.lock {
             break;
         }
-        let (dst, value) = match (inst.op, inst.ops[0], inst.ops[1], inst.osz) {
-            (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 4) => (dst, (inst.imm as u32) as u64),
-            (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 8) => (dst, inst.imm as u64),
+        let (dst, source) = match (inst.op, inst.ops[0], inst.ops[1], inst.osz) {
+            (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 4) => {
+                (dst, MovSource::Immediate((inst.imm as u32) as u64))
+            }
+            (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 8) => (dst, MovSource::Immediate(inst.imm as u64)),
+            (Op::Mov, Opnd::Gpr(dst), Opnd::Gpr(src), 4) => (
+                dst,
+                MovSource::Register {
+                    index: src,
+                    zero_extend: true,
+                },
+            ),
+            (Op::Mov, Opnd::Gpr(dst), Opnd::Gpr(src), 8) => (
+                dst,
+                MovSource::Register {
+                    index: src,
+                    zero_extend: false,
+                },
+            ),
             _ => break,
         };
-        if inst.len == 0 || dst >= 16 {
+        if inst.len == 0
+            || dst >= 16
+            || matches!(source, MovSource::Register { index, .. } if index >= 16)
+        {
             break;
         }
-        moves.push(MovImmediate {
+        moves.push(MovInstruction {
             dst,
-            value,
+            source,
             len: inst.len,
         });
     }
     if moves.is_empty() {
         return None;
     }
+    let first_register_register = moves
+        .iter()
+        .position(|mov| matches!(mov.source, MovSource::Register { .. }))
+        .map(|index| index as u32);
     Some(EmittedBlock {
         id,
         wasm: emit_module(start, &moves),
         instructions: moves.len(),
+        first_register_register,
     })
 }
 
-fn emit_module(start: u64, moves: &[MovImmediate]) -> Vec<u8> {
+fn emit_module(start: u64, moves: &[MovInstruction]) -> Vec<u8> {
     let mut code = Vec::new();
     // One i32 local: the number of retired guest instructions.
     code.extend_from_slice(&[0x01, 0x01, 0x7f]);
@@ -152,11 +181,26 @@ fn emit_module(start: u64, moves: &[MovImmediate]) -> Vec<u8> {
             0x20, 0x02, 0x20, 0x01, 0x4f, 0x04, 0x40, 0x20, 0x02, 0x0f, 0x0b,
         ]);
 
-        // state.gpr[dst] = immediate (MOV r32,imm zero-extends; MOV r64,imm keeps all bits).
+        // Store an immediate or load the source GPR. MOV r32 zero-extends the low dword.
         code.push(0x20);
         uleb(0, &mut code);
-        code.push(0x42);
-        sleb(mov.value as i64, &mut code);
+        match mov.source {
+            MovSource::Immediate(value) => {
+                code.push(0x42);
+                sleb(value as i64, &mut code);
+            }
+            MovSource::Register { index, zero_extend } => {
+                code.push(0x20);
+                uleb(0, &mut code);
+                code.push(0x29); // i64.load source GPR
+                uleb(3, &mut code);
+                uleb(GPR_OFFSET + index as u32 * 8, &mut code);
+                if zero_extend {
+                    code.push(0xa7); // i32.wrap_i64
+                    code.push(0xad); // i64.extend_i32_u
+                }
+            }
+        }
         code.push(0x37); // i64.store
         uleb(3, &mut code);
         uleb(GPR_OFFSET + mov.dst as u32 * 8, &mut code);
@@ -259,6 +303,8 @@ extern "C" {
         wasm_len: u32,
         state: *mut JitState,
         budget: u32,
+        emitted_instructions: u32,
+        first_register_register: u32,
     ) -> i32;
 }
 
@@ -271,7 +317,7 @@ mod tests {
     fn emits_only_a_leading_register_immediate_mov_prefix() {
         let mov_rax = decode(&[0x48, 0xb8, 1, 0, 0, 0, 0, 0, 0, 0], 0x1000).unwrap();
         let nop = decode(&[0x90], 0x100a).unwrap();
-        let emitted = emit_register_immediate_mov_block(7, 0x1000, &[mov_rax, nop]).unwrap();
+        let emitted = emit_mov_block(7, 0x1000, &[mov_rax, nop]).unwrap();
         assert_eq!(emitted.instruction_count(), 1);
         assert!(emitted.wasm.starts_with(b"\0asm\x01\0\0\0"));
         assert!(emitted.wasm.windows(7).any(|window| window == b"anywasm"));
@@ -285,7 +331,7 @@ mod tests {
             0x2005,
         )
         .unwrap();
-        let emitted = emit_register_immediate_mov_block(8, 0x2000, &[mov_eax, mov_rbx]).unwrap();
+        let emitted = emit_mov_block(8, 0x2000, &[mov_eax, mov_rbx]).unwrap();
         assert_eq!(emitted.instruction_count(), 2);
         assert!(emitted
             .wasm
@@ -295,10 +341,54 @@ mod tests {
     }
 
     #[test]
-    fn does_not_emit_register_register_or_partial_width_mov() {
-        let mov_eax_ebx = decode(&[0x89, 0xd8], 0x3000).unwrap();
-        let mov_ax_imm = decode(&[0x66, 0xb8, 1, 0], 0x3002).unwrap();
-        assert!(emit_register_immediate_mov_block(9, 0x3000, &[mov_eax_ebx]).is_none());
-        assert!(emit_register_immediate_mov_block(10, 0x3002, &[mov_ax_imm]).is_none());
+    fn does_not_emit_partial_width_mov() {
+        let mov_ax_imm = decode(&[0x66, 0xb8, 1, 0], 0x3000).unwrap();
+        assert!(emit_mov_block(10, 0x3000, &[mov_ax_imm]).is_none());
+    }
+
+    #[test]
+    fn emits_32_bit_zero_extending_and_64_bit_register_moves() {
+        let mov_eax_ebx = decode(&[0x89, 0xd8], 0x4000).unwrap();
+        let mov_rax_rcx = decode(&[0x48, 0x89, 0xc8], 0x4002).unwrap();
+        let emitted = emit_mov_block(11, 0x4000, &[mov_eax_ebx, mov_rax_rcx]).unwrap();
+
+        assert_eq!(emitted.instruction_count(), 2);
+        assert_eq!(emitted.first_register_register, Some(0));
+        assert!(emitted.wasm.windows(3).any(|w| w == [0x29, 0x03, 24])); // load RBX
+        assert!(emitted
+            .wasm
+            .windows(6)
+            .any(|w| w == [0x29, 0x03, 24, 0xa7, 0xad, 0x37]));
+        assert!(emitted
+            .wasm
+            .windows(6)
+            .any(|w| w == [0x29, 0x03, 8, 0x37, 0x03, 0]));
+    }
+
+    #[test]
+    fn emits_self_moves_as_retired_register_writes() {
+        let mov_rax_rax = decode(&[0x48, 0x89, 0xc0], 0x5000).unwrap();
+        let emitted = emit_mov_block(12, 0x5000, &[mov_rax_rax]).unwrap();
+
+        assert_eq!(emitted.instruction_count(), 1);
+        assert_eq!(emitted.first_register_register, Some(0));
+        assert!(emitted.wasm.windows(3).any(|w| w == [0x29, 0x03, 0])); // read RAX
+        assert!(emitted.wasm.windows(3).any(|w| w == [0x37, 0x03, 0])); // write RAX
+        assert!(emitted
+            .wasm
+            .windows(4)
+            .any(|w| w == [0x37, 0x03, 0x80, 0x01])); // advance RIP
+        assert!(emitted
+            .wasm
+            .windows(7)
+            .any(|w| w == [0x20, 0x02, 0x41, 1, 0x6a, 0x21, 0x02]));
+        assert!(emitted
+            .wasm
+            .windows(4)
+            .any(|w| w == [0x37, 0x03, 0x90, 0x01])); // icount
+        assert!(emitted
+            .wasm
+            .windows(4)
+            .any(|w| w == [0x37, 0x03, 0x98, 0x01])); // TSC
     }
 }

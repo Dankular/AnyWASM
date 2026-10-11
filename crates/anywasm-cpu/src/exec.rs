@@ -1178,7 +1178,7 @@ impl BlockCache {
                 .map(translate_instruction)
                 .collect();
             #[cfg(target_arch = "wasm32")]
-            let emitted = crate::jit::emit_register_immediate_mov_block(
+            let emitted = crate::jit::emit_mov_block(
                 self.next_jit_id,
                 decoded.start,
                 &decoded.instructions,

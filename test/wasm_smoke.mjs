@@ -41,6 +41,7 @@ const computeBundle = pack('fixtures/compute.exe');
 r = await runBundle(computeBundle);
 check('compute.exe (heap, SSE2, indirect calls)', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('primes<20000=2262') && r.out.includes('fp=609') && r.out.includes('gpa=ok'), JSON.stringify(r));
 check('compute.exe executes generated WebAssembly blocks', r.jitStats.executions > 0 && r.jitStats.compilations > 0 && r.jitStats.fallbacks === 0, JSON.stringify(r.jitStats));
+check('compute.exe executes generated register-to-register MOVs', r.jitStats.registerRegisterHits > 0, JSON.stringify(r.jitStats));
 
 const interpreted = await runBundle(computeBundle, { jit: false });
 check('compute.exe matches generated execution with interpreter fallback',
