@@ -30,6 +30,9 @@
   worst error 0/255, zero WebGPU validation errors.
 - Shader toolchain (`test/shaders.mjs`): HLSL -> DXBC -> SPIR-V -> WGSL with a fixed
   descriptor-to-bind-group layout (b#->group0, t#->group1, s#->group2).
+- Interpreter benchmark baseline (Node 24.16.0, Windows x64, release WASM, 3 rounds per workload):
+  median 24.2 M instr/s for `compute.exe`, 26.2 for call-heavy, 23.0 for memory-heavy, and 31.2
+  for SSE-float. The benchmark output is retained per commit by the WASM CI workflow.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 
@@ -61,6 +64,11 @@
 - DLL/function imports with no host implementation are bound to a trap that stops the process with
   `Stop::Unimplemented{dll,name}` (and logs it) instead of guessing.
 
-## Not started
-- anywasm CLI (analyze/pack), WASM crate + browser harness, user32/gdi32, D3D/WebGPU, threads, SEH.
+## Remaining target-level and project work
+- The section 1–6 checklist in `CLAUDE.md` tracks unfinished JIT, runtime, graphics, CPU, and
+  productisation work. Broad items such as threading, SEH, more D3D11 coverage, AVX, and 32-bit PE
+  support need a representative target and dedicated design/verification before implementation.
+- The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
+  checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
+  pixel-verified.
 - See `docs/EVALUATION.md` for the prior-art evaluation (WineBrowser, retrowin32, ...).

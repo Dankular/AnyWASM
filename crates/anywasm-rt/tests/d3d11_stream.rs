@@ -95,3 +95,67 @@ fn triangle_program_produces_the_expected_gpu_stream() {
     let cb_writes = writes.iter().filter(|c| u32s(&c.1)[2] == 16).count();
     assert!(cb_writes >= 3, "constant buffer uploads: {cb_writes}");
 }
+
+#[test]
+fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
+    let (cmds, out, stop) = run_collect("d3d11_textured.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout:\n{out}");
+    for line in [
+        "device hr=00000000",
+        "depth tex hr=00000000",
+        "dsv hr=00000000",
+        "texture hr=00000000",
+        "srv hr=00000000",
+        "sampler hr=00000000",
+        "depth state hr=00000000",
+        "frames=3",
+    ] {
+        assert!(out.contains(line), "missing `{line}` in:\n{out}");
+    }
+
+    let ops: Vec<u32> = cmds.iter().map(|c| c.0).collect();
+    let count = |opcode: u32| ops.iter().filter(|&&op| op == opcode).count();
+    assert_eq!(count(op::PRESENT), 3);
+    assert_eq!(count(op::DRAW_INDEXED), 9);
+    assert_eq!(count(op::CLEAR_DSV), 3);
+    assert_eq!(count(op::CREATE_SAMPLER), 1);
+    assert_eq!(count(op::CREATE_DEPTH), 1);
+    assert_eq!(count(op::TEXTURE_WRITE), 1);
+
+    let first_draw = ops.iter().position(|&opcode| opcode == op::DRAW_INDEXED).unwrap();
+    for creator in [
+        op::CREATE_TEXTURE2D,
+        op::CREATE_VIEW,
+        op::CREATE_SHADER,
+        op::CREATE_INPUT_LAYOUT,
+        op::CREATE_BUFFER,
+        op::CREATE_SAMPLER,
+        op::CREATE_DEPTH,
+    ] {
+        assert!(
+            ops.iter().position(|&opcode| opcode == creator).unwrap() < first_draw,
+            "op {creator} after first draw"
+        );
+    }
+
+    let texture = cmds.iter().find(|c| c.0 == op::CREATE_TEXTURE2D && u32s(&c.1)[1] == 2).unwrap();
+    assert_eq!(&u32s(&texture.1)[1..4], &[2, 2, 1], "2x2, one mip");
+    let upload = cmds.iter().find(|c| c.0 == op::TEXTURE_WRITE).unwrap();
+    assert_eq!(&u32s(&upload.1)[1..9], &[0, 0, 0, 0, 2, 2, 8, 16]);
+    assert_eq!(
+        &upload.1[36..52],
+        &[
+            0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+        ]
+    );
+
+    let index_buffer = cmds.iter().find(|c| c.0 == op::SET_INDEX_BUFFER).unwrap();
+    assert_eq!(u32s(&index_buffer.1)[1], 57, "R16_UINT index format");
+    let draws: Vec<_> = cmds.iter().filter(|c| c.0 == op::DRAW_INDEXED).collect();
+    let expected_frame = [[6, 0, 0], [6, 6, 0], [6, 12, 0]];
+    for frame in 0..3 {
+        for draw in 0..3 {
+            assert_eq!(u32s(&draws[frame * 3 + draw].1), expected_frame[draw]);
+        }
+    }
+}

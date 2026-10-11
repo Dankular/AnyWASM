@@ -49,3 +49,9 @@ node test/browser/run.mjs        # real page in headless Chromium (npm install i
 ## License
 
 GPL-2.0-only (see `Cargo.toml`). Third-party research material is referenced, not copied.
+
+## Legal scope
+
+AnyWASM does not provide Windows programs or game assets. You must supply binaries and assets that
+you obtained lawfully and are authorized to use. Review `THIRD_PARTY.md` before redistributing a
+build that includes the vendored shader tools.

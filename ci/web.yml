@@ -1,4 +1,4 @@
-# Copy to .github/workflows/web.yml (this session could not push workflow files: token lacks the `workflow` scope).
+# Source for .github/workflows/web.yml; keep the two workflow files synchronized.
 name: WASM
 
 on:
@@ -18,3 +18,20 @@ jobs:
         cargo build -p anywasm-cli
     - name: Run executables through the WASM build under Node
       run: node test/wasm_smoke.mjs
+    - name: Record interpreter benchmark
+      shell: bash
+      run: |
+        set -o pipefail
+        node test/bench.mjs | tee benchmark.txt
+        {
+          echo '### WASM interpreter benchmark'
+          echo '```text'
+          cat benchmark.txt
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: Store benchmark output
+      uses: actions/upload-artifact@v4
+      with:
+        name: wasm-benchmark-${{ github.sha }}
+        path: benchmark.txt
+        retention-days: 90

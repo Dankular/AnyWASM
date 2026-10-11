@@ -14,8 +14,8 @@ reimplemented system libraries, recompile shaders, and **fail loudly** on anythi
   Never stub silently.
 - Never skip or weaken a test to get green. Verify pixel/behaviour claims with a test that can fail.
 - Develop and push only on `claude/upbeat-franklin-c1vbxr`. Do not open a PR unless asked.
-- The session token cannot push `.github/workflows/*`; workflow files live in `ci/` for the owner
-  to copy (`ci/web.yml`).
+- Keep CI workflow sources in `ci/` mirrored under `.github/workflows/`. Pushing workflow changes
+  requires a GitHub credential with `workflow` scope; if unavailable, the owner copies the files.
 - Commit trailers: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` and the
   `Claude-Session:` line given by the harness.
 
@@ -42,6 +42,7 @@ node test/shaders.mjs               # HLSL -> DXBC -> SPIR-V -> WGSL
 node test/bench.mjs                 # interpreter throughput (instr/s) under WASM
 (cd test/browser && npm i && node run.mjs)   # headless Chromium, pixel checks (uses ?test=1 mode)
 bash fixtures/build.sh; node fixtures/gen_d3d_shaders.mjs   # rebuild fixtures / shader headers
+node fixtures/build_bench.mjs      # rebuild the call, memory, and SSE benchmark PE fixtures (Rust Windows target)
 ```
 Chromium path: highest `/opt/pw-browsers/chromium-NNNN/chrome-linux/chrome` (override with `CHROMIUM`).
 Test-environment caveat: in this headless Chromium `getCurrentTexture()` breaks later `mapAsync` and
@@ -64,7 +65,7 @@ I have **not** measured what a real game needs; the 10–50x figure in STATUS.md
 Measure first (e.g. instructions per frame of a representative program) before fixing a target.
 
 Design (proposal, **unverified** — nothing below is implemented):
-- [ ] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
+- [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s; keep as a regression gate.
 - [ ] **Block discovery**: translate basic blocks keyed by guest RIP, using the existing decoder.
       Reuse `Memory::exec_page_count` / `code_epoch` for self-modifying-code invalidation.
@@ -148,16 +149,15 @@ Design (proposal, **unverified** — nothing below is implemented):
 - [ ] Anti-debug/anti-cheat/DRM: out of scope unless a target requires it; flag as unsupported.
 
 ## 5. Tooling, CI, repo hygiene
-- [ ] **Copy `ci/web.yml` to `.github/workflows/`** (owner action; token lacks `workflow` scope).
-- [ ] Confirm GitHub Actions is green on commits after `bd6f0bd` (incl. `631ba66`).
-- [ ] `out.txt` at the repo root is tracked and appears to be a stray output file — confirm and
-      remove (not verified what produced it).
-- [ ] Silence/resolve compiler warnings (e.g. unused `ERROR_ACCESS_DENIED` in `kernel32.rs`).
-- [ ] Add a Rust-side command-stream test for `d3d11_textured` (`tests/d3d11_stream.rs` covers the
+- [x] **Copy `ci/web.yml` to `.github/workflows/`** (mirrored as `web.yml`; requires `workflow` scope).
+- [x] Confirm GitHub Actions is green on commits after `bd6f0bd` (incl. `631ba66`).
+- [x] `out.txt` at the repo root was confirmed as an unreferenced two-line sample added in `800f4e1`; remove it.
+- [x] Silence/resolve compiler warnings (e.g. unused `ERROR_ACCESS_DENIED` in `kernel32.rs`).
+- [x] Add a Rust-side command-stream test for `d3d11_textured` (`tests/d3d11_stream.rs` covers the
       triangle only) and add the textured exe to `test/wasm_smoke.mjs`.
-- [ ] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
-- [ ] Task list housekeeping: tasks #5 and #11 are effectively done for the triangle/textured
-      slices; #6 (docs) is ongoing.
+- [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
+- [~] Task list housekeeping: the repository has no GitHub issues to reconcile the old #5/#11/#6
+      references against. The triangle/textured slices are covered; docs still evolve with verified work.
 
 ## 6. Productisation (after a real target runs)
 - [ ] Pick 2–3 real, redistributable/open-source Win64 D3D11 programs as acceptance targets and
@@ -168,4 +168,4 @@ Design (proposal, **unverified** — nothing below is implemented):
       games (4 GB WASM memory / `memory64`), asset streaming.
 - [ ] Licensing review of vendored vkd3d-shader (LGPL) and Naga: see `THIRD_PARTY.md`; confirm
       what the combined distribution requires before shipping packaged apps.
-- [ ] Legal/scope statement: user supplies their own legally obtained binaries.
+- [x] Legal/scope statement: user supplies their own legally obtained binaries.

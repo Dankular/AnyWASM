@@ -332,9 +332,6 @@ impl<'a> Dec<'a> {
         self.p += 1;
         Ok(v)
     }
-    fn peek(&self) -> R<u8> {
-        self.b.get(self.p).copied().ok_or(DecodeError::Truncated)
-    }
     fn i8(&mut self) -> R<i64> {
         Ok(self.u8()? as i8 as i64)
     }

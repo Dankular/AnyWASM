@@ -3,12 +3,10 @@
 use super::*;
 use crate::process::*;
 use crate::vfs::norm;
-use anywasm_cpu::cpu::*;
-use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_W, PROT_X};
+use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_X};
 
 const INVALID_HANDLE: u64 = u64::MAX;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
-const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_PARAMETER: u32 = 87;

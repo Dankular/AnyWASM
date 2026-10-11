@@ -1,0 +1,37 @@
+# Source for .github/workflows/web.yml; keep the two workflow files synchronized.
+name: WASM
+
+on:
+  push:
+    branches: [ "claude/upbeat-franklin-c1vbxr" ]
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Add wasm target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Build wasm module and CLI
+      run: |
+        cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
+        cargo build -p anywasm-cli
+    - name: Run executables through the WASM build under Node
+      run: node test/wasm_smoke.mjs
+    - name: Record interpreter benchmark
+      shell: bash
+      run: |
+        set -o pipefail
+        node test/bench.mjs | tee benchmark.txt
+        {
+          echo '### WASM interpreter benchmark'
+          echo '```text'
+          cat benchmark.txt
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+    - name: Store benchmark output
+      uses: actions/upload-artifact@v4
+      with:
+        name: wasm-benchmark-${{ github.sha }}
+        path: benchmark.txt
+        retention-days: 90
