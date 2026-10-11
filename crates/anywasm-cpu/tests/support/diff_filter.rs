@@ -35,6 +35,7 @@ pub fn flag_mask(asm: &str, gpr: &[u64; 16]) -> u64 {
             }
         }
         "mul" | "imul" => all & !(SF | ZF | AF | PF),
+        "bzhi" => all & !(AF | PF), // AF and PF are undefined for BZHI.
         "div" | "idiv" => DF,
         "bsf" | "bsr" => ZF | DF,
         "tzcnt" | "lzcnt" => (CF | ZF) | DF,

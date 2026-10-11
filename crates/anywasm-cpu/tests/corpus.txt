@@ -2733,3 +2733,4 @@ b90300000033c083c001e2fb83f8037502ffc0|mov ecx, 3; xor eax, eax; add eax, 1; loo
 b90300000033c083c001e2fb83f8047505bb04000000|mov ecx, 3; xor eax, eax; add eax, 1; loop -5; cmp eax, 4; jne +5; mov ebx, 4
 b801000000e802000000eb0483c002c3|mov eax, 1; call +2; jmp +4; add eax, 2; ret
 f3ac|rep lodsb al, byte ptr [rsi]
+c4c270f54491fc|bzhi eax, dword ptr [r9+rdx*4-4], ecx

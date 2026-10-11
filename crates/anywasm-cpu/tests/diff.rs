@@ -208,6 +208,10 @@ fn make_case(asm: &str, r: &mut Rng) -> Case {
         st.gpr[RSI] = SCR;
         st.gpr[RDI] = r.below(4);
     }
+    if m == "bzhi" {
+        st.gpr[9] = SCR + 0x20;
+        st.gpr[RDX] = 3; // target form addresses [r9 + rdx*4 - 4] within the mapped data.
+    }
     if asm.split(';').any(|instruction| {
         let instruction = instruction.trim();
         !instruction.is_empty() && matches!(mnemonic(instruction), "call" | "ret")
@@ -528,6 +532,31 @@ fn deterministic_rep_cases_match_host() -> usize {
     6
 }
 
+fn deterministic_bzhi_cases_match_host() -> usize {
+    let asm = "bzhi eax, dword ptr [r9+rdx*4-4], ecx";
+    let code = [0xc4, 0xc2, 0x70, 0xf5, 0x44, 0x91, 0xfc];
+    let indexes: [u64; 7] = [0, 1, 31, 32, 33, 0x101, 255];
+    let sources: [u32; 7] = [
+        0xffff_ffff,
+        0x8000_0001,
+        0x7fff_ffff,
+        0x8000_0000,
+        0,
+        1,
+        0xa5a5_5a5a,
+    ];
+    let mut rng = Rng(0xb2b2_0bad_1dea_1234);
+
+    for (&index, &source) in indexes.iter().zip(&sources) {
+        let mut case = make_case(asm, &mut rng);
+        case.st.gpr[RCX] = index;
+        rep_case_write(&mut case, SCR + 0x28, &source.to_le_bytes());
+        assert_rep_case_matches_host(asm, &code, &case);
+    }
+
+    indexes.len()
+}
+
 #[test]
 fn corpus_matches_host_cpu() {
     setup_host();
@@ -572,7 +601,15 @@ fn corpus_matches_host_cpu() {
     } else {
         0
     };
-    eprintln!("differential: {ran} corpus instructions x {trials} trials + {rep_cases} deterministic REP cases ({total} corpus entries), {} failing instruction(s)", failures.len());
+    let bzhi_cases = if filter.as_ref().map_or(true, |f| f.contains("bzhi")) {
+        deterministic_bzhi_cases_match_host()
+    } else {
+        0
+    };
+    eprintln!(
+        "differential: {ran} corpus instructions x {trials} trials + {rep_cases} deterministic REP cases + {bzhi_cases} deterministic BZHI cases ({total} corpus entries), {} failing instruction(s)",
+        failures.len()
+    );
     let mut by_mn: BTreeMap<&str, Vec<(&String, &(usize, String))>> = BTreeMap::new();
     for (k, v) in &failures {
         by_mn.entry(mnemonic(k)).or_default().push((k, v));
