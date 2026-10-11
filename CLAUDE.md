@@ -166,6 +166,6 @@ Design (proposal, **unverified** — nothing below is implemented):
       progress, error reporting that surfaces the exact missing `dll!Symbol`.
 - [ ] Browser support matrix (WebGPU features/limits, Safari/Firefox), memory limits of large
       games (4 GB WASM memory / `memory64`), asset streaming.
-- [ ] Licensing review of vendored vkd3d-shader (LGPL) and Naga: see `THIRD_PARTY.md`; confirm
-      what the combined distribution requires before shipping packaged apps.
+- [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship
+      obligations are in `THIRD_PARTY.md`; legal review of the packaged combined work is still required.
 - [x] Legal/scope statement: user supplies their own legally obtained binaries.
