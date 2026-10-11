@@ -59,7 +59,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
     })
 }
 
-fn rtl_verify_version_info(p: &mut Process) -> R {
+pub(crate) fn rtl_verify_version_info(p: &mut Process) -> R {
     const STATUS_INVALID_PARAMETER: u64 = 0xC000_000D;
     const STATUS_REVISION_MISMATCH: u64 = 0xC000_0059;
     const VER_TYPE_MASK: u32 = 0xFF;

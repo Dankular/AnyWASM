@@ -11,7 +11,8 @@ fn run(name: &str) -> (Stop, String, String, Process) {
     let mut vfs = Vfs::new();
     vfs.insert(name, fixture(name));
     let mut p = Process::new(vfs);
-    p.load_exe(name, None).unwrap_or_else(|e| panic!("load {name}: {e}"));
+    p.load_exe(name, None)
+        .unwrap_or_else(|e| panic!("load {name}: {e}"));
     let stop = p.run_to_end(200_000_000);
     let out = String::from_utf8_lossy(&p.take_stdout()).into_owned();
     let err = String::from_utf8_lossy(&p.take_stderr()).into_owned();
@@ -28,14 +29,24 @@ fn hello_exe_prints_and_exits_zero() {
 #[test]
 fn multibyte_to_wide_char_obeys_win32_lengths_and_buffer_contract() {
     let (stop, out, err, p) = run("multibyte_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn lc_map_string_ex_handles_count_only_and_nul_terminated_strings() {
     let (stop, out, err, p) = run("lcmap_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
@@ -61,7 +72,36 @@ fn current_directory_resolves_relative_win32_and_crt_file_paths() {
 #[test]
 fn create_thread_runs_finite_worker_with_isolated_tls_and_thread_identity() {
     let (stop, out, err, p) = run("thread_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
+    assert!(out.is_empty());
+}
+
+#[test]
+fn cooperative_threads_resume_condition_variable_waiters_after_lock_reacquisition() {
+    let (stop, out, err, p) = run("thread_sync_test.exe");
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
+    assert!(out.is_empty());
+}
+
+#[test]
+fn static_tls_is_initialized_and_isolated_per_guest_thread() {
+    let (stop, out, err, p) = run("static_tls_thread_test.exe");
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
@@ -137,85 +177,167 @@ fn get_dlg_item_returns_direct_child_by_control_id() {
 #[test]
 fn device_notification_registration_returns_a_closable_handle() {
     let (stop, out, _, p) = run("device_notification_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn enum_display_devices_returns_virtual_adapter_and_monitor() {
     let (stop, out, _, p) = run("enumdisplaydevices_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn enum_display_settings_returns_virtual_modes() {
     let (stop, out, _, p) = run("enumdisplaysettings_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn enum_display_monitors_calls_guest_and_respects_clipping() {
     let (stop, out, _, p) = run("enumdisplaymonitors_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn window_properties_round_trip_and_remove_by_name() {
     let (stop, out, _, p) = run("windowprops_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn rectangle_helpers_update_signed_coordinates_and_intersections() {
     let (stop, out, _, p) = run("rect_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn shell_drag_accept_files_is_available_for_windows() {
     let (stop, out, _, p) = run("dragaccept_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn virtual_gdi_display_context_reports_display_caps() {
     let (stop, out, _, p) = run("gdiprobe_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn map_virtual_key_w_maps_common_us_layout_codes() {
     let (stop, out, _, p) = run("mapvirtualkey_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn to_unicode_uses_virtual_key_and_keyboard_state() {
     let (stop, out, _, p) = run("tounicode_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
 fn ver_set_condition_mask_sets_version_comparison_fields() {
     let (stop, out, _, p) = run("verconditionmask_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
 }
 
 #[test]
-fn get_proc_address_resolves_implemented_ntdll_version_verification() {
+fn verify_version_info_w_compares_version_and_sets_win32_last_error() {
     let (stop, out, _, p) = run("verconditionmask_test.exe");
-    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
     assert!(out.is_empty());
+}
+
+#[test]
+fn path_file_exists_w_checks_files_and_directories_in_the_vfs() {
+    let mut vfs = Vfs::new();
+    vfs.insert(
+        "pathfileexists_test.exe",
+        fixture("pathfileexists_test.exe"),
+    );
+    vfs.insert("game\\data\\present.txt", vec![1]);
+    let mut p = Process::new(vfs);
+    p.current_directory = "C:\\game".into();
+    p.load_exe("pathfileexists_test.exe", None).unwrap();
+
+    let stop = p.run_to_end(100_000_000);
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stderr: {:?}; unimplemented: {:?}",
+        p.take_stderr(),
+        p.unimplemented_log
+    );
 }
 
 #[test]
@@ -241,9 +363,24 @@ fn compute_exe_heap_fpu_indirect_calls_and_getprocaddress() {
 fn unimplemented_imports_are_reported_by_name() {
     // unimpl.exe calls kernel32!CreateToolhelp32Snapshot, which the runtime does not implement.
     let (stop, out, _, p) = run("unimpl.exe");
-    assert_eq!(stop, Stop::Unimplemented { dll: "kernel32".into(), name: "CreateToolhelp32Snapshot".into() });
-    assert_eq!(out, "before\n", "output up to the failing call is preserved");
-    assert_eq!(p.unimplemented_log, vec![("kernel32".to_string(), "CreateToolhelp32Snapshot".to_string())]);
+    assert_eq!(
+        stop,
+        Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "CreateToolhelp32Snapshot".into()
+        }
+    );
+    assert_eq!(
+        out, "before\n",
+        "output up to the failing call is preserved"
+    );
+    assert_eq!(
+        p.unimplemented_log,
+        vec![(
+            "kernel32".to_string(),
+            "CreateToolhelp32Snapshot".to_string()
+        )]
+    );
 }
 
 #[test]
@@ -258,7 +395,8 @@ fn run_with(name: &str, cmdline: &str) -> (Stop, String, String, Process) {
     let mut vfs = Vfs::new();
     vfs.insert(name, fixture(name));
     let mut p = Process::new(vfs);
-    p.load_exe(name, Some(cmdline)).unwrap_or_else(|e| panic!("load {name}: {e}"));
+    p.load_exe(name, Some(cmdline))
+        .unwrap_or_else(|e| panic!("load {name}: {e}"));
     let stop = p.run_to_end(500_000_000);
     let out = String::from_utf8_lossy(&p.take_stdout()).into_owned();
     let err = String::from_utf8_lossy(&p.take_stderr()).into_owned();
@@ -268,7 +406,12 @@ fn run_with(name: &str, cmdline: &str) -> (Stop, String, String, Process) {
 #[test]
 fn mingw_crt_program_runs_with_real_msvcrt_imports() {
     let (stop, out, err, p) = run_with("crt_test.exe", "\"C:\\crt_test.exe\" first \"second arg\"");
-    assert_eq!(stop, Stop::Exit(7), "stdout:\n{out}\nstderr:\n{err}\nunimplemented: {:?}", p.unimplemented_log);
+    assert_eq!(
+        stop,
+        Stop::Exit(7),
+        "stdout:\n{out}\nstderr:\n{err}\nunimplemented: {:?}",
+        p.unimplemented_log
+    );
     let expected = "argc=3 argv0_has_exe=1\n\
 arg1=first\n\
 arg2=second arg\n\

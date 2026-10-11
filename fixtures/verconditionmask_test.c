@@ -24,6 +24,10 @@ __declspec(dllimport) void *__stdcall GetProcAddress(void *module, const char *n
 
 __declspec(dllimport) ULONGLONG __stdcall VerSetConditionMask(
     ULONGLONG mask, DWORD type_mask, BYTE condition);
+__declspec(dllimport) int __stdcall VerifyVersionInfoW(
+    RTL_OSVERSIONINFOEXW *version, DWORD type_mask, ULONGLONG condition_mask);
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
+__declspec(dllimport) void __stdcall SetLastError(DWORD error);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int code);
 
 typedef NTSTATUS (__stdcall *RtlVerifyVersionInfoFn)(
@@ -65,6 +69,21 @@ void mainCRTStartup(void)
     version.build = 99999;
     if ((unsigned int)verify(&version, 0x7, conditions) != 0xC0000059u)
         ExitProcess(16);
+
+    version.build = 19000;
+    SetLastError(0x1234);
+    if (!VerifyVersionInfoW(&version, 0x7, conditions))
+        ExitProcess(17);
+
+    version.build = 99999;
+    SetLastError(0);
+    if (VerifyVersionInfoW(&version, 0x7, conditions) || GetLastError() != 1150)
+        ExitProcess(18);
+
+    version.size = 0;
+    SetLastError(0);
+    if (VerifyVersionInfoW(&version, 0x7, conditions) || GetLastError() != 87)
+        ExitProcess(19);
 
     ExitProcess(0);
 }

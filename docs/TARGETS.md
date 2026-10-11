@@ -223,13 +223,40 @@ but at the time of that trace the LCMap HLE read the full stack slot and tried t
 to address zero.
 Microsoft documents `cchDest=0` as a count-only query that does not use `lpDestStr`
 ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-lcmapstringex)).
-That LCMap count-query fault has since been addressed: the current bounded trace passes the
-`LCMapStringEx` call and reaches thread creation. Thread creation executes finite callbacks, then
-the runtime reaches `kernel32!SleepConditionVariableSRW` after finite inline thread callbacks and
-stops explicitly because no scheduler can resume the blocked thread. No GLFW window or D3D11
-renderer was observed, and no game behavior was verified. GLFW's Win32 window-creation path is also known from
+That LCMap count-query fault has since been addressed. At this earlier checkpoint the trace passed
+the `LCMapStringEx` call and reached thread creation. Thread creation executed finite callbacks,
+then the pre-scheduler runtime stopped explicitly at `kernel32!SleepConditionVariableSRW` because
+it could not resume a blocked guest thread. No GLFW window or D3D11 renderer was observed at that
+checkpoint. GLFW's Win32 window-creation path is also known from
 source inspection to call `SHELL32!DragAcceptFiles` unconditionally; that later call remains
 unreached and its behavior has not been verified in this target.
+
+### Current checkpoint after scheduler and CPU slices
+
+The cooperative scheduler now retains and resumes guest contexts through the target's condition
+waits. Target-grounded static TLS support assigns the image's TLS slot from index zero, initializes
+private blocks from each module template, and saves/restores `TEB+0x58` per thread. The freestanding
+`static_tls_thread_test.exe` verifies template initialization and worker/main isolation.
+
+The next trace stopped at `GLFWDemo.exe+0x96d8` with a read fault at `0x4`. Its sequence loaded the
+TLS vector from `GS:[0x58]`, loaded slot zero, then dereferenced a null block. After the TLS fix, the
+trace advanced to `GLFWDemo.exe+0x36b3`, bytes `C4 E3 7D 19 C0 01` (`VEXTRACTF128 xmm0,ymm0,1`). A
+target-specific implementation now extracts the upper 128-bit lane, and the following indirect
+callback runs.
+
+With the same 30,000,000-step cap, the latest run reaches virtual `CreateWindowExW`,
+`D3D11CreateDevice`, swap-chain/resource setup, repeated condition-variable waits, and
+`PathFileExistsW` for `C:\RenderStates.json`. It then makes several `LoadLibraryExW` and
+`GetProcAddress` calls and reaches guest `kernel32!ExitProcess` with status 3. This is a guest exit,
+not an AnyWASM decode or import stop. Opt-in exit tracing records the return address
+`0x14007dc14` (the call is at `GLFWDemo.exe+0x7dc0e`); the reason this branch passes status 3 to
+`ExitProcess` remains unknown. The trace does not reach shader creation or `Present`. Although the
+HLE creates virtual window, device, and swap-chain objects, no host window, host graphics device,
+displayed frame, or game acceptance has been verified.
+
+Reproduction used the Release output directory as the VFS root, `--trace-imports`, and
+`--max-steps 30000000`. The import trace was captured in the task environment under
+`%TEMP%\anywasm-glfwdemo-vextractf128.log`; it is not a repository artifact.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -240,17 +267,18 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 
 ## Next evidence needed
 
-- Trace each executable on its D3D11 path and record the first runtime blocker, distinguishing
-  imports reached on that path from static-only imports. The tutorials now report 12 missing USER32
-  symbols and 4 missing IMM32 symbols each; the current `/MT` game trace reaches an unsupported
-  infinite condition-variable wait before window creation.
+- Isolate why the selected GLFW Demo exits with status 3 after `LoadLibraryExW`/`GetProcAddress`
+  activity; capture
+  shader compilation/resource/presentation calls if the target advances. Continue to distinguish
+  virtual HLE window/device objects from observed host rendering.
+- Trace each tutorial executable on its D3D11 path and record the first runtime blocker, distinguishing
+  imports reached on that path from static-only imports. The tutorials still report 12 missing
+  USER32 symbols and 4 missing IMM32 symbols each.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
-- The D3D11-only GLFW Demo is the selected game candidate. The current `/MT` analyzer report has 96
-  missing imports across the EXE and three DLLs; the archived prior report had 122 after static
-  linking. The `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered by
-  guest regressions. The current trace reaches finite thread callbacks and then stops at the
-  unsupported infinite `SleepConditionVariableSRW` wait. Implement a resumable scheduler and retest
-  that path before continuing toward window creation. No window or renderer has been verified; the
-  known `SHELL32!DragAcceptFiles` call remains a later unreached checkpoint before gameplay
-  verification.
+- The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has
+  96 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
+  linking. Conversion, version, path, scheduler, static TLS, and target-specific AVX/BMI checkpoints
+  are covered by regressions. The current bounded trace reaches guest `ExitProcess(3)` after virtual
+  D3D setup and dynamic library resolution calls. The cause, shader compilation, presentation, host
+  rendering, and gameplay acceptance remain unverified.

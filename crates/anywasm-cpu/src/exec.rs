@@ -173,7 +173,11 @@ fn shift_op(cpu: &mut Cpu, op: Op, v: u64, count: u64, sz: u8) -> u64 {
     match op {
         Op::Shl => {
             let res = if cnt >= bits { 0 } else { (v << cnt) & m };
-            let cf = if cnt > bits { false } else { (v >> (bits - cnt)) & 1 != 0 };
+            let cf = if cnt > bits {
+                false
+            } else {
+                (v >> (bits - cnt)) & 1 != 0
+            };
             cpu.set_flag(CF, cf);
             cpu.set_flag(OF, (res & sgn(sz) != 0) != cf);
             cpu.set_flag(AF, false);
@@ -182,7 +186,11 @@ fn shift_op(cpu: &mut Cpu, op: Op, v: u64, count: u64, sz: u8) -> u64 {
         }
         Op::Shr => {
             let res = if cnt >= bits { 0 } else { v >> cnt };
-            let cf = if cnt > bits { false } else { (v >> (cnt - 1)) & 1 != 0 };
+            let cf = if cnt > bits {
+                false
+            } else {
+                (v >> (cnt - 1)) & 1 != 0
+            };
             cpu.set_flag(CF, cf);
             cpu.set_flag(OF, v & sgn(sz) != 0);
             cpu.set_flag(AF, false);
@@ -193,7 +201,11 @@ fn shift_op(cpu: &mut Cpu, op: Op, v: u64, count: u64, sz: u8) -> u64 {
             let s = sext(v, sz);
             let sh = cnt.min(63);
             let res = ((s >> sh) as u64) & m;
-            let cf = if cnt >= bits { s < 0 } else { (s >> (cnt - 1)) & 1 != 0 };
+            let cf = if cnt >= bits {
+                s < 0
+            } else {
+                (s >> (cnt - 1)) & 1 != 0
+            };
             cpu.set_flag(CF, cf);
             cpu.set_flag(OF, false);
             cpu.set_flag(AF, false);
@@ -202,14 +214,22 @@ fn shift_op(cpu: &mut Cpu, op: Op, v: u64, count: u64, sz: u8) -> u64 {
         }
         Op::Rol => {
             let r = cnt % bits;
-            let res = if r == 0 { v } else { ((v << r) | (v >> (bits - r))) & m };
+            let res = if r == 0 {
+                v
+            } else {
+                ((v << r) | (v >> (bits - r))) & m
+            };
             cpu.set_flag(CF, res & 1 != 0);
             cpu.set_flag(OF, ((res >> (bits - 1)) & 1 != 0) != (res & 1 != 0));
             res
         }
         Op::Ror => {
             let r = cnt % bits;
-            let res = if r == 0 { v } else { ((v >> r) | (v << (bits - r))) & m };
+            let res = if r == 0 {
+                v
+            } else {
+                ((v >> r) | (v << (bits - r))) & m
+            };
             cpu.set_flag(CF, res >> (bits - 1) & 1 != 0);
             cpu.set_flag(OF, ((res >> (bits - 1)) & 1) != ((res >> (bits - 2)) & 1));
             res
@@ -279,7 +299,11 @@ fn double_shift(cpu: &mut Cpu, left: bool, dst: u64, src: u64, count: u64, sz: u
         let wide = ((src as u128) << bits) | dst as u128;
         ((wide >> cnt) as u64) & m
     };
-    let cf = if left { (dst >> (bits - cnt)) & 1 != 0 } else { (dst >> (cnt - 1)) & 1 != 0 };
+    let cf = if left {
+        (dst >> (bits - cnt)) & 1 != 0
+    } else {
+        (dst >> (cnt - 1)) & 1 != 0
+    };
     cpu.set_flag(CF, cf);
     cpu.set_flag(OF, (res ^ dst) & sgn(sz) != 0);
     cpu.set_flag(AF, false);
@@ -305,7 +329,11 @@ fn crc32c(crc: u32, data: u64, sz: u8) -> u32 {
     for i in 0..sz {
         c ^= ((data >> (8 * i)) & 0xff) as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { (c >> 1) ^ 0x82F6_3B78 } else { c >> 1 };
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0x82F6_3B78
+            } else {
+                c >> 1
+            };
         }
     }
     c
@@ -316,9 +344,24 @@ fn crc32c(crc: u32, data: u64, sz: u8) -> u32 {
 pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
     let _ = sub;
     match leaf {
-        0 => [0x16, u32::from_le_bytes(*b"Genu"), u32::from_le_bytes(*b"ntel"), u32::from_le_bytes(*b"ineI")],
+        0 => [
+            0x16,
+            u32::from_le_bytes(*b"Genu"),
+            u32::from_le_bytes(*b"ntel"),
+            u32::from_le_bytes(*b"ineI"),
+        ],
         1 => {
-            let edx = 1 | 1 << 4 | 1 << 8 | 1 << 15 | 1 << 23 & 0 | 1 << 24 | 1 << 25 | 1 << 26 | 1 << 13 | 1 << 11 & 0 | 1 << 5 & 0;
+            let edx = 1
+                | 1 << 4
+                | 1 << 8
+                | 1 << 15
+                | 1 << 23 & 0
+                | 1 << 24
+                | 1 << 25
+                | 1 << 26
+                | 1 << 13
+                | 1 << 11 & 0
+                | 1 << 5 & 0;
             // FPU, TSC, CX8, CMOV, FXSR, SSE, SSE2 (MMX deliberately absent)
             let edx = edx | 1 << 5 & 0;
             let ecx = 1 | 1 << 9 | 1 << 19 | 1 << 20 | 1 << 23 | 1 << 13 | 1 << 22;
@@ -381,7 +424,9 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             w!(0, sext(v, i.ssz) as u64);
         }
         Op::Lea => {
-            let Opnd::Mem(m) = i.ops[1] else { return Err(Exit::Undefined) };
+            let Opnd::Mem(m) = i.ops[1] else {
+                return Err(Exit::Undefined);
+            };
             let mut m2 = m;
             m2.seg = 0; // LEA ignores segment bases
             w!(0, ea(cpu, &m2));
@@ -392,7 +437,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             w!(1, a);
         }
         Op::Push => {
-            let v = if let Opnd::Imm = i.ops[0] { i.imm as u64 } else { r!(0) };
+            let v = if let Opnd::Imm = i.ops[0] {
+                i.imm as u64
+            } else {
+                r!(0)
+            };
             push(cpu, mem, v, i.osz)?;
         }
         Op::Pop => {
@@ -413,16 +462,28 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             cpu.rflags = (cpu.rflags & !(SF | ZF | AF | PF | CF)) | ah;
         }
         Op::Cbw => match sz {
-            2 => cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xffff) | (cpu.gpr[RAX] as i8 as i16 as u16 as u64),
+            2 => {
+                cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xffff) | (cpu.gpr[RAX] as i8 as i16 as u16 as u64)
+            }
             4 => cpu.gpr[RAX] = cpu.gpr[RAX] as i16 as i32 as u32 as u64,
             _ => cpu.gpr[RAX] = cpu.gpr[RAX] as i32 as i64 as u64,
         },
         Op::Cwd => match sz {
             2 => {
-                let s = if cpu.gpr[RAX] & 0x8000 != 0 { 0xffff } else { 0 };
+                let s = if cpu.gpr[RAX] & 0x8000 != 0 {
+                    0xffff
+                } else {
+                    0
+                };
                 cpu.gpr[RDX] = (cpu.gpr[RDX] & !0xffff) | s;
             }
-            4 => cpu.gpr[RDX] = if cpu.gpr[RAX] & 0x8000_0000 != 0 { 0xffff_ffff } else { 0 },
+            4 => {
+                cpu.gpr[RDX] = if cpu.gpr[RAX] & 0x8000_0000 != 0 {
+                    0xffff_ffff
+                } else {
+                    0
+                }
+            }
             _ => cpu.gpr[RDX] = if cpu.gpr[RAX] >> 63 != 0 { u64::MAX } else { 0 },
         },
         Op::Xlat => {
@@ -432,7 +493,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
         }
         Op::Bswap => {
             let v = r!(0);
-            let res = if sz == 8 { v.swap_bytes() } else { (v as u32).swap_bytes() as u64 };
+            let res = if sz == 8 {
+                v.swap_bytes()
+            } else {
+                (v as u32).swap_bytes() as u64
+            };
             w!(0, res);
         }
         Op::Movbe => {
@@ -448,13 +513,21 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
         // ── ALU ──
         Op::Add | Op::Adc => {
             let (a, b) = (r!(0), r!(1));
-            let c = if i.op == Op::Adc { cpu.flag(CF) as u64 } else { 0 };
+            let c = if i.op == Op::Adc {
+                cpu.flag(CF) as u64
+            } else {
+                0
+            };
             let res = add_op(cpu, a, b, c, sz);
             w!(0, res);
         }
         Op::Sub | Op::Sbb | Op::Cmp => {
             let (a, b) = (r!(0), r!(1));
-            let c = if i.op == Op::Sbb { cpu.flag(CF) as u64 } else { 0 };
+            let c = if i.op == Op::Sbb {
+                cpu.flag(CF) as u64
+            } else {
+                0
+            };
             let res = sub_op(cpu, a, b, c, sz);
             if i.op != Op::Cmp {
                 w!(0, res);
@@ -475,7 +548,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
         Op::Inc | Op::Dec => {
             let a = r!(0);
             let cf = cpu.flag(CF);
-            let res = if i.op == Op::Inc { add_op(cpu, a, 1, 0, sz) } else { sub_op(cpu, a, 1, 0, sz) };
+            let res = if i.op == Op::Inc {
+                add_op(cpu, a, 1, 0, sz)
+            } else {
+                sub_op(cpu, a, 1, 0, sz)
+            };
             cpu.set_flag(CF, cf);
             w!(0, res);
         }
@@ -665,7 +742,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
                 cpu.set_flag(ZF, true);
             } else {
                 cpu.set_flag(ZF, false);
-                let idx = if i.op == Op::Bsf { v.trailing_zeros() } else { 63 - v.leading_zeros() };
+                let idx = if i.op == Op::Bsf {
+                    v.trailing_zeros()
+                } else {
+                    63 - v.leading_zeros()
+                };
                 w!(0, idx as u64);
             }
         }
@@ -719,12 +800,33 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             cpu.set_flag(SF, result & sgn(sz) != 0);
             cpu.set_flag(PF, parity(result));
         }
+        Op::Bzhi => {
+            let source = rd(cpu, mem, &i.ops[1], 4, 0)? as u32;
+            let index = (rd(cpu, mem, &i.ops[2], 4, 0)? as u32) & 0xff;
+            let carry = index > 31;
+            let result = if carry {
+                source
+            } else {
+                source & ((1u32 << index) - 1)
+            };
+            cpu.set_flag(CF, carry);
+            cpu.set_flag(ZF, result == 0);
+            cpu.set_flag(SF, result & 0x8000_0000 != 0);
+            cpu.set_flag(OF, false);
+            wr(cpu, mem, &i.ops[0], 4, result as u64)?;
+        }
         Op::Shlx => {
             let width = (i.osz * 8) as u32;
             let value = rd(cpu, mem, &i.ops[1], i.osz, 0)?;
             let count = (rd(cpu, mem, &i.ops[2], i.osz, 0)? & (width as u64 - 1)) as u32;
             let result = value.wrapping_shl(count) & msk(i.osz);
             wr(cpu, mem, &i.ops[0], i.osz, result)?;
+        }
+        Op::Shrx => {
+            let width = (i.osz * 8) as u32;
+            let value = rd(cpu, mem, &i.ops[1], i.osz, 0)?;
+            let count = (rd(cpu, mem, &i.ops[2], i.osz, 0)? & (width as u64 - 1)) as u32;
+            wr(cpu, mem, &i.ops[0], i.osz, value >> count)?;
         }
         Op::Cmpxchg => {
             let dst = r!(0);
@@ -738,13 +840,18 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             }
         }
         Op::Cmpxchg8b | Op::Cmpxchg16b => {
-            let Opnd::Mem(m) = i.ops[0] else { return Err(Exit::Undefined) };
+            let Opnd::Mem(m) = i.ops[0] else {
+                return Err(Exit::Undefined);
+            };
             let a = ea(cpu, &m);
             if i.op == Op::Cmpxchg8b {
                 let cur = mem.read_u64(a)?;
                 let cmp = (cpu.gpr[RDX] & 0xffff_ffff) << 32 | (cpu.gpr[RAX] & 0xffff_ffff);
                 if cur == cmp {
-                    mem.write_u64(a, (cpu.gpr[RCX] & 0xffff_ffff) << 32 | (cpu.gpr[RBX] & 0xffff_ffff))?;
+                    mem.write_u64(
+                        a,
+                        (cpu.gpr[RCX] & 0xffff_ffff) << 32 | (cpu.gpr[RBX] & 0xffff_ffff),
+                    )?;
                     cpu.set_flag(ZF, true);
                 } else {
                     cpu.gpr[RAX] = cur & 0xffff_ffff;
@@ -753,7 +860,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
                 }
             } else {
                 if a & 15 != 0 {
-                    return Err(Exit::Fault(Fault { addr: a, access: crate::mem::Access::Write, protection: true }));
+                    return Err(Exit::Fault(Fault {
+                        addr: a,
+                        access: crate::mem::Access::Write,
+                        protection: true,
+                    }));
                 }
                 let cur = mem.read_u128(a)?;
                 let cmp = (cpu.gpr[RDX] as u128) << 64 | cpu.gpr[RAX] as u128;
@@ -789,7 +900,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             return Ok(());
         }
         Op::Jcc => {
-            cpu.rip = if cond(cpu.rflags, i.cc) { i.imm as u64 } else { next };
+            cpu.rip = if cond(cpu.rflags, i.cc) {
+                i.imm as u64
+            } else {
+                next
+            };
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
@@ -922,11 +1037,15 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             cpu.rflags = (cpu.rflags & !ARITH_FLAGS) | CF;
         }
         Op::Ldmxcsr => {
-            let Opnd::Mem(m) = i.ops[0] else { return Err(Exit::Undefined) };
+            let Opnd::Mem(m) = i.ops[0] else {
+                return Err(Exit::Undefined);
+            };
             cpu.mxcsr = mem.read_u32(ea(cpu, &m))?;
         }
         Op::Stmxcsr => {
-            let Opnd::Mem(m) = i.ops[0] else { return Err(Exit::Undefined) };
+            let Opnd::Mem(m) = i.ops[0] else {
+                return Err(Exit::Undefined);
+            };
             mem.write_u32(ea(cpu, &m), cpu.mxcsr)?;
         }
         Op::Fxsave | Op::Fxrstor => return crate::sse::fxsave_restore(cpu, mem, i, next),
@@ -941,14 +1060,20 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
 
 fn exec_string(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
     let sz = i.osz;
-    let Opnd::Mem(mo) = i.ops[0] else { return Err(Exit::Undefined) };
+    let Opnd::Mem(mo) = i.ops[0] else {
+        return Err(Exit::Undefined);
+    };
     let seg_base = match mo.seg {
         1 => cpu.fs_base,
         2 => cpu.gs_base,
         _ => 0,
     };
     let am: u64 = if mo.addr32 { 0xffff_ffff } else { u64::MAX };
-    let step = if cpu.flag(DF) { (sz as u64).wrapping_neg() } else { sz as u64 };
+    let step = if cpu.flag(DF) {
+        (sz as u64).wrapping_neg()
+    } else {
+        sz as u64
+    };
     let rep = i.rep != 0;
     let cmpish = matches!(i.op, Op::Cmps | Op::Scas);
     loop {
@@ -1013,7 +1138,6 @@ fn adv(reg: u64, delta: u64, am: u64) -> u64 {
     }
 }
 
-
 /// Direct-mapped cache of decoded instructions, valid while `Memory::code_epoch` is unchanged.
 pub struct DecodeCache {
     entries: Vec<(u64, u64, Inst)>,
@@ -1030,7 +1154,9 @@ impl Default for DecodeCache {
 impl DecodeCache {
     pub fn new() -> Self {
         let dummy = crate::decode::decode(&[0x90], 0).unwrap();
-        DecodeCache { entries: vec![(u64::MAX, u64::MAX, dummy); 1 << DC_BITS] }
+        DecodeCache {
+            entries: vec![(u64::MAX, u64::MAX, dummy); 1 << DC_BITS],
+        }
     }
 
     /// Fetch (cached), decode and execute one instruction.

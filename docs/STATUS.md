@@ -10,13 +10,13 @@
   one case: 16-bit `shld/shrd` with count > 16, which the SDM calls undefined and vendors differ
   on (the first CI run caught this; that range is now excluded from the corpus and the interpreter
   keeps the Intel behaviour, documented in `exec.rs`).
-- `anywasm-rt`: PE64 loader (relocations, imports, delay imports, TLS, TEB/PEB with loader lists,
-  bundled DLLs) + host-implemented kernel32/ntdll/CRT. 5 end-to-end tests run **real Windows x64
-  executables**: freestanding clang-built programs (console I/O, relocated pointer tables, heap,
-  SSE2 math, indirect calls, GetProcAddress) and a mingw-w64 program importing the real
-  `msvcrt.dll` (argv, qsort with guest callbacks, printf family, malloc/realloc, math,
-  setjmp/longjmp, file I/O on the VFS, sscanf, atexit, exit code, stderr). The mingw program's
-  output is identical to the same source compiled natively (checked by hand).
+- `anywasm-rt`: PE64 loader (relocations, imports, delay imports, per-thread static TLS, TEB/PEB with loader lists,
+  bundled DLLs) + host-implemented kernel32/ntdll/CRT. 31 end-to-end tests run **real Windows x64
+  executables**: freestanding fixtures cover console I/O, relocated pointer tables, heap, SSE2 math,
+  indirect calls, GetProcAddress, thread synchronization, static TLS isolation, version checks, and
+  VFS paths; a mingw-w64 program imports the real `msvcrt.dll` (argv, qsort with guest callbacks,
+  printf family, malloc/realloc, math, setjmp/longjmp, file I/O on the VFS, sscanf, atexit, exit
+  code, stderr). The mingw program's output matches the same source compiled natively.
 - `printf` engine: unit tests for flags/width/precision/length modifiers/floats.
 - `anywasm` CLI (`analyze`, `run`, `pack`) and `.awb` bundles. `run` and `pack` support `--cwd`,
   bundles retain that guest directory, and the WASM loader restores it; relative Win32 and CRT file
@@ -65,8 +65,9 @@
 - x87 is modelled with f64, not 80-bit; transcendentals compared to 1e-9 relative tolerance.
 - rcpps/rsqrtps return exact reciprocals (excluded from the diff corpus).
 - Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic, XOR,
-  rounding/conversion, `VZEROUPPER`, `ANDN`, and `SHLX` (see the exact list in `CLAUDE.md`). This is
-  not broad AVX/AVX2/BMI coverage; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
+  rounding/conversion, `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the
+  exact list in `CLAUDE.md`). This is not broad AVX/AVX2/BMI coverage; EVEX, FMA, MMX, AES/PCLMUL,
+  and 16-bit/segment modes remain open.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (opt-in prototype, default disabled):** at a block entry, Rust emits a module for a
@@ -92,10 +93,12 @@
   memory MOVs, NOP, LEA, arithmetic,
   SIMD, or control flow are not emitted. Full JIT/interpreter state differential, module-cache
   pressure, CSP checks, browser engine matrix, and real-game performance remain open.
-- Thread support runs finite `CreateThread` callbacks inline with isolated TLS/FLS and thread
-  identity; `_beginthreadex`, resumable scheduling, blocking condition-variable waits, and real
-  synchronization remain unimplemented. No SEH/C++ exception unwinding, audio, DirectInput/XInput,
-  32-bit PE, D3D9/D3D12/OpenGL. GDI support is limited to virtual display DCs and basic caps.
+- Thread support uses a deterministic cooperative scheduler with saved CPU/stack/TEB TLS pointers,
+  dynamic TLS/FLS maps, static PE TLS blocks, quantum rotation, resumable waits, events, mutexes,
+  semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. Nested
+  synchronous callback scheduling and alertable waits remain unsupported. No SEH/C++ exception
+  unwinding, audio, DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL. GDI support is limited to
+  virtual display DCs and basic caps.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
   sampler state, mip generation, copies and instancing are implemented in the translator, but only two
   paths are pixel-verified: the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
@@ -122,9 +125,11 @@
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
   down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
-  queries. The bounded AnyWASM run reaches `SleepConditionVariableSRW` after finite thread callbacks,
-  then stops because the runtime cannot resume a blocked guest thread. No window or renderer has
-  been verified and no real-game acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for
+  queries. The bounded AnyWASM run now resumes past condition-variable waits, initializes target
+  static TLS, reaches the target's VEXTRACTF128 callback, creates virtual window/device/swap-chain
+  objects, and reaches guest `ExitProcess(3)` after later initialization; trace diagnostics record
+  the caller return address `0x14007dc14`. It does not reach shader creation or `Present`; no host
+  window, renderer, or real-game acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for
   exact traces and next steps.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not

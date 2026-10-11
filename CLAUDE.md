@@ -120,21 +120,22 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       graphics validation on other engines remains open.
 
 ## 2. Windows runtime coverage
-- [~] **Threads**: finite `CreateThread` callbacks run inline on a private guest stack with
-      separate TLS/FLS maps, thread ID, TEB stack bounds, last-error state, and exit status.
-      This is not a scheduler: `_beginthreadex` remains unimplemented, blocking/infinite
-      `SleepConditionVariableSRW/CS` stops as unimplemented, and critical sections, events,
-      semaphores, `WaitForMultipleObjects`, and `Sleep` still need real synchronization semantics.
-      Long-running callbacks stop at an instruction budget. Choose a scheduler model before adding
-      resumable or concurrent guest threads.
+- [~] **Threads**: a deterministic FIFO cooperative scheduler now saves full CPU state, private
+      stacks, last-error, dynamic TLS/FLS maps, and each guest thread's static PE TLS vector. It
+      supports finite callbacks, quantum rotation, events, mutexes, semaphores, waits, critical
+      sections, SRW locks, condition waits/wakes/timeouts, `Sleep`, and resume of blocked threads.
+      Static TLS images loaded after guest-thread creation fail explicitly. Nested synchronous
+      callback scheduling and alertable waits remain unsupported; this is not parallel execution.
+      The selected target passes its prior wait path and exits with guest status 3 after later
+      initialization; no host renderer or frame has been observed.
 - [ ] **SEH / C++ exceptions**: `.pdata` unwind tables, `RtlUnwindEx`/`RtlLookupFunctionEntry`,
       `__C_specific_handler`, `RaiseException`, vectored handlers; guest faults → exceptions.
-- [~] **More of kernel32/ntdll/user32**: target reports confirm `InitializeSListHead` is imported
-      and implemented in both tutorials; `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
-      `EnumDisplaySettingsW` cover reported USER32 imports. The tutorials now report 12 missing
-      USER32 symbols each. The target binaries also import `SleepConditionVariableSRW`; the HLE
-      stops explicitly on its infinite wait because a guest-thread scheduler and wait model are not
-      implemented.
+- [~] **More of kernel32/ntdll/user32/shlwapi**: target-grounded work adds
+      `VerifyVersionInfoA/W`, `PathFileExistsA/W`, and cooperative wait support alongside the
+      earlier `InitializeSListHead`, `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
+      `EnumDisplaySettingsW`. The selected target passes version checks, creates virtual window and
+      D3D objects, resolves `RenderStates.json`, and continues past condition-variable waits.
+      Unreached imports and host window/device behavior remain open.
 - [~] **GDI / gdi32**: virtual display DC creation and basic display capabilities are available;
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
@@ -187,8 +188,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 ## 4. CPU correctness
 - [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
       VMOVDQA/DQU, VMOVSS/SD, VPXOR/VXORPS, VADDSS/VDIVSS, VCOMISS/VUCOMISS, VROUNDSS,
-      VCVTSI2SS/VCVTTSS2SI, VZEROUPPER, ANDN, and SHLX. This is a targeted subset, not AVX2/BMI2
-      support; the remaining AVX/AVX2/BMI/FMA and AES/PCLMUL/MMX instructions are still open.
+      VCVTSI2SS/VCVTTSS2SI, VEXTRACTF128, VZEROUPPER, ANDN, SHLX, SHRX, BZHI, VPBROADCASTD,
+      VPADDD, VMOVDQU, VMOVQ, and VPEXTRQ. These are exact target-grounded forms, not broad
+      AVX/AVX2/BMI2 support; remaining AVX/AVX2/BMI/FMA and AES/PCLMUL/MMX instructions are open.
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
 - [ ] `rcpps`/`rsqrtps` return exact results (excluded from the diff corpus); match hardware
       approximation or document per-vendor differences.
@@ -209,6 +211,8 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [x] Silence/resolve compiler warnings (e.g. unused `ERROR_ACCESS_DENIED` in `kernel32.rs`).
 - [x] Add a Rust-side command-stream test for `d3d11_textured` (`tests/d3d11_stream.rs` covers the
       triangle only) and add the textured exe to `test/wasm_smoke.mjs`.
+- [x] Add WASM smoke regressions for condition-variable thread resumption and per-thread static PE
+      TLS isolation.
 - [x] Performance dashboard: record bench numbers per commit in CI (non-gating at first).
 - [~] Task list housekeeping: current open work is now queued in GitHub issues for [JIT](https://github.com/Dankular/AnyWASM/issues/1), [runtime](https://github.com/Dankular/AnyWASM/issues/2), [graphics](https://github.com/Dankular/AnyWASM/issues/3), [CPU](https://github.com/Dankular/AnyWASM/issues/4), and [productization](https://github.com/Dankular/AnyWASM/issues/5). Keep these grouped issues synchronized with this file's detailed checklists. Historical #5/#11/#6 references still cannot be mapped: the issue list was empty when inspected, and the old notes' broader status cannot be recovered.
 
@@ -219,10 +223,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       separate Intel-origin code/assets redistribution review. The Apache-2.0 GLFW Demo maze is now
       the selected game candidate. A separate D3D11-only `/MT` build succeeded; the current
       analyzer reports 96 missing imports across its EXE and three DLLs, down from 349. Its
-      `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. The bounded
-      AnyWASM run reaches `SleepConditionVariableSRW` after finite thread callbacks, then stops
-      because the scheduler cannot resume a blocked guest thread. The end-to-end acceptance gate
-      remains open; see `docs/TARGETS.md` for exact reports and next steps.
+      `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Cooperative
+      scheduling now resumes the selected target beyond its condition-variable waits. After
+      target-grounded static TLS and VEXTRACTF128 support, its bounded run reaches guest
+      `ExitProcess(3)` during later initialization. No real host window, renderer, or frame has been
+      verified, so the end-to-end acceptance gate remains open; see `docs/TARGETS.md` for the exact
+      trace and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the

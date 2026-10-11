@@ -20,6 +20,9 @@ MultiByteToWideChar
 LCMapStringEx
 WideCharToMultiByte
 VerSetConditionMask
+VerifyVersionInfoW
+GetLastError
+SetLastError
 LoadLibraryA
 GetProcAddress
 GetModuleHandleA
@@ -33,6 +36,7 @@ ResumeThread
 WaitForSingleObject
 CloseHandle
 SleepConditionVariableSRW
+WakeConditionVariable
 AcquireSRWLockExclusive
 ReleaseSRWLockExclusive
 GetCurrentProcessId

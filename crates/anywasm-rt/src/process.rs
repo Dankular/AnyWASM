@@ -14,6 +14,8 @@ pub const THUNK_BYTES: u64 = 0x10_0000;
 pub const RET_MAGIC: u64 = THUNK_BASE + THUNK_BYTES - 0x10;
 /// Entry-point return lands here and exits the process with RAX.
 pub const EXIT_MAGIC: u64 = THUNK_BASE + THUNK_BYTES - 0x20;
+/// Return address installed on a newly created guest thread's stack.
+pub const THREAD_RETURN_MAGIC: u64 = THUNK_BASE + THUNK_BYTES - 0x30;
 
 pub const PEB_ADDR: u64 = 0x7ffd_0000_0000;
 pub const TEB_ADDR: u64 = 0x7ffd_0001_0000;
@@ -39,6 +41,80 @@ pub enum Stop {
     Idle,
     /// Internal control transfer used to return from an explicitly created guest thread.
     ThreadExit(u32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThreadWait {
+    Handle {
+        handle: u64,
+        deadline: Option<u64>,
+    },
+    Multiple {
+        handles: Vec<u64>,
+        wait_all: bool,
+        deadline: Option<u64>,
+    },
+    Sleep {
+        deadline: u64,
+    },
+    CriticalAcquire {
+        address: u64,
+    },
+    SrwAcquire {
+        address: u64,
+        exclusive: bool,
+    },
+    Condition {
+        condition: u64,
+        lock: u64,
+        critical: bool,
+        exclusive: bool,
+        deadline: Option<u64>,
+        outcome: Option<bool>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThreadState {
+    Ready,
+    Running,
+    Suspended,
+    Blocked(ThreadWait),
+    Exited(u32),
+}
+
+pub struct GuestThread {
+    pub cpu: Cpu,
+    pub stack_base: u64,
+    pub stack_limit: u64,
+    pub teb_tls_vector: u64,
+    pub last_error: u32,
+    pub tls: HashMap<u32, u64>,
+    pub fls: HashMap<u32, u64>,
+    pub state: ThreadState,
+    pub is_guest: bool,
+    pub wait_order: u64,
+}
+
+#[derive(Clone, Debug)]
+struct StaticTlsTemplate {
+    index: u32,
+    data: Vec<u8>,
+    total_size: u64,
+}
+
+#[derive(Default)]
+pub struct SrwLockState {
+    pub exclusive_owner: Option<u32>,
+    pub shared_owners: HashMap<u32, u32>,
+    pub waiters: VecDeque<u32>,
+}
+
+#[derive(Default)]
+pub struct CriticalSectionState {
+    pub owner: Option<u32>,
+    pub recursion: u32,
+    pub waiters: VecDeque<u32>,
 }
 
 pub type RunResult = Stop;
@@ -67,9 +143,30 @@ pub struct Thunk {
 /// Win32 handle table entries.
 pub enum Handle {
     Std(u32),
-    File { path: String, pos: usize, write: bool },
-    Event { signaled: bool, manual: bool },
-    Thread { id: u32, start: u64, parameter: u64, exit_code: Option<u32>, suspended: bool },
+    File {
+        path: String,
+        pos: usize,
+        write: bool,
+    },
+    Event {
+        signaled: bool,
+        manual: bool,
+    },
+    Mutex {
+        owner: Option<u32>,
+        recursion: u32,
+    },
+    Semaphore {
+        count: u32,
+        max_count: u32,
+    },
+    Thread {
+        id: u32,
+        start: u64,
+        parameter: u64,
+        exit_code: Option<u32>,
+        suspended: bool,
+    },
     Module(u64),
     Other,
 }
@@ -95,13 +192,25 @@ pub struct Process {
     pub current_directory: String,
     pub env: Vec<(String, String)>,
     pub tls_next: u32,
+    pub fls_next: u32,
+    static_tls_next: u32,
+    static_tls_templates: Vec<StaticTlsTemplate>,
     pub fls: HashMap<u32, u64>,
     pub tls_slots: HashMap<u32, u64>,
-    pub thread_tls: HashMap<u32, HashMap<u32, u64>>,
-    pub thread_fls: HashMap<u32, HashMap<u32, u64>>,
     pub current_thread_id: u32,
     pub next_thread_id: u32,
-    pub thread_call_depth: u32,
+    pub current_thread_is_guest: bool,
+    pub current_thread_state: ThreadState,
+    pub current_wait_order: u64,
+    pub current_thread_saved: bool,
+    pub guest_threads: HashMap<u32, GuestThread>,
+    pub ready_threads: VecDeque<u32>,
+    pub schedule_requested: bool,
+    pub wait_sequence: u64,
+    pub quantum_used: u64,
+    pub retired_instructions: u64,
+    pub srw_locks: HashMap<u64, SrwLockState>,
+    pub critical_sections: HashMap<u64, CriticalSectionState>,
     pub atexit: Vec<u64>,
     pub tick_ms: u64,
     pub qpc: u64,
@@ -155,14 +264,26 @@ impl Process {
                 ("COMPUTERNAME".into(), "ANYWASM".into()),
                 ("OS".into(), "Windows_NT".into()),
             ],
-            tls_next: 1,
+            tls_next: 0,
+            fls_next: 0,
+            static_tls_next: 0,
+            static_tls_templates: Vec::new(),
             fls: HashMap::new(),
             tls_slots: HashMap::new(),
-            thread_tls: HashMap::new(),
-            thread_fls: HashMap::new(),
             current_thread_id: 0x1004,
             next_thread_id: 0x1008,
-            thread_call_depth: 0,
+            current_thread_is_guest: false,
+            current_thread_state: ThreadState::Running,
+            current_wait_order: 0,
+            current_thread_saved: false,
+            guest_threads: HashMap::new(),
+            ready_threads: VecDeque::new(),
+            schedule_requested: false,
+            wait_sequence: 0,
+            quantum_used: 0,
+            retired_instructions: 0,
+            srw_locks: HashMap::new(),
+            critical_sections: HashMap::new(),
             atexit: Vec::new(),
             tick_ms: 0,
             qpc: 1_000_000,
@@ -183,41 +304,66 @@ impl Process {
     // ── guest memory helpers (faults become crashes) ─────────────────────────
 
     pub fn rd8(&self, a: u64) -> Result<u8, Stop> {
-        self.mem.read_u8(a).map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
+        self.mem
+            .read_u8(a)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
     }
     pub fn rd16(&self, a: u64) -> Result<u16, Stop> {
-        self.mem.read_u16(a).map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
+        self.mem
+            .read_u16(a)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
     }
     pub fn rd32(&self, a: u64) -> Result<u32, Stop> {
-        self.mem.read_u32(a).map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
+        self.mem
+            .read_u32(a)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
     }
     pub fn rd64(&self, a: u64) -> Result<u64, Stop> {
-        self.mem.read_u64(a).map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
+        self.mem
+            .read_u64(a)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
     }
     pub fn wr8(&mut self, a: u64, v: u8) -> Result<(), Stop> {
-        self.mem.write_u8(a, v).map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
+        self.mem
+            .write_u8(a, v)
+            .map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
     }
     pub fn wr16(&mut self, a: u64, v: u16) -> Result<(), Stop> {
-        self.mem.write_u16(a, v).map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
+        self.mem
+            .write_u16(a, v)
+            .map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
     }
     pub fn wr32(&mut self, a: u64, v: u32) -> Result<(), Stop> {
-        self.mem.write_u32(a, v).map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
+        self.mem
+            .write_u32(a, v)
+            .map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
     }
     pub fn wr64(&mut self, a: u64, v: u64) -> Result<(), Stop> {
-        self.mem.write_u64(a, v).map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
+        self.mem
+            .write_u64(a, v)
+            .map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
     }
     pub fn read_bytes(&self, a: u64, n: usize) -> Result<Vec<u8>, Stop> {
-        self.mem.read_vec(a, n).map_err(|e| Stop::Crash(format!("read fault {:#x}+{n}: {e:?}", a)))
+        self.mem
+            .read_vec(a, n)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}+{n}: {e:?}", a)))
     }
     pub fn write_bytes(&mut self, a: u64, b: &[u8]) -> Result<(), Stop> {
-        self.mem.write_from(a, b).map_err(|e| Stop::Crash(format!("write fault {:#x}+{}: {e:?}", a, b.len())))
+        self.mem
+            .write_from(a, b)
+            .map_err(|e| Stop::Crash(format!("write fault {:#x}+{}: {e:?}", a, b.len())))
     }
     pub fn read_cstr(&self, a: u64) -> Result<String, Stop> {
-        let b = self.mem.read_cstr(a, 1 << 20).map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))?;
+        let b = self
+            .mem
+            .read_cstr(a, 1 << 20)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))?;
         Ok(String::from_utf8_lossy(&b).into_owned())
     }
     pub fn read_wstr(&self, a: u64) -> Result<String, Stop> {
-        self.mem.read_wstr(a, 1 << 20).map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
+        self.mem
+            .read_wstr(a, 1 << 20)
+            .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
     }
     pub fn write_cstr(&mut self, a: u64, s: &str) -> Result<(), Stop> {
         let mut b = s.as_bytes().to_vec();
@@ -239,7 +385,10 @@ impl Process {
             1 => self.cpu.gpr[RDX],
             2 => self.cpu.gpr[R8],
             3 => self.cpu.gpr[R9],
-            _ => self.mem.read_u64(self.cpu.gpr[RSP].wrapping_add(8 + 8 * n as u64)).unwrap_or(0),
+            _ => self
+                .mem
+                .read_u64(self.cpu.gpr[RSP].wrapping_add(8 + 8 * n as u64))
+                .unwrap_or(0),
         }
     }
     pub fn argf(&self, n: usize) -> f64 {
@@ -254,6 +403,517 @@ impl Process {
 
     pub fn set_last_error(&mut self, e: u32) {
         let _ = self.mem.write_u32(TEB_ADDR + 0x68, e);
+    }
+
+    pub fn now_ticks(&self) -> u64 {
+        self.retired_instructions
+            .saturating_add(self.extra.sleep_adjust)
+    }
+
+    pub fn create_guest_thread(
+        &mut self,
+        id: u32,
+        start: u64,
+        parameter: u64,
+        suspended: bool,
+    ) -> Result<(), Stop> {
+        let stack_limit = self.alloc_virtual(0x10000, PROT_RW);
+        let stack_base = stack_limit + 0x10000;
+        let stack_pointer = stack_base - 8;
+        self.wr64(stack_pointer, THREAD_RETURN_MAGIC)?;
+        let mut cpu = Cpu::new();
+        cpu.rip = start;
+        cpu.gpr[RSP] = stack_pointer;
+        cpu.gpr[RCX] = parameter;
+        cpu.gs_base = TEB_ADDR;
+        let teb_tls_vector = self.build_static_tls_vector()?;
+        let state = if suspended {
+            ThreadState::Suspended
+        } else {
+            ThreadState::Ready
+        };
+        self.guest_threads.insert(
+            id,
+            GuestThread {
+                cpu,
+                stack_base,
+                stack_limit,
+                teb_tls_vector,
+                last_error: 0,
+                tls: HashMap::new(),
+                fls: HashMap::new(),
+                state,
+                is_guest: true,
+                wait_order: 0,
+            },
+        );
+        if !suspended {
+            self.ready_threads.push_back(id);
+        }
+        Ok(())
+    }
+
+    pub fn resume_guest_thread(&mut self, id: u32) -> bool {
+        let Some(thread) = self.guest_threads.get_mut(&id) else {
+            return false;
+        };
+        if thread.state != ThreadState::Suspended {
+            return false;
+        }
+        thread.state = ThreadState::Ready;
+        self.ready_threads.push_back(id);
+        self.schedule_requested = true;
+        true
+    }
+
+    pub fn block_current_thread(&mut self, wait: ThreadWait) {
+        self.wait_sequence = self.wait_sequence.wrapping_add(1);
+        self.current_wait_order = self.wait_sequence;
+        self.current_thread_state = ThreadState::Blocked(wait);
+        self.schedule_requested = true;
+    }
+
+    pub fn request_thread_yield(&mut self) {
+        self.schedule_requested = true;
+    }
+
+    fn save_current_thread(&mut self) -> Result<(), Stop> {
+        if self.current_thread_saved {
+            return Ok(());
+        }
+        if self.current_thread_state == ThreadState::Exited(0) {
+            return Ok(());
+        }
+        if matches!(self.current_thread_state, ThreadState::Exited(_)) {
+            return Ok(());
+        }
+        let context = GuestThread {
+            cpu: self.cpu.clone(),
+            stack_base: self.rd64(TEB_ADDR + 0x08)?,
+            stack_limit: self.rd64(TEB_ADDR + 0x10)?,
+            teb_tls_vector: self.rd64(TEB_ADDR + 0x58)?,
+            last_error: self.rd32(TEB_ADDR + 0x68)?,
+            tls: std::mem::take(&mut self.tls_slots),
+            fls: std::mem::take(&mut self.fls),
+            state: self.current_thread_state.clone(),
+            is_guest: self.current_thread_is_guest,
+            wait_order: self.current_wait_order,
+        };
+        let id = self.current_thread_id;
+        let enqueue = context.state == ThreadState::Ready;
+        self.guest_threads.insert(id, context);
+        if enqueue {
+            self.ready_threads.push_back(id);
+        }
+        self.current_thread_saved = true;
+        Ok(())
+    }
+
+    fn restore_thread(&mut self, id: u32) -> Result<(), Stop> {
+        let Some(context) = self.guest_threads.remove(&id) else {
+            return Err(Stop::Crash(format!(
+                "ready thread {id} has no saved context"
+            )));
+        };
+        self.cpu = context.cpu;
+        self.current_thread_id = id;
+        self.current_thread_is_guest = context.is_guest;
+        self.current_wait_order = context.wait_order;
+        self.current_thread_state = ThreadState::Running;
+        self.current_thread_saved = false;
+        self.tls_slots = context.tls;
+        self.fls = context.fls;
+        self.wr64(TEB_ADDR + 0x08, context.stack_base)?;
+        self.wr64(TEB_ADDR + 0x10, context.stack_limit)?;
+        self.wr64(TEB_ADDR + 0x58, context.teb_tls_vector)?;
+        self.wr64(TEB_ADDR + 0x48, id as u64)?;
+        self.wr32(TEB_ADDR + 0x68, context.last_error)?;
+        self.cpu.gs_base = TEB_ADDR;
+        Ok(())
+    }
+
+    /// Save the current continuation and select the next FIFO-ready guest thread.
+    pub fn schedule_thread(&mut self) -> Result<bool, Stop> {
+        self.schedule_requested = false;
+        if self.current_thread_state == ThreadState::Running {
+            self.current_thread_state = ThreadState::Ready;
+        }
+        self.save_current_thread()?;
+        self.quantum_used = 0;
+        while let Some(id) = self.ready_threads.pop_front() {
+            if self
+                .guest_threads
+                .get(&id)
+                .is_some_and(|thread| thread.state == ThreadState::Ready)
+            {
+                self.restore_thread(id)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Advance deterministic time to the next deadline when no guest thread is runnable.
+    pub fn advance_to_next_deadline(&mut self) -> bool {
+        let next = self
+            .guest_threads
+            .values()
+            .filter_map(|thread| match &thread.state {
+                ThreadState::Blocked(ThreadWait::Handle {
+                    deadline: Some(deadline),
+                    ..
+                })
+                | ThreadState::Blocked(ThreadWait::Multiple {
+                    deadline: Some(deadline),
+                    ..
+                })
+                | ThreadState::Blocked(ThreadWait::Sleep { deadline })
+                | ThreadState::Blocked(ThreadWait::Condition {
+                    deadline: Some(deadline),
+                    outcome: None,
+                    ..
+                }) => Some(*deadline),
+                _ => None,
+            })
+            .min();
+        let Some(next) = next else {
+            return false;
+        };
+        let now = self.now_ticks();
+        self.extra.sleep_adjust = self
+            .extra
+            .sleep_adjust
+            .saturating_add(next.saturating_sub(now));
+        self.refresh_waiters();
+        true
+    }
+
+    pub fn exit_current_guest_thread(&mut self, code: u32) {
+        let id = self.current_thread_id;
+        self.current_thread_state = ThreadState::Exited(code);
+        for handle in self.handles.values_mut() {
+            if let Handle::Thread {
+                id: handle_id,
+                exit_code,
+                ..
+            } = handle
+            {
+                if *handle_id == id {
+                    *exit_code = Some(code);
+                }
+            }
+        }
+        self.schedule_requested = true;
+    }
+
+    pub fn try_acquire_srw(&mut self, address: u64, id: u32, exclusive: bool) -> bool {
+        let state = self.srw_locks.entry(address).or_default();
+        if !state.waiters.is_empty() && state.waiters.front().copied() != Some(id) {
+            return false;
+        }
+        let available = if exclusive {
+            state.exclusive_owner.is_none() && state.shared_owners.is_empty()
+        } else {
+            state.exclusive_owner.is_none()
+        };
+        if !available {
+            return false;
+        }
+        if state.waiters.front().copied() == Some(id) {
+            state.waiters.pop_front();
+        }
+        if exclusive {
+            state.exclusive_owner = Some(id);
+        } else {
+            *state.shared_owners.entry(id).or_default() += 1;
+        }
+        true
+    }
+
+    pub fn release_srw(&mut self, address: u64, id: u32, exclusive: bool) -> bool {
+        let Some(state) = self.srw_locks.get_mut(&address) else {
+            return false;
+        };
+        if exclusive {
+            if state.exclusive_owner != Some(id) {
+                return false;
+            }
+            state.exclusive_owner = None;
+        } else {
+            let Some(count) = state.shared_owners.get_mut(&id) else {
+                return false;
+            };
+            *count -= 1;
+            if *count == 0 {
+                state.shared_owners.remove(&id);
+            }
+        }
+        true
+    }
+
+    pub fn try_acquire_critical(&mut self, address: u64, id: u32) -> bool {
+        let state = self.critical_sections.entry(address).or_default();
+        if state.owner == Some(id) {
+            state.recursion = state.recursion.saturating_add(1);
+            return true;
+        }
+        if state.owner.is_some()
+            || (!state.waiters.is_empty() && state.waiters.front().copied() != Some(id))
+        {
+            return false;
+        }
+        if state.waiters.front().copied() == Some(id) {
+            state.waiters.pop_front();
+        }
+        state.owner = Some(id);
+        state.recursion = 1;
+        true
+    }
+
+    pub fn release_critical(&mut self, address: u64, id: u32) -> bool {
+        let Some(state) = self.critical_sections.get_mut(&address) else {
+            return false;
+        };
+        if state.owner != Some(id) {
+            return false;
+        }
+        state.recursion -= 1;
+        if state.recursion == 0 {
+            state.owner = None;
+        }
+        true
+    }
+
+    fn handle_is_signaled(&self, handle: u64, id: u32) -> Option<bool> {
+        match self.handles.get(&handle)? {
+            Handle::Event { signaled, .. } => Some(*signaled),
+            Handle::Mutex { owner, .. } => Some(owner.is_none() || *owner == Some(id)),
+            Handle::Semaphore { count, .. } => Some(*count != 0),
+            Handle::Thread { exit_code, .. } => Some(exit_code.is_some()),
+            _ => None,
+        }
+    }
+
+    fn acquire_wait_handle(&mut self, handle: u64, id: u32) {
+        match self
+            .handles
+            .get_mut(&handle)
+            .expect("validated wait handle")
+        {
+            Handle::Event { signaled, manual } => {
+                if !*manual {
+                    *signaled = false;
+                }
+            }
+            Handle::Mutex { owner, recursion } => {
+                if *owner == Some(id) {
+                    *recursion = recursion.saturating_add(1);
+                } else {
+                    *owner = Some(id);
+                    *recursion = 1;
+                }
+            }
+            Handle::Semaphore { count, .. } => *count -= 1,
+            Handle::Thread { .. } => {}
+            _ => unreachable!("validated wait handle"),
+        }
+    }
+
+    /// Atomically acquire supported waitable handles when ready. Returns the wait-any
+    /// index (or zero for wait-all), `None` if the wait should block, or an error code.
+    pub fn try_wait_handles(
+        &mut self,
+        handles: &[u64],
+        wait_all: bool,
+        id: u32,
+    ) -> Result<Option<u64>, u32> {
+        if handles.is_empty() {
+            return Err(87);
+        }
+        if wait_all
+            && handles
+                .iter()
+                .enumerate()
+                .any(|(i, handle)| handles[..i].contains(handle))
+        {
+            return Err(87);
+        }
+        for &handle in handles {
+            if self.handle_is_signaled(handle, id).is_none() {
+                return Err(6);
+            }
+        }
+        if wait_all {
+            if handles
+                .iter()
+                .any(|&handle| !self.handle_is_signaled(handle, id).unwrap_or(false))
+            {
+                return Ok(None);
+            }
+            for &handle in handles {
+                self.acquire_wait_handle(handle, id);
+            }
+            return Ok(Some(0));
+        }
+        for (index, &handle) in handles.iter().enumerate() {
+            if self.handle_is_signaled(handle, id) == Some(true) {
+                self.acquire_wait_handle(handle, id);
+                return Ok(Some(index as u64));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn wake_condition(&mut self, condition: u64, all: bool) {
+        self.refresh_waiters();
+        let mut waiters = self
+            .guest_threads
+            .iter()
+            .filter_map(|(&id, thread)| match &thread.state {
+                ThreadState::Blocked(ThreadWait::Condition {
+                    condition: c,
+                    outcome: None,
+                    ..
+                }) if *c == condition => Some((thread.wait_order, id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        waiters.sort_unstable();
+        if !all {
+            waiters.truncate(1);
+        }
+        for (_, id) in waiters {
+            if let Some(thread) = self.guest_threads.get_mut(&id) {
+                if let ThreadState::Blocked(ThreadWait::Condition { outcome, .. }) =
+                    &mut thread.state
+                {
+                    *outcome = Some(true);
+                }
+            }
+        }
+        self.refresh_waiters();
+    }
+
+    /// Complete signaled waits and deadlines in deterministic block order.
+    pub fn refresh_waiters(&mut self) {
+        let now = self.now_ticks();
+        let mut blocked = self
+            .guest_threads
+            .iter()
+            .filter_map(|(&id, thread)| {
+                matches!(thread.state, ThreadState::Blocked(_)).then_some((thread.wait_order, id))
+            })
+            .collect::<Vec<_>>();
+        blocked.sort_unstable();
+        for (_, id) in blocked {
+            let Some(wait) = self
+                .guest_threads
+                .get(&id)
+                .and_then(|thread| match &thread.state {
+                    ThreadState::Blocked(wait) => Some(wait.clone()),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let completion = match wait {
+                ThreadWait::Handle { handle, deadline } => {
+                    match self.try_wait_handles(&[handle], false, id) {
+                        Ok(Some(_)) => Some((0, None)),
+                        Ok(None) if deadline.is_some_and(|deadline| now >= deadline) => {
+                            Some((0x102, None))
+                        }
+                        Err(error) => Some((u32::MAX as u64, Some(error))),
+                        _ => None,
+                    }
+                }
+                ThreadWait::Multiple {
+                    handles,
+                    wait_all,
+                    deadline,
+                } => match self.try_wait_handles(&handles, wait_all, id) {
+                    Ok(Some(index)) => Some((index, None)),
+                    Ok(None) if deadline.is_some_and(|deadline| now >= deadline) => {
+                        Some((0x102, None))
+                    }
+                    Err(error) => Some((u32::MAX as u64, Some(error))),
+                    _ => None,
+                },
+                ThreadWait::Sleep { deadline } if now >= deadline => Some((0, None)),
+                ThreadWait::CriticalAcquire { address } => {
+                    if self.try_acquire_critical(address, id) {
+                        Some((0, None))
+                    } else {
+                        None
+                    }
+                }
+                ThreadWait::SrwAcquire { address, exclusive } => {
+                    if self.try_acquire_srw(address, id, exclusive) {
+                        Some((0, None))
+                    } else {
+                        None
+                    }
+                }
+                ThreadWait::Condition {
+                    condition,
+                    lock,
+                    critical,
+                    exclusive,
+                    deadline,
+                    mut outcome,
+                } => {
+                    if outcome.is_none() && deadline.is_some_and(|deadline| now >= deadline) {
+                        outcome = Some(false);
+                    }
+                    if let Some(woken) = outcome {
+                        let acquired = if critical {
+                            self.try_acquire_critical(lock, id)
+                        } else {
+                            self.try_acquire_srw(lock, id, exclusive)
+                        };
+                        if !acquired {
+                            if critical {
+                                let state = self.critical_sections.entry(lock).or_default();
+                                if !state.waiters.contains(&id) {
+                                    state.waiters.push_back(id);
+                                }
+                            } else {
+                                let state = self.srw_locks.entry(lock).or_default();
+                                if !state.waiters.contains(&id) {
+                                    state.waiters.push_back(id);
+                                }
+                            }
+                            if let Some(thread) = self.guest_threads.get_mut(&id) {
+                                thread.state = ThreadState::Blocked(ThreadWait::Condition {
+                                    condition,
+                                    lock,
+                                    critical,
+                                    exclusive,
+                                    deadline,
+                                    outcome: Some(woken),
+                                });
+                            }
+                            None
+                        } else {
+                            Some((woken as u64, (!woken).then_some(1460)))
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some((result, error)) = completion {
+                if let Some(thread) = self.guest_threads.get_mut(&id) {
+                    thread.cpu.gpr[RAX] = result;
+                    if let Some(error) = error {
+                        thread.last_error = error;
+                    }
+                    thread.state = ThreadState::Ready;
+                    self.ready_threads.push_back(id);
+                }
+            }
+        }
     }
 
     pub fn new_handle(&mut self, h: Handle) -> u64 {
@@ -276,7 +936,12 @@ impl Process {
 
     /// Address that, when called, runs the host implementation of `group!name`.
     /// Returns an always-trapping thunk when `create_missing` and nothing implements it.
-    pub fn thunk_for(&mut self, group: &'static str, name: &str, create_missing: bool) -> Option<u64> {
+    pub fn thunk_for(
+        &mut self,
+        group: &'static str,
+        name: &str,
+        create_missing: bool,
+    ) -> Option<u64> {
         if let Some(&a) = self.thunk_index.get(&(group, name.to_string())) {
             return Some(a);
         }
@@ -287,7 +952,11 @@ impl Process {
         let idx = self.thunks.len() as u64;
         assert!(idx < (THUNK_BYTES - 0x100) / 16, "thunk space exhausted");
         let addr = THUNK_BASE + idx * 16;
-        self.thunks.push(Thunk { group, name: name.to_string(), func });
+        self.thunks.push(Thunk {
+            group,
+            name: name.to_string(),
+            func,
+        });
         self.thunk_index.insert((group, name.to_string()), addr);
         Some(addr)
     }
@@ -296,7 +965,9 @@ impl Process {
 
     pub fn module_by_name(&self, name: &str) -> Option<usize> {
         let c = canonical_dll(base_name(name));
-        self.modules.iter().position(|m| canonical_dll(&m.name) == c)
+        self.modules
+            .iter()
+            .position(|m| canonical_dll(&m.name) == c)
     }
 
     pub fn module_by_base(&self, base: u64) -> Option<usize> {
@@ -325,13 +996,25 @@ impl Process {
 
     /// Load the main executable (and, transitively, bundled DLLs) and prepare to run.
     pub fn load_exe(&mut self, path: &str, cmdline: Option<&str>) -> Result<(), String> {
-        let data = self.vfs.get(path).ok_or_else(|| format!("{path}: not in VFS"))?.clone();
-        self.image_path = if path.contains(':') { path.to_string() } else { format!("C:\\{path}") };
-        self.cmdline = cmdline.map(str::to_string).unwrap_or_else(|| format!("\"{}\"", self.image_path));
+        let data = self
+            .vfs
+            .get(path)
+            .ok_or_else(|| format!("{path}: not in VFS"))?
+            .clone();
+        self.image_path = if path.contains(':') {
+            path.to_string()
+        } else {
+            format!("C:\\{path}")
+        };
+        self.cmdline = cmdline
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("\"{}\"", self.image_path));
         self.setup_teb_peb();
         let idx = self.load_image(&data, &self.image_path.clone(), false)?;
         let m = self.modules[idx].clone();
-        self.mem.write_u64(PEB_ADDR + 0x10, m.base).map_err(|e| format!("{e:?}"))?;
+        self.mem
+            .write_u64(PEB_ADDR + 0x10, m.base)
+            .map_err(|e| format!("{e:?}"))?;
         // Stack
         let pe = Pe::parse(&data).map_err(|e| e.to_string())?;
         let reserve = pe.stack_reserve.clamp(0x10_0000, 0x100_0000);
@@ -354,7 +1037,12 @@ impl Process {
     }
 
     fn setup_teb_peb(&mut self) {
-        for (a, n) in [(PEB_ADDR, 0x1000u64), (TEB_ADDR, 0x2000), (PARAMS_ADDR, 0x2000), (LDR_ADDR, 0x1_0000)] {
+        for (a, n) in [
+            (PEB_ADDR, 0x1000u64),
+            (TEB_ADDR, 0x2000),
+            (PARAMS_ADDR, 0x2000),
+            (LDR_ADDR, 0x1_0000),
+        ] {
             self.mem.map(a, n, PROT_RW);
         }
         let m = &mut self.mem;
@@ -405,29 +1093,51 @@ impl Process {
     }
 
     /// Map a PE64 image. Returns the module index.
-    pub fn load_image(&mut self, data: &[u8], path: &str, as_dll_hint: bool) -> Result<usize, String> {
+    pub fn load_image(
+        &mut self,
+        data: &[u8],
+        path: &str,
+        as_dll_hint: bool,
+    ) -> Result<usize, String> {
         let pe = Pe::parse(data).map_err(|e| format!("{path}: {e}"))?;
         if !pe.is_64 || pe.machine != anywasm_pe::MACHINE_AMD64 {
-            return Err(format!("{path}: not a PE32+ x86-64 image (machine {:#x})", pe.machine));
+            return Err(format!(
+                "{path}: not a PE32+ x86-64 image (machine {:#x})",
+                pe.machine
+            ));
         }
         let size = align_up(pe.size_of_image as u64, 0x1000);
         let base = if self.range_free(pe.image_base, size) {
             pe.image_base
         } else if pe.has_relocs() {
-            self.mem.find_free(0x1_8000_0000, size + 0x1_0000).ok_or("no address space for image")?
+            self.mem
+                .find_free(0x1_8000_0000, size + 0x1_0000)
+                .ok_or("no address space for image")?
         } else {
-            return Err(format!("{path}: preferred base {:#x} is taken and the image has no relocations", pe.image_base));
+            return Err(format!(
+                "{path}: preferred base {:#x} is taken and the image has no relocations",
+                pe.image_base
+            ));
         };
         if !self.mem.map(base, size, PROT_RW) {
             return Err(format!("{path}: cannot map {size:#x} bytes at {base:#x}"));
         }
         // headers + sections
-        let hdr = data.get(..pe.size_of_headers as usize).ok_or("truncated headers")?;
-        self.mem.write_force(base, hdr).map_err(|e| format!("{e:?}"))?;
+        let hdr = data
+            .get(..pe.size_of_headers as usize)
+            .ok_or("truncated headers")?;
+        self.mem
+            .write_force(base, hdr)
+            .map_err(|e| format!("{e:?}"))?;
         for s in &pe.sections {
-            let raw = data.get(s.raw_offset as usize..(s.raw_offset as usize + s.raw_size.min(s.mapped_size()) as usize));
+            let raw = data.get(
+                s.raw_offset as usize
+                    ..(s.raw_offset as usize + s.raw_size.min(s.mapped_size()) as usize),
+            );
             if let Some(raw) = raw {
-                self.mem.write_force(base + s.virtual_address as u64, raw).map_err(|e| format!("{e:?}"))?;
+                self.mem
+                    .write_force(base + s.virtual_address as u64, raw)
+                    .map_err(|e| format!("{e:?}"))?;
             }
         }
         // relocations
@@ -438,11 +1148,15 @@ impl Process {
                 match r.kind {
                     anywasm_pe::REL_BASED_DIR64 => {
                         let v = self.mem.read_u64(a).map_err(|e| format!("{e:?}"))?;
-                        self.mem.write_force(a, &v.wrapping_add(delta).to_le_bytes()).map_err(|e| format!("{e:?}"))?;
+                        self.mem
+                            .write_force(a, &v.wrapping_add(delta).to_le_bytes())
+                            .map_err(|e| format!("{e:?}"))?;
                     }
                     anywasm_pe::REL_BASED_HIGHLOW => {
                         let v = self.mem.read_u32(a).map_err(|e| format!("{e:?}"))?;
-                        self.mem.write_force(a, &v.wrapping_add(delta as u32).to_le_bytes()).map_err(|e| format!("{e:?}"))?;
+                        self.mem
+                            .write_force(a, &v.wrapping_add(delta as u32).to_le_bytes())
+                            .map_err(|e| format!("{e:?}"))?;
                     }
                     _ => {}
                 }
@@ -477,7 +1191,11 @@ impl Process {
             path: path.to_string(),
             base,
             size,
-            entry: if pe.entry_rva != 0 { base + pe.entry_rva as u64 } else { 0 },
+            entry: if pe.entry_rva != 0 {
+                base + pe.entry_rva as u64
+            } else {
+                0
+            },
             is_dll,
             exports,
             ordinals,
@@ -489,14 +1207,23 @@ impl Process {
             let provider = self.resolve_dll(&imp.dll)?;
             for e in &imp.entries {
                 let addr = self.bind_import(provider, &imp.dll, &e.name)?;
-                self.mem.write_force(base + e.iat_rva as u64, &addr.to_le_bytes()).map_err(|er| format!("{er:?}"))?;
+                self.mem
+                    .write_force(base + e.iat_rva as u64, &addr.to_le_bytes())
+                    .map_err(|er| format!("{er:?}"))?;
             }
         }
         // forwarded exports are resolved after imports
         for (n, fw) in fwd {
             if let Some((dll, func)) = fw.split_once('.') {
                 if let Ok(p) = self.resolve_dll(dll) {
-                    if let Ok(a) = self.bind_import(p, dll, &ImportName::Name { hint: 0, name: func.to_string() }) {
+                    if let Ok(a) = self.bind_import(
+                        p,
+                        dll,
+                        &ImportName::Name {
+                            hint: 0,
+                            name: func.to_string(),
+                        },
+                    ) {
                         self.modules[idx].exports.insert(n, a);
                     }
                 }
@@ -598,11 +1325,24 @@ impl Process {
     }
 
     /// Address for one import: an export of a loaded guest DLL, or a host thunk.
-    fn bind_import(&mut self, provider: usize, dll: &str, name: &ImportName) -> Result<u64, String> {
+    fn bind_import(
+        &mut self,
+        provider: usize,
+        dll: &str,
+        name: &ImportName,
+    ) -> Result<u64, String> {
         let m = &self.modules[provider];
         match (&m.hle_group, name) {
-            (None, ImportName::Name { name, .. }) => m.exports.get(name).copied().ok_or_else(|| format!("{}: export {name} not found", m.name)),
-            (None, ImportName::Ordinal(o)) => m.ordinals.get(o).copied().ok_or_else(|| format!("{}: ordinal {o} not found", m.name)),
+            (None, ImportName::Name { name, .. }) => m
+                .exports
+                .get(name)
+                .copied()
+                .ok_or_else(|| format!("{}: export {name} not found", m.name)),
+            (None, ImportName::Ordinal(o)) => m
+                .ordinals
+                .get(o)
+                .copied()
+                .ok_or_else(|| format!("{}: ordinal {o} not found", m.name)),
             (Some(g), ImportName::Name { name, .. }) => {
                 let g: &'static str = g;
                 let name = name.clone();
@@ -620,32 +1360,88 @@ impl Process {
     }
 
     fn setup_tls(&mut self, base: u64, pe: &Pe, tls: &anywasm_pe::Tls) -> Result<(), String> {
+        if self.current_thread_is_guest
+            || self
+                .guest_threads
+                .values()
+                .any(|thread| !matches!(thread.state, ThreadState::Exited(_)))
+        {
+            return Err(
+                "loading a static-TLS module after guest-thread creation is unsupported".into(),
+            );
+        }
         let tmpl_len = tls.end_raw_data.saturating_sub(tls.start_raw_data);
         let total = tmpl_len + tls.zero_fill as u64;
-        let block = self.alloc_virtual(align_up(total.max(16), 0x1000), PROT_RW);
-        if tmpl_len > 0 {
-            let src = tls.start_raw_data.wrapping_sub(pe.image_base).wrapping_add(base);
-            let bytes = self.mem.read_vec(src, tmpl_len as usize).map_err(|e| format!("{e:?}"))?;
-            self.mem.write_force(block, &bytes).map_err(|e| format!("{e:?}"))?;
-        }
+        let data = if tmpl_len > 0 {
+            let src = tls
+                .start_raw_data
+                .wrapping_sub(pe.image_base)
+                .wrapping_add(base);
+            self.mem
+                .read_vec(src, tmpl_len as usize)
+                .map_err(|e| format!("{e:?}"))?
+        } else {
+            Vec::new()
+        };
         // ThreadLocalStoragePointer -> array of per-module blocks, index stored at AddressOfIndex.
         let mut arr = self.mem.read_u64(TEB_ADDR + 0x58).unwrap_or(0);
         if arr == 0 {
             arr = self.alloc_virtual(0x1000, PROT_RW);
             self.mem.write_u64(TEB_ADDR + 0x58, arr).unwrap();
         }
-        let idx = self.tls_next;
-        self.tls_next += 1;
-        self.mem.write_force(arr + idx as u64 * 8, &block.to_le_bytes()).map_err(|e| format!("{e:?}"))?;
-        let idx_addr = tls.index_addr.wrapping_sub(pe.image_base).wrapping_add(base);
-        self.mem.write_force(idx_addr, &idx.to_le_bytes()).map_err(|e| format!("{e:?}"))?;
+        let idx = self.static_tls_next;
+        if idx >= 0x1000 / 8 {
+            return Err("static TLS module index exceeds the supported 512-entry vector".into());
+        }
+        self.static_tls_next += 1;
+        let block = self.alloc_virtual(align_up(total.max(16), 0x1000), PROT_RW);
+        if !data.is_empty() {
+            self.mem
+                .write_force(block, &data)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        self.mem
+            .write_force(arr + idx as u64 * 8, &block.to_le_bytes())
+            .map_err(|e| format!("{e:?}"))?;
+        let idx_addr = tls
+            .index_addr
+            .wrapping_sub(pe.image_base)
+            .wrapping_add(base);
+        self.mem
+            .write_force(idx_addr, &idx.to_le_bytes())
+            .map_err(|e| format!("{e:?}"))?;
+        self.static_tls_templates.push(StaticTlsTemplate {
+            index: idx,
+            data,
+            total_size: total,
+        });
         Ok(())
+    }
+
+    fn build_static_tls_vector(&mut self) -> Result<u64, Stop> {
+        if self.static_tls_templates.is_empty() {
+            return Ok(0);
+        }
+        let vector = self.alloc_virtual(0x1000, PROT_RW);
+        for template in self.static_tls_templates.clone() {
+            let block = self.alloc_virtual(align_up(template.total_size.max(16), 0x1000), PROT_RW);
+            if !template.data.is_empty() {
+                self.mem
+                    .write_force(block, &template.data)
+                    .map_err(|e| Stop::Crash(format!("static TLS template copy failed: {e:?}")))?;
+            }
+            self.wr64(vector + template.index as u64 * 8, block)?;
+        }
+        Ok(vector)
     }
 
     /// Reserve and map `size` bytes of anonymous virtual memory (64 KiB granularity).
     pub fn alloc_virtual(&mut self, size: u64, prot: u8) -> u64 {
         let size = align_up(size.max(1), 0x1000);
-        let addr = self.mem.find_free(self.vmem_next, size).expect("address space exhausted");
+        let addr = self
+            .mem
+            .find_free(self.vmem_next, size)
+            .expect("address space exhausted");
         self.mem.map(addr, size, prot);
         self.vmem.insert(addr, (size, prot));
         self.vmem_next = align_up(addr + size, 0x1_0000);
@@ -654,7 +1450,14 @@ impl Process {
 
     /// Run DllMain(DLL_PROCESS_ATTACH) for bundled DLLs (dependencies first), then TLS callbacks.
     fn run_dll_inits(&mut self, exe_idx: usize) -> Result<(), String> {
-        let order: Vec<usize> = (0..self.modules.len()).filter(|&i| i != exe_idx && self.modules[i].hle_group.is_none() && self.modules[i].entry != 0 && self.modules[i].is_dll).collect();
+        let order: Vec<usize> = (0..self.modules.len())
+            .filter(|&i| {
+                i != exe_idx
+                    && self.modules[i].hle_group.is_none()
+                    && self.modules[i].entry != 0
+                    && self.modules[i].is_dll
+            })
+            .collect();
         for i in order {
             let (base, entry) = (self.modules[i].base, self.modules[i].entry);
             let r = self.call_guest(entry, &[base, 1, 0]);
@@ -703,68 +1506,15 @@ impl Process {
         }
     }
 
-    /// Run a thread procedure on a private guest stack, cooperatively, until it returns.
-    /// This single-CPU model supports finite thread procedures; blocking or long-running
-    /// procedures stop with an explicit scheduler requirement instead of hanging the process.
-    pub fn call_guest_thread(&mut self, id: u32, addr: u64, parameter: u64) -> Result<u32, Stop> {
-        let saved_cpu = self.cpu.clone();
-        let saved_id = self.current_thread_id;
-        let saved_tid = self.rd64(TEB_ADDR + 0x48)?;
-        let saved_stack_base = self.rd64(TEB_ADDR + 0x08)?;
-        let saved_stack_limit = self.rd64(TEB_ADDR + 0x10)?;
-        let saved_last_error = self.rd32(TEB_ADDR + 0x68)?;
-        let saved_tls = std::mem::replace(&mut self.tls_slots, self.thread_tls.remove(&id).unwrap_or_default());
-        let saved_fls = std::mem::replace(&mut self.fls, self.thread_fls.remove(&id).unwrap_or_default());
-
-        let stack = self.alloc_virtual(0x10000, PROT_RW);
-        self.cpu = saved_cpu.clone();
-        self.cpu.gpr[RSP] = stack + 0x10000;
-        self.cpu.gs_base = TEB_ADDR;
-        self.current_thread_id = id;
-        self.wr64(TEB_ADDR + 0x08, stack + 0x10000)?;
-        self.wr64(TEB_ADDR + 0x10, stack)?;
-        self.wr64(TEB_ADDR + 0x48, id as u64)?;
-        self.wr32(TEB_ADDR + 0x68, 0)?;
-
-        self.thread_call_depth += 1;
-        let result = self.call_guest(addr, &[parameter]);
-        self.thread_call_depth -= 1;
-
-        let child_tls = std::mem::replace(&mut self.tls_slots, saved_tls);
-        let child_fls = std::mem::replace(&mut self.fls, saved_fls);
-        self.thread_tls.insert(id, child_tls);
-        self.thread_fls.insert(id, child_fls);
-        self.cpu = saved_cpu;
-        self.current_thread_id = saved_id;
-        self.wr64(TEB_ADDR + 0x08, saved_stack_base)?;
-        self.wr64(TEB_ADDR + 0x10, saved_stack_limit)?;
-        self.wr64(TEB_ADDR + 0x48, saved_tid)?;
-        self.wr32(TEB_ADDR + 0x68, saved_last_error)?;
-
-        match result {
-            Ok(code) => Ok(code as u32),
-            Err(Stop::ThreadExit(code)) => Ok(code),
-            Err(e) => Err(e),
-        }
-    }
-
     fn run_until_magic(&mut self) -> Result<(), Stop> {
-        let mut steps = 0u64;
         loop {
             if self.cpu.rip == RET_MAGIC {
                 return Ok(());
-            }
-            if self.thread_call_depth != 0 && steps >= 1_000_000 {
-                return Err(Stop::Unimplemented {
-                    dll: "kernel32".into(),
-                    name: "CreateThread callback did not return within the inline scheduling budget; cooperative blocking threads are not implemented".into(),
-                });
             }
             match self.step_once()? {
                 None => {}
                 Some(stop) => return Err(stop),
             }
-            steps += 1;
         }
     }
 
@@ -787,7 +1537,10 @@ impl Process {
             self.dispatch_thunk(rip)?;
             return Ok((1, self.yield_request.take()));
         }
-        match self.block_cache.execute(&mut self.cpu, &mut self.mem, max_instructions) {
+        match self
+            .block_cache
+            .execute(&mut self.cpu, &mut self.mem, max_instructions)
+        {
             Ok(executed) => Ok((executed, None)),
             Err(e) => Err(self.describe_exit(e)),
         }
@@ -808,7 +1561,10 @@ impl Process {
     }
 
     pub fn module_for(&self, addr: u64) -> Option<&str> {
-        self.modules.iter().find(|m| m.hle_group.is_none() && addr >= m.base && addr < m.base + m.size).map(|m| m.name.as_str())
+        self.modules
+            .iter()
+            .find(|m| m.hle_group.is_none() && addr >= m.base && addr < m.base + m.size)
+            .map(|m| m.name.as_str())
     }
 
     fn dispatch_thunk(&mut self, rip: u64) -> Result<(), Stop> {
@@ -816,20 +1572,31 @@ impl Process {
             let code = self.cpu.gpr[RAX] as u32;
             return self.finish_exit(code);
         }
+        if rip == THREAD_RETURN_MAGIC {
+            return Err(Stop::ThreadExit(0));
+        }
         let idx = ((rip - THUNK_BASE) / 16) as usize;
         let Some(t) = self.thunks.get(idx) else {
-            return Err(Stop::Crash(format!("jump into unallocated thunk space at {rip:#x}")));
+            return Err(Stop::Crash(format!(
+                "jump into unallocated thunk space at {rip:#x}"
+            )));
         };
         let (group, name, func) = (t.group, t.name.clone(), t.func);
         if self.trace_imports {
-            self.stderr.extend_from_slice(format!("[import] {group}!{name}\n").as_bytes());
+            self.stderr
+                .extend_from_slice(format!("[import] {group}!{name}\n").as_bytes());
         }
         let Some(f) = func else {
-            self.unimplemented_log.push((group.to_string(), name.clone()));
-            return Err(Stop::Unimplemented { dll: group.to_string(), name });
+            self.unimplemented_log
+                .push((group.to_string(), name.clone()));
+            return Err(Stop::Unimplemented {
+                dll: group.to_string(),
+                name,
+            });
         };
         self.skip_ret = false;
         let ret = f(self)?;
+        self.refresh_waiters();
         if self.skip_ret {
             self.skip_ret = false;
             return Ok(());
@@ -860,8 +1627,26 @@ impl Process {
             return Stop::Exit(c);
         }
         let mut remaining = max_steps;
+        const THREAD_QUANTUM: u64 = 10_000;
         while remaining != 0 {
-            match self.execute_slice(remaining) {
+            self.refresh_waiters();
+            if self.current_thread_state != ThreadState::Running
+                || self.schedule_requested
+                || self.quantum_used >= THREAD_QUANTUM
+            {
+                match self.schedule_thread() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if self.advance_to_next_deadline() && !self.ready_threads.is_empty() {
+                            continue;
+                        }
+                        return Stop::Idle;
+                    }
+                    Err(stop) => return stop,
+                }
+            }
+            let slice = remaining.min(THREAD_QUANTUM.saturating_sub(self.quantum_used).max(1));
+            match self.execute_slice(slice) {
                 Ok((_, Some(stop))) => return stop,
                 Ok((executed, None)) => {
                     if executed == 0 {
@@ -871,6 +1656,19 @@ impl Process {
                         ));
                     }
                     remaining -= executed;
+                    self.retired_instructions = self.retired_instructions.saturating_add(executed);
+                    self.quantum_used = self.quantum_used.saturating_add(executed);
+                }
+                Err(Stop::ThreadExit(code)) if self.current_thread_is_guest => {
+                    remaining = remaining.saturating_sub(1);
+                    self.retired_instructions = self.retired_instructions.saturating_add(1);
+                    self.quantum_used = self.quantum_used.saturating_add(1);
+                    self.exit_current_guest_thread(code);
+                }
+                Err(Stop::ThreadExit(code)) => {
+                    return Stop::Crash(format!(
+                        "ExitThread used by non-thread context with code {code}"
+                    ))
                 }
                 Err(stop) => return stop,
             }
@@ -906,4 +1704,335 @@ impl Process {
 
 pub fn base_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::*;
+
+    fn process_with_teb() -> Process {
+        let mut process = Process::new(Vfs::new());
+        assert!(process.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        process.mem.write_u64(TEB_ADDR + 0x08, 0x7000).unwrap();
+        process.mem.write_u64(TEB_ADDR + 0x10, 0x6000).unwrap();
+        process.mem.write_u64(TEB_ADDR + 0x48, 0x1004).unwrap();
+        process
+    }
+
+    #[test]
+    fn scheduler_preserves_full_cpu_and_thread_local_state_across_yields() {
+        let mut process = process_with_teb();
+        process.cpu.rip = 0x1234;
+        process.cpu.gpr[RBX] = 0xfeed_beef;
+        process.cpu.xmm[7] = 0x1122_3344_5566_7788_aabb_ccdd_eeff_0011;
+        process.tls_slots.insert(9, 0xaaaa);
+        process
+            .create_guest_thread(0x1008, 0x2000, 0x77, false)
+            .unwrap();
+        process.request_thread_yield();
+
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.cpu.rip, 0x2000);
+        assert_eq!(process.cpu.gpr[RCX], 0x77);
+        process.cpu.gpr[RBX] = 0xcafe_babe;
+        process.cpu.xmm[7] = 0x8877_6655_4433_2211_00ff_eedd_ccbb_aa99;
+        process.tls_slots.insert(9, 0xbbbb);
+        process.request_thread_yield();
+
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1004);
+        assert_eq!(process.cpu.rip, 0x1234);
+        assert_eq!(process.cpu.gpr[RBX], 0xfeed_beef);
+        assert_eq!(
+            process.cpu.xmm[7],
+            0x1122_3344_5566_7788_aabb_ccdd_eeff_0011
+        );
+        assert_eq!(process.tls_slots.get(&9), Some(&0xaaaa));
+
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.cpu.gpr[RBX], 0xcafe_babe);
+        assert_eq!(
+            process.cpu.xmm[7],
+            0x8877_6655_4433_2211_00ff_eedd_ccbb_aa99
+        );
+        assert_eq!(process.tls_slots.get(&9), Some(&0xbbbb));
+    }
+
+    #[test]
+    fn static_tls_vector_and_blocks_are_private_and_restored_on_switch() {
+        let mut process = process_with_teb();
+        let main_vector = process.alloc_virtual(0x1000, PROT_RW);
+        let main_block = process.alloc_virtual(0x1000, PROT_RW);
+        process.wr64(TEB_ADDR + 0x58, main_vector).unwrap();
+        process.wr64(main_vector, main_block).unwrap();
+        process.wr32(main_block, 0x1111).unwrap();
+        process.static_tls_templates.push(StaticTlsTemplate {
+            index: 0,
+            data: 7u32.to_le_bytes().to_vec(),
+            total_size: 4,
+        });
+
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        let guest_vector = process.guest_threads.get(&0x1008).unwrap().teb_tls_vector;
+        let guest_block = process.rd64(guest_vector).unwrap();
+        assert_ne!(guest_vector, main_vector);
+        assert_ne!(guest_block, main_block);
+        assert_eq!(process.rd32(guest_block).unwrap(), 7);
+
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.rd64(TEB_ADDR + 0x58).unwrap(), guest_vector);
+        process.wr32(guest_block, 0x2222).unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1004);
+        assert_eq!(process.rd64(TEB_ADDR + 0x58).unwrap(), main_vector);
+        assert_eq!(process.rd32(main_block).unwrap(), 0x1111);
+
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.rd64(TEB_ADDR + 0x58).unwrap(), guest_vector);
+        let restored_guest_block = process
+            .rd64(TEB_ADDR + 0x58)
+            .and_then(|vector| process.rd64(vector))
+            .unwrap();
+        assert_eq!(process.rd32(restored_guest_block).unwrap(), 0x2222);
+    }
+
+    #[test]
+    fn condition_waiter_reacquires_srw_lock_before_resume() {
+        let mut process = process_with_teb();
+        let lock = 0x4000;
+        let condition = 0x5000;
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert!(process.try_acquire_srw(lock, 0x1008, true));
+        assert!(process.release_srw(lock, 0x1008, true));
+        process.block_current_thread(ThreadWait::Condition {
+            condition,
+            lock,
+            critical: false,
+            exclusive: true,
+            deadline: None,
+            outcome: None,
+        });
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1004);
+
+        assert!(process.try_acquire_srw(lock, 0x1004, true));
+        process.wake_condition(condition, false);
+        assert!(matches!(
+            process.guest_threads.get(&0x1008).unwrap().state,
+            ThreadState::Blocked(ThreadWait::Condition {
+                outcome: Some(true),
+                ..
+            })
+        ));
+        assert!(process.release_srw(lock, 0x1004, true));
+        process.refresh_waiters();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.cpu.gpr[RAX], 1);
+        assert_eq!(
+            process.srw_locks.get(&lock).unwrap().exclusive_owner,
+            Some(0x1008)
+        );
+    }
+
+    #[test]
+    fn wait_all_does_not_partially_consume_auto_reset_objects() {
+        let mut process = process_with_teb();
+        let first = process.new_handle(Handle::Event {
+            signaled: true,
+            manual: false,
+        });
+        let second = process.new_handle(Handle::Event {
+            signaled: false,
+            manual: false,
+        });
+        assert_eq!(
+            process.try_wait_handles(&[first, second], true, 0x1004),
+            Ok(None)
+        );
+        assert!(matches!(
+            process.handles.get(&first),
+            Some(Handle::Event { signaled: true, .. })
+        ));
+        if let Some(Handle::Event { signaled, .. }) = process.handles.get_mut(&second) {
+            *signaled = true;
+        }
+        assert_eq!(
+            process.try_wait_handles(&[first, second], true, 0x1004),
+            Ok(Some(0))
+        );
+        assert!(matches!(
+            process.handles.get(&first),
+            Some(Handle::Event {
+                signaled: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            process.handles.get(&second),
+            Some(Handle::Event {
+                signaled: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn blocked_wait_all_resumes_only_after_every_object_is_ready() {
+        let mut process = process_with_teb();
+        let first = process.new_handle(Handle::Event {
+            signaled: false,
+            manual: false,
+        });
+        let second = process.new_handle(Handle::Event {
+            signaled: false,
+            manual: false,
+        });
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        process.block_current_thread(ThreadWait::Multiple {
+            handles: vec![first, second],
+            wait_all: true,
+            deadline: None,
+        });
+        assert!(process.schedule_thread().unwrap());
+        if let Some(Handle::Event { signaled, .. }) = process.handles.get_mut(&first) {
+            *signaled = true;
+        }
+        process.refresh_waiters();
+        assert!(matches!(
+            process.guest_threads.get(&0x1008).unwrap().state,
+            ThreadState::Blocked(_)
+        ));
+        if let Some(Handle::Event { signaled, .. }) = process.handles.get_mut(&second) {
+            *signaled = true;
+        }
+        process.refresh_waiters();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.cpu.gpr[RAX], 0);
+        assert!(matches!(
+            process.handles.get(&first),
+            Some(Handle::Event {
+                signaled: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            process.handles.get(&second),
+            Some(Handle::Event {
+                signaled: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn instruction_quantum_rotates_running_guest_threads_and_charges_global_budget() {
+        let mut process = process_with_teb();
+        let code = 0x10_000;
+        assert!(process.mem.map(code, 0x1000, PROT_RWX));
+        process.mem.write_force(code, &[0xeb, 0xfe]).unwrap(); // jmp to self
+        process.cpu.rip = code;
+        process.create_guest_thread(0x1008, code, 0, false).unwrap();
+        process.request_thread_yield();
+
+        assert_eq!(process.run(25_000), Stop::StepLimit);
+        assert_eq!(process.retired_instructions, 25_000);
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.cpu.icount, 15_000);
+        assert_eq!(
+            process.guest_threads.get(&0x1004).unwrap().cpu.icount,
+            10_000
+        );
+    }
+
+    #[test]
+    fn critical_section_condition_wait_reacquires_before_returning() {
+        let mut process = process_with_teb();
+        let lock = 0x6000;
+        let condition = 0x7000;
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert!(process.try_acquire_critical(lock, 0x1008));
+        assert!(process.release_critical(lock, 0x1008));
+        process.block_current_thread(ThreadWait::Condition {
+            condition,
+            lock,
+            critical: true,
+            exclusive: true,
+            deadline: None,
+            outcome: None,
+        });
+        assert!(process.schedule_thread().unwrap());
+        assert!(process.try_acquire_critical(lock, 0x1004));
+        process.wake_condition(condition, false);
+        assert!(process.release_critical(lock, 0x1004));
+        process.refresh_waiters();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(
+            process.critical_sections.get(&lock).unwrap().owner,
+            Some(0x1008)
+        );
+        assert_eq!(process.cpu.gpr[RAX], 1);
+    }
+
+    #[test]
+    fn finite_condition_timeout_sets_last_error_after_lock_reacquisition() {
+        let mut process = process_with_teb();
+        let lock = 0x8000;
+        let condition = 0x9000;
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert!(process.try_acquire_srw(lock, 0x1008, true));
+        assert!(process.release_srw(lock, 0x1008, true));
+        process.block_current_thread(ThreadWait::Condition {
+            condition,
+            lock,
+            critical: false,
+            exclusive: true,
+            deadline: Some(process.now_ticks() + 10),
+            outcome: None,
+        });
+        assert!(process.schedule_thread().unwrap());
+        assert!(process.advance_to_next_deadline());
+        assert!(matches!(
+            process.guest_threads.get(&0x1008).unwrap().state,
+            ThreadState::Ready
+        ));
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.cpu.gpr[RAX], 0);
+        assert_eq!(process.rd32(TEB_ADDR + 0x68).unwrap(), 1460);
+        assert_eq!(
+            process.srw_locks.get(&lock).unwrap().exclusive_owner,
+            Some(0x1008)
+        );
+    }
 }

@@ -62,7 +62,13 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             p.wr64(out, o)?;
             Ok(S_OK)
         },
-        "MakeWindowAssociation" | "SetFullscreenState" | "ResizeTarget" | "WaitForVBlank" | "SetMaximumFrameLatency" | "SetGPUThreadPriority" | "SetResizeFlags" => |_| Ok(S_OK),
+        "MakeWindowAssociation"
+        | "SetFullscreenState"
+        | "ResizeTarget"
+        | "WaitForVBlank"
+        | "SetMaximumFrameLatency"
+        | "SetGPUThreadPriority"
+        | "SetResizeFlags" => |_| Ok(S_OK),
         "GetWindowAssociation" => |p| {
             let o = p.arg(1);
             p.wr64(o, 0)?;
@@ -89,6 +95,7 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             p.wr32(o, 0)?;
             Ok(S_OK)
         },
+        "GetFrameLatencyWaitableObject" => get_frame_latency_waitable_object,
         "GetAdapter" => |p| {
             let out = p.arg(1);
             ensure_singletons(p);
@@ -124,7 +131,9 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             p.wr64(out, o)?;
             Ok(S_OK)
         },
-        "GetFrameStatistics" | "GetLastPresentCount" | "GetPresentStatistics" => |_| Ok(DXGI_ERROR_INVALID_CALL),
+        "GetFrameStatistics" | "GetLastPresentCount" | "GetPresentStatistics" => {
+            |_| Ok(DXGI_ERROR_INVALID_CALL)
+        }
         "GetDisplayModeList" => get_display_mode_list,
         "FindClosestMatchingMode" => |p| {
             let (want, out) = (p.arg(1), p.arg(2));
@@ -134,6 +143,26 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
         },
         _ => return None,
     })
+}
+
+fn get_frame_latency_waitable_object(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let Some(Kind::SwapChain { id, .. }) = kind_of(p, this) else {
+        return Ok(0);
+    };
+    let handle = if let Some(&handle) = p.extra.com.frame_latency_handles.get(&id) {
+        handle
+    } else {
+        // The virtual renderer has an immediately available frame slot. Keep a signaled manual
+        // reset event for this swap chain so guest frame loops can use the standard wait path.
+        let handle = p.new_handle(Handle::Event {
+            signaled: true,
+            manual: true,
+        });
+        p.extra.com.frame_latency_handles.insert(id, handle);
+        handle
+    };
+    Ok(handle)
 }
 
 fn get_adapter_desc1(p: &mut Process) -> R {
@@ -172,8 +201,46 @@ fn get_display_mode_list(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Vfs;
+    use anywasm_cpu::cpu::RCX;
+
+    #[test]
+    fn swap_chain_frame_latency_wait_handle_is_stable_and_ready() {
+        let mut p = Process::new(Vfs::new());
+        let swap_chain = create(
+            &mut p,
+            "IDXGISwapChain2",
+            Kind::SwapChain {
+                id: 17,
+                backbuffer: 0,
+            },
+        );
+        p.cpu.gpr[RCX] = swap_chain;
+
+        let first = get_frame_latency_waitable_object(&mut p).unwrap();
+        assert!(matches!(
+            p.handles.get(&first),
+            Some(Handle::Event {
+                signaled: true,
+                manual: true
+            })
+        ));
+        assert_eq!(get_frame_latency_waitable_object(&mut p).unwrap(), first);
+    }
+}
+
 /// Build a swap chain object (and its backbuffer texture) for a window.
-pub fn make_swap_chain(p: &mut Process, hwnd: u64, mut w: u32, mut h: u32, format: u32, buffers: u32) -> u64 {
+pub fn make_swap_chain(
+    p: &mut Process,
+    hwnd: u64,
+    mut w: u32,
+    mut h: u32,
+    format: u32,
+    buffers: u32,
+) -> u64 {
     let (win_gpu, ww, wh) = match p.extra.win.windows.get(&hwnd) {
         Some(x) => (x.gpu_id, x.w as u32, x.h as u32),
         None => (0, 0, 0),
@@ -185,11 +252,41 @@ pub fn make_swap_chain(p: &mut Process, hwnd: u64, mut w: u32, mut h: u32, forma
         h = if wh != 0 { wh } else { 720 };
     }
     let format = if format == 0 { 28 } else { format };
-    let tex_id = new_res(p, ResInfo { width: w, height: h, mips: 1, array: 1, format, samples: 1, usage: 0, bind: 0x20 | 0x8, ..Default::default() });
+    let tex_id = new_res(
+        p,
+        ResInfo {
+            width: w,
+            height: h,
+            mips: 1,
+            array: 1,
+            format,
+            samples: 1,
+            usage: 0,
+            bind: 0x20 | 0x8,
+            ..Default::default()
+        },
+    );
     let backbuffer = create(p, "ID3D11Texture2D", Kind::Texture2D { id: tex_id });
     let sc_id = p.extra.gpu.new_id();
-    let sc = create(p, "IDXGISwapChain1", Kind::SwapChain { id: sc_id, backbuffer });
-    p.extra.gpu.emit(op::SWAPCHAIN, Pk::new().u32(sc_id).u32(win_gpu).u32(tex_id).u32(w).u32(h).u32(format).u32(buffers));
+    let sc = create(
+        p,
+        "IDXGISwapChain1",
+        Kind::SwapChain {
+            id: sc_id,
+            backbuffer,
+        },
+    );
+    p.extra.gpu.emit(
+        op::SWAPCHAIN,
+        Pk::new()
+            .u32(sc_id)
+            .u32(win_gpu)
+            .u32(tex_id)
+            .u32(w)
+            .u32(h)
+            .u32(format)
+            .u32(buffers),
+    );
     sc
 }
 
@@ -212,7 +309,12 @@ fn create_swap_chain_for_hwnd(p: &mut Process) -> R {
     if desc == 0 || out == 0 {
         return Ok(E_INVALIDARG);
     }
-    let (w, h, fmt, buffers) = (p.rd32(desc)?, p.rd32(desc + 4)?, p.rd32(desc + 8)?, p.rd32(desc + 28)?);
+    let (w, h, fmt, buffers) = (
+        p.rd32(desc)?,
+        p.rd32(desc + 4)?,
+        p.rd32(desc + 8)?,
+        p.rd32(desc + 28)?,
+    );
     let sc = make_swap_chain(p, hwnd, w, h, fmt, buffers.max(1));
     p.wr64(out, sc)?;
     Ok(S_OK)
@@ -220,7 +322,9 @@ fn create_swap_chain_for_hwnd(p: &mut Process) -> R {
 
 fn present(p: &mut Process) -> R {
     let this = p.arg(0);
-    let Some(Kind::SwapChain { id, backbuffer }) = kind_of(p, this) else { return Ok(DXGI_ERROR_INVALID_CALL) };
+    let Some(Kind::SwapChain { id, backbuffer }) = kind_of(p, this) else {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    };
     let tex = match kind_of(p, backbuffer) {
         Some(Kind::Texture2D { id }) => id,
         _ => 0,
@@ -233,7 +337,9 @@ fn present(p: &mut Process) -> R {
 fn get_buffer(p: &mut Process) -> R {
     // (this, UINT Buffer, REFIID riid, void** ppSurface)
     let (this, idx, out) = (p.arg(0), p.arg(1), p.arg(3));
-    let Some(Kind::SwapChain { backbuffer, .. }) = kind_of(p, this) else { return Ok(DXGI_ERROR_INVALID_CALL) };
+    let Some(Kind::SwapChain { backbuffer, .. }) = kind_of(p, this) else {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    };
     if idx != 0 {
         return Ok(DXGI_ERROR_INVALID_CALL);
     }
@@ -245,10 +351,23 @@ fn get_buffer(p: &mut Process) -> R {
 fn resize_buffers(p: &mut Process) -> R {
     // (this, BufferCount, Width, Height, NewFormat, Flags)
     let (this, w, h, fmt) = (p.arg(0), p.arg(2) as u32, p.arg(3) as u32, p.arg(4) as u32);
-    let Some(Kind::SwapChain { id, backbuffer }) = kind_of(p, this) else { return Ok(DXGI_ERROR_INVALID_CALL) };
-    let Some(Kind::Texture2D { id: tex }) = kind_of(p, backbuffer) else { return Ok(DXGI_ERROR_INVALID_CALL) };
-    let (win_w, win_h) = p.extra.win.windows.get(&p.extra.win.main_window).map(|x| (x.w as u32, x.h as u32)).unwrap_or((1280, 720));
-    let (w, h) = (if w == 0 { win_w } else { w }, if h == 0 { win_h } else { h });
+    let Some(Kind::SwapChain { id, backbuffer }) = kind_of(p, this) else {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    };
+    let Some(Kind::Texture2D { id: tex }) = kind_of(p, backbuffer) else {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    };
+    let (win_w, win_h) = p
+        .extra
+        .win
+        .windows
+        .get(&p.extra.win.main_window)
+        .map(|x| (x.w as u32, x.h as u32))
+        .unwrap_or((1280, 720));
+    let (w, h) = (
+        if w == 0 { win_w } else { w },
+        if h == 0 { win_h } else { h },
+    );
     if let Some(r) = p.extra.com.res.get_mut(&tex) {
         r.width = w;
         r.height = h;
@@ -257,6 +376,9 @@ fn resize_buffers(p: &mut Process) -> R {
         }
     }
     let format = p.extra.com.res.get(&tex).map(|r| r.format).unwrap_or(28);
-    p.extra.gpu.emit(op::RESIZE_SWAPCHAIN, Pk::new().u32(id).u32(tex).u32(w).u32(h).u32(format));
+    p.extra.gpu.emit(
+        op::RESIZE_SWAPCHAIN,
+        Pk::new().u32(id).u32(tex).u32(w).u32(h).u32(format),
+    );
     Ok(S_OK)
 }

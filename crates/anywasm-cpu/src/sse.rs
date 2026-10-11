@@ -87,7 +87,11 @@ fn src_ymm(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<(u128, u1
     Ok(match o {
         Opnd::Xmm(n) => (
             cpu.xmm[*n as usize],
-            if bytes == 32 { cpu.ymm_hi[*n as usize] } else { 0 },
+            if bytes == 32 {
+                cpu.ymm_hi[*n as usize]
+            } else {
+                0
+            },
         ),
         Opnd::Mem(m) => {
             let raw = mem.read_vec(ea(cpu, m), bytes as usize)?;
@@ -321,25 +325,38 @@ fn pi_exec(k: PiK, l: u8, signed: bool, d: u128, s: u128) -> u128 {
                 (a * b) >> bits
             }
         }),
-        PiK::Mulhrsw => map2(d, s, 2, |a, b| ((((lsx(a, 2) * lsx(b, 2)) >> 14) + 1) >> 1) as u64 & 0xffff),
+        PiK::Mulhrsw => map2(d, s, 2, |a, b| {
+            ((((lsx(a, 2) * lsx(b, 2)) >> 14) + 1) >> 1) as u64 & 0xffff
+        }),
         PiK::Muludq => {
             let mut r = 0u128;
             for i in 0..2 {
-                put(&mut r, 8, i, (get(d, 4, 2 * i) as u64) * (get(s, 4, 2 * i) as u64));
+                put(
+                    &mut r,
+                    8,
+                    i,
+                    (get(d, 4, 2 * i) as u64) * (get(s, 4, 2 * i) as u64),
+                );
             }
             r
         }
         PiK::Muldq => {
             let mut r = 0u128;
             for i in 0..2 {
-                put(&mut r, 8, i, (lsx(get(d, 4, 2 * i), 4) * lsx(get(s, 4, 2 * i), 4)) as u64);
+                put(
+                    &mut r,
+                    8,
+                    i,
+                    (lsx(get(d, 4, 2 * i), 4) * lsx(get(s, 4, 2 * i), 4)) as u64,
+                );
             }
             r
         }
         PiK::Madd => {
             let mut r = 0u128;
             for i in 0..4 {
-                let v = lsx(get(d, 2, 2 * i), 2) * lsx(get(s, 2, 2 * i), 2) + lsx(get(d, 2, 2 * i + 1), 2) * lsx(get(s, 2, 2 * i + 1), 2);
+                let v = lsx(get(d, 2, 2 * i), 2) * lsx(get(s, 2, 2 * i), 2)
+                    + lsx(get(d, 2, 2 * i + 1), 2) * lsx(get(s, 2, 2 * i + 1), 2);
                 put(&mut r, 4, i, v as u64);
             }
             r
@@ -347,7 +364,8 @@ fn pi_exec(k: PiK, l: u8, signed: bool, d: u128, s: u128) -> u128 {
         PiK::Maddubs => {
             let mut r = 0u128;
             for i in 0..8 {
-                let v = get(d, 1, 2 * i) as i64 * lsx(get(s, 1, 2 * i), 1) + get(d, 1, 2 * i + 1) as i64 * lsx(get(s, 1, 2 * i + 1), 1);
+                let v = get(d, 1, 2 * i) as i64 * lsx(get(s, 1, 2 * i), 1)
+                    + get(d, 1, 2 * i + 1) as i64 * lsx(get(s, 1, 2 * i + 1), 1);
                 put(&mut r, 2, i, sat_s(v, 16));
             }
             r
@@ -452,7 +470,11 @@ fn pack(src_l: u8, signed_out: bool, d: u128, s: u128) -> u128 {
     for (half, src) in [d, s].iter().enumerate() {
         for i in 0..n {
             let v = lsx(get(*src, src_l, i), src_l);
-            let o = if signed_out { sat_s(v, bits) } else { sat_u(v, bits) };
+            let o = if signed_out {
+                sat_s(v, bits)
+            } else {
+                sat_u(v, bits)
+            };
             put(&mut r, dl, half * n + i, o);
         }
     }
@@ -474,7 +496,16 @@ fn pshufb(d: u128, s: u128) -> u128 {
     let mut r = 0u128;
     for i in 0..16 {
         let idx = get(s, 1, i);
-        put(&mut r, 1, i, if idx & 0x80 != 0 { 0 } else { get(d, 1, (idx & 15) as usize) });
+        put(
+            &mut r,
+            1,
+            i,
+            if idx & 0x80 != 0 {
+                0
+            } else {
+                get(d, 1, (idx & 15) as usize)
+            },
+        );
     }
     r
 }
@@ -636,6 +667,21 @@ fn pcmpstr(cpu: &mut Cpu, d: u128, s: u128, imm: u8, explicit: bool, want_mask: 
 pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
     let imm8 = i.imm as u8;
     match i.op {
+        Op::Vextractf128 => {
+            let (source_lo, source_hi) = match i.ops[1] {
+                Opnd::Xmm(s) => (cpu.xmm[s as usize], cpu.ymm_hi[s as usize]),
+                _ => return Err(Exit::Undefined),
+            };
+            let lane = if imm8 & 1 == 0 { source_lo } else { source_hi };
+            match i.ops[0] {
+                Opnd::Xmm(d) => {
+                    cpu.xmm[d as usize] = lane;
+                    cpu.ymm_hi[d as usize] = 0;
+                }
+                Opnd::Mem(m) => mem.write_from(ea(cpu, &m), &lane.to_le_bytes())?,
+                _ => return Err(Exit::Undefined),
+            }
+        }
         Op::Vmovups | Op::Vmovdqu | Op::Vmovdqa => match (&i.ops[0], &i.ops[1]) {
             (Opnd::Xmm(d), Opnd::Xmm(s)) => {
                 let (d, s) = (*d as usize, *s as usize);
@@ -684,6 +730,42 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 _ => return Err(Exit::Undefined),
             }
         }
+        Op::Vmovd => {
+            let value = rd(cpu, mem, &i.ops[1], 4, 0)?;
+            let dst = dst_n(&i.ops[0])?;
+            cpu.xmm[dst] = value as u32 as u128;
+            cpu.ymm_hi[dst] = 0;
+        }
+        Op::Vpbroadcastd => {
+            let source = src_x(cpu, mem, &i.ops[2], 4)? as u32;
+            let pair = source as u64 | ((source as u64) << 32);
+            let half = pair as u128 | ((pair as u128) << 64);
+            let dst = dst_n(&i.ops[0])?;
+            cpu.xmm[dst] = half;
+            cpu.ymm_hi[dst] = half;
+        }
+        Op::Vpaddd => {
+            let dst = dst_n(&i.ops[0])?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], 32)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], 32)?;
+            let mut result_lo = 0u128;
+            let mut result_hi = 0u128;
+            for lane in 0..8 {
+                let (a, b) = if lane < 4 {
+                    (get(a_lo, 4, lane), get(b_lo, 4, lane))
+                } else {
+                    (get(a_hi, 4, lane - 4), get(b_hi, 4, lane - 4))
+                };
+                let result = (a as u32).wrapping_add(b as u32) as u64;
+                if lane < 4 {
+                    put(&mut result_lo, 4, lane, result);
+                } else {
+                    put(&mut result_hi, 4, lane - 4, result);
+                }
+            }
+            cpu.xmm[dst] = result_lo;
+            cpu.ymm_hi[dst] = result_hi;
+        }
         Op::Vpxor => {
             let d = dst_n(&i.ops[0])?;
             let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
@@ -695,7 +777,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             let d = dst_n(&i.ops[0])?;
             let source = rd(cpu, mem, &i.ops[2], i.ssz, 0)?;
             let value = (sext(source, i.ssz) as f32).to_bits() as u128;
-            cpu.xmm[d] = (cpu.xmm[match i.ops[1] { Opnd::Xmm(n) => n as usize, _ => return Err(Exit::Undefined) }] & !lane_mask(4)) | value;
+            cpu.xmm[d] = (cpu.xmm[match i.ops[1] {
+                Opnd::Xmm(n) => n as usize,
+                _ => return Err(Exit::Undefined),
+            }] & !lane_mask(4))
+                | value;
             cpu.ymm_hi[d] = 0;
         }
         Op::Vfp(k, pr) => {
@@ -709,7 +795,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             let d = dst_n(&i.ops[0])?;
             let merge = src_x(cpu, mem, &i.ops[1], 16)?;
             let source = src_x(cpu, mem, &i.ops[2], 4)?;
-            let mode = if imm8 & 4 != 0 { rc(cpu) } else { (imm8 & 3) as u32 };
+            let mode = if imm8 & 4 != 0 {
+                rc(cpu)
+            } else {
+                (imm8 & 3) as u32
+            };
             let result = (rnd(f32::from_bits(source as u32) as f64, mode) as f32).to_bits() as u128;
             cpu.xmm[d] = (merge & !lane_mask(4)) | result;
             cpu.ymm_hi[d] = 0;
@@ -727,7 +817,9 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     let m = lane_mask(bytes);
                     cpu.xmm[*d as usize] = (dv & !m) | (sv & m);
                 }
-                (Opnd::Xmm(d), Opnd::Mem(_)) => cpu.xmm[*d as usize] = src_x(cpu, mem, &i.ops[1], bytes)?,
+                (Opnd::Xmm(d), Opnd::Mem(_)) => {
+                    cpu.xmm[*d as usize] = src_x(cpu, mem, &i.ops[1], bytes)?
+                }
                 (Opnd::Mem(_), Opnd::Xmm(s)) => {
                     let v = cpu.xmm[*s as usize];
                     store_x(cpu, mem, &i.ops[0], v, bytes)?;
@@ -850,7 +942,12 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             let base = if i.op == Op::Pshufhw { 4 } else { 0 };
             let mut r = s;
             for k in 0..4 {
-                put(&mut r, 2, base + k, get(s, 2, base + (imm8 >> (2 * k) & 3) as usize));
+                put(
+                    &mut r,
+                    2,
+                    base + k,
+                    get(s, 2, base + (imm8 >> (2 * k) & 3) as usize),
+                );
             }
             cpu.xmm[dst_n(&i.ops[0])?] = r;
         }
@@ -923,7 +1020,16 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     let (a, b) = (f32x4(d), f32x4(s));
                     let mut r = 0;
                     for k in 0..4 {
-                        put(&mut r, 4, k, if cmp_pred(imm8, a[k] as f64, b[k] as f64) { u32::MAX as u64 } else { 0 });
+                        put(
+                            &mut r,
+                            4,
+                            k,
+                            if cmp_pred(imm8, a[k] as f64, b[k] as f64) {
+                                u32::MAX as u64
+                            } else {
+                                0
+                            },
+                        );
                     }
                     r
                 }
@@ -931,12 +1037,25 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     let (a, b) = (f64x2(d), f64x2(s));
                     let mut r = 0;
                     for k in 0..2 {
-                        put(&mut r, 8, k, if cmp_pred(imm8, a[k], b[k]) { u64::MAX } else { 0 });
+                        put(
+                            &mut r,
+                            8,
+                            k,
+                            if cmp_pred(imm8, a[k], b[k]) {
+                                u64::MAX
+                            } else {
+                                0
+                            },
+                        );
                     }
                     r
                 }
                 Prec::Ss => {
-                    let t = cmp_pred(imm8, f32::from_bits(d as u32) as f64, f32::from_bits(s as u32) as f64);
+                    let t = cmp_pred(
+                        imm8,
+                        f32::from_bits(d as u32) as f64,
+                        f32::from_bits(s as u32) as f64,
+                    );
                     (d & !lane_mask(4)) | if t { u32::MAX as u128 } else { 0 }
                 }
                 Prec::Sd => {
@@ -953,7 +1072,10 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             let (a, b) = if pr == Prec::Sd {
                 (f64::from_bits(d as u64), f64::from_bits(s as u64))
             } else {
-                (f32::from_bits(d as u32) as f64, f32::from_bits(s as u32) as f64)
+                (
+                    f32::from_bits(d as u32) as f64,
+                    f32::from_bits(s as u32) as f64,
+                )
             };
             cpu.rflags &= !ARITH_FLAGS;
             if a.is_nan() || b.is_nan() {
@@ -966,7 +1088,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
         }
         Op::Round(pr) => {
             let n = dst_n(&i.ops[0])?;
-            let mode = if imm8 & 4 != 0 { rc(cpu) } else { (imm8 & 3) as u32 };
+            let mode = if imm8 & 4 != 0 {
+                rc(cpu)
+            } else {
+                (imm8 & 3) as u32
+            };
             let bytes = match pr {
                 Prec::Ss => 4,
                 Prec::Sd => 8,
@@ -980,8 +1106,13 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     from_f32x4(a.map(|x| rnd(x as f64, mode) as f32))
                 }
                 Prec::Pd => from_f64x2(f64x2(s).map(|x| rnd(x, mode))),
-                Prec::Ss => (d & !lane_mask(4)) | (rnd(f32::from_bits(s as u32) as f64, mode) as f32).to_bits() as u128,
-                Prec::Sd => (d & !lane_mask(8)) | rnd(f64::from_bits(s as u64), mode).to_bits() as u128,
+                Prec::Ss => {
+                    (d & !lane_mask(4))
+                        | (rnd(f32::from_bits(s as u32) as f64, mode) as f32).to_bits() as u128
+                }
+                Prec::Sd => {
+                    (d & !lane_mask(8)) | rnd(f64::from_bits(s as u64), mode).to_bits() as u128
+                }
             };
         }
         Op::Dpp(pr) => {
@@ -991,12 +1122,24 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             let d = cpu.xmm[n];
             cpu.xmm[n] = if pr == Prec::Ps {
                 let (a, b) = (f32x4(d), f32x4(s));
-                let p = [0, 1, 2, 3].map(|k| if imm8 >> (4 + k) & 1 != 0 { a[k] * b[k] } else { 0.0 });
+                let p = [0, 1, 2, 3].map(|k| {
+                    if imm8 >> (4 + k) & 1 != 0 {
+                        a[k] * b[k]
+                    } else {
+                        0.0
+                    }
+                });
                 let sum = (p[0] + p[1]) + (p[2] + p[3]);
                 from_f32x4([0, 1, 2, 3].map(|k| if imm8 >> k & 1 != 0 { sum } else { 0.0 }))
             } else {
                 let (a, b) = (f64x2(d), f64x2(s));
-                let p = [0, 1].map(|k| if imm8 >> (4 + k) & 1 != 0 { a[k] * b[k] } else { 0.0 });
+                let p = [0, 1].map(|k| {
+                    if imm8 >> (4 + k) & 1 != 0 {
+                        a[k] * b[k]
+                    } else {
+                        0.0
+                    }
+                });
                 let sum = p[0] + p[1];
                 from_f64x2([0, 1].map(|k| if imm8 >> k & 1 != 0 { sum } else { 0.0 }))
             };
@@ -1072,7 +1215,13 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
         Op::Pextr(l) => {
             let s = src_x(cpu, mem, &i.ops[1], 16)?;
             let v = get(s, l, (imm8 as usize) % (16 / l as usize));
-            let sz = if matches!(i.ops[0], Opnd::Mem(_)) { l } else if l == 8 { 8 } else { 4 };
+            let sz = if matches!(i.ops[0], Opnd::Mem(_)) {
+                l
+            } else if l == 8 {
+                8
+            } else {
+                4
+            };
             wr(cpu, mem, &i.ops[0], sz, v)?;
         }
         Op::Pmovx(sl, dl, sg) => {
@@ -1135,9 +1284,17 @@ fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()
             let single = matches!(k, Ss2Si | Tss2Si);
             let trunc = matches!(k, Tss2Si | Tsd2Si);
             let s = src_x(cpu, mem, &i.ops[1], if single { 4 } else { 8 })?;
-            let x = if single { f32::from_bits(s as u32) as f64 } else { f64::from_bits(s as u64) };
+            let x = if single {
+                f32::from_bits(s as u32) as f64
+            } else {
+                f64::from_bits(s as u64)
+            };
             let m = if trunc { 3 } else { mode };
-            let r = if osz == 8 { f2i64(x, m) } else { f2i32(x, m) as u64 };
+            let r = if osz == 8 {
+                f2i64(x, m)
+            } else {
+                f2i32(x, m) as u64
+            };
             wr(cpu, mem, &i.ops[0], osz, r)?;
         }
         Ss2Sd => {
@@ -1154,7 +1311,10 @@ fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()
         }
         Ps2Pd => {
             let s = src_x(cpu, mem, &i.ops[1], 8)?;
-            let r = from_f64x2([f32::from_bits(get(s, 4, 0) as u32) as f64, f32::from_bits(get(s, 4, 1) as u32) as f64]);
+            let r = from_f64x2([
+                f32::from_bits(get(s, 4, 0) as u32) as f64,
+                f32::from_bits(get(s, 4, 1) as u32) as f64,
+            ]);
             cpu.xmm[dst_n(&i.ops[0])?] = r;
         }
         Pd2Ps => {
@@ -1164,7 +1324,8 @@ fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()
         }
         Dq2Ps => {
             let s = src_x(cpu, mem, &i.ops[1], 16)?;
-            cpu.xmm[dst_n(&i.ops[0])?] = from_f32x4([0, 1, 2, 3].map(|k| lsx(get(s, 4, k), 4) as f32));
+            cpu.xmm[dst_n(&i.ops[0])?] =
+                from_f32x4([0, 1, 2, 3].map(|k| lsx(get(s, 4, k), 4) as f32));
         }
         Ps2Dq | Tps2Dq => {
             let s = f32x4(src_x(cpu, mem, &i.ops[1], 16)?);
@@ -1177,7 +1338,8 @@ fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()
         }
         Dq2Pd => {
             let s = src_x(cpu, mem, &i.ops[1], 8)?;
-            cpu.xmm[dst_n(&i.ops[0])?] = from_f64x2([lsx(get(s, 4, 0), 4) as f64, lsx(get(s, 4, 1), 4) as f64]);
+            cpu.xmm[dst_n(&i.ops[0])?] =
+                from_f64x2([lsx(get(s, 4, 0), 4) as f64, lsx(get(s, 4, 1), 4) as f64]);
         }
         Pd2Dq | Tpd2Dq => {
             let s = f64x2(src_x(cpu, mem, &i.ops[1], 16)?);
@@ -1193,13 +1355,21 @@ fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()
 
 /// FXSAVE / FXRSTOR (512-byte legacy layout; x87 registers go through f64 <-> f80 conversion).
 pub fn fxsave_restore(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
-    let Opnd::Mem(m) = i.ops[0] else { return Err(Exit::Undefined) };
+    let Opnd::Mem(m) = i.ops[0] else {
+        return Err(Exit::Undefined);
+    };
     let a = ea(cpu, &m);
     if i.op == Op::Fxsave {
         let mut buf = [0u8; 512];
         buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
         buf[2..4].copy_from_slice(&cpu.fpu_sw.to_le_bytes());
-        let ftw: u8 = (0..8).fold(0, |acc, k| acc | if (cpu.fpu_tw >> (2 * k)) & 3 != 3 { 1 << k } else { 0 });
+        let ftw: u8 = (0..8).fold(0, |acc, k| {
+            acc | if (cpu.fpu_tw >> (2 * k)) & 3 != 3 {
+                1 << k
+            } else {
+                0
+            }
+        });
         buf[4] = ftw;
         buf[24..28].copy_from_slice(&cpu.mxcsr.to_le_bytes());
         buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes());

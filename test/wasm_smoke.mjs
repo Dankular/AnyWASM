@@ -154,6 +154,14 @@ r = await runExe('fixtures/lcmap_test.exe');
 check('LCMapStringEx handles count-only sizing and NUL-terminated case mapping',
   r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 
+r = await runExe('fixtures/thread_sync_test.exe');
+check('cooperative guest threads resume condition waiters under WASM',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
+r = await runExe('fixtures/static_tls_thread_test.exe');
+check('static PE TLS initializes and remains isolated across WASM guest threads',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
 const cwdDataDir = join(tempDir, 'cwd_data');
 mkdirSync(join(cwdDataDir, 'game', 'assets'), { recursive: true });
 writeFileSync(join(cwdDataDir, 'game', 'assets', 'config.txt'), 'vfs!!');

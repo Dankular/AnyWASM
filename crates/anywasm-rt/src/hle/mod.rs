@@ -7,13 +7,14 @@ pub mod com;
 pub mod crt;
 pub mod d3d11;
 pub mod dxgi;
-pub mod gpu;
 pub mod gdi;
+pub mod gpu;
 pub mod heap;
 pub mod kernel32;
 pub mod ntdll;
-pub mod shell32;
 pub mod printf;
+pub mod shell32;
+pub mod shlwapi;
 pub mod user32;
 pub mod vtables;
 
@@ -48,17 +49,29 @@ pub struct Extra {
 
 /// Map a canonical (lower-case, no ".dll") library name to a host library group.
 pub fn group_of(name: &str) -> Option<&'static str> {
-    if name == "kernel32" || name == "kernelbase" || name.starts_with("api-ms-win-core-") || name.starts_with("api-ms-win-eventing-") || name == "api-ms-win-security-base-l1-1-0" {
+    if name == "kernel32"
+        || name == "kernelbase"
+        || name.starts_with("api-ms-win-core-")
+        || name.starts_with("api-ms-win-eventing-")
+        || name == "api-ms-win-security-base-l1-1-0"
+    {
         return Some("kernel32");
     }
     if name == "ntdll" {
         return Some("ntdll");
     }
-    if name == "msvcrt" || name == "ucrtbase" || name.starts_with("api-ms-win-crt-") || name.starts_with("vcruntime") || name.starts_with("msvcr") || name == "ucrtbased" {
+    if name == "msvcrt"
+        || name == "ucrtbase"
+        || name.starts_with("api-ms-win-crt-")
+        || name.starts_with("vcruntime")
+        || name.starts_with("msvcr")
+        || name == "ucrtbased"
+    {
         return Some("crt");
     }
     match name {
         "user32" => Some("user32"),
+        "shlwapi" => Some("shlwapi"),
         "winmm" => Some("winmm"),
         "d3d11" => Some("d3d11"),
         "dxgi" => Some("dxgi"),
@@ -80,6 +93,7 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "user32" => user32::lookup(name),
         "gdi32" => gdi::lookup(name),
         "shell32" => shell32::lookup(name),
+        "shlwapi" => shlwapi::lookup(name),
         "winmm" => user32::lookup_winmm(name),
         "d3d11" => d3d11::lookup(name),
         "dxgi" => dxgi::lookup(name),
@@ -94,8 +108,10 @@ pub fn data_symbol(group: &str, name: &str) -> Option<u64> {
         return None;
     }
     match name {
-        "_fmode" | "_commode" | "__argc" | "_osver" | "_winver" | "_winmajor" | "_winminor" | "__mb_cur_max" => Some(8),
-        "__initenv" | "__winitenv" | "_environ" | "_wenviron" | "__argv" | "__wargv" | "_pgmptr" | "_wpgmptr" | "_acmdln" | "_wcmdln" | "_iob" => Some(8),
+        "_fmode" | "_commode" | "__argc" | "_osver" | "_winver" | "_winmajor" | "_winminor"
+        | "__mb_cur_max" => Some(8),
+        "__initenv" | "__winitenv" | "_environ" | "_wenviron" | "__argv" | "__wargv"
+        | "_pgmptr" | "_wpgmptr" | "_acmdln" | "_wcmdln" | "_iob" => Some(8),
         _ => None,
     }
 }

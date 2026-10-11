@@ -16,6 +16,11 @@ const ERROR_TIMEOUT: u32 = 1460;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const ERROR_PROC_NOT_FOUND: u32 = 127;
 const ERROR_ALREADY_EXISTS: u32 = 183;
+const ERROR_NOT_OWNER: u32 = 288;
+const ERROR_OLD_WIN_VERSION: u32 = 1150;
+const WAIT_OBJECT_0: u64 = 0;
+const WAIT_TIMEOUT: u64 = 0x102;
+const WAIT_FAILED: u64 = u32::MAX as u64;
 
 pub const STD_IN: u64 = 0x10;
 pub const STD_OUT: u64 = 0x14;
@@ -42,7 +47,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetExitCodeThread" => |p| {
             let (h, out) = (p.arg(0), p.arg(1));
             let code = match p.handles.get(&h) {
-                Some(Handle::Thread { exit_code: Some(code), .. }) => *code,
+                Some(Handle::Thread {
+                    exit_code: Some(code),
+                    ..
+                }) => *code,
                 Some(Handle::Thread { .. }) => 259, // STILL_ACTIVE
                 _ => return Ok(0),
             };
@@ -90,8 +98,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GlobalMemoryStatusEx" => global_memory_status_ex,
         "GetVersion" => |_| Ok(0x4A61_0A00),
         "GetVersionExA" | "GetVersionExW" => get_version_ex,
+        "VerifyVersionInfoA" | "VerifyVersionInfoW" => verify_version_info,
         "VerSetConditionMask" => |p| {
-            let (mut mask, type_mask, condition) = (p.arg(0), p.arg(1) as u32, (p.arg(2) as u8 as u64) & 7);
+            let (mut mask, type_mask, condition) =
+                (p.arg(0), p.arg(1) as u32, (p.arg(2) as u8 as u64) & 7);
             if type_mask != 0 {
                 let bit = 31 - type_mask.leading_zeros();
                 let shift = bit * 3;
@@ -162,22 +172,29 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr32(m, 3)?;
             Ok(1)
         },
-        "SetConsoleMode" | "SetConsoleCtrlHandler" | "SetConsoleTitleA" | "SetConsoleTitleW" | "FlushConsoleInputBuffer" => |_| Ok(1),
+        "SetConsoleMode"
+        | "SetConsoleCtrlHandler"
+        | "SetConsoleTitleA"
+        | "SetConsoleTitleW"
+        | "FlushConsoleInputBuffer" => |_| Ok(1),
         "GetConsoleCP" | "GetConsoleOutputCP" => |_| Ok(437),
         "SetConsoleOutputCP" | "SetConsoleCP" => |_| Ok(1),
         "GetConsoleScreenBufferInfo" => get_console_screen_buffer_info,
         "AllocConsole" | "FreeConsole" | "AttachConsole" => |_| Ok(1),
         "GetConsoleWindow" => |_| Ok(0),
-        "GetFileType" => |p| Ok(match p.arg(0) {
-            STD_IN | STD_OUT | STD_ERR => 2,
-            h if p.handles.contains_key(&h) => 1,
-            _ => 0,
-        }),
+        "GetFileType" => |p| {
+            Ok(match p.arg(0) {
+                STD_IN | STD_OUT | STD_ERR => 2,
+                h if p.handles.contains_key(&h) => 1,
+                _ => 0,
+            })
+        },
         "CreateFileA" => |p| create_file(p, false),
         "CreateFileW" => |p| create_file(p, true),
         "CloseHandle" => |p| {
             let h = p.arg(0);
-            Ok(p.handles.remove(&h).is_some() as u64 | (matches!(h, STD_IN | STD_OUT | STD_ERR)) as u64)
+            Ok(p.handles.remove(&h).is_some() as u64
+                | (matches!(h, STD_IN | STD_OUT | STD_ERR)) as u64)
         },
         "GetFileSize" => |p| {
             let h = p.arg(0);
@@ -298,9 +315,19 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "GetModuleHandleExW" => |p| {
             let (flags, a, out) = (p.arg(0), p.arg(1), p.arg(2));
-            let n = if a == 0 { None } else if flags & 4 != 0 { None } else { Some(p.read_wstr(a)?) };
+            let n = if a == 0 {
+                None
+            } else if flags & 4 != 0 {
+                None
+            } else {
+                Some(p.read_wstr(a)?)
+            };
             let h = if flags & 4 != 0 {
-                p.modules.iter().find(|m| a >= m.base && a < m.base + m.size).map(|m| m.base).unwrap_or(0)
+                p.modules
+                    .iter()
+                    .find(|m| a >= m.base && a < m.base + m.size)
+                    .map(|m| m.base)
+                    .unwrap_or(0)
             } else {
                 module_handle(p, n)?
             };
@@ -349,27 +376,74 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(0)
         },
         "GetSystemTime" | "GetLocalTime" => get_system_time,
-        "Sleep" | "SleepEx" => |p| {
-            let ms = p.arg(0) & 0xffff_ffff;
-            p.extra.sleep_adjust += ms.min(60_000) * 100_000;
-            Ok(0)
+        "Sleep" => |p| sleep_thread(p, false),
+        "SleepEx" => |p| sleep_thread(p, p.arg(1) != 0),
+        "SwitchToThread" => |p| {
+            p.request_thread_yield();
+            Ok(1)
         },
-        "SwitchToThread" => |_| Ok(0),
         "GetTimeZoneInformation" => |p| {
             let a = p.arg(0);
             p.write_bytes(a, &[0u8; 172])?;
             Ok(0)
         },
         "GetSystemTimeAdjustment" => |_| Ok(0),
-        // sync (single-threaded model)
-        "InitializeCriticalSection" | "InitializeCriticalSectionEx" | "InitializeCriticalSectionAndSpinCount" => |_| Ok(1),
-        "EnterCriticalSection" | "LeaveCriticalSection" | "DeleteCriticalSection" => |_| Ok(0),
-        "TryEnterCriticalSection" => |_| Ok(1),
-        "InitializeSRWLock" | "AcquireSRWLockExclusive" | "ReleaseSRWLockExclusive" | "AcquireSRWLockShared" | "ReleaseSRWLockShared" => |_| Ok(0),
-        "TryAcquireSRWLockExclusive" | "TryAcquireSRWLockShared" => |_| Ok(1),
+        // sync
+        "InitializeCriticalSection"
+        | "InitializeCriticalSectionEx"
+        | "InitializeCriticalSectionAndSpinCount" => |p| {
+            p.critical_sections.entry(p.arg(0)).or_default();
+            Ok(1)
+        },
+        "EnterCriticalSection" => enter_critical_section,
+        "LeaveCriticalSection" => |p| {
+            let a = p.arg(0);
+            let _ = p.release_critical(a, p.current_thread_id);
+            Ok(0)
+        },
+        "DeleteCriticalSection" => |p| {
+            p.critical_sections.remove(&p.arg(0));
+            Ok(0)
+        },
+        "TryEnterCriticalSection" => |p| {
+            let a = p.arg(0);
+            Ok(p.try_acquire_critical(a, p.current_thread_id) as u64)
+        },
+        "InitializeSRWLock" => |p| {
+            p.srw_locks.entry(p.arg(0)).or_default();
+            Ok(0)
+        },
+        "AcquireSRWLockExclusive" => |p| acquire_srw(p, true),
+        "AcquireSRWLockShared" => |p| acquire_srw(p, false),
+        "ReleaseSRWLockExclusive" => |p| {
+            let a = p.arg(0);
+            let _ = p.release_srw(a, p.current_thread_id, true);
+            Ok(0)
+        },
+        "ReleaseSRWLockShared" => |p| {
+            let a = p.arg(0);
+            let _ = p.release_srw(a, p.current_thread_id, false);
+            Ok(0)
+        },
+        "TryAcquireSRWLockExclusive" => |p| {
+            let a = p.arg(0);
+            Ok(p.try_acquire_srw(a, p.current_thread_id, true) as u64)
+        },
+        "TryAcquireSRWLockShared" => |p| {
+            let a = p.arg(0);
+            Ok(p.try_acquire_srw(a, p.current_thread_id, false) as u64)
+        },
         "InitializeConditionVariable" => |_| Ok(0),
-        "WakeConditionVariable" | "WakeAllConditionVariable" => |_| Ok(0),
-        "SleepConditionVariableCS" | "SleepConditionVariableSRW" => sleep_condition_variable,
+        "WakeConditionVariable" => |p| {
+            p.wake_condition(p.arg(0), false);
+            Ok(0)
+        },
+        "WakeAllConditionVariable" => |p| {
+            p.wake_condition(p.arg(0), true);
+            Ok(0)
+        },
+        "SleepConditionVariableCS" => sleep_condition_variable_cs,
+        "SleepConditionVariableSRW" => sleep_condition_variable_srw,
         "InitOnceExecuteOnce" => init_once_execute_once,
         "InitOnceBeginInitialize" => |p| {
             let (once, _fl, pending, _ctx) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
@@ -384,44 +458,50 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr64(once, 1)?;
             Ok(1)
         },
-        "CreateEventA" | "CreateEventW" | "CreateEventExW" => |p| {
-            let (manual, init) = (p.arg(1) & 1 != 0, p.arg(2) & 1 != 0);
-            Ok(p.new_handle(Handle::Event { signaled: init, manual }))
+        "CreateEventA" | "CreateEventW" => |p| {
+            let (manual, init) = (p.arg(1) != 0, p.arg(2) != 0);
+            Ok(p.new_handle(Handle::Event {
+                signaled: init,
+                manual,
+            }))
+        },
+        "CreateEventExW" => |p| {
+            let flags = p.arg(2) as u32;
+            Ok(p.new_handle(Handle::Event {
+                signaled: flags & 2 != 0,
+                manual: flags & 1 != 0,
+            }))
         },
         "SetEvent" => |p| {
             let h = p.arg(0);
             if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&h) {
                 *signaled = true;
+                Ok(1)
+            } else {
+                p.set_last_error(ERROR_INVALID_HANDLE);
+                Ok(0)
             }
-            Ok(1)
         },
         "ResetEvent" => |p| {
             let h = p.arg(0);
             if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&h) {
                 *signaled = false;
+                Ok(1)
+            } else {
+                p.set_last_error(ERROR_INVALID_HANDLE);
+                Ok(0)
             }
-            Ok(1)
         },
-        "CreateMutexA" | "CreateMutexW" | "CreateMutexExW" | "CreateSemaphoreA" | "CreateSemaphoreW" | "CreateSemaphoreExW" => |p| Ok(p.new_handle(Handle::Other)),
-        "ReleaseMutex" | "ReleaseSemaphore" => |_| Ok(1),
-        "WaitForSingleObject" | "WaitForSingleObjectEx" => |p| {
-            let h = p.arg(0);
-            Ok(match p.handles.get_mut(&h) {
-                Some(Handle::Event { signaled, manual }) => {
-                    if *signaled {
-                        if !*manual {
-                            *signaled = false;
-                        }
-                        0
-                    } else {
-                        0x102
-                    }
-                }
-                Some(Handle::Thread { exit_code, .. }) => if exit_code.is_some() { 0 } else { 0x102 },
-                _ => 0,
-            })
-        },
-        "WaitForMultipleObjects" | "WaitForMultipleObjectsEx" => |_| Ok(0),
+        "CreateMutexA" | "CreateMutexW" => create_mutex,
+        "CreateMutexExW" => create_mutex_ex,
+        "ReleaseMutex" => release_mutex,
+        "CreateSemaphoreA" | "CreateSemaphoreW" => create_semaphore,
+        "CreateSemaphoreExW" => create_semaphore_ex,
+        "ReleaseSemaphore" => release_semaphore,
+        "WaitForSingleObject" => |p| wait_for_single_object(p, false),
+        "WaitForSingleObjectEx" => |p| wait_for_single_object(p, p.arg(2) != 0),
+        "WaitForMultipleObjects" => |p| wait_for_multiple_objects(p, false),
+        "WaitForMultipleObjectsEx" => |p| wait_for_multiple_objects(p, p.arg(4) != 0),
         "InterlockedIncrement" => |p| interlocked(p, 4, |v, _| v.wrapping_add(1), true),
         "InterlockedDecrement" => |p| interlocked(p, 4, |v, _| v.wrapping_sub(1), true),
         "InterlockedIncrement64" => |p| interlocked(p, 8, |v, _| v.wrapping_add(1), true),
@@ -456,8 +536,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(1)
         },
         "FlsAlloc" => |p| {
-            let i = p.tls_next;
-            p.tls_next += 1;
+            let i = p.fls_next;
+            p.fls_next += 1;
             p.fls.insert(i, 0);
             Ok(i as u64)
         },
@@ -535,10 +615,18 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "CreateThread" => create_thread,
         "ResumeThread" => resume_thread,
         "SuspendThread" => |p| {
-            if matches!(p.handles.get(&p.arg(0)), Some(Handle::Thread { .. })) { Ok(0) } else { Ok(u32::MAX as u64) }
+            if matches!(p.handles.get(&p.arg(0)), Some(Handle::Thread { .. })) {
+                Ok(0)
+            } else {
+                Ok(u32::MAX as u64)
+            }
         },
         "GetThreadContext" | "SetThreadContext" => |_| Ok(0),
-        "SetThreadPriority" | "SetPriorityClass" | "SetThreadAffinityMask" | "SetProcessAffinityMask" | "SetThreadDescription" => |_| Ok(1),
+        "SetThreadPriority"
+        | "SetPriorityClass"
+        | "SetThreadAffinityMask"
+        | "SetProcessAffinityMask"
+        | "SetThreadDescription" => |_| Ok(1),
         "GetThreadPriority" => |_| Ok(0),
         "GetProcessAffinityMask" => |p| {
             let (a, b) = (p.arg(1), p.arg(2));
@@ -559,7 +647,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.write_bytes(a, &[0u8; 32])?;
             Ok(1)
         },
-        "GetProcessWorkingSetSize" | "SetProcessWorkingSetSize" | "SetProcessWorkingSetSizeEx" => |_| Ok(1),
+        "GetProcessWorkingSetSize" | "SetProcessWorkingSetSize" | "SetProcessWorkingSetSizeEx" => {
+            |_| Ok(1)
+        }
         "AreFileApisANSI" => |_| Ok(1),
         "SetHandleCount" => |p| Ok(p.arg(0)),
         "SetHandleInformation" | "GetHandleInformation" => |_| Ok(1),
@@ -568,7 +658,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr64(out, src)?;
             Ok(1)
         },
-        "EncodePointer" | "DecodePointer" | "EncodeSystemPointer" | "DecodeSystemPointer" => |p| Ok(p.arg(0)),
+        "EncodePointer" | "DecodePointer" | "EncodeSystemPointer" | "DecodeSystemPointer" => {
+            |p| Ok(p.arg(0))
+        }
         "RtlLookupFunctionEntry" => |_| Ok(0),
         "IsWow64Process" => |p| {
             let a = p.arg(1);
@@ -588,7 +680,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn ticks(p: &Process) -> u64 {
-    p.cpu.icount + p.extra.sleep_adjust
+    p.now_ticks()
 }
 
 fn file_time(p: &Process) -> u64 {
@@ -599,6 +691,12 @@ fn file_time(p: &Process) -> u64 {
 
 fn exit_process(p: &mut Process) -> R {
     let code = p.arg(0) as u32;
+    if p.trace_imports {
+        let caller = p.mem.read_u64(p.cpu.gpr[anywasm_cpu::cpu::RSP]).unwrap_or(0);
+        p.stderr.extend_from_slice(
+            format!("[process] ExitProcess code={code} caller={caller:#x}\n").as_bytes(),
+        );
+    }
     p.finish_exit(code).map(|_| 0)
 }
 fn terminate_process(p: &mut Process) -> R {
@@ -611,7 +709,7 @@ fn terminate_process(p: &mut Process) -> R {
 }
 fn exit_thread(p: &mut Process) -> R {
     let code = p.arg(0) as u32;
-    if p.thread_call_depth != 0 {
+    if p.current_thread_is_guest {
         Err(Stop::ThreadExit(code))
     } else {
         p.finish_exit(code).map(|_| 0)
@@ -624,49 +722,360 @@ fn create_thread(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "CreateThread from a nested synchronous guest callback cannot be scheduled"
+                .into(),
+        });
+    }
     let id = p.next_thread_id;
     p.next_thread_id = p.next_thread_id.wrapping_add(4).max(0x1008);
     if thread_id_ptr != 0 {
         p.wr32(thread_id_ptr, id)?;
     }
-    let handle = p.new_handle(Handle::Thread { id, start, parameter, exit_code: None, suspended: flags & 4 != 0 });
-    if flags & 4 == 0 {
-        let code = p.call_guest_thread(id, start, parameter)?;
-        if let Some(Handle::Thread { exit_code, .. }) = p.handles.get_mut(&handle) {
-            *exit_code = Some(code);
-        }
+    let suspended = flags & 4 != 0;
+    let handle = p.new_handle(Handle::Thread {
+        id,
+        start,
+        parameter,
+        exit_code: None,
+        suspended,
+    });
+    p.create_guest_thread(id, start, parameter, suspended)?;
+    if !suspended {
+        p.request_thread_yield();
     }
     Ok(handle)
 }
 
 fn resume_thread(p: &mut Process) -> R {
     let h = p.arg(0);
-    let (id, start, parameter, suspended) = match p.handles.get(&h) {
-        Some(Handle::Thread { id, start, parameter, suspended, .. }) => (*id, *start, *parameter, *suspended),
+    let (id, suspended) = match p.handles.get(&h) {
+        Some(Handle::Thread { id, suspended, .. }) => (*id, *suspended),
         _ => return Ok(u32::MAX as u64),
     };
     if !suspended {
         return Ok(0);
     }
+    if !p.resume_guest_thread(id) {
+        return Ok(u32::MAX as u64);
+    }
     if let Some(Handle::Thread { suspended, .. }) = p.handles.get_mut(&h) {
         *suspended = false;
-    }
-    let code = p.call_guest_thread(id, start, parameter)?;
-    if let Some(Handle::Thread { exit_code, .. }) = p.handles.get_mut(&h) {
-        *exit_code = Some(code);
     }
     Ok(1)
 }
 
-fn sleep_condition_variable(p: &mut Process) -> R {
-    let timeout = p.arg(2) as u32;
-    if timeout == u32::MAX {
+fn sleep_thread(p: &mut Process, alertable: bool) -> R {
+    let ms = p.arg(0) as u32;
+    if ms == 0 {
+        p.request_thread_yield();
+        return Ok(0);
+    }
+    if alertable {
         return Err(Stop::Unimplemented {
             dll: "kernel32".into(),
-            name: "SleepConditionVariable (blocking wait has no ready cooperative worker)".into(),
+            name: "alertable SleepEx requires APC delivery".into(),
         });
     }
-    p.set_last_error(ERROR_TIMEOUT);
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "blocking Sleep from a nested synchronous guest callback cannot be scheduled"
+                .into(),
+        });
+    }
+    let duration = (ms as u64).saturating_mul(100_000);
+    p.block_current_thread(ThreadWait::Sleep {
+        deadline: p.now_ticks().saturating_add(duration),
+    });
+    Ok(0)
+}
+
+fn enter_critical_section(p: &mut Process) -> R {
+    let address = p.arg(0);
+    let id = p.current_thread_id;
+    if p.try_acquire_critical(address, id) {
+        return Ok(0);
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "contended critical section from a nested synchronous guest callback cannot be scheduled".into(),
+        });
+    }
+    let waiters = &mut p.critical_sections.entry(address).or_default().waiters;
+    if !waiters.contains(&id) {
+        waiters.push_back(id);
+    }
+    p.block_current_thread(ThreadWait::CriticalAcquire { address });
+    Ok(0)
+}
+
+fn acquire_srw(p: &mut Process, exclusive: bool) -> R {
+    let address = p.arg(0);
+    let id = p.current_thread_id;
+    if p.try_acquire_srw(address, id, exclusive) {
+        return Ok(0);
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "contended SRW lock from a nested synchronous guest callback cannot be scheduled"
+                .into(),
+        });
+    }
+    let waiters = &mut p.srw_locks.entry(address).or_default().waiters;
+    if !waiters.contains(&id) {
+        waiters.push_back(id);
+    }
+    p.block_current_thread(ThreadWait::SrwAcquire { address, exclusive });
+    Ok(0)
+}
+
+fn create_mutex(p: &mut Process) -> R {
+    let owned = p.arg(1) != 0;
+    Ok(p.new_handle(Handle::Mutex {
+        owner: owned.then_some(p.current_thread_id),
+        recursion: owned as u32,
+    }))
+}
+
+fn create_mutex_ex(p: &mut Process) -> R {
+    let owned = p.arg(2) & 1 != 0;
+    Ok(p.new_handle(Handle::Mutex {
+        owner: owned.then_some(p.current_thread_id),
+        recursion: owned as u32,
+    }))
+}
+
+fn create_semaphore(p: &mut Process) -> R {
+    let (initial, max_count) = (p.arg(1) as u32, p.arg(2) as u32);
+    if max_count == 0 || initial > max_count {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    Ok(p.new_handle(Handle::Semaphore {
+        count: initial,
+        max_count,
+    }))
+}
+
+fn create_semaphore_ex(p: &mut Process) -> R {
+    let (initial, max_count) = (p.arg(1) as u32, p.arg(2) as u32);
+    if max_count == 0 || initial > max_count {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    Ok(p.new_handle(Handle::Semaphore {
+        count: initial,
+        max_count,
+    }))
+}
+
+fn release_mutex(p: &mut Process) -> R {
+    let handle = p.arg(0);
+    let id = p.current_thread_id;
+    match p.handles.get_mut(&handle) {
+        Some(Handle::Mutex { owner, recursion }) if *owner == Some(id) => {
+            *recursion -= 1;
+            if *recursion == 0 {
+                *owner = None;
+            }
+            Ok(1)
+        }
+        Some(Handle::Mutex { .. }) => {
+            p.set_last_error(ERROR_NOT_OWNER);
+            Ok(0)
+        }
+        _ => {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            Ok(0)
+        }
+    }
+}
+
+fn release_semaphore(p: &mut Process) -> R {
+    let (handle, release_count, previous_count) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    let result = match p.handles.get_mut(&handle) {
+        Some(Handle::Semaphore { count, max_count })
+            if release_count != 0 && count.saturating_add(release_count) <= *max_count =>
+        {
+            let previous = *count;
+            *count += release_count;
+            Some(previous)
+        }
+        Some(Handle::Semaphore { .. }) => None,
+        _ => {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            return Ok(0);
+        }
+    };
+    let Some(previous) = result else {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    };
+    if previous_count != 0 {
+        p.wr32(previous_count, previous)?;
+    }
+    Ok(1)
+}
+
+fn wait_for_single_object(p: &mut Process, alertable: bool) -> R {
+    let (handle, timeout) = (p.arg(0), p.arg(1) as u32);
+    match p.try_wait_handles(&[handle], false, p.current_thread_id) {
+        Ok(Some(_)) => return Ok(WAIT_OBJECT_0),
+        Err(error) => {
+            p.set_last_error(error);
+            return Ok(WAIT_FAILED);
+        }
+        _ => {}
+    }
+    if timeout == 0 {
+        return Ok(WAIT_TIMEOUT);
+    }
+    if alertable {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "alertable WaitForSingleObjectEx requires APC delivery".into(),
+        });
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "blocking WaitForSingleObject from a nested synchronous guest callback cannot be scheduled".into(),
+        });
+    }
+    let deadline = (timeout != u32::MAX).then(|| {
+        p.now_ticks()
+            .saturating_add((timeout as u64).saturating_mul(100_000))
+    });
+    p.block_current_thread(ThreadWait::Handle { handle, deadline });
+    Ok(WAIT_TIMEOUT)
+}
+
+fn wait_for_multiple_objects(p: &mut Process, alertable: bool) -> R {
+    let count = p.arg(0) as usize;
+    let handles = p.arg(1);
+    if count == 0 || count > 64 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(WAIT_FAILED);
+    }
+    let wait_all = p.arg(2) != 0;
+    let timeout = p.arg(3) as u32;
+    let mut wait_handles = Vec::with_capacity(count);
+    for i in 0..count {
+        wait_handles.push(p.rd64(handles + (i as u64) * 8)?);
+    }
+    match p.try_wait_handles(&wait_handles, wait_all, p.current_thread_id) {
+        Ok(Some(index)) => return Ok(WAIT_OBJECT_0 + index),
+        Err(error) => {
+            p.set_last_error(error);
+            return Ok(WAIT_FAILED);
+        }
+        _ => {}
+    }
+    if timeout == 0 {
+        return Ok(WAIT_TIMEOUT);
+    }
+    if alertable {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "alertable WaitForMultipleObjectsEx requires APC delivery".into(),
+        });
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "blocking WaitForMultipleObjects from a nested synchronous guest callback cannot be scheduled".into(),
+        });
+    }
+    let deadline = (timeout != u32::MAX).then(|| {
+        p.now_ticks()
+            .saturating_add((timeout as u64).saturating_mul(100_000))
+    });
+    p.block_current_thread(ThreadWait::Multiple {
+        handles: wait_handles,
+        wait_all,
+        deadline,
+    });
+    Ok(WAIT_TIMEOUT)
+}
+
+fn sleep_condition_variable_cs(p: &mut Process) -> R {
+    sleep_condition_variable(p, true)
+}
+
+fn sleep_condition_variable_srw(p: &mut Process) -> R {
+    sleep_condition_variable(p, false)
+}
+
+fn sleep_condition_variable(p: &mut Process, critical: bool) -> R {
+    let (condition, lock, timeout) = (p.arg(0), p.arg(1), p.arg(2) as u32);
+    let flags = if critical { 0 } else { p.arg(3) as u32 };
+    if p.trace_imports {
+        let threads = p
+            .handles
+            .values()
+            .filter_map(|handle| match handle {
+                Handle::Thread {
+                    id,
+                    exit_code,
+                    suspended,
+                    ..
+                } => Some(format!("{id}:{exit_code:?}:suspended={suspended}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        p.stderr.extend_from_slice(format!(
+            "[sync] SleepConditionVariableSRW cond={condition:#x} lock={lock:#x} timeout={timeout:#x} flags={flags:#x} tid={} nested={} threads=[{threads}]\n",
+            p.current_thread_id, p.nested
+        ).as_bytes());
+    }
+    let exclusive = flags == 0;
+    if flags > 1 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if timeout == 0 {
+        p.set_last_error(ERROR_TIMEOUT);
+        return Ok(0);
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: "blocking SleepConditionVariable from a nested synchronous guest callback cannot be scheduled".into(),
+        });
+    }
+    let released = if critical {
+        let id = p.current_thread_id;
+        let recursion = p
+            .critical_sections
+            .get(&lock)
+            .filter(|state| state.owner == Some(id))
+            .map(|state| state.recursion);
+        recursion == Some(1) && p.release_critical(lock, id)
+    } else {
+        p.release_srw(lock, p.current_thread_id, exclusive)
+    };
+    if !released {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let deadline = (timeout != u32::MAX).then(|| {
+        p.now_ticks()
+            .saturating_add((timeout as u64).saturating_mul(100_000))
+    });
+    p.block_current_thread(ThreadWait::Condition {
+        condition,
+        lock,
+        critical,
+        exclusive,
+        deadline,
+        outcome: None,
+    });
     Ok(0)
 }
 
@@ -698,7 +1107,18 @@ fn global_memory_status_ex(p: &mut Process) -> R {
     b[0..4].copy_from_slice(&64u32.to_le_bytes());
     b[4..8].copy_from_slice(&30u32.to_le_bytes());
     let total: u64 = 8 << 30;
-    for (i, v) in [total, total / 2, total * 2, total, 1u64 << 47, (1u64 << 47) - (1 << 30), 0].iter().enumerate() {
+    for (i, v) in [
+        total,
+        total / 2,
+        total * 2,
+        total,
+        1u64 << 47,
+        (1u64 << 47) - (1 << 30),
+        0,
+    ]
+    .iter()
+    .enumerate()
+    {
         b[8 + 8 * i..16 + 8 * i].copy_from_slice(&v.to_le_bytes());
     }
     p.write_bytes(a, &b)?;
@@ -714,6 +1134,47 @@ fn get_version_ex(p: &mut Process) -> R {
     p.wr32(a + 16, 2)?;
     let _ = sz;
     Ok(1)
+}
+
+fn verify_version_info(p: &mut Process) -> R {
+    const STATUS_INVALID_PARAMETER: u64 = 0xC000_000D;
+    const STATUS_REVISION_MISMATCH: u64 = 0xC000_0059;
+
+    let (version, type_mask, condition_mask) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if p.trace_imports {
+        let (size, major, minor, build) = if version != 0 {
+            (
+                p.rd32(version)?,
+                p.rd32(version + 4)?,
+                p.rd32(version + 8)?,
+                p.rd32(version + 12)?,
+            )
+        } else {
+            (0, 0, 0, 0)
+        };
+        p.stderr.extend_from_slice(
+            format!(
+                "[version] VerifyVersionInfo info={version:#x} size={size} requested={major}.{minor}.{build} type={type_mask:#x} conditions={condition_mask:#018x}\n"
+            )
+            .as_bytes(),
+        );
+    }
+
+    match ntdll::rtl_verify_version_info(p)? {
+        0 => Ok(1),
+        STATUS_REVISION_MISMATCH => {
+            p.set_last_error(ERROR_OLD_WIN_VERSION);
+            Ok(0)
+        }
+        STATUS_INVALID_PARAMETER => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            Ok(0)
+        }
+        _ => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            Ok(0)
+        }
+    }
 }
 
 // heap -------------------------------------------------------------------------------------
@@ -843,7 +1304,8 @@ fn virtual_alloc(p: &mut Process) -> R {
             p.set_last_error(487);
             return Ok(0);
         }
-        p.mem.map(a, len, if ty & 0x1000 != 0 { pr } else { PROT_NONE });
+        p.mem
+            .map(a, len, if ty & 0x1000 != 0 { pr } else { PROT_NONE });
         p.vmem.insert(a, (len, pr));
         return Ok(a);
     }
@@ -902,15 +1364,24 @@ fn virtual_query(p: &mut Process) -> R {
             while p.mem.prot_of(end) == Some(pr) {
                 end += 0x1000;
             }
-            let alloc_base = p.modules.iter().find(|m| page >= m.base && page < m.base + m.size).map(|m| m.base).unwrap_or(start);
+            let alloc_base = p
+                .modules
+                .iter()
+                .find(|m| page >= m.base && page < m.base + m.size)
+                .map(|m| m.base)
+                .unwrap_or(start);
             b[0..8].copy_from_slice(&start.to_le_bytes());
             b[8..16].copy_from_slice(&alloc_base.to_le_bytes());
             b[16..20].copy_from_slice(&prot_to_win(pr).to_le_bytes());
             b[24..32].copy_from_slice(&(end - start).to_le_bytes());
             b[32..36].copy_from_slice(&0x1000u32.to_le_bytes()); // MEM_COMMIT
             b[36..40].copy_from_slice(&prot_to_win(pr).to_le_bytes());
-            let is_image = p.modules.iter().any(|m| page >= m.base && page < m.base + m.size);
-            b[40..44].copy_from_slice(&(if is_image { 0x1000000u32 } else { 0x20000 }).to_le_bytes());
+            let is_image = p
+                .modules
+                .iter()
+                .any(|m| page >= m.base && page < m.base + m.size);
+            b[40..44]
+                .copy_from_slice(&(if is_image { 0x1000000u32 } else { 0x20000 }).to_le_bytes());
         }
         None => {
             b[0..8].copy_from_slice(&page.to_le_bytes());
@@ -936,7 +1407,11 @@ fn emit(p: &mut Process, handle: u64, data: &[u8]) -> Option<usize> {
             Some(data.len())
         }
         h => match p.handles.get_mut(&h) {
-            Some(Handle::File { path, pos, write: true }) => {
+            Some(Handle::File {
+                path,
+                pos,
+                write: true,
+            }) => {
                 let path = path.clone();
                 let at = *pos;
                 *pos += data.len();
@@ -978,7 +1453,11 @@ fn read_file(p: &mut Process) -> R {
         let (path, at) = (path.clone(), *pos);
         let f = p.vfs.get(&path).cloned().unwrap_or_default();
         let end = (at + n).min(f.len());
-        let d = if at < f.len() { f[at..end].to_vec() } else { Vec::new() };
+        let d = if at < f.len() {
+            f[at..end].to_vec()
+        } else {
+            Vec::new()
+        };
         if let Some(Handle::File { pos, .. }) = p.handles.get_mut(&h) {
             *pos += d.len();
         }
@@ -1007,7 +1486,10 @@ fn write_console_a(p: &mut Process) -> R {
 fn write_console_w(p: &mut Process) -> R {
     let (h, buf, n, w) = (p.arg(0), p.arg(1), p.arg(2) as usize, p.arg(3));
     let raw = p.read_bytes(buf, n * 2)?;
-    let u: Vec<u16> = raw.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let u: Vec<u16> = raw
+        .chunks(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     let s = String::from_utf16_lossy(&u);
     emit(p, h, s.as_bytes());
     if w != 0 {
@@ -1029,7 +1511,11 @@ fn get_console_screen_buffer_info(p: &mut Process) -> R {
 
 fn create_file(p: &mut Process, wide: bool) -> R {
     let (name, access, _share, _sec, disp) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3), p.arg(4));
-    let raw_path = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
+    let raw_path = if wide {
+        p.read_wstr(name)?
+    } else {
+        p.read_cstr(name)?
+    };
     let n = norm(&raw_path);
     if n == "conout$" {
         return Ok(STD_OUT);
@@ -1057,7 +1543,11 @@ fn create_file(p: &mut Process, wide: bool) -> R {
         p.vfs.insert(&path, Vec::new());
     }
     p.set_last_error(0);
-    Ok(p.new_handle(Handle::File { path: norm(&path), pos: 0, write }))
+    Ok(p.new_handle(Handle::File {
+        path: norm(&path),
+        pos: 0,
+        write,
+    }))
 }
 
 fn file_len(p: &Process, h: u64) -> Option<u64> {
@@ -1117,8 +1607,16 @@ fn set_current_directory(p: &mut Process, path: &str) -> R {
 
 fn set_file_pointer(p: &mut Process) -> R {
     let (h, lo, hi_ptr, method) = (p.arg(0), p.arg(1) as u32 as i32 as i64, p.arg(2), p.arg(3));
-    let hi = if hi_ptr != 0 { (p.rd32(hi_ptr)? as i32 as i64) << 32 } else { 0 };
-    let off = if hi_ptr != 0 { hi | (lo as u64 & 0xffff_ffff) as i64 } else { lo };
+    let hi = if hi_ptr != 0 {
+        (p.rd32(hi_ptr)? as i32 as i64) << 32
+    } else {
+        0
+    };
+    let off = if hi_ptr != 0 {
+        hi | (lo as u64 & 0xffff_ffff) as i64
+    } else {
+        lo
+    };
     let new = seek(p, h, off, method)?;
     match new {
         Some(n) => {
@@ -1161,9 +1659,17 @@ fn seek(p: &mut Process, h: u64, off: i64, method: u64) -> Result<Option<u64>, S
 
 fn full_path(p: &mut Process, wide: bool) -> R {
     let (name, n, buf) = (p.arg(0), p.arg(1) as usize, p.arg(2));
-    let path = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
+    let path = if wide {
+        p.read_wstr(name)?
+    } else {
+        p.read_cstr(name)?
+    };
     let full = absolute(&path, &p.current_directory);
-    let length = if wide { full.encode_utf16().count() } else { full.len() };
+    let length = if wide {
+        full.encode_utf16().count()
+    } else {
+        full.len()
+    };
     if length + 1 <= n {
         if wide {
             p.write_wstr(buf, &full)?;
@@ -1173,7 +1679,10 @@ fn full_path(p: &mut Process, wide: bool) -> R {
         if p.arg(3) != 0 {
             let file_part = full.rfind('\\').map(|i| i + 1).unwrap_or(0);
             if wide {
-                p.wr64(p.arg(3), buf + (full[..file_part].encode_utf16().count() * 2) as u64)?;
+                p.wr64(
+                    p.arg(3),
+                    buf + (full[..file_part].encode_utf16().count() * 2) as u64,
+                )?;
             } else {
                 p.wr64(p.arg(3), buf + file_part as u64)?;
             }
@@ -1258,8 +1767,16 @@ fn get_environment_strings_a(p: &mut Process) -> R {
 }
 fn env_var(p: &mut Process, wide: bool) -> R {
     let (name, buf, n) = (p.arg(0), p.arg(1), p.arg(2) as usize);
-    let k = if wide { p.read_wstr(name)? } else { p.read_cstr(name)? };
-    let v = p.env.iter().find(|(a, _)| a.eq_ignore_ascii_case(&k)).map(|(_, v)| v.clone());
+    let k = if wide {
+        p.read_wstr(name)?
+    } else {
+        p.read_cstr(name)?
+    };
+    let v = p
+        .env
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(&k))
+        .map(|(_, v)| v.clone());
     match v {
         Some(v) => {
             if v.len() + 1 <= n {
@@ -1284,9 +1801,18 @@ fn env_var(p: &mut Process, wide: bool) -> R {
 
 fn module_handle(p: &mut Process, name: Option<String>) -> R {
     match name {
-        None => Ok(p.modules.iter().find(|m| m.hle_group.is_none() && !m.is_dll).map(|m| m.base).unwrap_or(0)),
+        None => Ok(p
+            .modules
+            .iter()
+            .find(|m| m.hle_group.is_none() && !m.is_dll)
+            .map(|m| m.base)
+            .unwrap_or(0)),
         Some(n) => {
-            let n = if n.contains('.') { n } else { format!("{n}.dll") };
+            let n = if n.contains('.') {
+                n
+            } else {
+                format!("{n}.dll")
+            };
             if let Some(i) = p.module_by_name(&n) {
                 return Ok(p.modules[i].base);
             }
@@ -1302,7 +1828,11 @@ fn module_handle(p: &mut Process, name: Option<String>) -> R {
 }
 
 fn load_library(p: &mut Process, name: &str) -> R {
-    let n = if name.contains('.') { name.to_string() } else { format!("{name}.dll") };
+    let n = if name.contains('.') {
+        name.to_string()
+    } else {
+        format!("{name}.dll")
+    };
     if let Some(i) = p.module_by_name(&n) {
         return Ok(p.modules[i].base);
     }
@@ -1321,7 +1851,11 @@ fn load_library(p: &mut Process, name: &str) -> R {
             Ok(i) => {
                 // Run DllMain for the new module and any dependencies it pulled in.
                 for k in before..p.modules.len() {
-                    let (base, entry, hle) = (p.modules[k].base, p.modules[k].entry, p.modules[k].hle_group.is_some());
+                    let (base, entry, hle) = (
+                        p.modules[k].base,
+                        p.modules[k].entry,
+                        p.modules[k].hle_group.is_some(),
+                    );
                     if !hle && entry != 0 {
                         p.call_guest(entry, &[base, 1, 0])?;
                     }
@@ -1329,7 +1863,8 @@ fn load_library(p: &mut Process, name: &str) -> R {
                 Ok(p.modules[i].base)
             }
             Err(e) => {
-                p.stderr.extend_from_slice(format!("LoadLibrary({n}): {e}\n").as_bytes());
+                p.stderr
+                    .extend_from_slice(format!("LoadLibrary({n}): {e}\n").as_bytes());
                 p.set_last_error(193);
                 Ok(0)
             }
@@ -1345,13 +1880,25 @@ fn load_library(p: &mut Process, name: &str) -> R {
 
 fn get_proc_address(p: &mut Process) -> R {
     let (h, name_ptr) = (p.arg(0), p.arg(1));
-    let Some(i) = p.module_by_base(h).or_else(|| if h == 0 { None } else { p.modules.iter().position(|m| h >= m.base && h < m.base + m.size) }) else {
+    let Some(i) = p.module_by_base(h).or_else(|| {
+        if h == 0 {
+            None
+        } else {
+            p.modules
+                .iter()
+                .position(|m| h >= m.base && h < m.base + m.size)
+        }
+    }) else {
         p.set_last_error(ERROR_MOD_NOT_FOUND);
         return Ok(0);
     };
     let m = p.modules[i].clone();
     let by_ordinal = name_ptr < 0x10000;
-    let name = if by_ordinal { format!("#{name_ptr}") } else { p.read_cstr(name_ptr)? };
+    let name = if by_ordinal {
+        format!("#{name_ptr}")
+    } else {
+        p.read_cstr(name_ptr)?
+    };
     if let Some(g) = m.hle_group {
         if crate::hle::lookup(g, &name).is_some() {
             return Ok(p.thunk_for(g, &name, true).unwrap());
@@ -1360,12 +1907,17 @@ fn get_proc_address(p: &mut Process) -> R {
             Some(a) => Ok(a),
             None => {
                 p.set_last_error(ERROR_PROC_NOT_FOUND);
-                p.unimplemented_log.push((format!("{} (GetProcAddress)", m.name), name));
+                p.unimplemented_log
+                    .push((format!("{} (GetProcAddress)", m.name), name));
                 Ok(0)
             }
         };
     }
-    let a = if by_ordinal { m.ordinals.get(&(name_ptr as u16)).copied() } else { m.exports.get(&name).copied() };
+    let a = if by_ordinal {
+        m.ordinals.get(&(name_ptr as u16)).copied()
+    } else {
+        m.exports.get(&name).copied()
+    };
     match a {
         Some(a) => Ok(a),
         None => {
@@ -1391,7 +1943,11 @@ fn init_once_execute_once(p: &mut Process) -> R {
 
 fn interlocked(p: &mut Process, width: u8, f: impl Fn(u64, u64) -> u64, return_new: bool) -> R {
     let (addr, arg) = (p.arg(0), p.arg(1));
-    let old = if width == 4 { p.rd32(addr)? as u64 } else { p.rd64(addr)? };
+    let old = if width == 4 {
+        p.rd32(addr)? as u64
+    } else {
+        p.rd64(addr)?
+    };
     let new = f(old, arg);
     if width == 4 {
         p.wr32(addr, new as u32)?;
@@ -1404,7 +1960,11 @@ fn interlocked(p: &mut Process, width: u8, f: impl Fn(u64, u64) -> u64, return_n
 
 fn cmpxchg(p: &mut Process, width: u8) -> R {
     let (addr, new, cmp) = (p.arg(0), p.arg(1), p.arg(2));
-    let old = if width == 4 { p.rd32(addr)? as u64 } else { p.rd64(addr)? };
+    let old = if width == 4 {
+        p.rd32(addr)? as u64
+    } else {
+        p.rd64(addr)?
+    };
     if old == if width == 4 { cmp & 0xffff_ffff } else { cmp } {
         if width == 4 {
             p.wr32(addr, new as u32)?;
@@ -1421,7 +1981,16 @@ fn get_system_time(p: &mut Process) -> R {
     let a = p.arg(0);
     let ms_total = ticks(p) / 100_000;
     let secs = ms_total / 1000;
-    let v: [u16; 8] = [2026, 1, 4, 1, (secs / 3600 % 24) as u16, (secs / 60 % 60) as u16, (secs % 60) as u16, (ms_total % 1000) as u16];
+    let v: [u16; 8] = [
+        2026,
+        1,
+        4,
+        1,
+        (secs / 3600 % 24) as u16,
+        (secs / 60 % 60) as u16,
+        (secs % 60) as u16,
+        (ms_total % 1000) as u16,
+    ];
     let mut b = [0u8; 16];
     for (i, x) in v.iter().enumerate() {
         b[2 * i..2 * i + 2].copy_from_slice(&x.to_le_bytes());
@@ -1437,7 +2006,10 @@ fn read_wide_n(p: &Process, a: u64, n: i64) -> Result<Vec<u16>, Stop> {
         Ok(p.read_wstr(a)?.encode_utf16().collect())
     } else {
         let raw = p.read_bytes(a, n as usize * 2)?;
-        Ok(raw.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+        Ok(raw
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect())
     }
 }
 
@@ -1450,8 +2022,9 @@ fn cp_decode(cp: u32, bytes: &[u8]) -> Vec<u16> {
 
 pub fn cp1252(b: u8) -> u16 {
     const HI: [u16; 32] = [
-        0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122,
-        0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178,
+        0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039,
+        0x152, 0x8d, 0x17d, 0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+        0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178,
     ];
     if (0x80..0xa0).contains(&b) {
         HI[(b - 0x80) as usize]
@@ -1462,13 +2035,23 @@ pub fn cp1252(b: u8) -> u16 {
 
 fn multi_byte_to_wide_char(p: &mut Process) -> R {
     // Both lengths are Win32 ints; upper bits in their x64 argument slots are unspecified.
-    let (cp, _fl, src, n, dst, dn) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as u32 as i32, p.arg(4), p.arg(5) as u32 as i32);
+    let (cp, _fl, src, n, dst, dn) = (
+        p.arg(0) as u32,
+        p.arg(1),
+        p.arg(2),
+        p.arg(3) as u32 as i32,
+        p.arg(4),
+        p.arg(5) as u32 as i32,
+    );
     if n == 0 || n < -1 || dn < 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
     let bytes = if n < 0 {
-        let mut b = p.mem.read_cstr(src, 1 << 20).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+        let mut b = p
+            .mem
+            .read_cstr(src, 1 << 20)
+            .map_err(|e| Stop::Crash(format!("{e:?}")))?;
         b.push(0);
         b
     } else {
@@ -1493,7 +2076,14 @@ fn multi_byte_to_wide_char(p: &mut Process) -> R {
 
 fn wide_char_to_multi_byte(p: &mut Process) -> R {
     // Both length parameters are Win32 ints, not pointer-sized values.
-    let (cp, _fl, src, n, dst, dn) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as u32 as i32, p.arg(4), p.arg(5) as u32 as i32);
+    let (cp, _fl, src, n, dst, dn) = (
+        p.arg(0) as u32,
+        p.arg(1),
+        p.arg(2),
+        p.arg(3) as u32 as i32,
+        p.arg(4),
+        p.arg(5) as u32 as i32,
+    );
     if n == 0 || n < -1 || dn < 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
@@ -1505,7 +2095,15 @@ fn wide_char_to_multi_byte(p: &mut Process) -> R {
     let out: Vec<u8> = if cp == 65001 {
         String::from_utf16_lossy(&w).into_bytes()
     } else {
-        w.iter().map(|&c| if c < 0x100 && !(0x80..0xa0).contains(&c) { c as u8 } else { (0x80u8..0xa0).find(|&b| cp1252(b) == c).unwrap_or(b'?') }).collect()
+        w.iter()
+            .map(|&c| {
+                if c < 0x100 && !(0x80..0xa0).contains(&c) {
+                    c as u8
+                } else {
+                    (0x80u8..0xa0).find(|&b| cp1252(b) == c).unwrap_or(b'?')
+                }
+            })
+            .collect()
     };
     if dn == 0 {
         return Ok(out.len() as u64);
@@ -1560,7 +2158,13 @@ fn get_string_type_w(p: &mut Process) -> R {
 
 fn lc_map_string_w(p: &mut Process) -> R {
     // cchSrc and cchDest are Win32 ints; their unused upper bits may be dirty in 64-bit ABI slots.
-    let (flags, src, n, dst, dn) = (p.arg(1), p.arg(2), p.arg(3) as u32 as i32, p.arg(4), p.arg(5) as u32 as i32);
+    let (flags, src, n, dst, dn) = (
+        p.arg(1),
+        p.arg(2),
+        p.arg(3) as u32 as i32,
+        p.arg(4),
+        p.arg(5) as u32 as i32,
+    );
     if n == 0 || n < -1 || dn < 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
@@ -1575,9 +2179,17 @@ fn lc_map_string_w(p: &mut Process) -> R {
     for c in w.iter_mut() {
         let ch = char::from_u32(*c as u32).unwrap_or('\0');
         if flags & 0x200 != 0 {
-            *c = ch.to_uppercase().next().map(|x| x as u32 as u16).unwrap_or(*c);
+            *c = ch
+                .to_uppercase()
+                .next()
+                .map(|x| x as u32 as u16)
+                .unwrap_or(*c);
         } else if flags & 0x100 != 0 {
-            *c = ch.to_lowercase().next().map(|x| x as u32 as u16).unwrap_or(*c);
+            *c = ch
+                .to_lowercase()
+                .next()
+                .map(|x| x as u32 as u16)
+                .unwrap_or(*c);
         }
     }
     if dst == 0 || w.len() > dn as usize {
@@ -1592,8 +2204,19 @@ fn lc_map_string_w(p: &mut Process) -> R {
 #[cfg(test)]
 mod lc_map_string_tests {
     use super::*;
-    use anywasm_cpu::cpu::{RCX, RDX, R8, R9, RSP};
+    use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+    #[test]
+    fn static_tls_tlsalloc_and_flsalloc_use_separate_index_spaces() {
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        let tls_alloc = lookup("TlsAlloc").unwrap();
+        let fls_alloc = lookup("FlsAlloc").unwrap();
+        assert_eq!(tls_alloc(&mut p), Ok(0));
+        assert_eq!(fls_alloc(&mut p), Ok(0));
+        assert_eq!(tls_alloc(&mut p), Ok(1));
+        assert_eq!(fls_alloc(&mut p), Ok(1));
+    }
 
     #[test]
     fn zero_capacity_query_ignores_unspecified_upper_stack_bits() {
@@ -1608,7 +2231,8 @@ mod lc_map_string_tests {
         p.cpu.gpr[R8] = BASE + 0x100;
         p.cpu.gpr[R9] = 3; // cchSrc
         p.wr64(BASE + 0x800 + 8 + 8 * 4, 0).unwrap(); // lpDestStr
-        p.wr64(BASE + 0x800 + 8 + 8 * 5, 0xdead_beef_0000_0000).unwrap(); // cchDest == 0
+        p.wr64(BASE + 0x800 + 8 + 8 * 5, 0xdead_beef_0000_0000)
+            .unwrap(); // cchDest == 0
 
         assert_eq!(lc_map_string_w(&mut p), Ok(3));
     }
@@ -1626,7 +2250,8 @@ mod lc_map_string_tests {
         p.cpu.gpr[R8] = BASE + 0x100;
         p.cpu.gpr[R9] = 0xffff_ffff; // cchWideChar == -1, including the NUL terminator
         p.wr64(BASE + 0x800 + 8 + 8 * 4, 0).unwrap(); // lpMultiByteStr
-        p.wr64(BASE + 0x800 + 8 + 8 * 5, 0x0000_7ff0_0000_0000).unwrap(); // cbMultiByte == 0
+        p.wr64(BASE + 0x800 + 8 + 8 * 5, 0x0000_7ff0_0000_0000)
+            .unwrap(); // cbMultiByte == 0
 
         assert_eq!(wide_char_to_multi_byte(&mut p), Ok(4));
     }
