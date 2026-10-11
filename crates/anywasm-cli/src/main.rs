@@ -8,8 +8,8 @@
 
 use anywasm_pe::{canonical_dll, ImportName, Pe};
 use anywasm_rt::hle;
-use anywasm_rt::{Bundle, Process, Stop, Vfs};
 use anywasm_rt::vfs::absolute;
+use anywasm_rt::{Bundle, Process, Stop, Vfs};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,9 @@ fn feature_of(dll: &str) -> Option<&'static str> {
 fn blocker_of(dll: &str) -> Option<&'static str> {
     Some(match dll {
         d if d.starts_with("easyanticheat") => "Easy Anti-Cheat (kernel/driver based; cannot run)",
-        d if d.starts_with("beclient") || d.starts_with("battleye") => "BattlEye anti-cheat (cannot run)",
+        d if d.starts_with("beclient") || d.starts_with("battleye") => {
+            "BattlEye anti-cheat (cannot run)"
+        }
         "steam_api64" | "steam_api" => "Steamworks (needs a steam_api replacement)",
         "winusb" | "setupapi" | "hid" => "Direct device/driver access",
         _ => return None,
@@ -92,10 +94,14 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
         ..Default::default()
     };
     if pe.machine != anywasm_pe::MACHINE_AMD64 || !pe.is_64 {
-        r.blockers.push(format!("{} images are not supported: only PE32+ x86-64", r.machine));
+        r.blockers.push(format!(
+            "{} images are not supported: only PE32+ x86-64",
+            r.machine
+        ));
     }
     if pe.is_dotnet() {
-        r.blockers.push(".NET managed executable (needs a CLR, not a native Win64 runtime)".into());
+        r.blockers
+            .push(".NET managed executable (needs a CLR, not a native Win64 runtime)".into());
     }
     let bundled: BTreeSet<String> = dir
         .map(|d| {
@@ -112,7 +118,13 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
         let canon = canonical_dll(&imp.dll);
         let group = hle::group_of(&canon);
         let is_bundled = bundled.contains(&canon);
-        let st = by_dll.entry(canon.clone()).or_insert_with(|| ImportStatus { dll: imp.dll.clone(), group, bundled: is_bundled, implemented: vec![], missing: vec![] });
+        let st = by_dll.entry(canon.clone()).or_insert_with(|| ImportStatus {
+            dll: imp.dll.clone(),
+            group,
+            bundled: is_bundled,
+            implemented: vec![],
+            missing: vec![],
+        });
         if let Some(f) = feature_of(&canon) {
             r.features.insert(f);
         }
@@ -124,7 +136,12 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
                 ImportName::Name { name, .. } => name.clone(),
                 ImportName::Ordinal(o) => format!("#{o}"),
             };
-            let ok = is_bundled || group.map(|g| hle::lookup(g, &name).is_some() || hle::data_symbol(g, &name).is_some()).unwrap_or(false);
+            let ok = is_bundled
+                || group
+                    .map(|g| {
+                        hle::lookup(g, &name).is_some() || hle::data_symbol(g, &name).is_some()
+                    })
+                    .unwrap_or(false);
             if ok {
                 st.implemented.push(name);
             } else {
@@ -187,7 +204,9 @@ mod tests {
 }
 
 fn print_report(r: &Report, json: bool) {
-    let (imp, miss): (usize, usize) = r.imports.iter().fold((0, 0), |a, i| (a.0 + i.implemented.len(), a.1 + i.missing.len()));
+    let (imp, miss): (usize, usize) = r.imports.iter().fold((0, 0), |a, i| {
+        (a.0 + i.implemented.len(), a.1 + i.missing.len())
+    });
     if json {
         let list = |v: &[String]| {
             format!(
@@ -249,18 +268,41 @@ fn print_report(r: &Report, json: bool) {
         return;
     }
     println!("Machine     : {}", r.machine);
-    println!("Subsystem   : {}{}", r.subsystem, if r.is_dll { " (DLL)" } else { "" });
-    println!("Image       : base {:#x}, {} KiB mapped{}", r.image_base, r.size_of_image / 1024, if r.has_tls { ", has TLS" } else { "" });
+    println!(
+        "Subsystem   : {}{}",
+        r.subsystem,
+        if r.is_dll { " (DLL)" } else { "" }
+    );
+    println!(
+        "Image       : base {:#x}, {} KiB mapped{}",
+        r.image_base,
+        r.size_of_image / 1024,
+        if r.has_tls { ", has TLS" } else { "" }
+    );
     if !r.features.is_empty() {
-        println!("Uses        : {}", r.features.iter().copied().collect::<Vec<_>>().join(", "));
+        println!(
+            "Uses        : {}",
+            r.features.iter().copied().collect::<Vec<_>>().join(", ")
+        );
     }
     for b in &r.blockers {
         println!("BLOCKER     : {b}");
     }
     println!("\nImports ({imp} implemented, {miss} missing):");
     for i in &r.imports {
-        let tag = if i.bundled { "bundled DLL".to_string() } else { i.group.map(|g| format!("host:{g}")).unwrap_or_else(|| "NO HOST LIBRARY".into()) };
-        println!("  {:<34} [{tag}] {} ok, {} missing", i.dll, i.implemented.len(), i.missing.len());
+        let tag = if i.bundled {
+            "bundled DLL".to_string()
+        } else {
+            i.group
+                .map(|g| format!("host:{g}"))
+                .unwrap_or_else(|| "NO HOST LIBRARY".into())
+        };
+        println!(
+            "  {:<34} [{tag}] {} ok, {} missing",
+            i.dll,
+            i.implemented.len(),
+            i.missing.len()
+        );
         for m in i.missing.iter().take(12) {
             println!("      - missing {m}");
         }
@@ -270,7 +312,10 @@ fn print_report(r: &Report, json: bool) {
     }
     println!();
     if !r.blockers.is_empty() {
-        println!("Verdict: cannot run ({} blocker(s) above).", r.blockers.len());
+        println!(
+            "Verdict: cannot run ({} blocker(s) above).",
+            r.blockers.len()
+        );
     } else if miss == 0 {
         println!("Verdict: every imported function has a host implementation (this does not prove the program will work).");
     } else {
@@ -286,7 +331,11 @@ fn load_dir(vfs: &mut Vfs, dir: &Path) -> std::io::Result<()> {
             if p.is_dir() {
                 walk(vfs, root, &p)?;
             } else {
-                let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('/', "\\");
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('/', "\\");
                 vfs.insert(&rel, std::fs::read(&p)?);
             }
         }
@@ -308,7 +357,17 @@ struct Opts {
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { exe: PathBuf::new(), dir: None, out: None, trace: false, json: false, max_steps: 20_000_000_000, args: vec![], cmdline: None, cwd: None };
+    let mut o = Opts {
+        exe: PathBuf::new(),
+        dir: None,
+        out: None,
+        trace: false,
+        json: false,
+        max_steps: 20_000_000_000,
+        args: vec![],
+        cmdline: None,
+        cwd: None,
+    };
     let mut it = args.iter();
     let mut have_exe = false;
     while let Some(a) = it.next() {
@@ -317,7 +376,13 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "-o" | "--out" => o.out = Some(it.next().ok_or("-o needs a value")?.into()),
             "--trace-imports" => o.trace = true,
             "--json" => o.json = true,
-            "--max-steps" => o.max_steps = it.next().ok_or("--max-steps needs a value")?.parse().map_err(|_| "bad --max-steps")?,
+            "--max-steps" => {
+                o.max_steps = it
+                    .next()
+                    .ok_or("--max-steps needs a value")?
+                    .parse()
+                    .map_err(|_| "bad --max-steps")?
+            }
             "--args" => o.cmdline = Some(it.next().ok_or("--args needs a value")?.clone()),
             "--cwd" => o.cwd = Some(it.next().ok_or("--cwd needs a value")?.clone()),
             "--" => {
@@ -342,9 +407,17 @@ fn build_vfs(o: &Opts) -> Result<(Vfs, String), String> {
     if let Some(d) = &o.dir {
         load_dir(&mut vfs, d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    let name = o.exe.file_name().ok_or("bad exe path")?.to_string_lossy().into_owned();
+    let name = o
+        .exe
+        .file_name()
+        .ok_or("bad exe path")?
+        .to_string_lossy()
+        .into_owned();
     if !vfs.exists(&name) {
-        vfs.insert(&name, std::fs::read(&o.exe).map_err(|e| format!("{}: {e}", o.exe.display()))?);
+        vfs.insert(
+            &name,
+            std::fs::read(&o.exe).map_err(|e| format!("{}: {e}", o.exe.display()))?,
+        );
     }
     Ok((vfs, name))
 }
@@ -356,7 +429,11 @@ fn command_line(name: &str, o: &Opts) -> String {
     let mut s = format!("\"C:\\{name}\"");
     for a in &o.args {
         s.push(' ');
-        if a.contains(' ') { s.push_str(&format!("\"{a}\"")) } else { s.push_str(a) }
+        if a.contains(' ') {
+            s.push_str(&format!("\"{a}\""))
+        } else {
+            s.push_str(a)
+        }
     }
     s
 }
@@ -368,7 +445,9 @@ fn guest_cwd(o: &Opts, vfs: &Vfs) -> Result<Option<String>, String> {
     }
     let cwd = absolute(cwd, "C:\\");
     if !vfs.is_dir(&cwd) {
-        return Err(format!("guest current directory is not present in the VFS: {cwd}"));
+        return Err(format!(
+            "guest current directory is not present in the VFS: {cwd}"
+        ));
     }
     Ok(Some(cwd))
 }
@@ -413,15 +492,24 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             Ok(ExitCode::from(121))
         }
         Stop::StepLimit => {
-            eprintln!("\nanywasm: step limit reached after {} instructions", o.max_steps);
+            eprintln!(
+                "\nanywasm: step limit reached after {} instructions",
+                o.max_steps
+            );
             Ok(ExitCode::from(122))
         }
         Stop::Frame | Stop::Idle => {
-            eprintln!("\nanywasm: program is waiting for window input (no display attached to the CLI)");
+            eprintln!(
+                "\nanywasm: program is waiting for window input (no display attached to the CLI)"
+            );
             Ok(ExitCode::from(123))
         }
         Stop::ThreadExit(code) => {
             eprintln!("\nanywasm: internal thread exit escaped its worker context (code {code})");
+            Ok(ExitCode::from(1))
+        }
+        Stop::GuestUnwind(_) => {
+            eprintln!("\nanywasm: internal guest unwind escaped its exception dispatcher");
             Ok(ExitCode::from(1))
         }
     }
@@ -431,12 +519,31 @@ fn pack(o: &Opts) -> Result<(), String> {
     let (vfs, name) = build_vfs(o)?;
     let cwd = guest_cwd(o, &vfs)?;
     let out = o.out.clone().ok_or("pack needs -o <out.awb>")?;
-    let mut files: Vec<(String, Vec<u8>)> = vfs.paths().map(|p| (p.clone(), vfs.get(p).unwrap().clone())).collect();
+    let mut files: Vec<(String, Vec<u8>)> = vfs
+        .paths()
+        .map(|p| (p.clone(), vfs.get(p).unwrap().clone()))
+        .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let b = Bundle { exe: name.to_ascii_lowercase(), cmdline: o.cmdline.clone().or_else(|| if o.args.is_empty() { None } else { Some(command_line(&name, o)) }), cwd, files };
+    let b = Bundle {
+        exe: name.to_ascii_lowercase(),
+        cmdline: o.cmdline.clone().or_else(|| {
+            if o.args.is_empty() {
+                None
+            } else {
+                Some(command_line(&name, o))
+            }
+        }),
+        cwd,
+        files,
+    };
     let bytes = b.to_bytes();
     std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
-    println!("wrote {} ({} files, {} KiB)", out.display(), b.files.len(), bytes.len() / 1024);
+    println!(
+        "wrote {} ({} files, {} KiB)",
+        out.display(),
+        b.files.len(),
+        bytes.len() / 1024
+    );
     Ok(())
 }
 

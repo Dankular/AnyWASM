@@ -106,6 +106,10 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             s.message = format!("internal thread exit escaped its worker context (code {code})").into_bytes();
             3
         }
+        Stop::GuestUnwind(_) => {
+            s.message = b"internal guest unwind escaped its exception dispatcher".to_vec();
+            3
+        }
     }
 }
 

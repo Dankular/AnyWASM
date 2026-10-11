@@ -255,17 +255,25 @@ exception parameters contain MSVC C++ EH magic `0x19930520`, an exception object
 `std::runtime_error` and `std::exception`.
 
 PE32+ exception tables are now parsed and validated; this image has 2,092 `.pdata` records, including
-2,089 version 1 and 3 version 2 unwind records. `RtlLookupFunctionEntry` and a tested version 1
-`RtlVirtualUnwind` subset are implemented. Version 2 records fail explicitly. The target has not yet
-called these helpers after throwing: frame search, guest language-handler invocation, second-pass
-unwind, and `RtlUnwindEx` remain unimplemented, so `RaiseException` still stops loudly.
+2,089 version 1 and 3 version 2 unwind records. Target-grounded frame search invokes the image's
+language handler, and second-pass unwinding through `RtlUnwindEx` resumes at the C++ catch. A
+synthetic regression checks handler calls, active unwind-stack use, flags, target RIP/RSP, and return
+value. The bounded target replay confirms the catch path.
+
+The next imports are `advapi32!RegOpenKeyExA` probes for
+`Software\Microsoft\Direct3D\Direct3D12` under predefined roots `HKCU` and `HKLM`, with options
+`0` and access `0x20019`. The HLE currently has no registry data store, so both non-empty paths
+return `ERROR_FILE_NOT_FOUND` (`2`). A replay capped at 100,000,000 instructions then remains in a
+repeating stream of `kernel32!HeapAlloc` and `kernel32!TlsGetValue` imports until the step cap. This
+does not establish why the target has not reached shader creation.
+
 The trace does not reach shader creation or `Present`. Although the HLE creates virtual window,
 device, and swap-chain objects, no host window, host graphics device, displayed frame, or game
 acceptance has been verified.
 
 Reproduction used the Release output directory as the VFS root, `--trace-imports`, and
-`--max-steps 30000000`. The import trace was captured in the task environment under
-`%TEMP%\anywasm-glfwdemo-unwind-primitives.log`; it is not a repository artifact.
+`--max-steps 100000000`. The import trace was captured in the task environment under
+`%TEMP%\anywasm-glfwdemo-regopen-100m.log`; it is not a repository artifact.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -276,10 +284,13 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 
 ## Next evidence needed
 
-- Implement and verify frame search, guest language-handler calls, and second-pass unwinding for the
-  selected MSVC C++ throw, adding version 2 support if the walked frames require one of the target's
-  three version 2 records. Then capture shader compilation/resource/presentation calls if the target
-  advances. Continue to distinguish virtual HLE window/device objects from observed host rendering.
+- Trace the repeated `HeapAlloc`/`TlsGetValue` imports with caller addresses and arguments to localize
+  the target's post-registry loop. Then capture shader compilation/resource/presentation calls if
+  the target advances. Continue to distinguish virtual HLE window/device objects from observed host
+  rendering.
+- Extend the virtual registry only from observed target paths and required values. The current
+  `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
+  registry query, create, write, or persisted-value behavior.
 - Trace each tutorial executable on its D3D11 path and record the first runtime blocker, distinguishing
   imports reached on that path from static-only imports. The tutorials still report 12 missing
   USER32 symbols and 4 missing IMM32 symbols each.
@@ -288,6 +299,6 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 - The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has
   96 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
   linking. Conversion, version, path, scheduler, static TLS, target-specific AVX/BMI, secure random,
-  and PE unwind primitive checkpoints have regressions. The current bounded trace stops at an
-  undispatched MSVC C++ `std::runtime_error`; shader compilation, presentation, host rendering, and
-  gameplay acceptance remain unverified.
+  PE unwind primitives, and the selected C++ catch path have regressions. A 100,000,000-step trace
+  reaches the post-catch registry probes and then repeats `HeapAlloc`/`TlsGetValue` until the cap.
+  Shader compilation, presentation, host rendering, and gameplay acceptance remain unverified.

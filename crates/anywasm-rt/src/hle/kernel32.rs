@@ -725,16 +725,25 @@ fn raise_exception(p: &mut Process) -> R {
             .map(|arg| format!("{arg:#x}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let stack = (0..72)
+            .map(|index| {
+                let offset = index * 8;
+                let value = p.rd64(p.cpu.gpr[RSP].wrapping_add(offset)).unwrap_or(0);
+                format!("+{offset:#04x}:{value:#x}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         p.stderr.extend_from_slice(
             format!(
                 "[seh] RaiseException code={code:#010x} flags={flags:#x} arg_count={arg_count} args=[{args}] caller={caller:#x}\n"
             )
             .as_bytes(),
         );
+        p.stderr.extend_from_slice(
+            format!("[seh] stack rsp={:#x} words=[{stack}]\n", p.cpu.gpr[RSP]).as_bytes(),
+        );
     }
-    Err(Stop::Crash(format!(
-        "RaiseException code={code:#x} flags={flags:#x} arg_count={arg_count} caller={caller:#x}"
-    )))
+    crate::exception::dispatch_raised_exception(p, code, flags, &arg_values, caller)
 }
 
 fn terminate_process(p: &mut Process) -> R {
@@ -2278,13 +2287,14 @@ mod lc_map_string_tests {
         assert_eq!(
             raise_exception(&mut p),
             Err(Stop::Crash(
-                "RaiseException code=0xe06d7363 flags=0x1 arg_count=4 caller=0x14001234".into()
+                "MSVC C++ ThrowInfo 0x5678 is outside loaded image 0x9abc".into()
             ))
         );
-        assert_eq!(
-            String::from_utf8(p.take_stderr()).unwrap(),
-            "[seh] RaiseException code=0xe06d7363 flags=0x1 arg_count=4 args=[0x19930520, 0x30300, 0x5678, 0x9abc] caller=0x14001234\n"
-        );
+        let trace = String::from_utf8(p.take_stderr()).unwrap();
+        assert!(trace.starts_with(
+            "[seh] RaiseException code=0xe06d7363 flags=0x1 arg_count=4 args=[0x19930520, 0x30300, 0x5678, 0x9abc] caller=0x14001234\n[seh] stack rsp=0x30800 words=[+0x00:0x14001234, +0x08:0x0"
+        ));
+        assert_eq!(trace.matches("+0x").count(), 72);
     }
 
     #[test]

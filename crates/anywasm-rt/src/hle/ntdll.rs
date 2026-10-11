@@ -63,15 +63,38 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "RtlNtStatusToDosError" => |_| Ok(317),
         "RtlVirtualUnwind" => crate::exception::rtl_virtual_unwind,
-        "RtlUnwind" | "RtlUnwindEx" => |p| {
-            Err(Stop::Unimplemented {
-                dll: "ntdll".into(),
-                name: "RtlUnwind (exception unwinding is not implemented)".into(),
-            }
-            .also(p))
-        },
+        "RtlUnwind" => |p| rtl_unwind_unimplemented(p, "RtlUnwind", 4),
+        "RtlUnwindEx" => crate::exception::rtl_unwind_ex,
         _ => return None,
     })
+}
+
+fn rtl_unwind_unimplemented(p: &mut Process, name: &str, arg_count: usize) -> R {
+    if p.trace_imports {
+        let args = (0..arg_count)
+            .map(|index| format!("{:#x}", p.arg(index)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let caller = p.rd64(p.cpu.gpr[RSP]).unwrap_or(0);
+        let context = (arg_count >= 5).then(|| p.arg(4));
+        let context_state = context
+            .map(|address| {
+                format!(
+                    " context={address:#x} context_rip={:#x} context_rsp={:#x}",
+                    p.rd64(address + 0xf8).unwrap_or(0),
+                    p.rd64(address + 0x98).unwrap_or(0)
+                )
+            })
+            .unwrap_or_default();
+        p.stderr.extend_from_slice(
+            format!("[seh] {name} args=[{args}] caller={caller:#x}{context_state}\n").as_bytes(),
+        );
+    }
+    Err(Stop::Unimplemented {
+        dll: "ntdll".into(),
+        name: format!("{name} (exception unwinding is not implemented)"),
+    }
+    .also(p))
 }
 
 fn rtl_lookup_function_entry(p: &mut Process) -> R {
@@ -244,6 +267,59 @@ mod rtl_pc_to_file_header_tests {
             hle_group: None,
         });
         process
+    }
+
+    #[test]
+    fn rtl_unwind_ex_trace_captures_all_six_arguments_and_guest_caller() {
+        let mut process = process_with_guest_image();
+        process.modules[0].runtime_functions = vec![anywasm_pe::RuntimeFunction {
+            begin_address: 0x100,
+            end_address: 0x120,
+            unwind_info_address: 0,
+        }];
+        const STACK: u64 = 0x60000;
+        assert!(process.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(0x72000, PAGE_SIZE, PROT_RW));
+        assert!(process
+            .mem
+            .map(crate::process::TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process
+            .wr64(crate::process::TEB_ADDR + 0x08, 0x80000)
+            .unwrap();
+        process
+            .wr64(crate::process::TEB_ADDR + 0x10, 0x50000)
+            .unwrap();
+        const CONTEXT: u64 = 0x76000;
+        assert!(process.mem.map(CONTEXT, PAGE_SIZE, PROT_RW));
+        process.cpu.gpr[RSP] = STACK;
+        process.cpu.gpr[RCX] = 0x71000;
+        process.cpu.gpr[RDX] = 0x1400_00110;
+        process.cpu.gpr[R8] = 0x72000;
+        process.cpu.gpr[R9] = 0x73000;
+        process.wr64(STACK, 0x1400_5678).unwrap();
+        process.wr64(STACK + 0x28, CONTEXT).unwrap();
+        process.wr64(STACK + 0x30, 0).unwrap();
+        process.wr64(CONTEXT + 0x98, 0x71000).unwrap();
+        process.wr64(CONTEXT + 0xf8, 0x1400_00110).unwrap();
+        process.wr32(0x72000 + 4, 1).unwrap();
+        process.trace_imports = true;
+        let rtl_unwind = crate::hle::lookup("ntdll", "RtlUnwindEx").unwrap();
+
+        assert_eq!(
+            rtl_unwind(&mut process),
+            Err(Stop::GuestUnwind(crate::process::GuestUnwind {
+                target_frame: 0x71000,
+                target_ip: 0x1400_00110,
+                call_rsp: STACK,
+                exception_record: 0x72000,
+                return_value: 0x73000,
+                context_record: CONTEXT,
+                history_table: 0,
+            }))
+        );
+        assert!(String::from_utf8(process.take_stderr())
+            .unwrap()
+            .contains("[seh] RtlUnwindEx args=[0x71000, 0x140000110, 0x72000, 0x73000, 0x76000, 0x0] caller=0x14005678 context=0x76000 context_rip=0x140000110 context_rsp=0x71000"));
     }
 
     #[test]

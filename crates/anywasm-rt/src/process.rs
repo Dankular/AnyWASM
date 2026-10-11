@@ -24,6 +24,17 @@ pub const LDR_ADDR: u64 = 0x7ffd_0003_0000;
 pub const STACK_TOP: u64 = 0x7ff0_0010_0000;
 pub const HLE_MODULE_BASE: u64 = 0x7ffc_0000_0000;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuestUnwind {
+    pub target_frame: u64,
+    pub target_ip: u64,
+    pub call_rsp: u64,
+    pub exception_record: u64,
+    pub return_value: u64,
+    pub context_record: u64,
+    pub history_table: u64,
+}
+
 /// Why `Process::run` returned.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
@@ -41,6 +52,8 @@ pub enum Stop {
     Idle,
     /// Internal control transfer used to return from an explicitly created guest thread.
     ThreadExit(u32),
+    /// Internal marker consumed by the active guest exception dispatcher.
+    GuestUnwind(GuestUnwind),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1559,8 +1572,18 @@ impl Process {
 
     fn describe_exit(&self, e: Exit) -> Stop {
         let c = &self.cpu;
+        let stack = if self.trace_imports {
+            let words = (0..8)
+                .map(|index| self.rd64(c.gpr[RSP].saturating_add(index * 8)).unwrap_or(0))
+                .map(|word| format!("{word:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" stack=[{words}]")
+        } else {
+            String::new()
+        };
         Stop::Crash(format!(
-            "{:?} at rip={:#x} (module {}) rax={:#x} rcx={:#x} rdx={:#x} rsp={:#x}",
+            "{:?} at rip={:#x} (module {}) rax={:#x} rcx={:#x} rdx={:#x} rsp={:#x}{stack}",
             e,
             c.rip,
             self.module_for(c.rip).unwrap_or("?"),
@@ -1600,6 +1623,17 @@ impl Process {
         let Some(f) = func else {
             self.unimplemented_log
                 .push((group.to_string(), name.clone()));
+            if self.trace_imports {
+                let args = (0..8)
+                    .map(|index| format!("{:#x}", self.arg(index)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let caller = self.rd64(self.cpu.gpr[RSP]).unwrap_or(0);
+                self.stderr.extend_from_slice(
+                    format!("[unimplemented] {group}!{name} args=[{args}] caller={caller:#x}\n")
+                        .as_bytes(),
+                );
+            }
             return Err(Stop::Unimplemented {
                 dll: group.to_string(),
                 name,
@@ -1680,6 +1714,11 @@ impl Process {
                     return Stop::Crash(format!(
                         "ExitThread used by non-thread context with code {code}"
                     ))
+                }
+                Err(Stop::GuestUnwind(_)) => {
+                    return Stop::Crash(
+                        "RtlUnwindEx transfer escaped its active guest exception dispatcher".into(),
+                    )
                 }
                 Err(stop) => return stop,
             }

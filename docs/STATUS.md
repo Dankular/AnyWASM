@@ -126,14 +126,16 @@
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
   down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
-  queries. The bounded AnyWASM run now resumes past condition-variable waits, initializes target
-  static TLS, reaches the target's VEXTRACTF128 callback, creates virtual window/device/swap-chain
-  objects, and reaches `RaiseException(0xe06d7363)` for an MSVC C++ `std::runtime_error` after the
-  `SystemFunction036` and `RtlPcToFileHeader` fixes. Native and WASM fixtures cover secure
+  queries. The bounded AnyWASM run resumes past condition-variable waits, initializes target static
+  TLS, reaches the target's VEXTRACTF128 callback, creates virtual window/device/swap-chain objects,
+  and completes the selected MSVC C++ `std::runtime_error` catch. It then probes
+  `Software\Microsoft\Direct3D\Direct3D12` under `HKCU` and `HKLM`; `RegOpenKeyExA` reports the
+  paths missing because AnyWASM has no registry data store. A 100,000,000-step replay remains in
+  repeated `HeapAlloc`/`TlsGetValue` imports until the cap. Native and WASM fixtures cover secure
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
-  `RtlVirtualUnwind` subset are in place. Guest exception search/dispatch remains open.
-  The trace does not reach shader creation or `Present`; no host window, renderer, or real-game
-  acceptance pass is claimed. See [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
+  `RtlVirtualUnwind` subset are in place. General SEH remains open. The trace does not reach shader
+  creation or `Present`; no host window, renderer, or real-game acceptance pass is claimed. See
+  [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
   pixel-verified.

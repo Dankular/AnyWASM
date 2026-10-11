@@ -126,31 +126,37 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       sections, SRW locks, condition waits/wakes/timeouts, `Sleep`, and resume of blocked threads.
       Static TLS images loaded after guest-thread creation fail explicitly. Nested synchronous
       callback scheduling and alertable waits remain unsupported; this is not parallel execution.
-      The selected target passes its condition-wait path. A previous run reached `ExitProcess(3)`,
-      but API fixes moved the current bounded run to an undispatched C++ exception. No host renderer
-      or frame has been observed.
+      The selected target passes its condition-wait path and its observed MSVC C++ exception catch.
+      Afterward it probes `HKCU` and `HKLM` at `Software\Microsoft\Direct3D\Direct3D12`; a
+      100,000,000-step replay then reaches the step cap while imports continue to alternate between
+      `HeapAlloc` and `TlsGetValue`. No host renderer or frame has been observed.
 - [~] **SEH / C++ exceptions**: PE32+ `.pdata` entries are parsed and validated;
       `RtlLookupFunctionEntry` and a tested `RtlVirtualUnwind` subset support leaf frames, common
-      version 1 unwind opcodes, handler metadata, and chained records. `RaiseException` still stops
-      on the selected target's MSVC C++ throw; frame search/second-pass unwind, `RtlUnwindEx`,
-      version 2 unwind records, language handlers, vectored handlers, and guest faults → exceptions
-      remain open.
+      version 1 unwind opcodes, handler metadata, and chained records. Target-grounded frame search,
+      language-handler invocation, second-pass unwind, `RtlUnwindEx`, and the selected MSVC C++ catch
+      are verified with a synthetic regression and bounded target replay. Version 2 unwind records,
+      general SEH behavior, vectored handlers, and guest faults → exceptions remain open.
 - [~] **More of kernel32/ntdll/user32/shlwapi**: target-grounded work adds
       `VerifyVersionInfoA/W`, `PathFileExistsA/W`, and cooperative wait support alongside the
       earlier `InitializeSListHead`, `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
       `EnumDisplaySettingsW`, plus `advapi32!SystemFunction036` and `RtlPcToFileHeader`. The
       selected target passes version checks, creates virtual window and D3D objects, resolves
-      `RenderStates.json`, and continues past condition-variable waits. Its current bounded run
-      reaches `RaiseException(0xe06d7363)` for an MSVC C++ `std::runtime_error`; exception dispatch,
-      unreached imports, and host window/device behavior remain open.
+      `RenderStates.json`, continues past condition-variable waits, and catches its MSVC C++
+      `std::runtime_error`. The target then probes Direct3D12 registry paths and reaches the
+      100,000,000-step cap. Shader creation, `Present`, unreached imports, and host window/device
+      behavior remain open.
 - [~] **GDI / gdi32**: virtual display DC creation and basic display capabilities are available;
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
       `WM_LBUTTONDOWN` messages reach the guest; add XInput (Gamepad API), DirectInput, raw input,
       cursor capture/pointer lock.
-- [ ] **Registry, COM beyond D3D/DXGI, shell/known-folders, networking (winsock → WebSocket/
-      fetch relay)**, timers/QueryPerformanceCounter accuracy, file dialogs, persistent VFS
+- [~] **Registry**: `advapi32!RegOpenKeyExA` recognizes predefined roots, returns the root for an
+      empty subkey, and reports missing subkeys while no registry data store exists. Target probes
+      `HKCU` and `HKLM` at `Software\Microsoft\Direct3D\Direct3D12`; query/create/write APIs and
+      populated registry data remain open. Other outstanding areas include COM beyond D3D/DXGI,
+      shell/known-folders, networking (winsock → WebSocket/fetch relay), timers/QueryPerformanceCounter
+      accuracy, file dialogs, persistent VFS
       (IndexedDB/OPFS) — verify what is already implemented before starting each.
 - [ ] **32-bit PE (WoW64-style)**: needs a 32-bit decoder/execution mode, 32-bit TEB/PEB and
       32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
@@ -233,10 +239,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       `MultiByteToWideChar` and `LCMapStringEx` size-query faults are fixed and covered. Cooperative
       scheduling now resumes the selected target beyond its condition-variable waits. After
       target-grounded static TLS and VEXTRACTF128 support, its bounded run first reached guest
-      `ExitProcess(3)`. The latest API fixes move it to `RaiseException(0xe06d7363)` for an MSVC C++
-      `std::runtime_error`; the exception is not dispatched yet. No real host window, renderer, or
-      frame has been verified, so the end-to-end acceptance gate remains open; see `docs/TARGETS.md`
-      for the exact trace and next steps.
+      `ExitProcess(3)`. Target-grounded MSVC C++ exception search and second-pass unwind now reach the
+      catch. The target then probes `Software\Microsoft\Direct3D\Direct3D12` under `HKCU` and
+      `HKLM`; a 100,000,000-step replay remains in repeated `HeapAlloc`/`TlsGetValue` imports. No real
+      host window, renderer, or frame has been verified, so the end-to-end acceptance gate remains
+      open; see `docs/TARGETS.md` for the exact trace and next steps.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
