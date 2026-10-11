@@ -76,12 +76,14 @@
   and same-bundle comparisons against both the default cached-only path and `{ jit: false }` for
   compute status, exit code, stdout/stderr, and retired count) pass. The smoke also confirms the
   default gate skips the fixture's short prefixes and forces one host module-compile failure with
-  safe interpreter fallback. The
-  headless Chrome worker suite passes. Final register/memory comparisons remain open. This is a
+  safe interpreter fallback. The headless Chrome suite also runs `compute.exe` through the opt-in
+  emitter in the page realm, confirms emitted register-register MOV execution without fallback, and
+  compares output and retired count with cached-only execution. The standard worker, input, and
+  WebGPU checks pass with the default gate. Final register/memory comparisons remain open. This is a
   mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
   memory MOVs, NOP, LEA, arithmetic,
-  SIMD, or control flow are not emitted. Full JIT/interpreter state differential, cache-pressure
-  and CSP checks, browser
+  SIMD, or control flow are not emitted. Full JIT/interpreter state differential, module-cache
+  pressure, CSP checks, forced-emitter worker execution, browser
   engine matrix, and real-game performance remain open.
 - No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
   no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.

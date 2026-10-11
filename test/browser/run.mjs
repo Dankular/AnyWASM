@@ -30,7 +30,7 @@ function decodePng(buf) {
 
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -38,8 +38,10 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-browser-'));
 const unimplBundle = join(tempDir, 'unimpl.awb');
+const computeBundle = join(tempDir, 'compute.awb');
 const cliPath = join(repoRoot, 'target', 'debug', `anywasm${process.platform === 'win32' ? '.exe' : ''}`);
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'unimpl.exe'), '-o', unimplBundle], { cwd: repoRoot, stdio: 'ignore' });
+execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'compute.exe'), '-o', computeBundle], { cwd: repoRoot, stdio: 'ignore' });
 
 const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 800));
@@ -89,6 +91,38 @@ try {
   check('hello.exe output shown in the page', text.includes('Hello from a Windows PE running inside AnyWASM!'), text);
   check('status shows clean exit', /exited \(exit code 0\)/.test(stat), stat);
   check('load progress clears after the guest reports its status', loadingCount === 1 && await loading.isHidden());
+
+  const computeBytes = Array.from(readFileSync(computeBundle));
+  const jitBrowser = await page.evaluate(async (bundle) => {
+    const { AnyWasm, Status } = await import('/anywasm.js');
+    const wasm = await (await fetch('/anywasm_wasm.wasm')).arrayBuffer();
+    const execute = async (options) => {
+      const runtime = await AnyWasm.create(wasm, options);
+      runtime.load(new Uint8Array(bundle));
+      let out = '', err = '';
+      const result = runtime.runToEnd({
+        onOutput(stream, text) { if (stream === 'stdout') out += text; else err += text; },
+      });
+      return { ...result, instr: runtime.instructions(), out, err, jitStats: runtime.jitStats };
+    };
+    return {
+      emitted: await execute({ jitMinPrefix: 1 }),
+      cached: await execute({}),
+      exited: Status.EXITED,
+    };
+  }, computeBytes);
+  check('Chrome executes opt-in emitted blocks including register-register MOVs',
+    jitBrowser.emitted.status === jitBrowser.exited && jitBrowser.emitted.exitCode === 0 &&
+      jitBrowser.emitted.jitStats.executions > 0 && jitBrowser.emitted.jitStats.registerRegisterHits > 0 &&
+      jitBrowser.emitted.jitStats.fallbacks === 0 && jitBrowser.emitted.out.includes('primes<20000=2262') &&
+      jitBrowser.emitted.out.includes('fp=609') && jitBrowser.emitted.out.includes('gpa=ok'),
+    JSON.stringify(jitBrowser.emitted));
+  check('Chrome cached-only run matches emitted output and retired count',
+    jitBrowser.cached.status === jitBrowser.exited && jitBrowser.cached.exitCode === jitBrowser.emitted.exitCode &&
+      jitBrowser.cached.out === jitBrowser.emitted.out && jitBrowser.cached.err === jitBrowser.emitted.err &&
+      jitBrowser.cached.instr === jitBrowser.emitted.instr && jitBrowser.cached.jitStats.executions === 0 &&
+      jitBrowser.cached.jitStats.compilations === 0 && jitBrowser.cached.jitStats.fallbacks === 0,
+    JSON.stringify({ emitted: jitBrowser.emitted, cached: jitBrowser.cached }));
 
   await page.goto('http://localhost:8099/index.html?run=crt_test');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
