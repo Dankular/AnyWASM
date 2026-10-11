@@ -47,22 +47,23 @@ Run `thread_sync_test.exe` through the existing WASM smoke helper and assert tha
 
 - [x] **Step 3: Add the C ABI export returning `Process.retired_instructions`, or zero before process load, and the `AnyWasm.retiredInstructions()` wrapper method.**
 - [x] **Step 4: Rebuild the release WASM and run `node test/wasm_smoke.mjs`; the threaded assertion must pass and existing output/count checks must remain unchanged.**
-- [ ] **Step 5: Commit the passing regression and implementation.**
+- [x] **Step 5: Commit the passing regression and implementation.**
 
 ### Task 2: Add a reusable frame-cost benchmark
 
 **Files:**
 - Create: `test/target_frame_bench.mjs`
-- Test: `test/wasm_smoke.mjs` and `fixtures/d3d11_triangle.exe`
+- Create: `test/target_frame_bench_test.mjs`
+- Test: `fixtures/d3d11_triangle.exe`
 
 **Interfaces:**
 - Consumes: positional `.awb` path; optional frame count and maximum guest-instruction budget; `ANYWASM_JIT_MIN_PREFIX` (default `65`).
 - Produces: JSON containing each frame's cumulative retired-instruction delta and elapsed milliseconds, terminal status if reached early, total guest count, and JIT statistics.
 
-- [ ] **Step 1: Implement argument validation and release-WASM / `.awb` loading.**
-- [ ] **Step 2: Run in bounded slices until the requested number of `Status.FRAME` stops, a terminal status, or the instruction cap. Drain GPU bytes after each frame.**
-- [ ] **Step 3: Pack `fixtures/d3d11_triangle.exe`, request four frames, and verify exactly three frame records followed by clean process exit.**
-- [ ] **Step 4: Run `node --check test/target_frame_bench.mjs`.**
+- [x] **Step 1: Implement argument validation and release-WASM / `.awb` loading.**
+- [x] **Step 2: Run in bounded slices until the requested number of `Status.FRAME` stops, a terminal status, or the instruction cap. Drain GPU bytes after each frame.**
+- [x] **Step 3: Pack `fixtures/d3d11_triangle.exe`, request four frames, and verify exactly three frame records followed by clean process exit; verify the instruction cap stops before the first frame.**
+- [x] **Step 4: Run `node --check test/target_frame_bench.mjs` and `node --check test/target_frame_bench_test.mjs`.**
 
 ### Task 3: Record the representative target comparison
 
@@ -75,8 +76,8 @@ Run `thread_sync_test.exe` through the existing WASM smoke helper and assert tha
 - Consumes: target benchmark JSON, target build provenance in `docs/TARGETS.md`, and the current task queue in GitHub issues #1 and #5.
 - Produces: reproducible target frame counts, separate cold-start and steady-frame data, cached-only versus forced-emitter comparison, and explicit guest-only limitations.
 
-- [ ] **Step 1: Run the benchmark against the D3D11-only `/MT` GLFW Demo bundle with the default prefix and with prefix `1`, using matching frame and instruction limits.**
-- [ ] **Step 2: Record command, Node/runtime version, frame counts, elapsed time, module compilations/executions, and whether any run ended before the requested frames.**
-- [ ] **Step 3: Update the JIT priority notes and queue issue #1/#5 based on the measured result; do not claim host rendering or game acceptance.**
-- [ ] **Step 4: Run `git diff --check`, `cargo test --workspace`, `cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release`, `node test/wasm_smoke.mjs`, and the fixture frame benchmark.**
+- [x] **Step 1: Run the benchmark against the D3D11-only `/MT` GLFW Demo bundle with the default prefix and with prefix `1`, using matching frame and instruction limits.**
+- [x] **Step 2: Record command, Node/runtime version, frame counts, elapsed time, module compilations/executions, and whether any run ended before the requested frames.**
+- [x] **Step 3: Update the JIT priority notes and queue issue #1/#5 based on the measured result; do not claim host rendering or game acceptance.**
+- [x] **Step 4: Run `git diff --check`, `cargo test --workspace`, `cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release`, `node test/wasm_smoke.mjs`, and the fixture frame benchmark.**
 

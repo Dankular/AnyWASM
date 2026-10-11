@@ -305,6 +305,44 @@ That validates the narrow typed-UAV executor path; it does not run the selected 
 stream or verify its SDF shader, host-visible GLFW Demo pixels, or gameplay. The 96 static missing
 imports, registry data store, and tutorial D3D11 paths also remain open.
 
+### Guest instruction cost per present
+
+The new `test/target_frame_bench.mjs` drives the target until guest `Present` frame stops, reads the
+process-wide retired-instruction counter, and drains the recorded GPU stream at each stop. The
+reusable fixture regression requests four stops from `d3d11_triangle.exe`; it records the fixture's
+three frames and clean exit. A second fixture run caps execution at one guest instruction and
+confirms the benchmark stops at the cap without recording a frame.
+
+The representative run used Node `v24.16.0` on Windows x64 and the release WASM built at
+AnyWASM commit `1858e43`. The target bundle is the eight-file output of the D3D11-only `/MT` Release
+build documented above. Reproduction:
+
+```powershell
+$release = 'D:\Dev Proj\WASM\target-eval\DiligentBuild-GLFWDemo-staticcrt\DiligentSamples\Samples\GLFWDemo\Release'
+$bundle = "$env:TEMP\anywasm-glfwdemo-frame-measure.awb"
+.\target\debug\anywasm.exe pack "$release\GLFWDemo.exe" -o $bundle --dir $release
+node test/target_frame_bench.mjs $bundle --frames 8 --max-instructions 1000000000 --slice-instructions 10000000 --jit-min-prefix 65
+node test/target_frame_bench.mjs $bundle --frames 8 --max-instructions 1000000000 --slice-instructions 10000000 --jit-min-prefix 1
+```
+
+The packed bundle contained 8 files (7,963,698 bytes); its SHA-256 matched a later independent
+repack. Both runs reached all eight requested guest `Present` stops, did not hit the instruction cap,
+and did not reach a terminal state. Frame 1 includes guest process initialization; frames 2–8 are
+steady presents. The values below are guest instructions retired across all guest threads and Node
+wall time to each stop:
+
+| MOV prefix | First frame instructions / time | Frames 2–8 instructions each | Frames 2–8 time range / mean | Total instructions / elapsed | Emitter stats |
+|---:|---:|---:|---:|---:|---|
+| 65 (default, cached-only) | 576,571,219 / 42,284.38 ms | 3,199 | 0.197–0.466 ms / 0.246 ms | 576,593,612 / 42,286.11 ms | 0 compilations, 0 executions, 0 fallbacks |
+| 1 (forced emission) | 576,572,636 / 69,142.77 ms | 3,199 | 0.232–0.562 ms / 0.287 ms | 576,595,029 / 69,144.79 ms | 687,352 compilations, 13,087,679 executions, 0 fallbacks; 11,494,232 register-register hits |
+
+Forced emission made the cold first-frame pass 63.5% slower in this run. Emitted blocks covered
+only the existing leading-MOV prototype; every fallback count was zero, but the result remains
+slower and does not justify enabling it. The benchmark runs the emulator guest and HLE in Node;
+draining the stream does not execute D3D11 commands through browser WebGPU. It therefore measures
+neither host-rendered frame time nor target FPS, shader pixels, gameplay, or a product performance
+target. The older 10–50x performance estimate remains unverified.
+
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
 [GLFW Demo CMake](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo/CMakeLists.txt),
