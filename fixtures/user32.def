@@ -2,9 +2,12 @@ LIBRARY user32.dll
 EXPORTS
 MessageBoxA
 RegisterClassExA
+RegisterClassExW
 CreateWindowExA
+CreateWindowExW
 ShowWindow
 UpdateWindow
+IsWindowUnicode
 GetCapture
 SetCapture
 ReleaseCapture

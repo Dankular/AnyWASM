@@ -19,6 +19,7 @@ SetLastError
 LoadLibraryA
 GetProcAddress
 GetModuleHandleA
+GetModuleHandleW
 GetCurrentThreadId
 GetCurrentProcessId
 Sleep

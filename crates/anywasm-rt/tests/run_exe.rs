@@ -81,6 +81,13 @@ fn get_capture_returns_the_current_window_handle() {
 }
 
 #[test]
+fn is_window_unicode_reports_the_window_class_character_mode() {
+    let (stop, out, _, _) = run("iswindowunicode_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout so far: {out:?}");
+    assert_eq!(out, "");
+}
+
+#[test]
 fn reloc_exe_follows_relocated_pointer_tables() {
     let (stop, out, _, _) = run("reloc.exe");
     assert_eq!(stop, Stop::Exit(0));

@@ -42,6 +42,7 @@ const HWND_BASE: u64 = 0x0001_0010;
 pub struct Class {
     pub wndproc: u64,
     pub name: String,
+    pub unicode: bool,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,7 @@ pub struct Window {
     pub style: u32,
     pub user_data: u64,
     pub parent: u64,
+    pub unicode: bool,
     pub needs_paint: bool,
     pub gpu_id: u32,
 }
@@ -151,6 +153,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "IsWindow" => |p| Ok(p.extra.win.windows.contains_key(&p.arg(0)) as u64),
         "IsWindowVisible" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.visible as u64).unwrap_or(0)),
+        "IsWindowUnicode" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.unicode as u64).unwrap_or(0)),
         "IsIconic" | "IsZoomed" => |_| Ok(0),
         "GetMessageA" | "GetMessageW" => get_message,
         "PeekMessageA" | "PeekMessageW" => peek_message,
@@ -375,7 +378,7 @@ fn register_class(p: &mut Process, wide: bool, ex: bool) -> R {
     p.extra.win.next_atom += 1;
     let atom = 0xc000 + p.extra.win.next_atom;
     p.extra.win.atoms.insert(atom, name.clone());
-    p.extra.win.classes.insert(name.clone(), Class { wndproc, name });
+    p.extra.win.classes.insert(name.clone(), Class { wndproc, name, unicode: wide });
     Ok(atom as u64)
 }
 
@@ -395,7 +398,7 @@ fn create_window(p: &mut Process, wide: bool) -> R {
     p.extra.win.next = p.extra.win.next.max(HWND_BASE) + 0x10;
     let hwnd = p.extra.win.next;
     let gpu_id = p.extra.gpu.new_id();
-    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, visible: false, style, user_data: 0, parent, needs_paint: false, gpu_id });
+    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, visible: false, style, user_data: 0, parent, unicode: class.unicode, needs_paint: false, gpu_id });
     if p.extra.win.main_window == 0 && parent == 0 {
         p.extra.win.main_window = hwnd;
         p.extra.win.focus = hwnd;
@@ -431,7 +434,7 @@ fn create_window(p: &mut Process, wide: bool) -> R {
 
 /// System classes created by name (BUTTON, EDIT, STATIC...) behave as inert windows for now.
 fn builtin_class(name: &str) -> Option<Class> {
-    matches!(name, "button" | "edit" | "static" | "combobox" | "listbox" | "scrollbar" | "#32770").then(|| Class { wndproc: 0, name: name.to_string() })
+    matches!(name, "button" | "edit" | "static" | "combobox" | "listbox" | "scrollbar" | "#32770").then(|| Class { wndproc: 0, name: name.to_string(), unicode: true })
 }
 
 fn destroy_window(p: &mut Process, h: u64) -> Result<(), Stop> {

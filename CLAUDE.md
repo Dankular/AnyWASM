@@ -114,9 +114,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [ ] **SEH / C++ exceptions**: `.pdata` unwind tables, `RtlUnwindEx`/`RtlLookupFunctionEntry`,
       `__C_specific_handler`, `RaiseException`, vectored handlers; guest faults → exceptions.
 - [~] **More of kernel32/ntdll/user32**: target reports confirm `InitializeSListHead` is imported
-      and implemented in both tutorials; `USER32!GetCapture` is now implemented and guest-tested.
-      `SleepConditionVariableSRW` remains unresolved in all three reports and unimplemented until
-      the runtime has a guest-thread scheduler and wait model.
+      and implemented in both tutorials; `GetCapture` and `IsWindowUnicode` now cover two reported
+      USER32 imports. The tutorials still report 14 missing USER32 symbols each. The three targets
+      still import unresolved `SleepConditionVariableSRW`, which needs a guest-thread scheduler and
+      wait model before implementation.
 - [ ] **GDI / gdi32**, common controls, message boxes, clipboard (as needed by real programs).
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
