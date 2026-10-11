@@ -4,6 +4,7 @@
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
 const MAX_JIT_MODULES = 256;
+const DEFAULT_JIT_MIN_PREFIX = 65; // decoded blocks are capped at 64 instructions
 
 function bytesEqual(a, b) {
   if (a.length !== b.length) return false;
@@ -13,18 +14,23 @@ function bytesEqual(a, b) {
 
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 }) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
     /** Counts calls routed through the dynamic WebAssembly trampoline. */
     this.jitStats = jitStats;
+    this.jitMinPrefix = jitMinPrefix;
   }
 
   /**
    * Instantiate from raw WASM bytes (Uint8Array/ArrayBuffer) or a Response/URL string.
-   * Set `{ jit: false }` to run emitted candidates through the interpreter fallback.
+   * Set `{ jit: false }` to run emitted candidates through the interpreter fallback. Use
+   * `{ jitMinPrefix: 1 }` to opt in to dynamic emission; the default (65) disables it.
    */
-  static async create(source, { jit = true } = {}) {
+  static async create(source, { jit = true, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX } = {}) {
+    if (!Number.isInteger(jitMinPrefix) || jitMinPrefix < 1 || jitMinPrefix > 0xffff_ffff) {
+      throw new RangeError('jitMinPrefix must be an integer from 1 to 4294967295');
+    }
     let bytes = source;
     if (typeof source === 'string') bytes = await (await fetch(source)).arrayBuffer();
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
@@ -72,7 +78,7 @@ export class AnyWasm {
       },
     };
     ({ instance } = await WebAssembly.instantiate(bytes, imports));
-    return new AnyWasm(instance, jitStats);
+    return new AnyWasm(instance, jitStats, jitMinPrefix);
   }
 
   /** Load an .awb bundle. Throws with the loader's message on failure. */
@@ -83,6 +89,7 @@ export class AnyWasm {
     const rc = this.x.aw_load(ptr, n);
     this.x.aw_free(ptr, n);
     if (rc !== 0) throw new Error(this.message() || 'failed to load bundle');
+    this.x.aw_jit_set_min_prefix?.(this.jitMinPrefix);
   }
 
   /** Execute up to `steps` guest instructions. Returns a Status value. */

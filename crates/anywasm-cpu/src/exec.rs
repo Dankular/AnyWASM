@@ -1051,9 +1051,13 @@ pub struct BlockCache {
     blocks: HashMap<u64, CachedBlock>,
     #[cfg(target_arch = "wasm32")]
     next_jit_id: u32,
+    #[cfg(target_arch = "wasm32")]
+    min_jit_prefix: usize,
 }
 
 const MAX_CACHED_BLOCKS: usize = 1024;
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_JIT_MIN_PREFIX: usize = MAX_BLOCK_INSTRUCTIONS + 1;
 
 struct CachedBlock {
     decoded: DecodedBlock,
@@ -1098,7 +1102,16 @@ impl BlockCache {
             blocks: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             next_jit_id: 1,
+            #[cfg(target_arch = "wasm32")]
+            min_jit_prefix: DEFAULT_JIT_MIN_PREFIX,
         }
+    }
+
+    /// Set the minimum emitted MOV-prefix length. Values above the block limit disable emission.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_jit_min_prefix(&mut self, min_jit_prefix: usize) {
+        self.min_jit_prefix = min_jit_prefix.max(1);
+        self.blocks.clear();
     }
 
     /// Return a cached block or decode a straight-line block beginning at `start`.
@@ -1178,11 +1191,16 @@ impl BlockCache {
                 .map(translate_instruction)
                 .collect();
             #[cfg(target_arch = "wasm32")]
-            let emitted = crate::jit::emit_mov_block(
-                self.next_jit_id,
-                decoded.start,
-                &decoded.instructions,
-            );
+            let emitted = if self.min_jit_prefix > decoded.instructions.len() {
+                None
+            } else {
+                crate::jit::emit_mov_block(
+                    self.next_jit_id,
+                    decoded.start,
+                    &decoded.instructions,
+                    self.min_jit_prefix,
+                )
+            };
             #[cfg(target_arch = "wasm32")]
             if emitted.is_some() {
                 self.next_jit_id = self.next_jit_id.wrapping_add(1).max(1);

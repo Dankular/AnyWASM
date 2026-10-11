@@ -60,10 +60,12 @@ indexed draws) pixel-verified in headless Chromium; CI green through `bd6f0bd` (
 Status key: **[ ]** not started · **[~]** partial. Ordered by value toward "package a real game".
 
 ## 1. Block-translating JIT to WASM  (highest priority; performance)
-Why: the cached-block executor now measures 32.2 M guest instr/s on `compute.exe` and 26.1–38.5 M
-on the call-heavy, memory-heavy and SSE-float fixtures (`test/bench.mjs`, release WASM under Node).
-I have **not** measured what a real game needs; the 10–50x figure in STATUS.md is an estimate.
-Measure first (e.g. instructions per frame of a representative program) before fixing a target.
+Why: the cached-block executor's earlier baseline measured 32.2 M guest instr/s on `compute.exe` and
+26.1–38.5 M on the call-heavy, memory-heavy and SSE-float fixtures (`test/bench.mjs`, release WASM
+under Node). A later six-round gate sweep did not show a reliable improvement from dynamic emission,
+so it is disabled by default. I have **not** measured what a real game needs; the 10–50x figure in
+STATUS.md is an estimate. Measure first (e.g. instructions per frame of a representative program)
+before fixing a target.
 
 Design (partial implementation; the verified dynamic-emission scope is a leading run of 32-bit or
 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
@@ -71,10 +73,13 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [x] **Block discovery**: decode and cache basic blocks keyed by guest RIP. `code_epoch` invalidates
       cached blocks on executable-memory writes and protection changes.
-- [x] **WASM emission (MVP)**: Rust emits a separate module for the supported MOV prefix; JS compiles
+- [~] **WASM emission (MVP prototype, opt-in)**: Rust can emit a separate module for the supported
+      MOV prefix; JS compiles
       and instantiates it through the `anywasm.run_emitted_block` import. Generated modules import
       the runtime's exported memory. The JS side caches up to 256 modules and checks bytes when a
-      process-local module ID is reused. Module batching and its performance trade-offs remain open.
+      process-local module ID is reused. `{ jitMinPrefix: 1 }` explicitly opts in; the default
+      threshold is 65, above the 64-instruction block limit, so short blocks avoid host compile and
+      execute overhead. No throughput win is established; module batching and performance remain open.
 - [~] **State model (MVP)**: generated code receives a 160-byte `repr(C)` snapshot containing GPRs,
       RIP, RFLAGS, retired count, and TSC. It writes GPRs, RIP, count, and TSC; RFLAGS pass through
       unchanged. Rust commits the snapshot only when the returned retired count matches the budget
@@ -89,11 +94,12 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       32-bit register moves zero-extend; self-moves still advance RIP/count/TSC. Compile/trap/
       invalid-count failures retry from the untouched live CPU snapshot.
 - [~] **Correctness checks**: Rust emitter tests cover prefix limits, 32-bit zero-extension,
-      64-bit copies, and self-move retirement. The WASM smoke confirms generated
+      64-bit copies, self-move retirement, and that prefixes below the configured gate are skipped.
+      The WASM smoke explicitly forces threshold 1 and confirms generated
       register-register MOV execution, checks `compute.exe` output and `run(1)` retirement limits,
-      and compares the same bundle with `{ jit: false }` for status, exit code, stdout/stderr, and
-      retired count. A forced host compile failure also falls back safely. Final registers/memory and
-      the full JIT/interpreter/host differential remain unverified.
+      and compares the same bundle with the default cached-only path and `{ jit: false }` for status,
+      exit code, stdout/stderr, and retired count. A forced host compile failure also falls back
+      safely. Final registers/memory and the full JIT/interpreter/host differential remain unverified.
 - [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
       MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
 - [~] **Browser check**: the rebuilt runtime passes the headless Chrome worker, input, and WebGPU

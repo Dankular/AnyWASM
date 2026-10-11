@@ -98,6 +98,15 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
     }
 }
 
+/// Set the minimum number of leading MOV instructions required for dynamic block emission.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn aw_jit_set_min_prefix(min_prefix: u32) {
+    if let Some(s) = state() {
+        s.p.block_cache.set_jit_min_prefix(min_prefix as usize);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn aw_exit_code() -> i32 {
     state().map(|s| s.exit_code).unwrap_or(-1)

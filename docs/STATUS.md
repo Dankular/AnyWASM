@@ -36,15 +36,26 @@
   operations; other instructions use the interpreter. These figures predate dynamic WASM emission
   and are not performance measurements of the emitted path. The benchmark output is retained per
   commit by WASM CI.
-- Dynamic-emitter sample after adding register-register MOV (`node test/bench.mjs`, Node 24.16.0/
-  Windows x64, one run with three rounds): medians were 14.4 M instr/s compute, 14.5 call-heavy,
-  12.9 memory-heavy, and 32.1 SSE-float. Counters showed 343,561 emitted calls across 22 modules
-  for compute (283,554 calls retired a register-register MOV), 500,000 calls/one module for
-  call-heavy, 262,016 calls/one module for memory-heavy (all retired a register-register MOV), and
-  no emitted calls for SSE-float. The preceding immediate-only sample under the same three-round
-  harness measured 22.9/15.0/25.5/38.5 M instr/s. These are single-run samples, not a controlled
-  A/B; they show no speedup claim is supported. Host trampoline cost and larger emitted blocks may
-  contribute and need isolated measurement or batching.
+- Dynamic-emitter gate sweep (`node test/bench.mjs`, Node 24.16.0/Windows x64, six rounds per
+  workload) compared minimum supported MOV-prefix lengths 1, 2, 3, 4, and 65 (cached-only). Median
+  M instr/s by workload were:
+
+  | Minimum prefix | Compute | Call-heavy | Memory-heavy | SSE-float | Emitted calls |
+  | ---: | ---: | ---: | ---: | ---: | --- |
+  | 1 | 14.4 | 15.35 | 13.25 | 32.5 | 343,561 / 500,000 / 262,016 / 0 |
+  | 2 | 29.8 | 25.05 | 26.55 | 31.65 | 2 / 0 / 0 / 0 |
+  | 3 | 29.6 | 25.1 | 26.85 | 31.35 | 2 / 0 / 0 / 0 |
+  | 4 | 29.95 | 25.25 | 27.5 | 37.9 | 0 / 0 / 0 / 0 |
+  | 65 (default) | 30.0 | 25.55 | 26.55 | 38.8 | 0 / 0 / 0 / 0 |
+
+  Prefix 1 reproduces the large regressions seen in the initial emitter sample. Prefixes 2 and 3
+  emit only two compute calls in these fixtures and do not consistently outperform cached-only;
+  prefix 4 emits nothing and still scans candidate prefixes. Since no conservative threshold shows
+  a repeatable benefit, dynamic emission is disabled by default with threshold 65, above the
+  64-instruction block limit. Set `{ jitMinPrefix: 1 }` to force the prototype for experiments and
+  correctness checks. These are local benchmark samples, not a speedup claim. The earlier
+  cached-block baseline above was collected separately (two runs); compare like-for-like only in
+  future controlled runs.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 
@@ -54,18 +65,21 @@
 - Not decoded: VEX/EVEX (AVX, BMI), MMX, AES/PCLMUL, 16-bit/segment modes. CPUID hides them.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
-- **Dynamic WASM emission (first verified slice):** at a block entry, Rust emits a module for a
+- **Dynamic WASM emission (opt-in prototype, default disabled):** at a block entry, Rust emits a module for a
   leading sequence of 32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs. Register-to-register 32-bit
   moves zero-extend; self-moves retire normally. The module imports the main runtime's
   memory and runs through `anywasm.run_emitted_block` in `web/anywasm.js`. It mutates a copied
   160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC); Rust commits only a valid exact
   instruction count. Compile/trap/invalid-count failures retry through the interpreter. The JS
   wrapper caches up to 256 generated modules and validates bytes if an ID is reused. Rust tests,
-  `test/wasm_smoke.mjs` (including generated execution, one-instruction budgets, and a generated vs
-  `{ jit: false }` comparison of compute status, exit code, stdout/stderr, and retired count) pass.
-  The smoke also forces one host module-compile failure and confirms safe interpreter fallback. The
+  `test/wasm_smoke.mjs` (including explicitly forced generated execution, one-instruction budgets,
+  and same-bundle comparisons against both the default cached-only path and `{ jit: false }` for
+  compute status, exit code, stdout/stderr, and retired count) pass. The smoke also confirms the
+  default gate skips the fixture's short prefixes and forces one host module-compile failure with
+  safe interpreter fallback. The
   headless Chrome worker suite passes. Final register/memory comparisons remain open. This is a
-  mechanism prototype, not a throughput win: partial-width and memory MOVs, NOP, LEA, arithmetic,
+  mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
+  memory MOVs, NOP, LEA, arithmetic,
   SIMD, or control flow are not emitted. Full JIT/interpreter state differential, cache-pressure
   and CSP checks, browser
   engine matrix, and real-game performance remain open.

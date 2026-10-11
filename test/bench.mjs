@@ -9,6 +9,8 @@ import { AnyWasm, Status } from '../web/anywasm.js';
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const wasmPath = fileURLToPath(new URL('../target/wasm32-unknown-unknown/release/anywasm_wasm.wasm', import.meta.url));
 const cliPath = fileURLToPath(new URL(`../target/debug/anywasm${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
+const jitMinPrefix = Number(process.env.ANYWASM_JIT_MIN_PREFIX ?? '65');
+const rounds = 6;
 const wasm = readFileSync(wasmPath);
 const bundleDir = mkdtempSync(join(tmpdir(), 'anywasm-bench-'));
 
@@ -20,14 +22,15 @@ try {
     ['sse-float', 'bench_sse.exe'],
   ];
 
+  console.log(`minimum emitted MOV prefix: ${jitMinPrefix}; rounds: ${rounds}`);
   for (const [name, executable] of workloads) {
     const bundlePath = join(bundleDir, `${name}.awb`);
     const fixturePath = fileURLToPath(new URL(`../fixtures/${executable}`, import.meta.url));
     execFileSync(cliPath, ['pack', fixturePath, '-o', bundlePath], { cwd: repoRoot, stdio: 'ignore' });
     const bundle = readFileSync(bundlePath);
     console.log(`${name}:`);
-    for (let round = 0; round < 3; round++) {
-      const w = await AnyWasm.create(wasm); w.load(bundle);
+    for (let round = 0; round < rounds; round++) {
+      const w = await AnyWasm.create(wasm, { jitMinPrefix }); w.load(bundle);
       const t0 = performance.now();
       const r = w.runToEnd({ sliceSteps: 5_000_000 });
       const dt = (performance.now() - t0) / 1000;

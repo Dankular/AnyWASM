@@ -115,48 +115,28 @@ impl EmittedBlock {
 ///
 /// Only 32-bit and 64-bit GPR operands are included. All other encodings and instructions stop
 /// the emitted prefix and remain on the interpreter path.
-pub fn emit_mov_block(id: u32, start: u64, instructions: &[Inst]) -> Option<EmittedBlock> {
-    let mut moves: Vec<MovInstruction> = Vec::new();
-    for inst in instructions {
-        if inst.lock {
-            break;
-        }
-        let (dst, source) = match (inst.op, inst.ops[0], inst.ops[1], inst.osz) {
-            (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 4) => {
-                (dst, MovSource::Immediate((inst.imm as u32) as u64))
-            }
-            (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 8) => (dst, MovSource::Immediate(inst.imm as u64)),
-            (Op::Mov, Opnd::Gpr(dst), Opnd::Gpr(src), 4) => (
-                dst,
-                MovSource::Register {
-                    index: src,
-                    zero_extend: true,
-                },
-            ),
-            (Op::Mov, Opnd::Gpr(dst), Opnd::Gpr(src), 8) => (
-                dst,
-                MovSource::Register {
-                    index: src,
-                    zero_extend: false,
-                },
-            ),
-            _ => break,
-        };
-        if inst.len == 0
-            || dst >= 16
-            || matches!(source, MovSource::Register { index, .. } if index >= 16)
-        {
-            break;
-        }
-        moves.push(MovInstruction {
-            dst,
-            source,
-            len: inst.len,
-        });
-    }
-    if moves.is_empty() {
+pub fn emit_mov_block(
+    id: u32,
+    start: u64,
+    instructions: &[Inst],
+    min_prefix: usize,
+) -> Option<EmittedBlock> {
+    let min_prefix = min_prefix.max(1);
+    if min_prefix > instructions.len() {
         return None;
     }
+    let prefix_len = instructions
+        .iter()
+        .take_while(|inst| translate_mov(**inst).is_some())
+        .count();
+    if prefix_len < min_prefix {
+        return None;
+    }
+    let moves: Vec<_> = instructions[..prefix_len]
+        .iter()
+        .copied()
+        .map(|inst| translate_mov(inst).unwrap())
+        .collect();
     let first_register_register = moves
         .iter()
         .position(|mov| matches!(mov.source, MovSource::Register { .. }))
@@ -166,6 +146,41 @@ pub fn emit_mov_block(id: u32, start: u64, instructions: &[Inst]) -> Option<Emit
         wasm: emit_module(start, &moves),
         instructions: moves.len(),
         first_register_register,
+    })
+}
+
+fn translate_mov(inst: Inst) -> Option<MovInstruction> {
+    if inst.lock || inst.len == 0 {
+        return None;
+    }
+    let (dst, source) = match (inst.op, inst.ops[0], inst.ops[1], inst.osz) {
+        (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 4) => {
+            (dst, MovSource::Immediate((inst.imm as u32) as u64))
+        }
+        (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 8) => (dst, MovSource::Immediate(inst.imm as u64)),
+        (Op::Mov, Opnd::Gpr(dst), Opnd::Gpr(src), 4) => (
+            dst,
+            MovSource::Register {
+                index: src,
+                zero_extend: true,
+            },
+        ),
+        (Op::Mov, Opnd::Gpr(dst), Opnd::Gpr(src), 8) => (
+            dst,
+            MovSource::Register {
+                index: src,
+                zero_extend: false,
+            },
+        ),
+        _ => return None,
+    };
+    if dst >= 16 || matches!(source, MovSource::Register { index, .. } if index >= 16) {
+        return None;
+    }
+    Some(MovInstruction {
+        dst,
+        source,
+        len: inst.len,
     })
 }
 
@@ -317,7 +332,7 @@ mod tests {
     fn emits_only_a_leading_register_immediate_mov_prefix() {
         let mov_rax = decode(&[0x48, 0xb8, 1, 0, 0, 0, 0, 0, 0, 0], 0x1000).unwrap();
         let nop = decode(&[0x90], 0x100a).unwrap();
-        let emitted = emit_mov_block(7, 0x1000, &[mov_rax, nop]).unwrap();
+        let emitted = emit_mov_block(7, 0x1000, &[mov_rax, nop], 1).unwrap();
         assert_eq!(emitted.instruction_count(), 1);
         assert!(emitted.wasm.starts_with(b"\0asm\x01\0\0\0"));
         assert!(emitted.wasm.windows(7).any(|window| window == b"anywasm"));
@@ -331,7 +346,7 @@ mod tests {
             0x2005,
         )
         .unwrap();
-        let emitted = emit_mov_block(8, 0x2000, &[mov_eax, mov_rbx]).unwrap();
+        let emitted = emit_mov_block(8, 0x2000, &[mov_eax, mov_rbx], 1).unwrap();
         assert_eq!(emitted.instruction_count(), 2);
         assert!(emitted
             .wasm
@@ -343,14 +358,14 @@ mod tests {
     #[test]
     fn does_not_emit_partial_width_mov() {
         let mov_ax_imm = decode(&[0x66, 0xb8, 1, 0], 0x3000).unwrap();
-        assert!(emit_mov_block(10, 0x3000, &[mov_ax_imm]).is_none());
+        assert!(emit_mov_block(10, 0x3000, &[mov_ax_imm], 1).is_none());
     }
 
     #[test]
     fn emits_32_bit_zero_extending_and_64_bit_register_moves() {
         let mov_eax_ebx = decode(&[0x89, 0xd8], 0x4000).unwrap();
         let mov_rax_rcx = decode(&[0x48, 0x89, 0xc8], 0x4002).unwrap();
-        let emitted = emit_mov_block(11, 0x4000, &[mov_eax_ebx, mov_rax_rcx]).unwrap();
+        let emitted = emit_mov_block(11, 0x4000, &[mov_eax_ebx, mov_rax_rcx], 1).unwrap();
 
         assert_eq!(emitted.instruction_count(), 2);
         assert_eq!(emitted.first_register_register, Some(0));
@@ -368,7 +383,7 @@ mod tests {
     #[test]
     fn emits_self_moves_as_retired_register_writes() {
         let mov_rax_rax = decode(&[0x48, 0x89, 0xc0], 0x5000).unwrap();
-        let emitted = emit_mov_block(12, 0x5000, &[mov_rax_rax]).unwrap();
+        let emitted = emit_mov_block(12, 0x5000, &[mov_rax_rax], 1).unwrap();
 
         assert_eq!(emitted.instruction_count(), 1);
         assert_eq!(emitted.first_register_register, Some(0));
@@ -390,5 +405,18 @@ mod tests {
             .wasm
             .windows(4)
             .any(|w| w == [0x37, 0x03, 0x98, 0x01])); // TSC
+    }
+
+    #[test]
+    fn prefix_gate_skips_short_blocks_before_module_generation() {
+        let mov_rax = decode(&[0x48, 0xb8, 1, 0, 0, 0, 0, 0, 0, 0], 0x6000).unwrap();
+        let mov_rbx = decode(&[0x48, 0xbb, 2, 0, 0, 0, 0, 0, 0, 0], 0x600a).unwrap();
+        assert!(emit_mov_block(13, 0x6000, &[mov_rax, mov_rbx], 3).is_none());
+        assert_eq!(
+            emit_mov_block(14, 0x6000, &[mov_rax, mov_rbx], 2)
+                .unwrap()
+                .instruction_count(),
+            2
+        );
     }
 }
