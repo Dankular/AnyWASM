@@ -42,9 +42,10 @@
 - Not decoded: VEX/EVEX (AVX, BMI), MMX, AES/PCLMUL, 16-bit/segment modes. CPUID hides them.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
-- **Performance:** interpreter with a decode cache only (no JIT). Measured ~19 M guest instr/s in
-  WASM under Node, ~3x better than before the cache. Real games need 10-50x more: a block-translating
-  JIT to WASM is the main missing piece for playable speed.
+- **Performance:** execution remains interpreter-only; the CPU crate now has a decoder-backed block
+  cache as JIT groundwork, but the run loop does not use it and no WASM code is generated. Measured
+  ~19 M guest instr/s in WASM under Node, ~3x better than before the instruction cache. Real games
+  need 10-50x more: a block-translating JIT to WASM is the main missing piece for playable speed.
 - No threads (CreateThread/_beginthreadex report "unimplemented"), no SEH/C++ exception unwinding,
   no GDI, no audio, no DirectInput/XInput, no 32-bit PE, no D3D9/D3D12/OpenGL.
 - Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and

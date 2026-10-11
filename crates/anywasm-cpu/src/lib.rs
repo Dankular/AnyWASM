@@ -8,5 +8,5 @@ pub mod mem;
 
 pub use cpu::Cpu;
 pub use decode::{decode, DecodeError, Inst, Op, Opnd};
-pub use exec::{exec, step, DecodeCache, Exit};
+pub use exec::{exec, step, BlockCache, DecodedBlock, DecodeCache, Exit};
 pub use mem::{Access, Fault, Memory};

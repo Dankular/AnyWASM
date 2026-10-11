@@ -1,5 +1,7 @@
 //! Integer / control-flow interpreter. SSE and x87 live in `sse.rs` / `x87.rs`.
 
+use std::collections::HashMap;
+
 use crate::cpu::*;
 use crate::decode::{decode, DecodeError, Inst, MemOp, Op, Opnd};
 use crate::mem::{Fault, MemResult, Memory};
@@ -1024,4 +1026,104 @@ impl DecodeCache {
         let inst = e.2;
         exec(cpu, mem, &inst)
     }
+}
+
+/// Maximum number of decoded instructions retained in one straight-line block.
+pub const MAX_BLOCK_INSTRUCTIONS: usize = 64;
+
+/// A decoded basic block. `fallthrough_rip` is the address after the final instruction,
+/// including when that instruction is a branch; `terminated` distinguishes control-flow ends
+/// from blocks split only because of [`MAX_BLOCK_INSTRUCTIONS`].
+#[derive(Debug)]
+pub struct DecodedBlock {
+    pub start: u64,
+    pub instructions: Vec<Inst>,
+    pub fallthrough_rip: u64,
+    pub terminated: bool,
+}
+
+/// Cache of decoded basic blocks, invalidated whenever executable memory changes.
+pub struct BlockCache {
+    code_epoch: Option<u64>,
+    blocks: HashMap<u64, DecodedBlock>,
+}
+
+const MAX_CACHED_BLOCKS: usize = 1024;
+
+impl Default for BlockCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlockCache {
+    pub fn new() -> Self {
+        Self {
+            code_epoch: None,
+            blocks: HashMap::new(),
+        }
+    }
+
+    /// Return a cached block or decode a straight-line block beginning at `start`.
+    ///
+    /// The block includes the first control-flow or terminal instruction. A linear block that
+    /// reaches [`MAX_BLOCK_INSTRUCTIONS`] is returned with `terminated == false`.
+    pub fn get_block(&mut self, start: u64, mem: &Memory) -> ExecResult<&DecodedBlock> {
+        if self.code_epoch != Some(mem.code_epoch) {
+            self.blocks.clear();
+            self.code_epoch = Some(mem.code_epoch);
+        }
+        if !self.blocks.contains_key(&start) {
+            if self.blocks.len() >= MAX_CACHED_BLOCKS {
+                self.blocks.clear();
+            }
+            let block = decode_block(start, mem)?;
+            self.blocks.insert(start, block);
+        }
+        Ok(self.blocks.get(&start).unwrap())
+    }
+}
+
+fn decode_block(start: u64, mem: &Memory) -> ExecResult<DecodedBlock> {
+    let mut rip = start;
+    let mut instructions = Vec::with_capacity(MAX_BLOCK_INSTRUCTIONS);
+    for _ in 0..MAX_BLOCK_INSTRUCTIONS {
+        let mut buf = [0u8; 15];
+        let n = mem.fetch(rip, &mut buf)?;
+        let inst = decode(&buf[..n], rip).map_err(Exit::Decode)?;
+        rip = rip.wrapping_add(inst.len as u64);
+        let terminated = ends_basic_block(inst.op);
+        instructions.push(inst);
+        if terminated {
+            return Ok(DecodedBlock {
+                start,
+                instructions,
+                fallthrough_rip: rip,
+                terminated,
+            });
+        }
+    }
+    Ok(DecodedBlock { start, instructions, fallthrough_rip: rip, terminated: false })
+}
+
+fn ends_basic_block(op: Op) -> bool {
+    matches!(
+        op,
+        Op::Jmp
+            | Op::JmpInd
+            | Op::Jcc
+            | Op::Call
+            | Op::CallInd
+            | Op::Ret
+            | Op::RetImm
+            | Op::Loop
+            | Op::Loope
+            | Op::Loopne
+            | Op::Jrcxz
+            | Op::Int3
+            | Op::Int
+            | Op::Hlt
+            | Op::Ud2
+            | Op::Syscall
+    )
 }

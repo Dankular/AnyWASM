@@ -64,10 +64,12 @@ Why: the interpreter measures ~19 M guest instr/s (confirmed, `test/bench.mjs`, 
 I have **not** measured what a real game needs; the 10–50x figure in STATUS.md is an estimate.
 Measure first (e.g. instructions per frame of a representative program) before fixing a target.
 
-Design (proposal, **unverified** — nothing below is implemented):
+Design (proposal, **unverified** — decoder-backed block-cache groundwork exists; WASM code
+generation and execution are not implemented):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s; keep as a regression gate.
-- [ ] **Block discovery**: translate basic blocks keyed by guest RIP, using the existing decoder.
+- [ ] **Block discovery** (decoded-block cache groundwork exists; JIT translation remains
+      unfinished): translate basic blocks keyed by guest RIP, using the existing decoder.
       Reuse `Memory::exec_page_count` / `code_epoch` for self-modifying-code invalidation.
 - [ ] **WASM emission**: emit a WASM module per block (or per trace) from Rust, instantiate via a
       host import (`WebAssembly.Module`/`Instance` from JS; the Rust core runs *inside* WASM, so
