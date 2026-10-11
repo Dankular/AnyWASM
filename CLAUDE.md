@@ -137,9 +137,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       stability, a "will this run?" report that lists blockers before packaging.
 
 ## 3. Graphics
-- [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor blending
-      and one 2x2 texture-to-texture `CopyResource` case are pixel-verified in
-      `test/browser/run.mjs` via `d3d11_textured`): buffer `CopyResource`, other blend modes,
+- [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor blending,
+      one 2x2 texture-to-texture `CopyResource` case, and one same-size vertex-buffer
+      `CopyResource` case are pixel-verified in `test/browser/run.mjs` via `d3d11_textured`):
+      other buffer `CopyResource` cases, other blend modes,
       alpha test/discard, mips and trilinear/anisotropic filtering, instancing,
       `CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple render targets,
       cube/array/3D textures, depth-stencil ops/stencil, rasterizer state

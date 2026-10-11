@@ -108,6 +108,7 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
         "srv hr=00000000",
         "copy destination hr=00000000",
         "copy srv hr=00000000",
+        "copy vertex buffer hr=00000000",
         "sampler hr=00000000",
         "depth state hr=00000000",
         "frames=3",
@@ -118,20 +119,54 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
     let ops: Vec<u32> = cmds.iter().map(|c| c.0).collect();
     let count = |opcode: u32| ops.iter().filter(|&&op| op == opcode).count();
     assert_eq!(count(op::PRESENT), 3);
-    assert_eq!(count(op::DRAW_INDEXED), 12);
-    assert_eq!(count(op::COPY_RESOURCE), 1);
+    assert_eq!(count(op::DRAW_INDEXED), 15);
+    assert_eq!(count(op::COPY_RESOURCE), 2);
+    assert_eq!(count(op::CREATE_BUFFER), 4);
     assert_eq!(count(op::CREATE_TEXTURE2D), 3, "depth, source texture, and copy destination");
     assert_eq!(count(op::CLEAR_DSV), 3);
     assert_eq!(count(op::CREATE_SAMPLER), 1);
     assert_eq!(count(op::CREATE_DEPTH), 1);
     assert_eq!(count(op::TEXTURE_WRITE), 2);
 
-    let first_draw = ops.iter().position(|&opcode| opcode == op::DRAW_INDEXED).unwrap();
-    let copy = cmds.iter().find(|c| c.0 == op::COPY_RESOURCE).unwrap();
-    let copy_args = u32s(&copy.1);
-    assert_eq!(copy_args.len(), 2, "COPY_RESOURCE carries destination and source IDs");
-    assert_ne!(copy_args[0], copy_args[1], "copy uses distinct texture resources");
-    assert!(ops.iter().position(|&opcode| opcode == op::COPY_RESOURCE).unwrap() < first_draw);
+    let first_draw = ops
+        .iter()
+        .position(|&opcode| opcode == op::DRAW_INDEXED)
+        .unwrap();
+    let texture_ids: Vec<_> = cmds
+        .iter()
+        .filter(|c| c.0 == op::CREATE_TEXTURE2D)
+        .map(|c| u32s(&c.1)[0])
+        .collect();
+    let buffer_ids: Vec<_> = cmds
+        .iter()
+        .filter(|c| c.0 == op::CREATE_BUFFER)
+        .map(|c| u32s(&c.1)[0])
+        .collect();
+    let mut texture_copies = 0;
+    let mut buffer_copies = 0;
+    for (index, copy) in cmds
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.0 == op::COPY_RESOURCE)
+    {
+        let args = u32s(&copy.1);
+        assert_eq!(
+            args.len(),
+            2,
+            "COPY_RESOURCE carries destination and source IDs"
+        );
+        assert_ne!(args[0], args[1], "copy uses distinct resources");
+        assert!(index < first_draw, "COPY_RESOURCE must precede drawing");
+        if texture_ids.contains(&args[0]) && texture_ids.contains(&args[1]) {
+            texture_copies += 1;
+        } else if buffer_ids.contains(&args[0]) && buffer_ids.contains(&args[1]) {
+            buffer_copies += 1;
+        } else {
+            panic!("COPY_RESOURCE IDs do not refer to two textures or two buffers: {args:?}");
+        }
+    }
+    assert_eq!(texture_copies, 1);
+    assert_eq!(buffer_copies, 1);
     for creator in [
         op::CREATE_TEXTURE2D,
         op::CREATE_VIEW,
@@ -161,10 +196,10 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
     let index_buffer = cmds.iter().find(|c| c.0 == op::SET_INDEX_BUFFER).unwrap();
     assert_eq!(u32s(&index_buffer.1)[1], 57, "R16_UINT index format");
     let draws: Vec<_> = cmds.iter().filter(|c| c.0 == op::DRAW_INDEXED).collect();
-    let expected_frame = [[6, 0, 0], [6, 6, 0], [6, 12, 0], [6, 18, 0]];
+    let expected_frame = [[6, 0, 0], [6, 6, 0], [6, 12, 0], [6, 18, 0], [6, 24, 0]];
     for frame in 0..3 {
-        for draw in 0..4 {
-            assert_eq!(u32s(&draws[frame * 4 + draw].1), expected_frame[draw]);
+        for draw in 0..5 {
+            assert_eq!(u32s(&draws[frame * 5 + draw].1), expected_frame[draw]);
         }
     }
 }

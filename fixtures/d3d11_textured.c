@@ -93,20 +93,32 @@ int main(void) {
 
     /* near quad A (z 0.2) samples only the red texel, far quad B (z 0.8) only the green texel,
      * quad C (z 0.5) maps the whole texture. */
-    Vertex verts[16] = {
+    Vertex verts[20] = {
         QUAD(-0.8f, -0.1f, 0.2f, 0.7f, 0.2f, 0.25f, 0.25f, 0.25f, 0.25f),
         QUAD(-0.2f, -0.1f, 0.8f, 0.7f, 0.8f, 0.75f, 0.25f, 0.75f, 0.25f),
         QUAD(-0.6f, -0.9f, 0.6f, -0.3f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f),
         QUAD(-0.95f, -0.1f, -0.825f, 0.7f, 0.3f, 0.25f, 0.25f, 0.25f, 0.25f),
+        QUAD(0.825f, -0.1f, 0.95f, 0.7f, 0.3f, 0.25f, 0.25f, 0.25f, 0.25f),
     };
-    unsigned short idx[24];
-    for (int q = 0; q < 4; q++) {
+    unsigned short idx[30];
+    for (int q = 0; q < 5; q++) {
         unsigned short b = (unsigned short)(q * 4), *i = idx + q * 6;
         i[0] = b; i[1] = b + 1; i[2] = b + 2; i[3] = b; i[4] = b + 2; i[5] = b + 3;
     }
     D3D11_BUFFER_DESC vbd = { sizeof verts, D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
     D3D11_SUBRESOURCE_DATA vinit = { verts, 0, 0 };
     ID3D11Buffer *vb; ID3D11Device_CreateBuffer(dev, &vbd, &vinit, &vb);
+    Vertex poisonVerts[20];
+    for (int i = 0; i < 20; i++) {
+        poisonVerts[i].x = 2.0f; poisonVerts[i].y = 2.0f; poisonVerts[i].z = 0.3f;
+        poisonVerts[i].u = 0.25f; poisonVerts[i].v = 0.25f;
+    }
+    D3D11_BUFFER_DESC copyVbd = vbd;
+    D3D11_SUBRESOURCE_DATA poisonInit = { poisonVerts, 0, 0 };
+    ID3D11Buffer *copyVb; hr = ID3D11Device_CreateBuffer(dev, &copyVbd, &poisonInit, &copyVb);
+    printf("copy vertex buffer hr=%08lx\n", (unsigned long)hr);
+    if (FAILED(hr)) return 2;
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)copyVb, (ID3D11Resource *)vb);
     D3D11_BUFFER_DESC ibd = { sizeof idx, D3D11_USAGE_DEFAULT, D3D11_BIND_INDEX_BUFFER, 0, 0, 0 };
     D3D11_SUBRESOURCE_DATA iinit = { idx, 0, 0 };
     ID3D11Buffer *ib; ID3D11Device_CreateBuffer(dev, &ibd, &iinit, &ib);
@@ -158,6 +170,9 @@ int main(void) {
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 12, 0);  /* C */
         ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &copySrv);
         ID3D11DeviceContext_DrawIndexed(ctx, 6, 18, 0);  /* D (copied red texture) */
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &srv);
+        ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &copyVb, &stride, &offset);
+        ID3D11DeviceContext_DrawIndexed(ctx, 6, 24, 0);  /* E (copied vertex buffer) */
         IDXGISwapChain_Present(sc, 1, 0);
         if (++frames == 3) PostQuitMessage(0);
     }
