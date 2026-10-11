@@ -307,6 +307,13 @@ imports, registry data store, and tutorial D3D11 paths also remain open.
 
 ### Guest instruction cost per present
 
+**Preliminary only; the instruction totals and cap below are incomplete.** Review of the runtime
+found that `Process::call_guest` runs synchronous guest callbacks outside `Process::run`, so callback
+instructions are missing from `retired_instructions`. In addition, `Process::run` does not charge an
+HLE call when it returns a frame stop. These gaps affect the reported per-frame totals and can let a
+callback loop run past the benchmark's requested instruction cap. Fix these before using the counts
+as a performance baseline; the elapsed Node times still describe the guest/HLE runs that completed.
+
 The new `test/target_frame_bench.mjs` drives the target until guest `Present` frame stops, reads the
 process-wide retired-instruction counter, and drains the recorded GPU stream at each stop. The
 reusable fixture regression requests four stops from `d3d11_triangle.exe`; it records the fixture's

@@ -58,14 +58,14 @@
   correctness checks. These are local benchmark samples, not a speedup claim. The earlier
   cached-block baseline above was collected separately (two runs); compare like-for-like only in
   future controlled runs.
-- Representative-target guest benchmark (`test/target_frame_bench.mjs`): Diligent GLFW Demo,
-  release WASM under Node 24.16.0/Windows x64, eight frame stops and a 1,000,000,000-instruction
-  cap. Cached-only retired 576.57M process-wide guest instructions before its first stop in 42.28 s;
-  prefix 1 took 69.14 s with 687,352 module compilations and 13.09M emitted-block executions.
-  Both runs then retired 3,199 instructions per frame in under 0.6 ms, reached all eight guest
-  `Present` stops, and reported no terminal state or cap. These are emulator guest/HLE measurements;
-  the target command stream was not sent to WebGPU and no host pixels or game performance were
-  measured. Full per-frame data and commands are in `docs/TARGETS.md`.
+- Preliminary representative-target benchmark (`test/target_frame_bench.mjs`): Diligent GLFW Demo,
+  release WASM under Node 24.16.0/Windows x64, eight guest frame stops. The recorded first-frame
+  counts and timings were 576.57M / 42.28 s cached-only and 576.57M / 69.14 s with prefix 1, with
+  687,352 module compilations and 13.09M emitted-block executions. Review found that synchronous
+  guest callbacks and the yielding HLE instruction are missing from the aggregate counter, so these
+  counts and the claimed instruction cap are incomplete. Do not use them as a performance baseline
+  until accounting is fixed. The target command stream was not sent to WebGPU; no host pixels or game
+  performance were measured. Preliminary data and commands are in `docs/TARGETS.md`.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
 

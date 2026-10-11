@@ -66,22 +66,23 @@ Status key: **[ ]** not started · **[~]** partial. Ordered by value toward "pac
 ## 1. Block-translating JIT to WASM  (highest priority; performance)
 Why: the cached-block executor's earlier baseline measured 32.2 M guest instr/s on `compute.exe` and
 26.1–38.5 M on the call-heavy, memory-heavy and SSE-float fixtures (`test/bench.mjs`, release WASM
-under Node). A D3D11-only Diligent GLFW Demo run now measures process-wide guest instructions and
-elapsed time at eight `Present` stops; the first frame retires about 576.6M instructions and takes
-42.28 s with cached execution, while forced MOV emission takes 69.14 s. The full results and guest-
-only limits are in `docs/TARGETS.md`. A later six-round gate sweep also found no reliable improvement,
-so dynamic emission remains disabled by default. The 10–50x figure in `STATUS.md` is still only an
-estimate; these measurements do not set a product performance target because AnyWASM does not
-execute this target's command stream in the browser renderer.
+under Node). A preliminary D3D11-only Diligent GLFW Demo run reached eight guest `Present` stops,
+but review found that the aggregate counter omits synchronous guest-callback instructions and the
+yielding HLE instruction. Its 576.6M first-frame count is therefore incomplete; see
+`docs/TARGETS.md`. A later six-round gate sweep also found no reliable improvement, so dynamic
+emission remains disabled by default. The 10–50x figure in `STATUS.md` is still only an estimate;
+neither result sets a product performance target because AnyWASM does not execute this target's
+command stream in the browser renderer.
 
 Design (partial implementation; the verified dynamic-emission scope is a leading run of 32-bit or
 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
-- [x] **Representative-target demand**: measure process-wide guest instructions and elapsed time
-      at eight Diligent GLFW Demo `Present` stops in cached-only and forced-emission modes. The
-      measured first-frame guest pass takes 42.28 s cached-only and 69.14 s with prefix 1; this is
-      not a host-rendered frame-rate measurement or product performance target.
+- [~] **Representative-target demand**: preliminary cached-only and forced-emission runs reached
+      eight Diligent GLFW Demo `Present` stops. Their current instruction counts omit synchronous
+      callback instructions and the yielding HLE instruction, so the counts and cap are incomplete
+      until process accounting is fixed. The Node timings are guest/HLE-only, not host-rendered frame
+      time or a product performance target.
 - [x] **Block discovery**: decode and cache basic blocks keyed by guest RIP. `code_epoch` invalidates
       cached blocks on executable-memory writes and protection changes.
 - [~] **WASM emission (MVP prototype, opt-in)**: Rust can emit a separate module for the supported
