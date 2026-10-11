@@ -591,7 +591,9 @@ is diagnostic test routing only.
 
 - Complete a controlled playthrough before making a gameplay acceptance claim. Flashlight behavior
   outside the single seeded check, other gameplay states, other UAV formats, and general staging
-  readback remain untested.
+  readback remain untested. Stabilize the flashlight browser assertion for the random Release bundle
+  (or make it consume a deterministic seeded build); the current 100-bright-pixel threshold failed
+  once at +36 pixels when the random wall layout occluded most of the beam.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current

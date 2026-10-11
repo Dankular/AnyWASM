@@ -176,7 +176,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       window, and exercises `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`. `test/browser/target.mjs`
       verifies W/S/A/D movement, cursor-aimed movement in all four directions, a flashlight response,
       and Tab map regeneration in the selected Diligent maze; browser input skips hidden top-level
-      helper windows. Add XInput
+      helper windows. The positive flashlight measurement is from a seeded build; the random Release
+      bundle can miss the current bright-pixel threshold when walls occlude the beam. Make that check
+      repeatable with a seeded bundle or a verified clear ray before using it as a general target gate.
+      Add XInput
       (Gamepad API), DirectInput, raw input, cursor capture/pointer lock.
 - [~] **Registry**: `advapi32!RegOpenKeyExA` recognizes predefined roots, returns the root for an
       empty subkey, and reports missing subkeys while no registry data store exists. Target probes
