@@ -145,7 +145,7 @@ generation and execution are not implemented):
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
 - [ ] `rcpps`/`rsqrtps` return exact results (excluded from the diff corpus); match hardware
       approximation or document per-vendor differences.
-- [ ] Extend the diff harness to control flow (jcc/call/ret/loop/string ops with REP), privileged-ish
+- [~] Extend the diff harness to control flow (jcc/call/ret/loop/string ops with REP), privileged-ish
       instructions used by user code (`rdtsc`, `cpuid`, `xgetbv`, `syscall` stubs), and multi-
       instruction sequences. Remember: undefined flags/vendor-specific behaviour must be excluded
       explicitly and documented (precedent: 16-bit shld/shrd count>16).

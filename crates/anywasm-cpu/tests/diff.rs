@@ -10,6 +10,9 @@ use anywasm_cpu::cpu::*;
 use anywasm_cpu::mem::{PROT_RW, PROT_RWX};
 use anywasm_cpu::{step, Cpu, Memory};
 use std::collections::BTreeMap;
+#[path = "support/diff_filter.rs"]
+mod diff_filter;
+use diff_filter::{mnemonic, skip};
 
 const DATA: u64 = 0x1000_0000;
 const CODE: u64 = 0x1001_0000;
@@ -142,16 +145,6 @@ fn rand_xmm(r: &mut Rng) -> [u8; 16] {
         }
     };
     v.to_le_bytes()
-}
-
-fn mnemonic(asm: &str) -> &str {
-    let mut it = asm.split_whitespace();
-    let first = it.next().unwrap();
-    if matches!(first, "rep" | "repe" | "repne") {
-        it.next().unwrap()
-    } else {
-        first
-    }
 }
 
 /// Architecturally defined arithmetic flags to compare for this instruction + operands.
@@ -510,15 +503,6 @@ fn mem_matches_x87(h: &[u8], e: &[u8], tolerant: bool) -> Option<String> {
 
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
-}
-
-/// Instructions whose results legitimately differ from hardware or are nondeterministic.
-fn skip(asm: &str) -> Option<&'static str> {
-    match mnemonic(asm) {
-        "rdtsc" | "rdrand" | "cpuid" => Some("nondeterministic"),
-        "rcpps" | "rsqrtps" | "rcpss" | "rsqrtss" => Some("hardware approximation"),
-        _ => None,
-    }
 }
 
 #[test]

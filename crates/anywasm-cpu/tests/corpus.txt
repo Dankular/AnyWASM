@@ -2728,3 +2728,6 @@ dd4610dd4618d9f3dd5e28dbe3|fld qword ptr [rsi+16]; fld qword ptr [rsi+24]; fpata
 66c7467c0010df467cdd4610def1d9f0dd5e28dbe3|mov word ptr [rsi+124], 4096; fild word ptr [rsi+124]; fld qword ptr [rsi+16]; fdivrp st(1), st; f2xm1; fstp qword ptr [rsi+40]; fninit
 dd4610d9c0d9fbdd5e28dd5e30ddd8dbe3|fld qword ptr [rsi+16]; fld st(0); fsincos; fstp qword ptr [rsi+40]; fstp qword ptr [rsi+48]; fstp st(0); fninit
 0fae86000100000fae8e00010000|fxsave [rsi+256]; fxrstor [rsi+256]
+900f3190|nop; rdtsc; nop
+b90300000033c083c001e2fb83f8037502ffc0|mov ecx, 3; xor eax, eax; add eax, 1; loop -5; cmp eax, 3; jne +2; inc eax
+b90300000033c083c001e2fb83f8047505bb04000000|mov ecx, 3; xor eax, eax; add eax, 1; loop -5; cmp eax, 4; jne +5; mov ebx, 4
