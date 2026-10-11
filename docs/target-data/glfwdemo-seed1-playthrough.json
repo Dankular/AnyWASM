@@ -1,0 +1,1575 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples GLFW Demo maze",
+  "build": "seed-1 D3D11-only /MT target bundle",
+  "browser": "Playwright Chromium revision 1234",
+  "bundleSha256": "34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36",
+  "result": {
+    "teleportScreen": {
+      "x": 885.1428571428571,
+      "y": 37.19047619047619,
+      "pixels": 21
+    },
+    "teleportWorld": {
+      "x": 60.95804567180031,
+      "y": 61.050569422316634
+    },
+    "playerWorld": {
+      "x": 32,
+      "y": 32
+    },
+    "goalWorld": {
+      "x": 60.625,
+      "y": 60.25
+    },
+    "reconstructedWallCells": 944,
+    "pathSteps": 293,
+    "pathDistance": 45.012824638055186,
+    "runs": [
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 5,
+        "end": {
+          "x": 32.625,
+          "y": 32
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 27,
+        "end": {
+          "x": 36,
+          "y": 35.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "end": {
+          "x": 36.25,
+          "y": 35.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 36.375,
+          "y": 35.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 6,
+        "end": {
+          "x": 37.125,
+          "y": 35.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 15,
+        "end": {
+          "x": 39,
+          "y": 37.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "end": {
+          "x": 39.25,
+          "y": 37.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 39.375,
+          "y": 37.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 6,
+        "end": {
+          "x": 40.125,
+          "y": 37.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 47,
+        "end": {
+          "x": 46,
+          "y": 43.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "end": {
+          "x": 46.25,
+          "y": 43.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 46.375,
+          "y": 43.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 22,
+        "end": {
+          "x": 49.125,
+          "y": 43.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 15,
+        "end": {
+          "x": 51,
+          "y": 45.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "end": {
+          "x": 51.25,
+          "y": 45.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 51.375,
+          "y": 45.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 6,
+        "end": {
+          "x": 52.125,
+          "y": 45.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 15,
+        "end": {
+          "x": 54,
+          "y": 47.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "end": {
+          "x": 54.25,
+          "y": 47.375
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 54.375,
+          "y": 47.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 12,
+        "end": {
+          "x": 55.875,
+          "y": 47.5
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 20,
+        "end": {
+          "x": 58.375,
+          "y": 50
+        }
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 2,
+        "end": {
+          "x": 58.375,
+          "y": 50.25
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 58.5,
+          "y": 50.375
+        }
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 54,
+        "end": {
+          "x": 58.5,
+          "y": 57.125
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 7,
+        "end": {
+          "x": 59.375,
+          "y": 58
+        }
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 2,
+        "end": {
+          "x": 59.375,
+          "y": 58.25
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "end": {
+          "x": 59.5,
+          "y": 58.375
+        }
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 6,
+        "end": {
+          "x": 59.5,
+          "y": 59.125
+        }
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 9,
+        "end": {
+          "x": 60.625,
+          "y": 60.25
+        }
+      }
+    ],
+    "visitedPositions": 152842,
+    "directionalSegments": [
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 5,
+        "to": 131589
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 27,
+        "to": 145467
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "to": 145469
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 145983
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 6,
+        "to": 145989
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 15,
+        "to": 153699
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "to": 153701
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 154215
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 6,
+        "to": 154221
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 47,
+        "to": 178379
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "to": 178381
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 178895
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 22,
+        "to": 178917
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 15,
+        "to": 186627
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "to": 186629
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 187143
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 6,
+        "to": 187149
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 15,
+        "to": 194859
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 2,
+        "to": 194861
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 195375
+      },
+      {
+        "dx": 1,
+        "dy": 0,
+        "edges": 12,
+        "to": 195387
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 20,
+        "to": 205667
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 2,
+        "to": 206693
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 207207
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 54,
+        "to": 234909
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 7,
+        "to": 238507
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 2,
+        "to": 239533
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 1,
+        "to": 240047
+      },
+      {
+        "dx": 0,
+        "dy": 1,
+        "edges": 6,
+        "to": 243125
+      },
+      {
+        "dx": 1,
+        "dy": 1,
+        "edges": 9,
+        "to": 247751
+      }
+    ],
+    "keyPulses": 1834,
+    "pulseLimitReached": false,
+    "teleported": true,
+    "planningIterations": 34,
+    "blockedSegments": 0,
+    "runProgress": [
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 5,
+        "expectedDistance": 0.625,
+        "projectedDistance": 0.6114915541642247,
+        "pulses": 25,
+        "plannedPulses": 25,
+        "before": {
+          "x": 519.5,
+          "y": 403,
+          "pixels": 16
+        },
+        "after": {
+          "x": 527.2105263157895,
+          "y": 403,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 31.960346964064435,
+          "y": 32.039653035935565
+        },
+        "afterWorld": {
+          "x": 32.57183851822866,
+          "y": 32.039653035935565
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 27,
+        "expectedDistance": 4.772970773009196,
+        "projectedDistance": 4.7828512678809885,
+        "pulses": 193,
+        "plannedPulses": 193,
+        "before": {
+          "x": 527.2105263157895,
+          "y": 403,
+          "pixels": 19
+        },
+        "after": {
+          "x": 569.75,
+          "y": 360.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 32.57183851822866,
+          "y": 32.039653035935565
+        },
+        "afterWorld": {
+          "x": 35.9454770755886,
+          "y": 35.42998760842627
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 2,
+        "expectedDistance": 0.25,
+        "projectedDistance": 0.23791821561338367,
+        "pulses": 10,
+        "plannedPulses": 10,
+        "before": {
+          "x": 569.75,
+          "y": 360.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 572.75,
+          "y": 360.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 35.9454770755886,
+          "y": 35.42998760842627
+        },
+        "afterWorld": {
+          "x": 36.18339529120198,
+          "y": 35.42998760842627
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.125,
+        "projectedDistance": 0.11895910780668828,
+        "pulses": 5,
+        "plannedPulses": 5,
+        "before": {
+          "x": 572.75,
+          "y": 360.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 574.25,
+          "y": 360.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 36.18339529120198,
+          "y": 35.42998760842627
+        },
+        "afterWorld": {
+          "x": 36.30235439900867,
+          "y": 35.42998760842627
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.1710374766884964,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 574.25,
+          "y": 360.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 575.95,
+          "y": 358.9,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 36.30235439900867,
+          "y": 35.42998760842627
+        },
+        "afterWorld": {
+          "x": 36.43717472118959,
+          "y": 35.537050805452296
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 6,
+        "expectedDistance": 0.75,
+        "projectedDistance": 0.717719950433704,
+        "pulses": 30,
+        "plannedPulses": 30,
+        "before": {
+          "x": 575.95,
+          "y": 358.9,
+          "pixels": 20
+        },
+        "after": {
+          "x": 585,
+          "y": 359,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 36.43717472118959,
+          "y": 35.537050805452296
+        },
+        "afterWorld": {
+          "x": 37.154894671623296,
+          "y": 35.52912019826518
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 15,
+        "expectedDistance": 2.6516504294495533,
+        "projectedDistance": 2.6889334449879474,
+        "pulses": 107,
+        "plannedPulses": 107,
+        "before": {
+          "x": 585,
+          "y": 359,
+          "pixels": 21
+        },
+        "after": {
+          "x": 608.9,
+          "y": 334.95,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 37.154894671623296,
+          "y": 35.52912019826518
+        },
+        "afterWorld": {
+          "x": 39.050309789343245,
+          "y": 37.4364312267658
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 2,
+        "expectedDistance": 0.25,
+        "projectedDistance": 0.2458488228004967,
+        "pulses": 10,
+        "plannedPulses": 10,
+        "before": {
+          "x": 608.9,
+          "y": 334.95,
+          "pixels": 20
+        },
+        "after": {
+          "x": 612,
+          "y": 335,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 39.050309789343245,
+          "y": 37.4364312267658
+        },
+        "afterWorld": {
+          "x": 39.29615861214374,
+          "y": 37.432465923172245
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.1682335836280267,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 612,
+          "y": 335,
+          "pixels": 21
+        },
+        "after": {
+          "x": 613.25,
+          "y": 333.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 39.29615861214374,
+          "y": 37.432465923172245
+        },
+        "afterWorld": {
+          "x": 39.39529120198265,
+          "y": 37.57125154894672
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 7,
+        "expectedDistance": 0.875,
+        "projectedDistance": 0.8525402726146254,
+        "pulses": 35,
+        "plannedPulses": 35,
+        "before": {
+          "x": 613.25,
+          "y": 333.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 624,
+          "y": 333.2105263157895,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 39.39529120198265,
+          "y": 37.57125154894672
+        },
+        "afterWorld": {
+          "x": 40.24783147459728,
+          "y": 37.574382051783736
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 46,
+        "expectedDistance": 8.131727983645296,
+        "projectedDistance": 8.199173602081693,
+        "pulses": 329,
+        "plannedPulses": 329,
+        "before": {
+          "x": 624,
+          "y": 333.2105263157895,
+          "pixels": 19
+        },
+        "after": {
+          "x": 697,
+          "y": 260,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 40.24783147459728,
+          "y": 37.574382051783736
+        },
+        "afterWorld": {
+          "x": 46.037174721189594,
+          "y": 43.380421313506815
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 2,
+        "expectedDistance": 0.25,
+        "projectedDistance": 0.23791821561338367,
+        "pulses": 10,
+        "plannedPulses": 10,
+        "before": {
+          "x": 697,
+          "y": 260,
+          "pixels": 21
+        },
+        "after": {
+          "x": 700,
+          "y": 260,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 46.037174721189594,
+          "y": 43.380421313506815
+        },
+        "afterWorld": {
+          "x": 46.27509293680298,
+          "y": 43.380421313506815
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.19184531466353677,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 700,
+          "y": 260,
+          "pixels": 21
+        },
+        "after": {
+          "x": 701.6315789473684,
+          "y": 258.2105263157895,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 46.27509293680298,
+          "y": 43.380421313506815
+        },
+        "afterWorld": {
+          "x": 46.404487054066394,
+          "y": 43.52233744211831
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 22,
+        "expectedDistance": 2.75,
+        "projectedDistance": 2.6502837018196033,
+        "pulses": 111,
+        "plannedPulses": 111,
+        "before": {
+          "x": 701.6315789473684,
+          "y": 258.2105263157895,
+          "pixels": 19
+        },
+        "after": {
+          "x": 735.05,
+          "y": 258.1,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 46.404487054066394,
+          "y": 43.52233744211831
+        },
+        "afterWorld": {
+          "x": 49.054770755886,
+          "y": 43.531102850061956
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.125,
+        "projectedDistance": 0.13482032218091433,
+        "pulses": 5,
+        "plannedPulses": 5,
+        "before": {
+          "x": 735.05,
+          "y": 258.1,
+          "pixels": 20
+        },
+        "after": {
+          "x": 736.75,
+          "y": 258.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 49.054770755886,
+          "y": 43.531102850061956
+        },
+        "afterWorld": {
+          "x": 49.18959107806691,
+          "y": 43.51920693928129
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.125,
+        "projectedDistance": 0.11895910780668828,
+        "pulses": 5,
+        "plannedPulses": 5,
+        "before": {
+          "x": 736.75,
+          "y": 258.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 736.75,
+          "y": 256.75,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 49.18959107806691,
+          "y": 43.51920693928129
+        },
+        "afterWorld": {
+          "x": 49.18959107806691,
+          "y": 43.63816604708798
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 14,
+        "expectedDistance": 2.4748737341529163,
+        "projectedDistance": 2.4954648238157233,
+        "pulses": 100,
+        "plannedPulses": 100,
+        "before": {
+          "x": 736.75,
+          "y": 256.75,
+          "pixels": 20
+        },
+        "after": {
+          "x": 758.75,
+          "y": 234.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 49.18959107806691,
+          "y": 43.63816604708798
+        },
+        "afterWorld": {
+          "x": 50.93432465923172,
+          "y": 45.42255266418835
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 3,
+        "expectedDistance": 0.375,
+        "projectedDistance": 0.35687732342007905,
+        "pulses": 15,
+        "plannedPulses": 15,
+        "before": {
+          "x": 758.75,
+          "y": 234.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 763.25,
+          "y": 234.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 50.93432465923172,
+          "y": 45.42255266418835
+        },
+        "afterWorld": {
+          "x": 51.2912019826518,
+          "y": 45.42255266418835
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.1682335836280267,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 763.25,
+          "y": 234.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 765,
+          "y": 233,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 51.2912019826518,
+          "y": 45.42255266418835
+        },
+        "afterWorld": {
+          "x": 51.42998760842627,
+          "y": 45.52168525402726
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 6,
+        "expectedDistance": 0.75,
+        "projectedDistance": 0.7137546468401439,
+        "pulses": 30,
+        "plannedPulses": 30,
+        "before": {
+          "x": 765,
+          "y": 233,
+          "pixels": 21
+        },
+        "after": {
+          "x": 774,
+          "y": 233,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 51.42998760842627,
+          "y": 45.52168525402726
+        },
+        "afterWorld": {
+          "x": 52.14374225526642,
+          "y": 45.52168525402726
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 15,
+        "expectedDistance": 2.6516504294495533,
+        "projectedDistance": 2.6574675339760425,
+        "pulses": 107,
+        "plannedPulses": 107,
+        "before": {
+          "x": 774,
+          "y": 233,
+          "pixels": 21
+        },
+        "after": {
+          "x": 797.2777777777778,
+          "y": 208.88888888888889,
+          "pixels": 18
+        },
+        "beforeWorld": {
+          "x": 52.14374225526642,
+          "y": 45.52168525402726
+        },
+        "afterWorld": {
+          "x": 53.989811372711,
+          "y": 47.43384276469778
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 2,
+        "expectedDistance": 0.25,
+        "projectedDistance": 0.23791821561338367,
+        "pulses": 10,
+        "plannedPulses": 10,
+        "before": {
+          "x": 797.2777777777778,
+          "y": 208.88888888888889,
+          "pixels": 18
+        },
+        "after": {
+          "x": 800.2777777777778,
+          "y": 208.88888888888889,
+          "pixels": 18
+        },
+        "beforeWorld": {
+          "x": 53.989811372711,
+          "y": 47.43384276469778
+        },
+        "afterWorld": {
+          "x": 54.22772958832439,
+          "y": 47.43384276469778
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.18479458942376875,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 800.2777777777778,
+          "y": 208.88888888888889,
+          "pixels": 18
+        },
+        "after": {
+          "x": 801.8421052631579,
+          "y": 207.1578947368421,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 54.22772958832439,
+          "y": 47.43384276469778
+        },
+        "afterWorld": {
+          "x": 54.35179025630992,
+          "y": 47.57112111132851
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 13,
+        "expectedDistance": 1.625,
+        "projectedDistance": 1.5788169308028444,
+        "pulses": 65,
+        "plannedPulses": 65,
+        "before": {
+          "x": 801.8421052631579,
+          "y": 207.1578947368421,
+          "pixels": 19
+        },
+        "after": {
+          "x": 821.75,
+          "y": 207.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 54.35179025630992,
+          "y": 47.57112111132851
+        },
+        "afterWorld": {
+          "x": 55.93060718711276,
+          "y": 47.5638166047088
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.125,
+        "projectedDistance": 0.11895910780669539,
+        "pulses": 5,
+        "plannedPulses": 5,
+        "before": {
+          "x": 821.75,
+          "y": 207.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 823.25,
+          "y": 207.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 55.93060718711276,
+          "y": 47.5638166047088
+        },
+        "afterWorld": {
+          "x": 56.04956629491946,
+          "y": 47.5638166047088
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 19,
+        "expectedDistance": 3.3587572106361008,
+        "projectedDistance": 3.364671672560519,
+        "pulses": 136,
+        "plannedPulses": 136,
+        "before": {
+          "x": 823.25,
+          "y": 207.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 853,
+          "y": 177,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 56.04956629491946,
+          "y": 47.5638166047088
+        },
+        "afterWorld": {
+          "x": 58.4089219330855,
+          "y": 49.962825278810406
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "w"
+        ],
+        "edges": 2,
+        "expectedDistance": 0.25,
+        "projectedDistance": 0.23791821561338367,
+        "pulses": 10,
+        "plannedPulses": 10,
+        "before": {
+          "x": 853,
+          "y": 177,
+          "pixels": 21
+        },
+        "after": {
+          "x": 853,
+          "y": 174,
+          "pixels": 21
+        },
+        "beforeWorld": {
+          "x": 58.4089219330855,
+          "y": 49.962825278810406
+        },
+        "afterWorld": {
+          "x": 58.4089219330855,
+          "y": 50.20074349442379
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.19184531466354177,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 853,
+          "y": 174,
+          "pixels": 21
+        },
+        "after": {
+          "x": 854.6315789473684,
+          "y": 172.21052631578948,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 58.4089219330855,
+          "y": 50.20074349442379
+        },
+        "afterWorld": {
+          "x": 58.538316050348925,
+          "y": 50.34265962303528
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "w"
+        ],
+        "edges": 54,
+        "expectedDistance": 6.75,
+        "projectedDistance": 6.678406052305483,
+        "pulses": 273,
+        "plannedPulses": 273,
+        "before": {
+          "x": 854.6315789473684,
+          "y": 172.21052631578948,
+          "pixels": 19
+        },
+        "after": {
+          "x": 854.7894736842105,
+          "y": 88,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 58.538316050348925,
+          "y": 50.34265962303528
+        },
+        "afterWorld": {
+          "x": 58.55083806169699,
+          "y": 57.021065675340765
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.125,
+        "projectedDistance": 0.11895910780669539,
+        "pulses": 5,
+        "plannedPulses": 5,
+        "before": {
+          "x": 854.7894736842105,
+          "y": 88,
+          "pixels": 19
+        },
+        "after": {
+          "x": 854.7777777777778,
+          "y": 86.5,
+          "pixels": 18
+        },
+        "beforeWorld": {
+          "x": 58.55083806169699,
+          "y": 57.021065675340765
+        },
+        "afterWorld": {
+          "x": 58.54991050530084,
+          "y": 57.14002478314746
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 7,
+        "expectedDistance": 1.2374368670764582,
+        "projectedDistance": 1.2461746935409312,
+        "pulses": 50,
+        "plannedPulses": 50,
+        "before": {
+          "x": 854.7777777777778,
+          "y": 86.5,
+          "pixels": 18
+        },
+        "after": {
+          "x": 865.75,
+          "y": 75.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 58.54991050530084,
+          "y": 57.14002478314746
+        },
+        "afterWorld": {
+          "x": 59.42007434944238,
+          "y": 58.032218091697644
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "w"
+        ],
+        "edges": 2,
+        "expectedDistance": 0.25,
+        "projectedDistance": 0.23791821561338367,
+        "pulses": 10,
+        "plannedPulses": 10,
+        "before": {
+          "x": 865.75,
+          "y": 75.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 865.75,
+          "y": 72.25,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 59.42007434944238,
+          "y": 58.032218091697644
+        },
+        "afterWorld": {
+          "x": 59.42007434944238,
+          "y": 58.27013630731103
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 1,
+        "expectedDistance": 0.1767766952966369,
+        "projectedDistance": 0.1682335836280267,
+        "pulses": 7,
+        "plannedPulses": 7,
+        "before": {
+          "x": 865.75,
+          "y": 72.25,
+          "pixels": 20
+        },
+        "after": {
+          "x": 867.25,
+          "y": 70.75,
+          "pixels": 20
+        },
+        "beforeWorld": {
+          "x": 59.42007434944238,
+          "y": 58.27013630731103
+        },
+        "afterWorld": {
+          "x": 59.53903345724907,
+          "y": 58.38909541511772
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "w"
+        ],
+        "edges": 6,
+        "expectedDistance": 0.75,
+        "projectedDistance": 0.723146155351202,
+        "pulses": 30,
+        "plannedPulses": 30,
+        "before": {
+          "x": 867.25,
+          "y": 70.75,
+          "pixels": 20
+        },
+        "after": {
+          "x": 867.2105263157895,
+          "y": 61.63157894736842,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 59.53903345724907,
+          "y": 58.38909541511772
+        },
+        "afterWorld": {
+          "x": 59.53590295441205,
+          "y": 59.112241570468925
+        },
+        "stalled": false,
+        "teleported": false
+      },
+      {
+        "keys": [
+          "d",
+          "w"
+        ],
+        "edges": 9,
+        "expectedDistance": 1.5909902576697321,
+        "projectedDistance": -38.49302452064417,
+        "pulses": 64,
+        "plannedPulses": 64,
+        "before": {
+          "x": 867.2105263157895,
+          "y": 61.63157894736842,
+          "pixels": 19
+        },
+        "after": {
+          "x": 520.7894736842105,
+          "y": 401.63157894736844,
+          "pixels": 19
+        },
+        "beforeWorld": {
+          "x": 59.53590295441205,
+          "y": 59.112241570468925
+        },
+        "afterWorld": {
+          "x": 32.06261005674036,
+          "y": 32.148177134285525
+        },
+        "stalled": false,
+        "teleported": true
+      }
+    ],
+    "markerAfter": {
+      "x": 520.7894736842105,
+      "y": 401.63157894736844,
+      "pixels": 19
+    },
+    "dispatchesBefore": 1,
+    "dispatchesAfter": 2,
+    "webgpuErrors": [],
+    "workerInputCount": 8908,
+    "workerInputTail": [
+      "[target-probe] input 1:68:0",
+      "[target-probe] input 1:87:0",
+      "[target-probe] input 0:68:0",
+      "[target-probe] input 2:100:0",
+      "[target-probe] input 0:87:0",
+      "[target-probe] input 2:119:0",
+      "[target-probe] input 1:68:0",
+      "[target-probe] input 1:87:0"
+    ]
+  }
+}

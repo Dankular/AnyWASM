@@ -195,12 +195,15 @@ from the prior external build were passed as disconnected FetchContent overrides
 D3D11 as the only enabled graphics backend, and the Release `GLFWDemo` target built successfully.
 No binary was copied into this repository.
 
-The current static-runtime analyzer output is in
+The regenerated static-runtime analyzer output is in
 [`target-imports/glfwdemo-d3d11-staticcrt.json`](target-imports/glfwdemo-d3d11-staticcrt.json).
 The earlier dynamic-runtime report remains in
 [`target-imports/glfwdemo-d3d11.json`](target-imports/glfwdemo-d3d11.json), generated with an older
-analyzer implementation. The current static-runtime report is therefore the authoritative blocker
-list; its counts are not a like-for-like comparison with that older 349-miss snapshot.
+analyzer implementation. The current source-built CLI reports 84 missing imports across the EXE and
+three DLLs when each image is analyzed with the release directory, so imports from bundled sibling
+DLLs count as resolved. An individual-file run without `--dir` reports 88 because four imports from
+the bundled D3Dcompiler DLL are counted as missing. The older 349-miss dynamic-runtime snapshot used
+an older analyzer and is not directly comparable.
 
 | Image | Implemented | Missing | Largest unresolved groups |
 |---|---:|---:|---|
@@ -212,8 +215,8 @@ list; its counts are not a like-for-like comparison with that older 349-miss sna
 
 The static runtime leaves no reported MSVCP140, VCRUNTIME140, or UCRT import misses in the EXE,
 engine, and archiver. The EXE's current misses include 20 USER32, 10 GDI32, 7 KERNEL32, and 3
-SHELL32 symbols; the engine retains 9 imports, the archiver 8, and D3DCompiler 27. The archived
-JSON records each unresolved name.
+SHELL32 symbols; the engine retains 9 imports, the archiver 8, and D3DCompiler 27. The JSON
+records each unresolved name.
 
 ### Third-party DLL loading audit
 
@@ -582,18 +585,24 @@ formats/readback paths, all gameplay states, or game acceptance.
 
 This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
 directions, a flashlight response for one seed/aim direction, and map regeneration in the selected
-target. Its deterministic seed-1 SDF UAV has a bounded independent readback. Other gameplay states
-and a full playthrough remain unverified; no real-game acceptance pass is claimed. The default
+target. A controlled replay of the deterministic seed-1 bundle also traversed the maze to its
+teleport, regenerated the map (compute dispatches 1 → 2), and returned the player marker to the
+center with no WebGPU errors. It covered 45.01 map units in 1,834 key pulses over 34 measured route
+segments; the complete measurements and bundle hash are in
+[`target-data/glfwdemo-seed1-playthrough.json`](target-data/glfwdemo-seed1-playthrough.json). This
+establishes one complete seeded maze traversal, not general gameplay acceptance: the random Release
+map, other gameplay states, graphics states, and other readback paths remain unverified. The default
 250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
 is diagnostic test routing only.
 
 ## Next evidence needed
 
-- Complete a controlled playthrough before making a gameplay acceptance claim. Flashlight behavior
-  outside the single seeded check, other gameplay states, other UAV formats, and general staging
-  readback remain untested. Stabilize the flashlight browser assertion for the random Release bundle
-  (or make it consume a deterministic seeded build); the current 100-bright-pixel threshold failed
-  once at +36 pixels when the random wall layout occluded most of the beam.
+- A controlled seed-1 maze traversal is now recorded, but it does not establish general gameplay
+  acceptance. Flashlight behavior outside the single seeded check, other gameplay states, other UAV
+  formats, and general staging readback remain untested. Stabilize the flashlight browser assertion
+  for the random Release bundle (or make it consume a deterministic seeded build); the current
+  100-bright-pixel threshold failed once at +36 pixels when the random wall layout occluded most of
+  the beam.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current
@@ -604,12 +613,16 @@ is diagnostic test routing only.
   MSVC runtime imports. Their current D3D11 traces do not reach shader creation or Present.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
-- The D3D11-only GLFW Demo remains the selected game candidate. The current `/MT` analyzer report has
-  84 missing imports across the EXE and three DLLs; the archived prior report had 122 after static
-  linking. Conversion, version, path, scheduler, static TLS, selected target VEX/BMI, secure random,
+- The D3D11-only GLFW Demo remains the selected game candidate. The latest package-aware source-built
+  `/MT` analysis reports 84 missing imports across the EXE and three DLLs. A prior status note listed
+  96, which this build does not reproduce; analyzing each image without `--dir` reports 88 because
+  four imports from bundled D3Dcompiler are treated as unresolved. The older dynamic-runtime snapshot
+  reported 349 with an older analyzer. Conversion, version, path,
+  scheduler, static TLS, selected target VEX/BMI, secure random,
   PE unwind primitives, the selected C++ catch path, D3D11 UAV binding, and constant-buffer ranges
   have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
   compute dispatch, draw, and repeated present calls. The browser target replay now verifies host
   rendering, all four movement directions, cursor-aimed Space movement in all four directions, a
   seeded flashlight response, and Tab map regeneration; native comparison, independent UAV readback,
-  and gameplay acceptance remain bounded to the specific evidence above.
+  and one full seed-1 maze traversal; broad gameplay acceptance remains open and evidence remains
+  bounded to the specific cases above.

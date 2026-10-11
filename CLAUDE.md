@@ -236,8 +236,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       [`docs/images/glfwdemo-first-frame.png`](docs/images/glfwdemo-first-frame.png); SDF maze pixels
       are visible with no WebGPU validation errors. A deterministic seed-1 native D3D11 capture has
       a bounded visual comparison in `docs/TARGETS.md`. Its 128x128 R32_FLOAT SDF UAV is independently
-      read back with all finite values inside the shader's ±4 bound; other UAV formats, pixel
-      equivalence, graphics states, and gameplay remain unverified. Target-driven Tab map reset is
+      read back with all finite values inside the shader's ±4 bound, and a controlled seed-1 browser
+      replay traverses the maze to its teleport; other UAV formats, pixel equivalence, graphics
+      states, other gameplay states, and broad game acceptance remain unverified. Target-driven Tab
+      map reset is
       pixel-checked after adding D3D11 `Flush1` event signaling and event-query completion; other
       query types are not supported. Structured/raw-buffer UAVs, geometry/hull/domain
       shaders, MSAA (forced to 1 sample), general staging read-back, deferred
@@ -307,8 +309,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       static-analysis only and needs a separate Intel-origin code/assets redistribution review.
       The Apache-2.0 GLFW Demo maze is now the selected game candidate. A separate D3D11-only `/MT`
       build succeeded; the current
-      analyzer reports 84 missing imports across its EXE and three DLLs; an older analyzer snapshot
-      reported 349, but those totals are not directly comparable. The browser test now verifies all
+      package-aware analyzer reports 84 missing imports across its EXE and three DLLs. A prior
+      status note listed 96, which the current build does not reproduce; see `docs/TARGETS.md` for
+      the `--dir` distinction and per-image report. An older dynamic-runtime snapshot reported 349
+      with an older analyzer. The browser test now verifies all
       four WASD directions and cursor-aimed movement in all four directions, plus the flashlight's
       visible response to a held left click;
       guest pointer coordinates account for canvas borders and the CSS-to-window scale, and
@@ -342,8 +346,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       general Release bundle uses `std::random_device` for map generation; its flashlight threshold
       varies between launches and failed once in an unseeded replay. Keep the stored flashlight claim
       scoped to its seeded build and aim direction; see `docs/TARGETS.md`. The
-      normal worker slice still stops in a synchronous callback that cannot resume, and no gameplay
-      or end-to-end game acceptance pass is claimed; see `docs/TARGETS.md` for exact evidence and limits.
+      normal worker slice still stops in a synchronous callback that cannot resume. One controlled
+      seed-1 maze traversal reaches the teleport, but broad gameplay and end-to-end game acceptance
+      remain open; see `docs/TARGETS.md` for exact evidence and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the

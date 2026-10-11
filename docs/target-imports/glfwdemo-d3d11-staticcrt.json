@@ -1,7 +1,7 @@
 {
-  "generated_utc": "2026-10-11T22:23:29Z",
-  "analyzer": "anywasm analyze --json",
-  "anywasm_commit": "976848159cb176945f9249ad85aa6ce7468dba3a",
+  "generated_utc": "2026-10-11T23:45:54Z",
+  "analyzer": "anywasm analyze --json --dir <release-dir>",
+  "anywasm_commit": "0ca50c84ed9ede02b3924cc67207d094a53d3e9f",
   "diligentengine_commit": "efe5da2270c6edfc8b0d2e39e946b35acbeaa874",
   "diligentcore_commit": "074060cfd1db73064d7a18cf40df86af6531520c",
   "diligentsamples_commit": "03a10e15e69c5ae1738a52175ae029f3f4275a90",
@@ -12,6 +12,10 @@
     "cmake_msvc_runtime_library": "MultiThreaded",
     "policy_default_cmp0091": "NEW",
     "rendering_backend": "D3D11 only"
+  },
+  "aggregate": {
+    "implemented_count": 484,
+    "missing_count": 84
   },
   "images": [
     {

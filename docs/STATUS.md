@@ -189,8 +189,12 @@
   AnyWASM. Both reach virtual D3D11 device discovery/creation before stopping at the first unresolved
   `MSVCP140.dll` `basic_ios<char>` constructor. They do not reach shader creation, guest `Present`,
   or pixel verification; Asteroids remains analyzer-only pending licence review.
-  A D3D11-only `/MT` build now reports 96 missing static imports across the EXE and three DLLs,
-  down from 349. Guest regressions cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
+  The current source-built, package-aware analyzer reports 84 missing static imports for the
+  D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in
+  D3Dcompiler. A prior status note listed 96, which this build does not reproduce; analyzing each
+  image without `--dir` reports 88 because four imports from bundled D3Dcompiler are counted as
+  missing. The older dynamic-runtime snapshot reported 349 with an older analyzer. Guest regressions
+  cover Win32 `MultiByteToWideChar` and `LCMapStringEx` count-only
   queries. Scheduler regressions cover condition-variable resumption. An earlier bounded run stopped
   at `SleepConditionVariableSRW`; a fresh 30,000,000-step CLI replay continued after the wait and hit
   the cap in D3DCompiler. A separate high-cap guest trace initializes target static TLS, completes the
