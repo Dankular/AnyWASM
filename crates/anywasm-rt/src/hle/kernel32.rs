@@ -1313,7 +1313,12 @@ pub fn cp1252(b: u8) -> u16 {
 }
 
 fn multi_byte_to_wide_char(p: &mut Process) -> R {
-    let (cp, _fl, src, n, dst, dn) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as i64, p.arg(4), p.arg(5) as usize);
+    // Both lengths are Win32 ints; upper bits in their x64 argument slots are unspecified.
+    let (cp, _fl, src, n, dst, dn) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as u32 as i32, p.arg(4), p.arg(5) as u32 as i32);
+    if n == 0 || n < -1 || dn < 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
     let bytes = if n < 0 {
         let mut b = p.mem.read_cstr(src, 1 << 20).map_err(|e| Stop::Crash(format!("{e:?}")))?;
         b.push(0);
@@ -1325,7 +1330,7 @@ fn multi_byte_to_wide_char(p: &mut Process) -> R {
     if dn == 0 {
         return Ok(w.len() as u64);
     }
-    if w.len() > dn {
+    if dst == 0 || w.len() > dn as usize {
         p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
         return Ok(0);
     }

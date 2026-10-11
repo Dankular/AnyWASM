@@ -111,6 +111,10 @@ const normalizeLines = text => text.replace(/\r\n/g, '\n');
 check('crt_test.exe output identical to native build', normalizeLines(r.out) === normalizeLines(native), `\n--- wasm\n${r.out}\n--- native\n${native}`);
 check('crt_test.exe stderr captured', r.err === 'to stderr\n', JSON.stringify(r.err));
 
+r = await runExe('fixtures/multibyte_test.exe');
+check('MultiByteToWideChar handles sizing, null/short buffers, invalid lengths, and NUL input',
+  r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
+
 r = await runExe('fixtures/d3dprobe.exe');
 check('d3dprobe.exe (D3D11CreateDevice + MessageBoxA) runs to completion', r.status === Status.EXITED && r.exitCode === 0 && r.err.includes('[MessageBox] probe: ok'), JSON.stringify(r));
 

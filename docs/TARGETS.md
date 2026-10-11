@@ -151,11 +151,74 @@ surface is large. This candidate has not been run or behavior-verified and does 
 real-target acceptance gate. A missing static import alone does not prove that a selected path
 reaches it.
 
-The next smallest experiment is to rebuild this target with the MSVC static runtime
-(`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`) and re-run all four analyses. That targets the dominant
-MSVCP140/VCRUNTIME140 import groups before any host API work. It will not address the executable's
-USER32/GDI32 surface or the D3D compiler DLL's KERNEL32/ADVAPI32 imports; those remain separate
-blockers if reached.
+### Static MSVC runtime experiment
+
+A separate D3D11-only build was configured under
+`D:\Dev Proj\WASM\target-eval\DiligentBuild-GLFWDemo-staticcrt`; the original build tree and
+external source checkout were preserved. The top-level project requires CMake 3.10, so the
+configure set `CMAKE_POLICY_DEFAULT_CMP0091=NEW` along with
+`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`. Generated MSBuild projects for `GLFWDemo`, the D3D11
+engine, Common, and GLFW all specify `RuntimeLibrary=MultiThreaded`. DiligentFX was enabled because
+this DiligentSamples checkout requires it; the already-populated EnTT and Abseil source directories
+from the prior external build were passed as disconnected FetchContent overrides. CMake reported
+D3D11 as the only enabled graphics backend, and the Release `GLFWDemo` target built successfully.
+No binary was copied into this repository.
+
+The full static-runtime analyzer output is in
+[`target-imports/glfwdemo-d3d11-staticcrt.json`](target-imports/glfwdemo-d3d11-staticcrt.json).
+Counts below compare that build with the earlier dynamic-runtime build above:
+
+| Image | Total missing | MSVCP140 | VCRUNTIME140 | UCRT API sets (`api-ms-win-crt-*`) | Other missing |
+|---|---:|---:|---:|---:|---:|
+| `GLFWDemo.exe` | 134 -> 63 | 64 -> 0 | 5 -> 0 | 9 -> 0 | 56 -> 63 |
+| `GraphicsEngineD3D11_64r.dll` | 96 -> 17 | 75 -> 0 | 7 -> 0 | 7 -> 0 | 7 -> 17 |
+| `Archiver_64r.dll` | 91 -> 14 | 73 -> 0 | 7 -> 0 | 7 -> 0 | 4 -> 14 |
+| `D3Dcompiler_47.dll` | 28 -> 28 | 0 -> 0 | 0 -> 0 | 0 -> 0 | 28 -> 28 |
+| **Total** | **349 -> 122** | **212 -> 0** | **19 -> 0** | **23 -> 0** | **95 -> 122** |
+
+The static runtime removes all reported MSVCP140, VCRUNTIME140, and UCRT import misses from the EXE,
+engine, and archiver. KERNEL32 misses increase from 22 to 49 because the static runtime brings in
+additional APIs. The EXE still has 36 USER32, 13 GDI32, 10 KERNEL32, and 4 SHELL32 missing imports;
+the engine retains 17 imports, the archiver 14, and D3DCompiler 28.
+
+### Bounded AnyWASM trial
+
+The EXE was run with the Release output directory as its VFS root so the companion DLLs and shader
+assets were available, with `--mode d3d11` and a 3,000,000-instruction cap. The first traced run
+reached static CRT command-line/code-page initialization, then faulted while trying to write 512
+bytes to address zero in `kernel32!MultiByteToWideChar`. Argument tracing captured
+`(1252, 1, src, 256, NULL, 0xbf00be00000000)`: `cchWideChar` is a 32-bit `int`, so its low 32 bits
+were zero (a valid count-only query), while unused upper stack-slot bits were dirty. The HLE had read
+the full 64-bit slot as the capacity and tried to write the conversion result to the null output
+pointer.
+
+The HLE now reads both signed length parameters from their low 32 bits, preserves
+`cbMultiByte=-1` as the null-terminated input form, rejects `cbMultiByte=0` and negative output
+capacity with `ERROR_INVALID_PARAMETER`, and returns `ERROR_INSUFFICIENT_BUFFER` for a null output
+pointer with nonzero capacity or an undersized buffer. A new freestanding guest fixture covers these
+cases. Microsoft documents `cchWideChar=0` as a count-only call that does not use the output pointer,
+`cbMultiByte=-1` as including the terminating NUL, and lists `ERROR_INSUFFICIENT_BUFFER` for a null
+output buffer ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar)).
+The x64 calling convention assigns arguments beyond the fourth to eight-byte stack slots, so the HLE
+must honor the declared 32-bit parameter type when reading those values
+([ABI documentation](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170)).
+The new fixture was built locally with the installed VS 2022 `cl`/`link`; `fixtures/build.sh` now
+includes it in the existing clang/lld-link fixture build. A native Windows run of that same fixture
+reported `ERROR_INVALID_PARAMETER` (87) for the null-output/nonzero-capacity call, while the API
+documentation's error list also describes `ERROR_INSUFFICIENT_BUFFER` (122) for a null output
+buffer. The AnyWASM regression currently asserts 122 per the documented error entry and requested
+behavior; this host observation is retained as an open compatibility detail.
+
+After that fix, the same bounded game run passed the conversion calls and reached a second null
+write in `kernel32!LCMapStringEx`. The last captured call was
+`(NULL, 512, src, 256, NULL, 0xbf00be00000000)`: `cchDest` is again a zero 32-bit count-only query,
+but the current LCMap HLE reads the full stack slot and tries to write 512 bytes to address zero.
+Microsoft documents `cchDest=0` as a count-only query that does not use `lpDestStr`
+([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-lcmapstringex)).
+No GLFW window or D3D11 renderer was observed, and no game behavior was verified. This is the next
+localized blocker. GLFW's Win32 window-creation path is also known from source inspection to call
+the still-unimplemented `SHELL32!DragAcceptFiles` unconditionally; that later dependency remains
+unreached.
 
 Pinned upstream references: [DiligentSamples README](https://github.com/DiligentGraphics/DiligentSamples/blob/03a10e15e69c5ae1738a52175ae029f3f4275a90/README.md),
 [GLFW Demo source](https://github.com/DiligentGraphics/DiligentSamples/tree/03a10e15e69c5ae1738a52175ae029f3f4275a90/Samples/GLFWDemo),
@@ -172,6 +235,8 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
   IMM32 symbols.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
-- The D3D11-only GLFW Demo is now the selected game candidate. Its statically unresolved import
-  surface needs to be reduced and re-analyzed before attempting a behavior run; do not count the
-  existing D3D11 fixtures as a game acceptance run.
+- The D3D11-only GLFW Demo is the selected game candidate. Its `/MT` build reduces reported misses
+  from 349 to 122. The `MultiByteToWideChar` size-query fault is fixed and covered by a guest
+  regression; the current run stops at an analogous `LCMapStringEx` null write before window
+  creation. Fix and test that reached path next, then implement the known GLFW
+  `SHELL32!DragAcceptFiles` dependency before attempting gameplay verification.

@@ -16,6 +16,7 @@ QueryPerformanceFrequency
 GetTickCount64
 GetLastError
 SetLastError
+MultiByteToWideChar
 LoadLibraryA
 GetProcAddress
 GetModuleHandleA

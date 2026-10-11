@@ -111,10 +111,11 @@
   productisation work. Broad items such as threading, SEH, more D3D11 coverage, AVX, and 32-bit PE
   support need a representative target and dedicated design/verification before implementation.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
-  The maze build is D3D11-only, but its EXE has 134 unresolved imports and its D3D11 engine DLL has
-  96; it was not run through AnyWASM. No real-game acceptance pass is claimed. See
-  [`docs/TARGETS.md`](TARGETS.md) for source/license evidence, build notes, import groups, and the
-  next smallest experiment.
+  A D3D11-only `/MT` build reduced the maze package's missing static imports from 349 to 122, but a
+  bounded AnyWASM run now passes CRT `MultiByteToWideChar` initialization and stops at a null write
+  in `LCMapStringEx` before window creation. The former has a guest regression covering the Win32
+  capacity contract and signed length parameters. No real-game acceptance pass is claimed. See
+  [`docs/TARGETS.md`](TARGETS.md) for exact traces and next steps.
 - The D3D11 textured fixture now has Rust command-stream and WASM smoke coverage. Its WebGPU pixel
   checks remain in `test/browser/run.mjs`; other rendering states listed in `CLAUDE.md` are not
   pixel-verified.

@@ -26,6 +26,13 @@ fn hello_exe_prints_and_exits_zero() {
 }
 
 #[test]
+fn multibyte_to_wide_char_obeys_win32_lengths_and_buffer_contract() {
+    let (stop, out, err, p) = run("multibyte_test.exe");
+    assert_eq!(stop, Stop::Exit(0), "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}", p.unimplemented_log);
+    assert!(out.is_empty());
+}
+
+#[test]
 fn process_run_honors_block_instruction_budget_and_icount() {
     const CODE: u64 = 0x10000;
     let mut p = Process::new(Vfs::new());

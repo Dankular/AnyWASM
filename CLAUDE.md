@@ -192,10 +192,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       import blockers in `docs/TARGETS.md`. These are preliminary targets: the tutorial renderer
       choice was not launched, the samples have not run through AnyWASM, and Asteroids needs a
       separate Intel-origin code/assets redistribution review. The Apache-2.0 GLFW Demo maze is now
-      the selected game candidate; its D3D11-only build succeeded, but static analysis reports 134
-      unresolved imports in the EXE and 96 in the D3D11 engine DLL. It was not run, so the
-      end-to-end acceptance gate remains open. See `docs/TARGETS.md` for provenance and the next
-      smallest experiment.
+      the selected game candidate. A separate D3D11-only `/MT` build succeeded and reduced total
+      missing imports from 349 to 122. Its `MultiByteToWideChar` size-query fault is fixed and
+      covered by a guest regression; the bounded AnyWASM run now stops at a null write in
+      `LCMapStringEx` before window creation. The end-to-end acceptance gate remains open; see
+      `docs/TARGETS.md` for exact reports and the next implementation.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
