@@ -21,6 +21,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
 const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
 const D3D11_QUERY_EVENT: u32 = 0;
+const DXGI_FORMAT_UNKNOWN: u32 = 0;
 const DXGI_FORMAT_R32_FLOAT: u32 = 41;
 const DXGI_FORMAT_R32_UINT: u32 = 42;
 const DXGI_FORMAT_R32_SINT: u32 = 43;
@@ -30,12 +31,17 @@ const DXGI_FORMAT_R8G8B8A8_SINT: u32 = 32;
 const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
 const DXGI_FORMAT_R32G32B32A32_FLOAT: u32 = 2;
 const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
+const D3D11_FORMAT_SUPPORT_BUFFER: u32 = 0x1;
+const D3D11_FORMAT_SUPPORT_CPU_LOCKABLE: u32 = 0x0002_0000;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
 const D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE: u32 = 0x80;
 const D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE: u32 = 0x0004_0000;
 const D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET: u32 = 0x0020_0000;
 
 fn format_support_flags(format: u32) -> u32 {
+    if format == DXGI_FORMAT_UNKNOWN {
+        return D3D11_FORMAT_SUPPORT_BUFFER | D3D11_FORMAT_SUPPORT_CPU_LOCKABLE;
+    }
     let mut flags = 0x0003_ffff; // common sampling, render-target and texture capabilities
     if matches!(format, DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM) {
         flags |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE | D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
@@ -1434,6 +1440,8 @@ mod tests {
     #[test]
     fn format_support_advertises_typed_uav_for_supported_formats() {
         const TYPED_UAV: u32 = 0x0200_0000;
+
+        assert_eq!(format_support_flags(0), 0x0002_0001); // DXGI_FORMAT_UNKNOWN: buffers and CPU lockable only.
 
         assert_ne!(format_support_flags(41) & TYPED_UAV, 0); // DXGI_FORMAT_R32_FLOAT
         assert_ne!(format_support_flags(42) & TYPED_UAV, 0); // DXGI_FORMAT_R32_UINT
