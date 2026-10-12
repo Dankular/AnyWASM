@@ -115,6 +115,7 @@ export class GpuExecutor {
     this.layouts = new Map();  // input layouts
     this.samplers = new Map();
     this.fixedFunctionShaders = new Map();
+    this.fixedFunctionPixelVariants = new Map();
     this.fixedFunctionNextId = 0xfffffff0;
     this.blends = new Map();
     this.rasters = new Map();
@@ -596,6 +597,7 @@ export class GpuExecutor {
         vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
         ps: {
           stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false,
+          fixedFunction: { source: code, output: 'input.color' },
           texturedVariant: texturedPsId || undefined,
         },
         texturedPs: texturedModule ? {
@@ -605,6 +607,7 @@ export class GpuExecutor {
           descriptors: [{ type: 0, register: 0, resourceType: 4 }, { type: 3, register: 0 }],
           cbSizes: {},
           usesDrawParameters: false,
+          fixedFunction: { source: texturedCode, output: `vec4<f32>(${colorExpr}, ${alphaExpr})` },
         } : null,
       };
       this.fixedFunctionShaders.set(key, fixed);
@@ -616,6 +619,31 @@ export class GpuExecutor {
     this.st.shader[0] = fixed.vsId;
     this.st.shader[1] = fixed.psId;
     this.st.layout = fixed.layoutId;
+  }
+
+  fixedFunctionAlphaTest(ps, psId, alphaFunc, alphaRef) {
+    if (!ps?.fixedFunction) return ps;
+    const compare = {
+      1: 'false', 2: 'outputColor.a < REFERENCE', 3: 'outputColor.a == REFERENCE',
+      4: 'outputColor.a <= REFERENCE', 5: 'outputColor.a > REFERENCE',
+      6: 'outputColor.a != REFERENCE', 7: 'outputColor.a >= REFERENCE', 8: 'true',
+    }[alphaFunc] || 'true';
+    const referenceValue = (alphaRef & 0xff) / 255;
+    const reference = referenceValue.toFixed(9);
+    const key = `${psId}/${alphaFunc}/${alphaRef & 0xff}`;
+    let variant = this.fixedFunctionPixelVariants.get(key);
+    if (variant) return variant;
+    const statement = `return ${ps.fixedFunction.output};`;
+    if (!ps.fixedFunction.source.includes(statement)) {
+      this.log('D3D9 alpha test skipped: fixed-function pixel shader output was not found');
+      return ps;
+    }
+    const expression = compare.replaceAll('REFERENCE', reference);
+    const replacement = `let outputColor = ${ps.fixedFunction.output};\n          if (!(${expression})) { discard; }\n          return outputColor;`;
+    const source = ps.fixedFunction.source.replace(statement, replacement);
+    variant = { ...ps, module: this.device.createShaderModule({ code: source }) };
+    this.fixedFunctionPixelVariants.set(key, variant);
+    return variant;
   }
 
   viewFormat(dxgi, tex) {
@@ -761,6 +789,9 @@ export class GpuExecutor {
       psId = ps.texturedVariant;
       ps = this.shaders.get(psId);
     }
+    if (ps && st.d3d9RenderStates.get(15)) {
+      ps = this.fixedFunctionAlphaTest(ps, psId, st.d3d9RenderStates.get(25) ?? 8, st.d3d9RenderStates.get(24) ?? 0);
+    }
     if (!vs) return;
     let topology = st.topology;
     let transientIndexBuffer = null;
@@ -891,7 +922,7 @@ export class GpuExecutor {
     }
     const rtFormats = att.colors.map((c) => c?.format || null);
     const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
-    const d3d9PipelineStates = [8, 7, 14, 23, 22, 27, 19, 20, 171, 206, 207, 208, 209, 168]
+    const d3d9PipelineStates = [8, 7, 14, 23, 22, 15, 24, 25, 27, 19, 20, 171, 206, 207, 208, 209, 168]
       .map((state) => st.d3d9RenderStates.get(state) ?? null);
     const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, d3d9PipelineStates, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);

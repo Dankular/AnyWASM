@@ -776,6 +776,14 @@ try {
       command(16, words(6)); // D3D9 triangle fan
       command(48, words(7, 0)); // D3DRS_ZENABLE = FALSE
       command(48, words(22, 1)); // D3DRS_CULLMODE = D3DCULL_NONE
+      command(48, words(15, 1)); // D3DRS_ALPHATESTENABLE
+      command(48, words(25, 5)); // D3DRS_ALPHAFUNC = D3DCMP_GREATER
+      command(48, words(24, 255)); // D3DRS_ALPHAREF
+      command(29, words(4, 0));
+      gpu.execute(append());
+      stream.length = 0;
+      const rejectedPixels = await gpu.readBackbuffer(1);
+      command(48, words(24, 254)); // Alpha 1.0 is now greater than the reference.
       command(29, words(4, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
@@ -783,7 +791,14 @@ try {
         const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
       };
-      const result = { upperRight: at(45, 20), lowerLeft: at(20, 45), background: at(1, 1), stats: gpu.stats };
+      const rejectedAt = (x, y) => {
+        const i = (y * rejectedPixels.width + x) * 4;
+        return Array.from(rejectedPixels.data.slice(i, i + 4));
+      };
+      const result = {
+        rejected: [rejectedAt(45, 20), rejectedAt(20, 45)],
+        upperRight: at(45, 20), lowerLeft: at(20, 45), background: at(1, 1), stats: gpu.stats,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -791,9 +806,12 @@ try {
     }
   });
   check('D3D9 FVF fixed-function triangle fan draws with no WebGPU validation errors',
-    d3d9FixedResult.stats?.draws === 1 && d3d9FixedResult.stats.errors.length === 0,
+    d3d9FixedResult.stats?.draws === 2 && d3d9FixedResult.stats.errors.length === 0,
     JSON.stringify(d3d9FixedResult));
-  check('D3D9 triangle fan rasterizes both fan triangles with the correct pixel color',
+  check('D3D9 alpha test discards fragments whose alpha equals the GREATER reference',
+    d3d9FixedResult.rejected?.every((pixel) => near(pixel, [0, 0, 0, 255], 1)),
+    JSON.stringify(d3d9FixedResult.rejected));
+  check('D3D9 alpha test allows fragments above the GREATER reference across the triangle fan',
     near(d3d9FixedResult.upperRight, [255, 0, 0, 255], 1)
       && near(d3d9FixedResult.lowerLeft, [255, 0, 0, 255], 1)
       && near(d3d9FixedResult.background, [0, 0, 0, 255], 1),
