@@ -2544,14 +2544,36 @@ try {
         scissor(); command(29, words(3, 0)); command(17, words(1, 8));
       }
       gpu.execute(append());
-      const pixels = await gpu.readBackbuffer(1);
-      const at = (x, y) => {
-        const i = (y * pixels.width + x) * 4;
-        return Array.from(pixels.data.slice(i, i + 4));
+      const operationFrame = await gpu.readBackbuffer(1);
+      const at = (frame, x, y) => {
+        const i = (y * frame.width + x) * 4;
+        return Array.from(frame.data.slice(i, i + 4));
       };
+      const operationPixels = operations.map((_, i) => at(operationFrame, i * 8 + 4, 32));
+
+      const comparisonValues = [4, 5, 6], comparisonNames = ['never', 'less', 'equal', 'less-equal', 'greater', 'not-equal', 'greater-equal', 'always'];
+      stream.length = 0;
+      command(27, clearColor); command(28, clearDepth);
+      for (let i = 0; i < comparisonNames.length; i++) stencilState(50 + i, 0, i + 1, 1);
+      for (let func = 0; func < comparisonNames.length; func++) {
+        for (let valueIndex = 0; valueIndex < comparisonValues.length; valueIndex++) {
+          const stored = comparisonValues[valueIndex];
+          const left = func * 8, top = Math.floor(valueIndex * 64 / 3), bottom = Math.floor((valueIndex + 1) * 64 / 3);
+          const scissor = () => command(23, words(1, left, top, left + 8, bottom));
+          command(17, words(1, 8)); command(26, words(13, stored)); scissor(); command(29, words(3, 0));
+          command(17, words(1, 9)); command(26, words(50 + func, 5)); scissor(); command(29, words(3, 0));
+        }
+      }
+      gpu.execute(append());
+      const comparisonFrame = await gpu.readBackbuffer(1);
       const result = {
         operationNames: operations.map(({ name }) => name),
-        operationPixels: operations.map((_, i) => at(i * 8 + 4, 32)),
+        operationPixels,
+        comparisonNames,
+        comparisonPixels: comparisonNames.map((_, func) => comparisonValues.map((__, value) => {
+          const top = Math.floor(value * 64 / 3), bottom = Math.floor((value + 1) * 64 / 3);
+          return at(comparisonFrame, func * 8 + 4, Math.floor((top + bottom) / 2));
+        })),
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -2561,10 +2583,17 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 stencil pass operations cover keep, zero, replace, saturating and wrapping arithmetic',
-    stencilResult.draws === 24 && stencilResult.errors.length === 0
+  const stencilComparisonPasses = [
+    [false, false, false], [false, false, true], [false, true, false], [false, true, true],
+    [true, false, false], [true, false, true], [true, true, false], [true, true, true],
+  ];
+  check('D3D11 stencil operations and all comparison functions match boundary values',
+    stencilResult.draws === 72 && stencilResult.errors.length === 0
       && stencilResult.operationPixels?.length === 8
-      && stencilResult.operationPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1)),
+      && stencilResult.operationPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1))
+      && stencilResult.comparisonPixels?.length === 8
+      && stencilResult.comparisonPixels.every((row, func) => row.length === 3
+        && row.every((pixel, value) => near(pixel, stencilComparisonPasses[func][value] ? [0, 255, 0, 255] : [255, 0, 0, 255], 1))),
     JSON.stringify(stencilResult));
 
   const reverseBlendResult = await page.evaluate(async () => {

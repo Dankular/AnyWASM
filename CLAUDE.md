@@ -251,9 +251,10 @@ register-stack subset):
       selection, depth-only D32_FLOAT values, and Texture3D R32_FLOAT row/depth pitches. Comparison
       samplers pixel-test all eight
       comparison functions against depth values on both sides of the reference; depth-state
-      comparisons pixel-test all eight functions at equality. Stencil pass operations cover keep,
-      zero, replace, both saturating operations, invert, and both wrapping operations, including
-      8-bit boundaries. Other staging formats and subresource layouts, other format/resolve
+      comparisons pixel-test all eight functions at equality. Stencil comparisons cover all eight
+      functions with stored values below, equal to, and above the reference. Stencil pass operations
+      cover keep, zero, replace, both saturating operations, invert, and both wrapping operations,
+      including 8-bit boundaries. Other staging formats and subresource layouts, other format/resolve
       combinations, and more render-state combinations remain open.
 - [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
