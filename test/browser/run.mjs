@@ -1456,6 +1456,30 @@ try {
         copied: [atVolume(0, 1, 1), atVolume(1, 1, 1), atVolume(0, 2, 2), atVolume(1, 2, 2)],
         outside: [atVolume(2, 1, 1), atVolume(0, 0, 1), atVolume(0, 1, 0)],
       };
+
+      stream.length = 0;
+      const sourceBuffer = 50, destinationBuffer = 51;
+      const sourceBytes = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
+      const destinationBytes = new Uint8Array(32).fill(0xee);
+      command(2, words(sourceBuffer, sourceBytes.length, 0, 0, 0, 0));
+      command(2, words(destinationBuffer, destinationBytes.length, 0, 0, 0, 0));
+      const writeBuffer = (id, data) => {
+        const payload = new Uint8Array(12 + data.length);
+        payload.set(words(id, 0, data.length)); payload.set(data, 12); command(3, payload);
+      };
+      writeBuffer(sourceBuffer, sourceBytes); writeBuffer(destinationBuffer, destinationBytes);
+      command(40, words(destinationBuffer, 0, 5, 0, 0, sourceBuffer, 0, 1, 7, 0, 0, 18, 1, 1));
+      gpu.execute(append());
+      result.copyBuffer = Array.from(await gpu.readBackResource(destinationBuffer));
+
+      stream.length = 0;
+      const overlappingBuffer = 52;
+      const overlappingBytes = Uint8Array.from({ length: 32 }, (_, i) => i);
+      command(2, words(overlappingBuffer, overlappingBytes.length, 0, 0, 0, 0));
+      writeBuffer(overlappingBuffer, overlappingBytes);
+      command(40, words(overlappingBuffer, 0, 8, 0, 0, overlappingBuffer, 0, 1, 4, 0, 0, 16, 1, 1));
+      gpu.execute(append());
+      result.copyBufferOverlap = Array.from(await gpu.readBackResource(overlappingBuffer));
       result.errors = gpu.stats.errors;
       gpu.device.destroy();
       return result;
@@ -1476,6 +1500,15 @@ try {
     copyRegionResult.copy3d?.copied?.map((pixel) => pixel[0]).join(',') === '21,22,41,42'
       && copyRegionResult.copy3d?.outside?.every((pixel) => pixel[0] === 9 && pixel[1] === 8 && pixel[2] === 7 && pixel[3] === 255),
     JSON.stringify(copyRegionResult.copy3d));
+  const expectedBufferRegion = Array(32).fill(0xee);
+  expectedBufferRegion.splice(5, 11, ...Array.from({ length: 11 }, (_, i) => i + 8));
+  check('D3D11 CopySubresourceRegion copies unaligned buffer byte ranges and preserves both edges',
+    copyRegionResult.copyBuffer?.every((byte, i) => byte === expectedBufferRegion[i]) && copyRegionResult.errors.length === 0,
+    JSON.stringify(copyRegionResult.copyBuffer));
+  const expectedBufferOverlap = Array.from({ length: 32 }, (_, i) => i >= 8 && i < 20 ? i - 4 : i);
+  check('D3D11.1 overlapping buffer CopySubresourceRegion uses the original source bytes',
+    copyRegionResult.copyBufferOverlap?.every((byte, i) => byte === expectedBufferOverlap[i]) && copyRegionResult.errors.length === 0,
+    JSON.stringify(copyRegionResult.copyBufferOverlap));
   check('GenerateMips box-filters the 4x4 source into four 2x2 colour averages',
     copyRegionResult.mip1?.every((pixel, i) => near(pixel, [[20, 20, 0, 255], [100, 20, 0, 255], [20, 100, 0, 255], [100, 100, 0, 255]][i], 1)),
     JSON.stringify(copyRegionResult.mip1));

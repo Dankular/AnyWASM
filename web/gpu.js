@@ -2156,6 +2156,87 @@ export class GpuExecutor {
     }
   }
 
+  copyBufferRegion(src, dst, sourceOffset, destinationOffset, size) {
+    if (size <= 0) return;
+    let source = src.gpu;
+    if (src === dst) {
+      const scratch = this.device.createBuffer({ size: src.gpu.size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE });
+      this.encoder().copyBufferToBuffer(src.gpu, 0, scratch, 0, src.gpu.size);
+      this.transientBuffers.push(scratch);
+      source = scratch;
+    }
+
+    if ((sourceOffset | destinationOffset | size) % 4 === 0) {
+      this.encoder().copyBufferToBuffer(source, sourceOffset, dst.gpu, destinationOffset, size);
+      return;
+    }
+
+    if (source.size > this.device.limits.maxStorageBufferBindingSize || dst.gpu.size > this.device.limits.maxStorageBufferBindingSize) {
+      throw new Error('unaligned buffer CopySubresourceRegion exceeds the WebGPU storage binding limit');
+    }
+    if (!this.bufferByteCopyPipeline) {
+      const module = this.device.createShaderModule({ code: `
+        struct CopyParams {
+          sourceOffset: u32,
+          destinationOffset: u32,
+          byteCount: u32,
+          firstWord: u32,
+          wordCount: u32,
+        };
+        @group(0) @binding(0) var<storage, read> sourceData: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> destinationData: array<u32>;
+        @group(0) @binding(2) var<uniform> params: CopyParams;
+        @compute @workgroup_size(64)
+        fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
+          if (invocation.x >= params.wordCount) { return; }
+          let destinationWord = params.firstWord + invocation.x;
+          var result = destinationData[destinationWord];
+          for (var lane = 0u; lane < 4u; lane += 1u) {
+            let destinationByte = destinationWord * 4u + lane;
+            if (destinationByte >= params.destinationOffset && destinationByte < params.destinationOffset + params.byteCount) {
+              let sourceByte = params.sourceOffset + destinationByte - params.destinationOffset;
+              let sourceWord = sourceData[sourceByte / 4u];
+              let value = (sourceWord >> ((sourceByte % 4u) * 8u)) & 0xffu;
+              let shift = lane * 8u;
+              result = (result & ~(0xffu << shift)) | (value << shift);
+            }
+          }
+          destinationData[destinationWord] = result;
+        }
+      ` });
+      const visibility = GPUShaderStage.COMPUTE;
+      const layout = this.device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility, buffer: { type: 'storage' } },
+        { binding: 2, visibility, buffer: { type: 'uniform', minBindingSize: 20 } },
+      ] });
+      this.bufferByteCopyLayout = layout;
+      this.bufferByteCopyPipeline = this.device.createComputePipeline({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        compute: { module, entryPoint: 'main' },
+      });
+    }
+
+    const firstWord = destinationOffset >>> 2;
+    const wordCount = ((destinationOffset + size + 3) >>> 2) - firstWord;
+    const params = this.device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(params, 0, new Uint32Array([sourceOffset, destinationOffset, size, firstWord, wordCount]));
+    this.transientBuffers.push(params);
+    const bindGroup = this.device.createBindGroup({
+      layout: this.bufferByteCopyLayout,
+      entries: [
+        { binding: 0, resource: { buffer: source } },
+        { binding: 1, resource: { buffer: dst.gpu } },
+        { binding: 2, resource: { buffer: params, size: 20 } },
+      ],
+    });
+    const pass = this.encoder().beginComputePass();
+    pass.setPipeline(this.bufferByteCopyPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(wordCount / 64));
+    pass.end();
+  }
+
   copyRegion(dv) {
     const u = (i) => dv.getUint32(i * 4, true);
     const [dst, dsub, dx, dy, dz, src, ssub, hasBox] = [u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7)];
@@ -2164,11 +2245,13 @@ export class GpuExecutor {
     this.endPass();
     if (d.kind === 'buffer' && s.kind === 'buffer') {
       const l = hasBox ? u(8) : 0, r = hasBox ? u(11) : s.size;
-      const sourceOffset = l & ~3, destOffset = dx & ~3;
-      const size = Math.min(r - l, d.size - dx) & ~3;
-      this.encoder().copyBufferToBuffer(s.gpu, sourceOffset, d.gpu, destOffset, size);
+      const sourceOffset = l, destOffset = dx;
+      const sourceSize = s.d3dSize ?? s.size, destinationSize = d.d3dSize ?? d.size;
+      const size = Math.max(0, Math.min(r - l, sourceSize - sourceOffset, destinationSize - destOffset));
+      this.copyBufferRegion(s, d, sourceOffset, destOffset, size);
       if (d.shadow && s.shadow && sourceOffset + size <= s.shadow.length && destOffset + size <= d.shadow.length) {
-        d.shadow.set(s.shadow.subarray(sourceOffset, sourceOffset + size), destOffset);
+        if (s.shadow === d.shadow) d.shadow.copyWithin(destOffset, sourceOffset, sourceOffset + size);
+        else d.shadow.set(s.shadow.subarray(sourceOffset, sourceOffset + size), destOffset);
       }
       return;
     }
