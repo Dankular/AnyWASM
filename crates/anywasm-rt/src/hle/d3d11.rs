@@ -29,6 +29,7 @@ const DXGI_FORMAT_R8G8B8A8_SINT: u32 = 32;
 const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
 const DXGI_FORMAT_R32G32B32A32_FLOAT: u32 = 2;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
+const D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE: u32 = 0x80;
 
 fn format_support_flags(format: u32) -> u32 {
     let mut flags = 0x0003_ffff; // common sampling, render-target and texture capabilities
@@ -163,13 +164,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             p.wr32(out, if samples == 1 || samples == 4 { 1 } else { 0 })?;
             Ok(S_OK)
         },
-        "CheckFeatureSupport" => |p| {
-            let (feature, data, size) = (p.arg(1), p.arg(2), p.arg(3) as usize);
-            if data != 0 {
-                p.write_bytes(data, &vec![0u8; size])?;
-            }
-            Ok(if feature == 0 { S_OK } else { S_OK })
-        },
+        "CheckFeatureSupport" => check_feature_support,
         "GetFeatureLevel" => |_| Ok(D3D_FEATURE_LEVEL_11_0 as u64),
         "GetCreationFlags" => |_| Ok(0),
         "GetDeviceRemovedReason" => |_| Ok(S_OK),
@@ -365,6 +360,47 @@ fn get_query_data(p: &mut Process) -> R {
     let (data, size) = (p.arg(2), p.arg(3) as u32);
     if data != 0 && size >= 4 {
         p.wr32(data, 1)?;
+    }
+    Ok(S_OK)
+}
+
+fn check_feature_support(p: &mut Process) -> R {
+    const FEATURE_THREADING: u64 = 0;
+    const FEATURE_DOUBLES: u64 = 1;
+    const FEATURE_FORMAT_SUPPORT: u64 = 2;
+    const FEATURE_FORMAT_SUPPORT2: u64 = 3;
+    const FEATURE_D3D10_X_HARDWARE_OPTIONS: u64 = 4;
+
+    let (feature, data, size) = (p.arg(1), p.arg(2), p.arg(3) as u32);
+    let expected_size = match feature {
+        FEATURE_THREADING | FEATURE_FORMAT_SUPPORT | FEATURE_FORMAT_SUPPORT2 => 8,
+        FEATURE_DOUBLES | FEATURE_D3D10_X_HARDWARE_OPTIONS => 4,
+        _ => return Ok(E_INVALIDARG),
+    };
+    if data == 0 || size != expected_size {
+        return Ok(E_INVALIDARG);
+    }
+
+    match feature {
+        FEATURE_THREADING | FEATURE_DOUBLES => p.write_bytes(data, &vec![0; size as usize])?,
+        FEATURE_FORMAT_SUPPORT => {
+            let format = p.rd32(data)?;
+            p.wr32(data + 4, format_support_flags(format))?;
+        }
+        FEATURE_FORMAT_SUPPORT2 => {
+            let format = p.rd32(data)?;
+            let flags = if format_support_flags(format)
+                & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW
+                != 0
+            {
+                D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE
+            } else {
+                0
+            };
+            p.wr32(data + 4, flags)?;
+        }
+        FEATURE_D3D10_X_HARDWARE_OPTIONS => p.wr32(data, 1)?,
+        _ => unreachable!(),
     }
     Ok(S_OK)
 }
@@ -1282,6 +1318,41 @@ mod tests {
         assert_ne!(format_support_flags(32) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_SINT
         assert_eq!(format_support_flags(54) & TYPED_UAV, 0); // DXGI_FORMAT_R16_FLOAT
         assert_eq!(format_support_flags(61) & TYPED_UAV, 0); // DXGI_FORMAT_R8_UNORM
+    }
+
+    #[test]
+    fn check_feature_support_reports_typed_uav_format_queries() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DATA: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DATA, PAGE_SIZE, PROT_RW));
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 2; // D3D11_FEATURE_FORMAT_SUPPORT
+        p.cpu.gpr[R8] = DATA;
+        p.cpu.gpr[R9] = 8;
+        p.wr32(DATA, DXGI_FORMAT_R8G8B8A8_UINT).unwrap();
+
+        let check = method("ID3D11Device", "CheckFeatureSupport").unwrap();
+        assert_eq!(check(&mut p).unwrap(), S_OK);
+        assert_ne!(p.rd32(DATA + 4).unwrap() & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW, 0);
+
+        p.cpu.gpr[RDX] = 3; // D3D11_FEATURE_FORMAT_SUPPORT2
+        p.wr32(DATA, DXGI_FORMAT_R8G8B8A8_UINT).unwrap();
+        assert_eq!(check(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(DATA + 4).unwrap(), 0x80); // D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE
+
+        p.wr32(DATA, 54).unwrap(); // DXGI_FORMAT_R16_FLOAT is not a supported typed UAV.
+        assert_eq!(check(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(DATA + 4).unwrap(), 0);
+
+        p.cpu.gpr[R9] = 4;
+        assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
+        p.cpu.gpr[RDX] = 99;
+        p.cpu.gpr[R9] = 8;
+        assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
     }
 
     #[test]
