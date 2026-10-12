@@ -3901,6 +3901,18 @@ try {
         SamplerState volumeSampler : register(s0);
         float4 main() : SV_Target { return float4(volume.SampleLevel(volumeSampler, float3(0.5, 0.5, 0.5), 0.0), 0.0, 0.0, 1.0); }
       `, 'main', 'ps_5_0');
+      const uintCompute = tool.compileHlsl(`
+        RWTexture3D<uint> volume : register(u0);
+        [numthreads(2, 2, 2)]
+        void main(uint3 id : SV_DispatchThreadID) { volume[id] = id.x + id.y * 4 + id.z * 16; }
+      `, 'main', 'cs_5_0');
+      const uintPixel = tool.compileHlsl(`
+        Texture3D<uint> volume : register(t0);
+        float4 main() : SV_Target {
+          uint value = volume.Load(int4(1, 1, 1, 0));
+          return float4(float(value) / 31.0, 0.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -3944,19 +3956,49 @@ try {
       command(21, words(1, 2, 0)); command(15, words(12)); command(16, words(4));
       command(13, words(0, 1, 11, 8, 0));
       command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 10));
-      command(29, words(3, 0)); gpu.execute(append());
-      const pixels = await gpu.readBackbuffer(1);
-      const i = (32 * pixels.width + 32) * 4;
-      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), dispatches: gpu.stats.dispatches, draws: gpu.stats.draws, errors: gpu.stats.errors, logs: gpuLogs };
+      command(29, words(3, 0));
+      gpu.execute(append());
+      const floatPixels = await gpu.readBackbuffer(1);
+      const center = (32 * floatPixels.width + 32) * 4;
+      const floatPixel = Array.from(floatPixels.data.slice(center, center + 4));
+      stream.length = 0;
+      command(46, words(13, 4, 4, 2, 1, 42, 0x88, 0, 0)); // 4x4x2 R32_UINT SRV + UAV volume
+      command(12, words(14, 3, 13, 42, 8, 0, 1, 0, 2)); // 3D UAV covering both W slices
+      command(12, words(15, 2, 13, 42, 8, 0, 1, 0, 1)); // 3D SRV
+      shader(9, 2, uintCompute); shader(10, 1, uintPixel);
+      command(17, words(2, 9)); command(43, words(0, 1, 14, 0xffffffff));
+      command(42, words(2, 2, 1)); // 2x2x1 workgroups of 2x2x2 threads
+      command(17, words(1, 10)); command(19, words(1, 0, 1, 15));
+      command(21, words(1, 2, 0)); command(29, words(3, 0));
+      gpu.execute(append());
+      const uintBackbuffer = await gpu.readBackbuffer(1);
+      const uintObservedPixel = Array.from(uintBackbuffer.data.slice(center, center + 4));
+      const uintPixels = await gpu.readBackResource(13);
+      const uintValues = Array.from(new Uint32Array(uintPixels.buffer, uintPixels.byteOffset, uintPixels.byteLength / 4));
+      const result = {
+        pixel: floatPixel,
+        uintPixel: uintObservedPixel,
+        uintValues,
+        dispatches: gpu.stats.dispatches,
+        draws: gpu.stats.draws,
+        errors: gpu.stats.errors,
+        logs: gpuLogs,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message, logs: gpuLogs };
     }
   });
-  check('D3D11 3D UAV compute writes are visible through a Texture3D SRV',
-    texture3dUavResult.dispatches === 1 && texture3dUavResult.draws === 1 && texture3dUavResult.errors.length === 0
+  check('D3D11 R32_FLOAT 3D UAV writes remain visible through a Texture3D SRV',
+    texture3dUavResult.dispatches === 2 && texture3dUavResult.draws === 2 && texture3dUavResult.errors.length === 0
       && near(texture3dUavResult.pixel, [64, 0, 0, 255], 1),
+    JSON.stringify(texture3dUavResult));
+  check('D3D11 R32_UINT Texture3D UAV writes reach all voxels and the following draw',
+    texture3dUavResult.dispatches === 2 && texture3dUavResult.draws === 2 && texture3dUavResult.errors.length === 0
+      && near(texture3dUavResult.uintPixel, [173, 0, 0, 255], 1)
+      && texture3dUavResult.uintValues?.length === 32
+      && texture3dUavResult.uintValues.every((value, i) => value === i),
     JSON.stringify(texture3dUavResult));
 
   const caps = await page.textContent('#caps');
