@@ -935,6 +935,86 @@ try {
       && computeResult.uav.values.length === 16 && computeResult.uav.values.every((value) => Math.abs(value - 0.25) < 0.0001),
     JSON.stringify(computeResult.uav));
 
+  const typedTextureUavResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const logs = [];
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const compute = tool.compileHlsl(`
+        RWTexture2D<uint> dst : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = id.x + id.y * 4; }
+      `, 'main', 'cs_5_0');
+      const signedCompute = tool.compileHlsl(`
+        RWTexture2D<int> dst : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = int(id.x + id.y * 4) - 8; }
+      `, 'main', 'cs_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, dxbc) => {
+        const head = words(id, 2, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(4, words(3, 4, 4, 1, 1, 42, 0x88, 0, 1, 0)); // R32_UINT SRV + UAV texture
+      command(12, words(4, 3, 3, 42, 4, 0, 1, 0, 1)); // R32_UINT UAV
+      shader(6, compute);
+      command(17, words(2, 6));
+      command(43, words(0, 1, 4, 0xffffffff));
+      command(42, words(4, 4, 1));
+      command(4, words(13, 4, 4, 1, 1, 43, 0x88, 0, 1, 0)); // R32_SINT SRV + UAV texture
+      command(12, words(14, 3, 13, 43, 4, 0, 1, 0, 1)); // R32_SINT UAV
+      shader(7, signedCompute);
+      command(17, words(2, 7));
+      command(43, words(0, 1, 14, 0xffffffff));
+      command(42, words(4, 4, 1));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
+      gpu.execute(commands);
+      const readback = await gpu.readBackTexture(4);
+      const signedReadback = await gpu.readBackTexture(14);
+      const result = {
+        width: readback.width,
+        height: readback.height,
+        format: readback.format,
+        values: Array.from(readback.data),
+        signedFormat: signedReadback.format,
+        signedValues: Array.from(signedReadback.data),
+        dispatches: gpu.stats.dispatches,
+        errors: gpu.stats.errors,
+        logs,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: String(error), logs };
+    }
+  });
+  check('R32_UINT/R32_SINT UAV dispatch and readback preserve typed values',
+    typedTextureUavResult.width === 4 && typedTextureUavResult.height === 4
+      && typedTextureUavResult.format === 'r32uint'
+      && typedTextureUavResult.dispatches === 2 && typedTextureUavResult.errors.length === 0
+      && typedTextureUavResult.values.every((value, i) => value === i)
+      && typedTextureUavResult.signedFormat === 'r32sint'
+      && typedTextureUavResult.signedValues.every((value, i) => value === i - 8),
+    JSON.stringify(typedTextureUavResult));
+
   const structuredBufferUavResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');

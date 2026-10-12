@@ -1404,7 +1404,7 @@ export class GpuExecutor {
     return { width: t.width, height: t.height, data: out };
   }
 
-  /** Read a common color texture or R32_FLOAT texture, optionally through a D3D11 view. */
+  /** Read a supported typed texture, optionally through a D3D11 view. */
   async readBackTexture(id) {
     const view = this.views.get(id);
     const resourceId = view?.resource ?? id;
@@ -1413,10 +1413,11 @@ export class GpuExecutor {
     const mip = view?.mip ?? 0;
     const slice = view && (view.dim === 5 || view.dim === 4 && view.slices > 1) ? view.slice : 0;
     const format = view ? this.viewFormat(view.format, texture) : texture.format;
-    const floatData = format === 'r32float';
+    const scalar32 = ['r32float', 'r32uint', 'r32sint'].includes(format);
+    const scalarArray = format === 'r32uint' ? Uint32Array : format === 'r32sint' ? Int32Array : Float32Array;
     const rgba8 = ['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb'].includes(format);
-    if (!floatData && !rgba8) {
-      throw new Error(`texture readback supports R32_FLOAT and RGBA8/BGRA8 only (got ${format})`);
+    if (!scalar32 && !rgba8) {
+      throw new Error(`texture readback supports R32_FLOAT/R32_UINT/R32_SINT and RGBA8/BGRA8 only (got ${format})`);
     }
     const width = Math.max(1, texture.width >> mip);
     const height = Math.max(1, texture.height >> mip);
@@ -1436,10 +1437,10 @@ export class GpuExecutor {
     await buffer.mapAsync(GPUMapMode.READ);
     const bytes = new Uint8Array(buffer.getMappedRange());
     let data;
-    if (floatData) {
-      data = new Float32Array(width * height);
+    if (scalar32) {
+      data = new scalarArray(width * height);
       for (let row = 0; row < height; row++) {
-        data.set(new Float32Array(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
+        data.set(new scalarArray(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
       }
     } else {
       data = new Uint8Array(width * height * 4);

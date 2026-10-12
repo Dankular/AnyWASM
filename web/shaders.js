@@ -112,12 +112,14 @@ function deferNonFiniteF32StoreConstants(spirv) {
   return out;
 }
 
-// D3D11's typed float UAV declaration does not carry its DXGI format in the scanned binding.
-// AnyWASM's selected D3D11 path advertises R32_FLOAT as its typed UAV format, so specialize one
-// formatless float storage image to R32f before Naga validates it for WebGPU.
-function specializeSingleFloatUavImage(spirv, descriptors) {
+// D3D11 typed UAV declarations do not carry their DXGI format in the scanned binding. The
+// supported scalar R32 formats are inferred from the resource return type and specialized before
+// Naga validates the formatless SPIR-V storage image for WebGPU.
+function specializeSingleTypedUavImage(spirv, descriptors) {
   const uavs = descriptors.filter((d) => d.type === D.UAV);
-  if (uavs.length !== 1 || uavs[0].dataType !== 5) return spirv;
+  if (uavs.length !== 1) return spirv;
+  const spirvFormat = { 3: 24, 4: 33, 5: 3 }[uavs[0].dataType]; // R32_SINT, R32_UINT, R32_FLOAT
+  if (spirvFormat === undefined) return spirv;
 
   const bytes = new Uint8Array(spirv);
   const words = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -128,7 +130,7 @@ function specializeSingleFloatUavImage(spirv, descriptors) {
     const first = words.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
     if (wordCount === 0 || at + wordCount * 4 > bytes.byteLength) return spirv;
     if (opcode === 25 && wordCount >= 9 && words.getUint32(at + 7 * 4, true) === 2 && words.getUint32(at + 8 * 4, true) === 0) {
-      words.setUint32(at + 8 * 4, 3, true); // OpTypeImage Unknown -> R32f
+      words.setUint32(at + 8 * 4, spirvFormat, true); // OpTypeImage Unknown -> scalar R32 format
       storageImage = true;
     }
     at += wordCount * 4;
@@ -505,7 +507,7 @@ export class ShaderTool {
     });
     const normalizedSpirv = deferNonFiniteF32StoreConstants(spirv);
     const bufferImageSpirv = lowerBufferImagesToStorageBuffers(normalizedSpirv);
-    const wgsl = this.naga.spirv_to_wgsl(specializeSingleFloatUavImage(bufferImageSpirv, descriptors));
+    const wgsl = this.naga.spirv_to_wgsl(specializeSingleTypedUavImage(bufferImageSpirv, descriptors));
     return { spirv, wgsl, descriptors };
   }
 }
