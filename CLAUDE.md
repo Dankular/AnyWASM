@@ -188,7 +188,11 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       populated registry data remain open. Other outstanding areas include COM beyond D3D/DXGI,
       shell/known-folders, networking (winsock → WebSocket/fetch relay), timers/QueryPerformanceCounter
       accuracy, file dialogs, persistent VFS
-      (IndexedDB/OPFS) — verify what is already implemented before starting each.
+      (IndexedDB/OPFS) — verify what is already implemented before starting each. `SetTimer` and
+      `KillTimer` currently only store/remove registrations; no `WM_TIMER` messages or `TimerProc`
+      callbacks are scheduled. QPC uses virtual ticks derived from retired guest instructions plus
+      host time injected after browser frame yields; accuracy for other scheduling patterns remains
+      open.
 - [ ] **32-bit PE (WoW64-style)**: needs a 32-bit decoder/execution mode, 32-bit TEB/PEB and
       32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
 - [~] **DLL loading**: the selected Diligent target maps and executes code from
