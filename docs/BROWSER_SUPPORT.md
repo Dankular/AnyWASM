@@ -18,7 +18,9 @@ three frames. WebKit reported no WebGPU and no `transferControlToOffscreen`; the
 with a clear `Graphics unavailable: OffscreenCanvas worker transfer is unsupported` status. A
 synthetic cache-pressure probe compiled 300 unique emitted modules in Node, Firefox, and WebKit,
 then verified that evicted modules recompile and retained modules execute from cache. The WebKit
-result verifies explicit failure handling, not rendering support or native Safari behavior.
+result verifies explicit failure handling, not rendering support or native Safari behavior. The
+Firefox process-exit result did not check pixels; a later readback found WebGPU validation errors and
+no valid triangle output.
 
 Fresh CSP run on 2026-10-11: Chromium `151.0.7922.34`, Firefox `141.0`, and Playwright WebKit `18.2`
 loaded the page and same-origin worker with `default-src 'self'; script-src 'self'
@@ -41,9 +43,13 @@ through `CHROMIUM`, `FIREFOX`, and `WEBKIT`: Chromium `151.0.7922.34`, Firefox `
 Playwright WebKit `18.2`. `node test/browser/cross-engine.mjs` passed its core and same-origin CSP
 assertions in all three engines. Chromium and Firefox reported WebGPU and OffscreenCanvas worker
 transfer, exited the hello and D3D11 triangle fixtures successfully (three frames), and passed the
-emitted-module cache-pressure probe. WebKit exited hello, passed cache pressure, and returned the
-expected explicit graphics-unavailable status because WebGPU and OffscreenCanvas worker transfer
-are unavailable. This run is specific to the installed browser builds and platform.
+emitted-module cache-pressure probe. The Firefox triangle exit is not a rendering pass: its WebGPU
+stats contain three validation errors, beginning with a missing bind group at index 1; the 640x480
+back-buffer readback is transparent black and the visible canvas is black. Chromium's back-buffer
+and visible-canvas pixel assertions pass without validation errors. WebKit exited hello, passed cache
+pressure, and returned the expected explicit graphics-unavailable status because WebGPU and
+OffscreenCanvas worker transfer are unavailable. This run is specific to the installed browser builds
+and platform.
 
 Fresh Chromium suite on 2026-10-12: Chrome `151.0.7922.34`, selected through `CHROMIUM` on Windows
 x64. `node test/browser/run.mjs` passed the worker, emitted-module, input, D3D11 triangle, textured,
@@ -59,7 +65,7 @@ errors. It does not add target-game or non-Chromium pixel coverage.
 | Chromium, headless | **Partial, exercised by the browser suite.** It drives the real page and worker; checks load progress and accessible unimplemented-import diagnostics; verifies keyboard input, CSS-to-guest mouse scaling, `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`, and compares opt-in emitted execution with cached execution. The selected maze replay checks W/S/A/D, cursor-aimed movement in all four directions, and a flashlight response for one seed. |
 | Content Security Policy | **Partial, exercised in Chromium, Firefox, and WebKit.** A same-origin policy allowing `wasm-unsafe-eval` permits the page and worker to run hello and the emitted-module cache-pressure probe. Other deployment policies and directives remain untested. |
 | WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are checked by reading back the GPU back buffer in `?test=1` mode. The selected Diligent maze replay also reads its 128x128 R32_FLOAT SDF UAV in test mode. A separate non-test-mode run captures the visible 640x480 triangle canvas and checks its clear colour and interpolated centre pixel. Other rendering paths and browser engines remain unverified. |
-| Firefox | **Partial, smoke tested.** Firefox 141.0 exits hello and completes the D3D11 triangle in three frames. A separate Windows Firefox 140.0.2 run exited hello but reported WebGPU unavailable and stopped graphics with an explicit status. Pixel output, input behavior, and broader conformance remain untested. |
+| Firefox | **Partial, smoke tested.** Firefox 141.0 exits hello and the D3D11 fixture after three frames, but emits three WebGPU validation errors; its back buffer is transparent black and its visible canvas is black. The primary error says bind group 1 is missing. A separate Windows Firefox 140.0.2 run exited hello but reported WebGPU unavailable and stopped graphics with an explicit status. Firefox rendering is not verified. |
 | Safari / WebKit | **Partial, smoke tested with Playwright WebKit 18.2.** Hello exits successfully. The installed engine lacks WebGPU and OffscreenCanvas worker transfer; graphics programs stop with an explicit limitation. This does not establish native Safari behavior. |
 | Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The build target is `wasm32-unknown-unknown`. The browser buffers the complete `.awb` as an `ArrayBuffer`, copies it into WASM linear memory, then `Bundle::from_bytes` copies each file into the in-memory VFS. No 4 GB pressure test, memory64 build, or large-asset streaming test has run; this is a source-level assessment, not a browser measurement. |
 

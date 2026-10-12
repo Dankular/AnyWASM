@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { chromium, firefox, webkit } from 'playwright-core';
 import { fileURLToPath } from 'node:url';
+import { decodePng } from './png.mjs';
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const indexPath = fileURLToPath(new URL('../../web/index.html', import.meta.url));
@@ -74,6 +75,43 @@ try {
       if (graphics.status === '1') {
         assert.equal(graphics.status, '1', `${item.name} graphics run did not exit: ${graphics.stat}`);
         assert.equal(graphics.exitCode, '0', `${item.name} graphics run exited nonzero: ${graphics.stat}`);
+        const near = (actual, expected, tolerance) => actual.every((value, index) => Math.abs(value - expected[index]) <= tolerance);
+        await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
+        await page.waitForFunction(() => window.__pixels !== null, null, { timeout: 20000 });
+        const backBuffer = await page.evaluate(() => {
+          const pixels = window.__pixels;
+          const at = (x, y) => {
+            const index = (y * pixels.width + x) * 4;
+            return Array.from(pixels.data.slice(index, index + 4));
+          };
+          return { width: pixels.width, height: pixels.height, error: pixels.error, clear: at(10, 10), center: at(320, 288) };
+        });
+        assert.equal(backBuffer.error, undefined, `${item.name} back-buffer readback error: ${backBuffer.error}`);
+        assert.deepEqual([backBuffer.width, backBuffer.height], [640, 480], `${item.name} triangle back-buffer dimensions`);
+        const screenshot = decodePng(await page.locator('#screen').screenshot());
+        const pixel = (x, y) => {
+          const index = (y * screenshot.w + x) * 4;
+          return Array.from(screenshot.data.subarray(index, index + 4));
+        };
+        const clear = pixel(10, 10), center = pixel(320, 288);
+        const gpuStats = await page.evaluate(() => window.__gpuStats);
+        assert.ok(gpuStats, `${item.name} missing WebGPU statistics`);
+        assert.deepEqual([screenshot.w, screenshot.h], [640, 480], `${item.name} triangle canvas dimensions`);
+        if (gpuStats.errors.length) {
+          // Firefox currently exits the guest despite invalid GPU commands. Keep the exact failure
+          // visible here; once it clears, the strict pixel assertions below become mandatory.
+          assert.equal(item.name, 'Firefox', `${item.name} emitted WebGPU validation errors: ${JSON.stringify(gpuStats.errors)}`);
+          assert.match(gpuStats.errors[0], /expects a BindGroup to be set at index 1/, `${item.name} unexpected WebGPU validation error`);
+          console.log(`${item.name} triangle graphics limitation: ${JSON.stringify({ backBuffer, visibleCanvas: { clear, center }, gpuErrors: gpuStats.errors })}`);
+          graphics.rendering = 'invalid: missing bind group 1; pixels are not valid output';
+        } else {
+          assert.ok(near(backBuffer.clear, [0, 0, 51, 255], 2), `${item.name} back-buffer clear pixel: ${backBuffer.clear}`);
+          assert.ok(near(backBuffer.center, [85, 85, 85, 255], 6), `${item.name} back-buffer center pixel: ${backBuffer.center}`);
+          assert.ok(near(clear, [0, 0, 51, 255], 2), `${item.name} visible canvas clear pixel: ${clear}`);
+          assert.ok(near(center, [85, 85, 85, 255], 6), `${item.name} visible triangle center pixel: ${center}`);
+          graphics.rendering = 'pixel-verified';
+        }
+        graphics.canvasPixels = { size: `${screenshot.w}x${screenshot.h}`, clear, center };
       } else {
         assert.equal(graphics.status, '3', `${item.name} silently completed without graphics: ${graphics.stat}`);
         assert.match(graphics.stat, /Graphics unavailable:/, `${item.name} did not explain its graphics limitation: ${graphics.stat}`);
