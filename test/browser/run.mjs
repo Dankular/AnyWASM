@@ -422,11 +422,26 @@ try {
         return { skipped: 'adapter does not support BC textures' };
       }
       const formats = [
-        { name: 'BC1', dxgi: 71, blockBytes: 8 },
-        { name: 'BC3', dxgi: 77, blockBytes: 16 },
+        { name: 'BC1_TYPELESS', dxgi: 70, blockBytes: 8 },
+        { name: 'BC1_UNORM', dxgi: 71, blockBytes: 8 },
+        { name: 'BC1_SRGB', dxgi: 72, blockBytes: 8 },
+        { name: 'BC2_TYPELESS', dxgi: 73, blockBytes: 16 },
+        { name: 'BC2_UNORM', dxgi: 74, blockBytes: 16 },
+        { name: 'BC2_SRGB', dxgi: 75, blockBytes: 16 },
+        { name: 'BC3_TYPELESS', dxgi: 76, blockBytes: 16 },
+        { name: 'BC3_UNORM', dxgi: 77, blockBytes: 16 },
+        { name: 'BC3_SRGB', dxgi: 78, blockBytes: 16 },
+        { name: 'BC4_TYPELESS', dxgi: 79, blockBytes: 8 },
+        { name: 'BC4_UNORM', dxgi: 80, blockBytes: 8 },
         { name: 'BC4_SNORM', dxgi: 81, blockBytes: 8 },
+        { name: 'BC5_TYPELESS', dxgi: 82, blockBytes: 16 },
         { name: 'BC5_UNORM', dxgi: 83, blockBytes: 16 },
+        { name: 'BC5_SNORM', dxgi: 84, blockBytes: 16 },
+        { name: 'BC6H_TYPELESS', dxgi: 94, blockBytes: 16 },
+        { name: 'BC6H_UF16', dxgi: 95, blockBytes: 16 },
         { name: 'BC6H_SF16', dxgi: 96, blockBytes: 16 },
+        { name: 'BC7_TYPELESS', dxgi: 97, blockBytes: 16 },
+        { name: 'BC7_UNORM', dxgi: 98, blockBytes: 16 },
         { name: 'BC7_SRGB', dxgi: 99, blockBytes: 16 },
       ];
       const readbacks = [];
@@ -440,7 +455,7 @@ try {
         const id = 7 + index;
         gpu.createTexture(id, 8, 8, 1, 1, format.dxgi, 0, 0, 0);
         gpu.textureWrite(id, 0, 0, 0, 0, 8, 8, rowPitch, source.length, source);
-        readbacks.push({ name: format.name, bytes: Array.from(await gpu.readBackResource(id)) });
+        readbacks.push({ name: format.name, blockBytes: format.blockBytes, bytes: Array.from(await gpu.readBackResource(id)) });
       }
       gpu.device.destroy();
       return { readbacks };
@@ -449,16 +464,15 @@ try {
       return { error: String(error) };
     }
   });
-  const bcExpected = [8, 16, 8, 16, 16, 16].map((blockBytes) => {
-    const rowBytes = 2 * blockBytes;
-    return Array.from({ length: rowBytes }, (_, i) => i + 1)
-      .concat(Array.from({ length: rowBytes }, (_, i) => 0x80 + i));
-  });
-  check('D3D11 BC1/BC3/BC4/BC5/BC6H/BC7 staging Map(READ) preserves compressed block rows',
+  check('D3D11 all BC DXGI format variants preserve compressed staging block rows',
     Boolean(bcReadbackResult.skipped)
-      || (!bcReadbackResult.error && bcReadbackResult.readbacks?.length === bcExpected.length
-        && bcReadbackResult.readbacks.every((item, index) => item.bytes.length === bcExpected[index].length
-          && item.bytes.every((value, i) => value === bcExpected[index][i]))),
+      || (!bcReadbackResult.error && bcReadbackResult.readbacks?.length === 21
+        && bcReadbackResult.readbacks.every((item) => {
+          const rowBytes = 2 * item.blockBytes;
+          const expected = Array.from({ length: rowBytes }, (_, i) => i + 1)
+            .concat(Array.from({ length: rowBytes }, (_, i) => 0x80 + i));
+          return item.bytes.length === expected.length && item.bytes.every((value, i) => value === expected[i]);
+        })),
     JSON.stringify(bcReadbackResult));
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
