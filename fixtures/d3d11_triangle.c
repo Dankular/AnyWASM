@@ -139,6 +139,41 @@ static void check_staging_d32_float(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     ID3D11Texture2D_Release(source);
 }
 
+static void check_staging_d16_unorm(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_D16_UNORM; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    ID3D11DepthStencilView *dsv = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &source);
+    if (FAILED(hr)) { printf("staging D16_UNORM source hr=%08lx\n", (unsigned long)hr); return; }
+    hr = ID3D11Device_CreateDepthStencilView(dev, (ID3D11Resource *)source, NULL, &dsv);
+    if (FAILED(hr)) {
+        printf("staging D16_UNORM DSV hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(source);
+        return;
+    }
+    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_ClearDepthStencilView(ctx, dsv, D3D11_CLEAR_DEPTH, 0.25f, 0);
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const USHORT *row0 = (const USHORT *)mapped.pData;
+            const USHORT *row1 = (const USHORT *)((const BYTE *)mapped.pData + mapped.RowPitch);
+            printf("staging D16_UNORM readback=%04x,%04x,%04x,%04x row_pitch=%u\n",
+                row0[0], row0[1], row1[0], row1[1], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging D16_UNORM Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging D16_UNORM staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11DepthStencilView_Release(dsv);
+    ID3D11Texture2D_Release(source);
+}
+
 static void check_staging_texture3d(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     static const float expected[8] = { 0.125f, 0.25f, 0.375f, 0.5f, 0.625f, 0.75f, 0.875f, 1.0f };
     D3D11_TEXTURE3D_DESC desc = {0};
@@ -385,6 +420,7 @@ int main(void) {
             check_staging_rgba16_float(dev, ctx);
             check_staging_r8_subresources(dev, ctx);
             check_staging_d32_float(dev, ctx);
+            check_staging_d16_unorm(dev, ctx);
             check_staging_texture3d(dev, ctx);
             check_staging_bgra8(dev, ctx);
             check_staging_r16_float(dev, ctx);

@@ -248,7 +248,8 @@ register-stack subset):
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels with row
       pitch, packed RGBA16_FLOAT and R16_FLOAT values, raw BGRA8_UNORM and R10G10B10A2_UNORM bytes,
       R8G8_UNORM two-channel texels, odd-width R8_UNORM row packing plus mip/array subresource
-      selection, depth-only D32_FLOAT values, and Texture3D R32_FLOAT row/depth pitches. Comparison
+      selection, depth-only D16_UNORM and D32_FLOAT values, and Texture3D R32_FLOAT row/depth
+      pitches. Comparison
       samplers pixel-test all eight
       comparison functions against depth values on both sides of the reference; depth-state
       comparisons pixel-test all eight functions at equality. Stencil comparisons cover all eight
