@@ -282,6 +282,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     set_st(cpu, r, a);
                 }
                 2 => {}
+                3 => {
+                    let value = st(cpu, 0);
+                    set_st(cpu, r, value);
+                    pop(cpu);
+                }
                 4 => match rm {
                     0 => {
                         let v = -st(cpu, 0);
@@ -558,6 +563,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode::decode;
 
     #[test]
     fn f80_roundtrip() {
@@ -567,5 +573,25 @@ mod tests {
             assert_eq!(x.to_bits(), y.to_bits(), "{x}");
         }
         assert!(f80_to_f64(&f64_to_f80(f64::NAN)).is_nan());
+    }
+
+    #[test]
+    fn fstp_register_copies_st0_then_pops_and_updates_tags() {
+        let mut cpu = Cpu::new();
+        cpu.fpu_top = 6;
+        cpu.fpu_st[6] = 3.5;
+        cpu.fpu_st[7] = -2.25;
+        cpu.fpu_tw = !(3 << (6 * 2)) & !(3 << (7 * 2));
+        let instruction = decode(&[0xd9, 0xd9], 0x1000).unwrap(); // fstp st(1)
+
+        exec(&mut cpu, &mut Memory::new(), &instruction, 0x1002).unwrap();
+
+        assert_eq!(cpu.fpu_top, 7);
+        assert_eq!(cpu.fpu_st[7].to_bits(), 3.5f64.to_bits());
+        assert_eq!((cpu.fpu_tw >> (6 * 2)) & 3, 3);
+        assert_eq!((cpu.fpu_tw >> (7 * 2)) & 3, 0);
+        assert_eq!(cpu.rip, 0x1002);
+        assert_eq!(cpu.icount, 1);
+        assert_eq!(cpu.tsc, 1);
     }
 }

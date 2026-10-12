@@ -118,6 +118,18 @@ core::arch::global_asm!(
     "jne JIT_STATE_FAIL",
     "cmp edi, 0x10203040",
     "jne JIT_STATE_FAIL",
+    "mov r14d, 1",
+    "jmp JIT_STATE_INDIRECT_TARGET",
+    "JIT_STATE_INDIRECT_TARGET:",
+    "nop",
+    "test r14d, r14d",
+    "jz JIT_STATE_INDIRECT_DONE",
+    "mov r14d, 0",
+    "jmp JIT_STATE_INDIRECT_SOURCE",
+    "JIT_STATE_INDIRECT_SOURCE:",
+    "lea rax, [rip + JIT_STATE_INDIRECT_TARGET]",
+    "jmp rax",
+    "JIT_STATE_INDIRECT_DONE:",
     "mov ecx, 100000",
     "JIT_STATE_CHAIN_CHECK:",
     "dec ecx",
@@ -148,6 +160,62 @@ core::arch::global_asm!(
     ".text",
 );
 
+#[cfg(jit_indirect)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "mov r14d, 1",
+    "jmp JIT_INDIRECT_TARGET",
+    "JIT_INDIRECT_TARGET:",
+    "nop",
+    "test r14d, r14d",
+    "jz JIT_INDIRECT_DONE",
+    "mov r14d, 0",
+    "jmp JIT_INDIRECT_SOURCE",
+    "JIT_INDIRECT_SOURCE:",
+    "lea rax, [rip + JIT_INDIRECT_TARGET]",
+    "jmp rax",
+    "JIT_INDIRECT_DONE:",
+    "xor eax, eax",
+    "ret",
+    ".text",
+);
+
+#[cfg(jit_badjmp)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "mov rax, 0x0000800000000000",
+    "jmp rax",
+    ".text",
+);
+
+#[cfg(jit_hle)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetLastError(error: u32);
+}
+
+#[cfg(jit_hle)]
+#[no_mangle]
+#[used]
+pub static JIT_HLE_IMPORT: unsafe extern "system" fn(u32) = SetLastError;
+
+#[cfg(jit_hle)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "xor ecx, ecx",
+    "mov rax, qword ptr [rip + JIT_HLE_IMPORT]",
+    "jmp JIT_HLE_PREFIX",
+    "JIT_HLE_PREFIX:",
+    "jmp rax",
+    ".text",
+);
+
 #[cfg(jit_sse)]
 unsafe extern "system" {
     fn jit_sse_entry() -> u32;
@@ -172,9 +240,58 @@ core::arch::global_asm!(
     "cmp rax, rdx",
     "jne JIT_SSE_FAIL",
     "mov rax, qword ptr [rip + JIT_SSE_RESULT + 8]",
-    "movabs rdx, 0x401b000000000000",
+    "movabs rdx, 0x401e000000000000",
     "cmp rax, rdx",
     "jne JIT_SSE_FAIL",
+    "movapd xmm3, xmm0",
+    "subpd xmm3, xmm1",
+    "movupd xmmword ptr [rip + JIT_SSE_RESULT + 16], xmm3",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 16]",
+    "movabs rdx, 0xbfe8000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 24]",
+    "movabs rdx, 0xbff8000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "movapd xmm4, xmm1",
+    "divpd xmm4, xmm0",
+    "movupd xmmword ptr [rip + JIT_SSE_RESULT + 32], xmm4",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 32]",
+    "movabs rdx, 0x3ff8000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 40]",
+    "movabs rdx, 0x4000000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "movupd xmm6, xmmword ptr [rip + JIT_SSE_ZERO]",
+    "addpd xmm6, xmm1",
+    "movupd xmmword ptr [rip + JIT_SSE_RESULT + 48], xmm6",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 48]",
+    "movabs rdx, 0x4002000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 56]",
+    "movabs rdx, 0x4008000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "movupd xmm7, xmmword ptr [rip + JIT_SSE_NAN]",
+    "addpd xmm7, xmm1",
+    "movupd xmmword ptr [rip + JIT_SSE_RESULT + 64], xmm7",
+    "movupd xmm8, xmmword ptr [rip + JIT_SSE_INPUT0]",
+    "addpd xmm8, xmmword ptr [rip + JIT_SSE_INPUT1]",
+    "movupd xmmword ptr [rip + JIT_SSE_RESULT + 80], xmm8",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 80]",
+    "movabs rdx, 0x400e000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 88]",
+    "movabs rdx, 0x4012000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "movupd xmm5, xmmword ptr [rip + JIT_SSE_EXCEPTION]",
+    "addpd xmm5, xmm1",
     "xor eax, eax",
     "ret",
     "JIT_SSE_FAIL:",
@@ -184,13 +301,102 @@ core::arch::global_asm!(
     ".p2align 4",
     ".globl JIT_SSE_RESULT",
     "JIT_SSE_RESULT:",
-    ".quad 0, 0",
+    ".quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0",
     ".globl JIT_SSE_INPUT0",
     "JIT_SSE_INPUT0:",
-    ".quad 0x3ff8000000000000, 0x3ff4000000000000",
+    ".quad 0x3ff8000000000000, 0x3ff8000000000000",
     ".globl JIT_SSE_INPUT1",
     "JIT_SSE_INPUT1:",
     ".quad 0x4002000000000000, 0x4008000000000000",
+    ".globl JIT_SSE_EXCEPTION",
+    "JIT_SSE_EXCEPTION:",
+    ".quad 0x7ff0000000000000, 0x0000000000000001",
+    ".globl JIT_SSE_ZERO",
+    "JIT_SSE_ZERO:",
+    ".quad 0x0000000000000000, 0x8000000000000000",
+    ".globl JIT_SSE_NAN",
+    "JIT_SSE_NAN:",
+    ".quad 0x7ff8000000000001, 0xfff8000000000002",
+    ".text",
+);
+
+#[cfg(jit_sse_mxcsr)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "ldmxcsr dword ptr [rip + JIT_SSE_MXCSR]",
+    "jmp JIT_SSE_MXCSR_OPS",
+    "JIT_SSE_MXCSR_OPS:",
+    "movupd xmm0, xmmword ptr [rip + JIT_SSE_MXCSR_INPUT0]",
+    "movupd xmm1, xmmword ptr [rip + JIT_SSE_MXCSR_INPUT1]",
+    "addpd xmm0, xmm1",
+    "movupd xmmword ptr [rip + JIT_SSE_MXCSR_RESULT], xmm0",
+    "xor eax, eax",
+    "ret",
+    ".data",
+    ".p2align 4",
+    "JIT_SSE_MXCSR:",
+    ".long 0x3f80",
+    "JIT_SSE_MXCSR_INPUT0:",
+    ".quad 0x3ff0000000000000, 0x3ff0000000000000",
+    "JIT_SSE_MXCSR_INPUT1:",
+    ".quad 0x3ca8000000000000, 0x3ca8000000000000",
+    "JIT_SSE_MXCSR_RESULT:",
+    ".quad 0, 0",
+    ".text",
+);
+
+#[cfg(jit_x87)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "fld qword ptr [rip + JIT_X87_INPUT0]",
+    "fld qword ptr [rip + JIT_X87_INPUT1]",
+    "jmp JIT_X87_STACK_OPS",
+    "JIT_X87_STACK_OPS:",
+    "fadd st(0), st(1)",
+    "fxch st(1)",
+    "fstp st(1)",
+    "fld st(0)",
+    "fmul st(0), st(1)",
+    "fsub st(0), st(1)",
+    "fsubr st(0), st(1)",
+    "fdiv st(0), st(1)",
+    "fdivr st(0), st(1)",
+    "fadd st(0), st(1)",
+    "xor eax, eax",
+    "ret",
+    ".data",
+    ".p2align 3",
+    ".globl JIT_X87_INPUT0",
+    "JIT_X87_INPUT0:",
+    ".quad 0x3ff8000000000000",
+    ".globl JIT_X87_INPUT1",
+    "JIT_X87_INPUT1:",
+    ".quad 0x4002000000000000",
+    ".text",
+);
+
+#[cfg(jit_x87_exception)]
+core::arch::global_asm!(
+    ".text",
+    ".globl mainCRTStartup",
+    "mainCRTStartup:",
+    "fld qword ptr [rip + JIT_X87_EXCEPTION_INF]",
+    "fld qword ptr [rip + JIT_X87_EXCEPTION_TWO]",
+    "jmp JIT_X87_EXCEPTION_OPS",
+    "JIT_X87_EXCEPTION_OPS:",
+    "fadd st(0), st(1)",
+    "xor eax, eax",
+    "ret",
+    ".data",
+    ".p2align 3",
+    "JIT_X87_EXCEPTION_INF:",
+    ".quad 0x7ff0000000000000",
+    "JIT_X87_EXCEPTION_TWO:",
+    ".quad 0x4000000000000000",
     ".text",
 );
 
@@ -300,13 +506,19 @@ fn run_workload() -> u32 {
     bench_sse,
     callback_budget,
     jit_state,
-    jit_sse
+    jit_sse,
+    jit_sse_mxcsr,
+    jit_x87,
+    jit_x87_exception,
+    jit_indirect,
+    jit_badjmp,
+    jit_hle
 )))]
 compile_error!(
-    "select one workload with --cfg bench_call, bench_memory, bench_sse, callback_budget, or jit_state"
+    "select one workload with --cfg bench_call, bench_memory, bench_sse, callback_budget, jit_state, jit_sse, jit_sse_mxcsr, jit_x87, jit_x87_exception, jit_indirect, jit_badjmp, or jit_hle"
 );
 
-#[cfg(not(any(callback_budget, jit_state, jit_sse, bench_sse)))]
+#[cfg(not(any(callback_budget, jit_state, jit_sse, jit_sse_mxcsr, jit_x87, jit_x87_exception, jit_indirect, jit_badjmp, jit_hle, bench_sse)))]
 #[no_mangle]
 pub extern "system" fn mainCRTStartup() -> u32 {
     run_workload();

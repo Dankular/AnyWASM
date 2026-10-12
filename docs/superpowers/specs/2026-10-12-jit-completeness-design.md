@@ -5,27 +5,40 @@
 ## Verified current state
 
 - `crates/anywasm-cpu/src/mem.rs` uses one `Cell<TlbEntry>` for reads and one for writes. The
-  emitted module checks the matching entry, permissions, page boundary, and backing-frame bounds.
-  Mapping, unmapping, protection changes, and relevant writes preserve the interpreter's fault and
-  self-modifying-code behavior through fallback and cache invalidation.
-- `crates/anywasm-cpu/src/jit.rs` emits NOP, selected 32/64-bit GPR MOV, selected scalar and XMM
-  memory MOV, 32-bit ADD with arithmetic flags, direct JMP/Jcc, full-width XMM moves, and guarded
-  packed-double ADD/MUL. The JS trampoline caches modules and chains only to registered emitted
-  block starts. Indirect exits and call/HLE handoff are interpreted.
+  emitted module checks entry identity, permissions, page boundary, and backing-frame bounds.
+  Mapping, unmapping, protection changes, and executable writes preserve interpreter faults and
+  self-modifying-code behavior through fallback and cache invalidation. A four-page hot-access test
+  passes; the existing one-entry design remains, with no multi-entry alternative implemented.
+- `crates/anywasm-cpu/src/jit.rs` emits NOP, selected 32/64-bit GPR MOV and memory MOV/ADD, 32-bit
+  ADD with arithmetic flags, direct JMP/Jcc, register-indirect JMP, full-width XMM moves, guarded
+  packed-double ADD/MUL/SUB/DIV, and selected register-stack x87 operations. The JS trampoline
+  caches modules and chains only to registered emitted block starts. Unregistered indirect targets
+  return to normal lookup/fault handling; HLE targets return to the runtime dispatcher. CALL remains
+  interpreted.
 - The original 624-byte `JitState` omitted mode, FS/GS bases, YMM upper halves, and x87 state.
   This task has extended it to 976 bytes and added a `jit-test-api` WASM snapshot of every CPU
   field and every mapped guest page. Full-state smoke comparisons pass on compute and
   `jit_state.exe` across emitted, cached-only, and interpreter paths.
+- Additional full-state smoke fixtures exercise packed-double normal lanes, signed zero, subnormal,
+  infinity, NaN, non-default MXCSR, and interpreted memory-source fallback. The x87 fixture exercises
+  FLD/FXCH/FSTP and all six selected D8 ST arithmetic selectors; a separate exceptional-input fixture
+  verifies fallback leaves the same final CPU and mapped memory state as cached-only/interpreter runs.
+  Packed-single SSE arithmetic remains interpreter-only; this task measures and emits the guarded
+  packed-double register forms.
 - `Cpu` represents x87 values as f64 and separately stores TOP, control, status, and tag words.
-  x87 instructions are currently interpreted. This design matches the existing interpreter model;
-  it does not claim 80-bit x87 precision.
-- `test/browser/run.mjs` already starts forced emission, grows the exported memory by one page,
-  resumes, and checks output and retired count against forced and cached-only runs. A current
-  Chromium run passed all JIT checks. The full runner later reported one separate structured-buffer
-  UAV shader-validation failure.
-- The latest recorded six-round Node benchmark shows forced emission faster only on SSE-float
-  (50.8 vs 34.7 M guest instructions/s) and slower on compute (8.1 vs 22.1), call (9.2 vs 19.0),
-  memory (7.1 vs 22.5), and block-chain (6.7 vs 25.2). Emission remains opt-in.
+  The emitter supports FLD/FXCH/FSTP register-stack forms and selected D8 ST arithmetic under that
+  model; memory forms, extended precision, and unsupported exceptional cases remain interpreted.
+- `test/browser/run.mjs` starts forced emission, grows exported memory by one page, resumes, and
+  checks output and retired count against cached-only execution. The JIT page/worker and memory-growth
+  checks pass. The latest full Chromium run had seven separate input/canvas assertion failures
+  (mouse-coordinate scaling, mouse-leave/input-fixture exit, and screenshot extent/interpolated-pixel
+  checks); its JIT and graphics assertions passed without page or WebGPU validation errors.
+- A fresh same-build Node benchmark used one warm-up and 10 alternating paired rounds. Median cached
+  vs emitted guest MIPS: compute 20.14/6.28 (-68.8%), call-heavy 17.32/4.31 (-75.1%), memory-heavy
+  19.61/65.14 (+232.2%), SSE-float 26.35/42.74 (+62.2%), block-chain 21.12/5.57 (-73.6%). Every
+  pair matched status, exit code, stdout/stderr, and retired count. Memory and SSE meet the 10% target;
+  emission stays opt-in due to regressions on the other three workloads. The representative emitted
+  counters are documented in `docs/STATUS.md`.
 
 ## Goal and acceptance
 

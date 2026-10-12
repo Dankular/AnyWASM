@@ -101,36 +101,60 @@
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (opt-in prototype, default disabled):** Rust emits leading NOPs,
-  32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs, selected TLB-backed 32-bit/64-bit memory MOVs, 32-bit ADD
-  with register or immediate source and arithmetic flags, direct JMP/Jcc exits, full-width vector
-  moves, and packed-double ADD/MUL. Memory forms use plain unsegmented 64-bit addresses and
-  one-entry read/write TLB checks; accesses must remain in one mapped page with compatible
-  permissions. Cold misses, faults, page crossings, and writes to executable pages retry through
-  the interpreter. A direct store ends its emitted prefix. Packed-double arithmetic falls back for
-  non-default MXCSR rounding/DAZ/FTZ controls and zero, subnormal, infinite, or NaN operands.
-  Other instructions, including x87 and unsupported SSE forms, remain interpreted.
-  The generated module imports the runtime memory and runs through anywasm.run_emitted_block in
-  web/anywasm.js. Its 976-byte call state holds every current CPU field plus memory/TLB pointers,
-  counters, and scratch. GPR and XMM values are block-local Wasm locals flushed on exit. Rust
-  commits the full copied CPU state only after an exact valid instruction count. A feature-gated
-  smoke API compares all CPU fields and mapped guest pages across emitted, cached-only, and
-  interpreter execution for compute and `jit_state.exe` fixtures;
-  compile, trap, invalid-count, and guarded-operation failures retry against the untouched snapshot.
-  The JS wrapper caches up to 256 modules and uses a balanced RIP lookup tree to chain among
-  registered emitted block starts.
-  Rust JIT tests and test/wasm_smoke.mjs pass. Smoke checks compare emitted execution with
-  cached-only and interpreter output/counts for compute and SSE fixtures, validate both packed
-  result lanes, verify 32-bit ADD/Jcc loop chaining, and check selected registers and memory in
-  jit_state.exe. Headless Chromium page and worker tests pass; the page test grows WASM memory by
-  one page after emission starts and confirms the cached module resumes without another TLB fallback.
-  The current full Chromium browser-suite run has one separate D3D11 structured-buffer UAV shader
-  validation failure. The fixture covers selected registers and memory, not arbitrary final process
-  state; complete JIT/interpreter/host differential testing remains open.
-  A fresh same-build six-round sample shows prefix-1 emission below cached-only throughput on four
-  of five fixtures, while the SSE-float fixture is faster. The result is workload-specific, and
-  emission remains disabled by default. Partial-width MOVs, LEA, wider integer arithmetic, indirect
-  and control-system exits, and broader SSE/x87 emission remain open. Module-cache pressure and
-  emitted-path CSP checks pass in Node, Chromium, Firefox, and WebKit.
+  selected 32-bit/64-bit GPR MOVs and TLB-backed memory MOVs, 32-bit ADD, memory ADD, direct JMP/Jcc
+  and register-indirect JMP exits, full-width vector moves, guarded packed-double ADD/MUL/SUB/DIV,
+  and a narrow f64-model x87 register-stack subset. Memory probes use plain unsegmented 64-bit
+  addresses and the existing one-entry read/write TLBs; accesses must stay within one mapped page
+  with compatible permissions and current frame bounds. Misses, faults, page crossings, and
+  executable-page stores retry through the interpreter. Mapping/protection changes and executable
+  writes invalidate cached translations. Direct stores end an emitted prefix.
+  Packed-double arithmetic is guarded for the supported finite normal/default-MXCSR domain;
+  signed zero, subnormal, infinity, NaN, and unsupported MXCSR modes use interpreter fallback.
+  Tests compare full state for those cases and for packed-double memory-source arithmetic, which
+  stays interpreted. x87 emits FLD/FXCH/FSTP register-stack forms and all six selected D8 ST
+  arithmetic selectors under the interpreter's f64 model. The smoke fixture checks all six and an
+  exceptional arithmetic fallback against complete CPU/memory snapshots; memory forms and extended
+  precision remain unsupported.
+  The generated module imports runtime memory and runs through `anywasm.run_emitted_block` in
+  `web/anywasm.js`. Its 976-byte call state holds every current CPU field plus memory/TLB pointers,
+  counters, and scratch. GPR/XMM values are block-local Wasm locals flushed on exit. Rust commits the
+  full copied CPU state only after an exact valid instruction count. The feature-gated smoke API
+  compares all CPU fields and all mapped guest pages across emitted, cached-only, and interpreter
+  execution for compute, packed-double, x87, indirect-JMP, memory, and state fixtures. Compile,
+  trap, invalid-count, and guarded-operation failures retry from the untouched snapshot. The JS
+  wrapper caches up to 256 modules and chains only among registered emitted block starts through a
+  balanced RIP lookup tree. CALL remains interpreted; unregistered indirect targets return to
+  normal lookup/fault handling and HLE targets return to the runtime dispatcher.
+
+  The memory tests cover four interleaved hot pages, protection/map/unmap invalidation, cross-page
+  faults, and executable-page write invalidation. The emitted memory fixture walks multiple pages
+  and compares complete CPU/memory state. The Chromium page and worker checks compare output/counts;
+  the page test grows WASM memory by one page after emission starts and confirms execution resumes
+  with matching cached-only output/count. The JIT-specific browser checks pass. The latest full
+  Chromium run has seven unrelated input/canvas assertion failures (mouse-coordinate scaling,
+  mouse-leave delivery and input-fixture exit, plus screenshot extent/interpolated-pixel checks);
+  JIT and graphics checks pass without page errors or WebGPU validation errors. Module-cache pressure
+  and emitted-path CSP checks pass in Node, Chromium, Firefox, and WebKit.
+
+  Latest paired Node benchmark: one warm-up plus 10 alternating cached-only/emitted rounds on one
+  release WASM build (`jitMinPrefix` 65/1, five-million-instruction slices). Every pair matched
+  status, exit code, stdout/stderr, and retired count. Values are median guest MIPS; emitted counts
+  are from the representative final pair.
+
+  | Workload | Cached | Emitted | Change | Modules | Executions | Chain transitions | Register hits | Fallbacks |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | Compute | 20.14 | 6.28 | -68.8% | 67 | 365,969 | 2,287 | 283,595 | 2 |
+  | Call-heavy | 17.32 | 4.31 | -75.1% | 5 | 1,500,199 | 499,998 | 0 | 1 |
+  | Memory-heavy | 19.61 | 65.14 | +232.2% | 11 | 782,888 | 782,524 | 261,014 | 2,233 |
+  | SSE-float | 26.35 | 42.74 | +62.2% | 10 | 62,599 | 61,932 | 0 | 1 |
+  | Block-chain | 21.12 | 5.57 | -73.6% | 28 | 200,102 | 100,079 | 200,001 | 2 |
+
+  The memory and SSE medians exceed the 10% acceptance target. The other three workloads regress,
+  so emission remains disabled by default. The existing one-entry TLB stays in place; a multi-entry
+  alternative was not implemented or directly benchmarked. Partial-width MOVs, LEA, wider integer
+  arithmetic, packed-single SSE arithmetic, CALL, system/runtime exits, broader x87 exception
+  behavior, and arbitrary-program full-state differential coverage remain open. The latest
+  `cargo test --workspace` run passes.
 - Thread support uses a deterministic cooperative scheduler with saved CPU/stack/TEB TLS pointers,
   dynamic TLS/FLS maps, static PE TLS blocks, quantum rotation, resumable waits, events, mutexes,
   semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. An earlier

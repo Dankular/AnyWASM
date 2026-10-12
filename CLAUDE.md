@@ -73,11 +73,17 @@ The cached-only eight-frame sample retired 580.8M guest instructions, with 580.8
 frame; forcing the current MOV emitter was about 60.5% slower on that cold pass. The benchmark uses
 one 1B-instruction run slice because synchronous callbacks cannot yet suspend at a smaller slice
 boundary. These are guest/HLE timings: AnyWASM did not execute this target's command stream in the
-browser renderer. A six-round fixture sweep showed higher throughput on SSE-float and lower throughput on the other four workloads, so dynamic emission remains disabled by default. These results do not establish a product performance target. See docs/TARGETS.md for exact commands, counts, and limits.
+browser renderer. The latest same-build fixture run used 10 paired rounds after one warm-up:
+memory-heavy improved from 19.61 to 65.14 MIPS (+232.2%) and SSE-float from 26.35 to 42.74 MIPS
+(+62.2%); compute regressed 68.8%, call-heavy 75.1%, and block-chain 73.6%. Every pair matched
+status, exit code, stdout/stderr, and retired count. Emission remains disabled by default because
+the regressions are workload-specific. These results do not establish a product performance target.
+See docs/TARGETS.md for exact commands, counts, and limits.
 
-Design (partial implementation; the verified dynamic-emission scope includes leading NOPs,
-32-bit or 64-bit GPR-immediate and GPR-to-GPR MOVs, selected TLB-resident memory MOVs, 32-bit ADD,
-direct JMP/Jcc exits, and guarded packed-double SSE operations):
+Design (opt-in implementation; the emitted subset includes leading NOPs, selected 32-bit or
+64-bit GPR MOVs and TLB-resident memory operations, 32-bit ADD, direct JMP/Jcc and register-indirect
+JMP exits, vector moves, guarded packed-double ADD/MUL/SUB/DIV, and a narrow f64-model x87
+register-stack subset):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [~] **Representative-target demand**: corrected cached-only and forced-emission runs each reached
@@ -93,41 +99,47 @@ direct JMP/Jcc exits, and guarded packed-double SSE operations):
       instantiates it through `anywasm.run_emitted_block`. Generated modules import the runtime's
       exported memory. The JS side caches up to 256 modules and checks bytes when a process-local
       module ID is reused. `{ jitMinPrefix: 1 }` explicitly opts in; the default threshold is 65,
-      above the 64-instruction block limit. There is no general throughput win; the current local
-      benchmark is faster on SSE-float and slower on the other four fixtures.
+      above the 64-instruction block limit. Same-build medians improve on memory and SSE-float but
+      regress on compute, call-heavy, and block-chain, so there is no general throughput win.
 - [~] **State model (MVP)**: generated code receives a 976-byte `repr(C)` state with every current
       `Cpu` field, memory/TLB pointers, counters, and chain scratch. GPR/XMM values are block-local
       and flushed at block exit. 32-bit ADD writes arithmetic flags. Rust commits the full snapshot
       only after a valid retired count. The `jit-test-api` smoke build compares all CPU fields and
-      mapped memory for compute and `jit_state.exe`; arbitrary-program differential coverage and
-      lazy flags remain open.
-- [~] **Memory access**: selected 32-bit/64-bit MOV and full-width XMM memory moves use inline probes
-      of the one-entry read/write TLBs for plain, unsegmented 64-bit addresses. Accesses must stay
-      within one mapped page with compatible permissions; misses, faults, and page crossings retry
-      through the interpreter. A direct store ends an emitted prefix.
-- [~] **Exits**: immediate JMP/Jcc update generated RIP and end the block. The JS trampoline can
-      chain among registered emitted block starts through a balanced RIP lookup tree. Indirect jumps,
-      `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`, and
-      `yield_request` integration remain open.
-- [~] **Fallback**: leading NOPs, 32-bit/64-bit GPR MOVs, 32-bit ADD immediate/register forms,
-      selected TLB-resident memory MOVs, direct JMP/Jcc, full-width vector moves, and packed-double
-      ADD/MUL are emitted. Packed-double arithmetic falls back for non-default MXCSR
-      rounding/DAZ/FTZ controls and zero, subnormal, infinite, or NaN operands. Other instructions
-      use the interpreter. 32-bit moves zero-extend; self-moves still advance RIP/count/TSC.
-      Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
+      mapped memory across compute, SSE, x87, indirect-JMP, memory, and JIT-state fixtures;
+      arbitrary-program differential coverage and lazy flags remain open.
+- [~] **Memory access**: selected 32-bit/64-bit MOV, memory ADD, and full-width XMM memory moves use
+      inline probes of the one-entry read/write TLBs for plain, unsegmented 64-bit addresses. Accesses
+      must stay within one mapped page with compatible permissions; misses, faults, and page crossings
+      retry through the interpreter. Mapping/protection changes and executable-page writes invalidate
+      cached translations. A direct store ends an emitted prefix. Four-page hot-access tests pass; the
+      measured memory gain supports retaining this one-entry design rather than adding a multi-entry TLB.
+- [~] **Exits**: immediate JMP/Jcc and register-indirect JMP update generated RIP and end the block.
+      The JS trampoline chains only to registered emitted starts through a balanced RIP lookup tree.
+      Unregistered or noncanonical targets return to normal lookup/fault handling, and an indirect jump
+      into an HLE thunk returns to the runtime dispatcher. CALL, `Stop::*`, `skip_ret`, and
+      `yield_request` remain interpreter/runtime paths.
+- [~] **Fallback**: leading NOPs, selected 32-bit/64-bit GPR MOVs, 32-bit ADD immediate/register
+      forms, memory MOV/ADD, direct and register-indirect exits, full-width vector moves, and guarded
+      packed-double ADD/MUL/SUB/DIV are emitted. Packed-double arithmetic falls back for non-default
+      MXCSR controls and zero, subnormal, infinite, or NaN operands. Unsupported SSE memory arithmetic
+      and other instructions use the interpreter. 32-bit moves zero-extend; self-moves still advance
+      RIP/count/TSC. Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
 - [~] **Correctness checks**: Rust tests cover prefix limits, block-local register reads/writeback,
       32-bit ADD/Jcc emission, full-width vector moves, and packed-double operations. WASM smoke
-      compares compute output and retired count across emitted, cached-only, and interpreter paths;
-      jit_sse.exe and bench_sse.exe verify packed result lanes and chained ADD/JNE loop behavior.
-      jit_state.exe checks selected GPRs and memory plus direct and conditional exits in emitted,
-      cached-only, interpreter, and native runs. Process-accounting tests cover nested guest callbacks,
-      yielding HLE calls, and instructions retired before a later block fault; callbacks that exhaust
-      their active slice fail with a diagnostic. The full browser JIT check compares page and worker
-      output/counts, and grows WASM memory after emission starts. This still does not compare all
-      final CPU state for arbitrary programs.
-- [~] **SSE/x87 in the JIT**: full-width XMM moves and packed-double ADD/MUL are emitted for
-      guarded normal finite operands with default MXCSR rounding/DAZ/FTZ controls; unsupported or
-      exceptional operands fall back. x87 and the rest of SSE remain interpreter-only.
+      compares complete CPU snapshots and mapped guest memory across emitted, cached-only, and
+      interpreter runs for compute, packed-double, x87, indirect-JMP, memory, and state fixtures.
+      The fixtures check normal output/counts, known and invalid indirect targets, HLE handoff,
+      fallback, and direct/conditional chaining. SSE fixtures cover finite lanes, signed zero,
+      subnormal, infinity, NaN, alternate MXCSR, and interpreted memory-source arithmetic. x87
+      fixtures cover FLD/FXCH/FSTP, all six selected D8 arithmetic forms, and exceptional fallback.
+      Browser page and worker checks compare output/counts, including a memory-growth-after-emission
+      resume. Arbitrary programs are not fully differential-tested.
+- [~] **SSE/x87 in the JIT**: packed-double ADD/MUL/SUB/DIV are emitted for guarded normal finite
+      register operands with default MXCSR controls; unsupported or exceptional operands fall back.
+      The fixture exercises normal lanes and fallback for signed zero, subnormal, infinity, NaN,
+      non-default MXCSR, and memory-form arithmetic. The x87 subset emits FLD/FXCH/FSTP register-stack
+      forms and selected D8 ST arithmetic using the current f64 model; memory forms, extended precision,
+      and broader exception behavior remain interpreted. Packed-single arithmetic remains interpreted.
 - [x] **Browser JIT check**: headless Chromium page-realm and worker checks force the opt-in emitter
       and compare output and retired counts with cached-only execution. The page check grows WASM
       memory by one page after emission starts; the cached module resumes without another fallback.
@@ -138,8 +150,10 @@ direct JMP/Jcc exits, and guarded packed-double SSE operations):
       errors leave the triangle black; Playwright WebKit 18.2 runs hello and reports graphics
       unavailable when OffscreenCanvas transfer is missing. Chromium, Firefox, and WebKit also pass
       the emitted path under a same-origin CSP that permits wasm-unsafe-eval. Full graphics
-      validation on other engines remains open. The current Chromium browser-suite run has one
-      separate D3D11 structured-buffer UAV shader-validation failure; the JIT browser checks pass.
+      validation on other engines remains open. The latest Chromium full-suite run passes the JIT,
+      memory-growth, and graphics checks without page or WebGPU validation errors, but has seven
+      separate input/canvas assertions failing: mouse-coordinate scaling, mouse-leave delivery/input
+      fixture exit, and visible-canvas screenshot extent/interpolated-pixel expectations.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: a deterministic FIFO cooperative scheduler now saves full CPU state, private

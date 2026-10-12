@@ -35,6 +35,14 @@ const MXCSR_OFFSET: u32 = 608;
 const CPU_MODE_OFFSET: u32 = 612;
 const FS_BASE_OFFSET: u32 = 616;
 const GS_BASE_OFFSET: u32 = 624;
+const FPU_ST_OFFSET: u32 = 896;
+const FPU_TOP_OFFSET: u32 = 960;
+const FPU_TW_OFFSET: u32 = 972;
+const X87_TOP_LOCAL: u32 = 63;
+const X87_VALUE0_LOCAL: u32 = 64;
+const X87_VALUE1_LOCAL: u32 = 65;
+const X87_RESULT_LOCAL: u32 = 66;
+const X87_TAG_LOCAL: u32 = 67;
 const XMM_LOCAL_BASE: u32 = 25;
 const RIP_LOCAL: u32 = 57;
 const ICOUNT_LOCAL: u32 = 58;
@@ -96,6 +104,9 @@ const _: [(); MXCSR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, mxcsr
 const _: [(); CPU_MODE_OFFSET as usize] = [(); std::mem::offset_of!(JitState, cpu_mode)];
 const _: [(); FS_BASE_OFFSET as usize] = [(); std::mem::offset_of!(JitState, fs_base)];
 const _: [(); GS_BASE_OFFSET as usize] = [(); std::mem::offset_of!(JitState, gs_base)];
+const _: [(); FPU_ST_OFFSET as usize] = [(); std::mem::offset_of!(JitState, fpu_st)];
+const _: [(); FPU_TOP_OFFSET as usize] = [(); std::mem::offset_of!(JitState, fpu_top)];
+const _: [(); FPU_TW_OFFSET as usize] = [(); std::mem::offset_of!(JitState, fpu_tw)];
 
 impl From<&Cpu> for JitState {
     fn from(cpu: &Cpu) -> Self {
@@ -191,6 +202,14 @@ enum XmmSource {
 }
 
 #[derive(Clone, Copy)]
+enum X87StackOp {
+    Load(u8),
+    Exchange(u8),
+    StorePop(u8),
+    Arithmetic { index: u8, operation: u8 },
+}
+
+#[derive(Clone, Copy)]
 struct StoreInstruction {
     address: MemOp,
     source: StoreSource,
@@ -255,8 +274,16 @@ enum JitInstruction {
         kind: FpK,
         len: u8,
     },
+    X87Stack {
+        op: X87StackOp,
+        len: u8,
+    },
     Jump {
         target: u64,
+        len: u8,
+    },
+    JumpRegister {
+        register: u8,
         len: u8,
     },
     Branch {
@@ -356,7 +383,9 @@ pub fn emit_mov_block(
         );
         let is_exit = matches!(
             instruction,
-            JitInstruction::Jump { .. } | JitInstruction::Branch { .. }
+            JitInstruction::Jump { .. }
+                | JitInstruction::JumpRegister { .. }
+                | JitInstruction::Branch { .. }
         );
         emitted.push(instruction);
         // A direct store is observable before Rust commits the copied CPU state. Keep it last so
@@ -392,6 +421,18 @@ fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
     if inst.op == Op::Nop {
         return Some(JitInstruction::Nop { len: inst.len });
     }
+    if inst.op == Op::JmpInd && inst.osz == 8 {
+        let Opnd::Gpr(register) = inst.ops[0] else {
+            return None;
+        };
+        return (register < 16).then_some(JitInstruction::JumpRegister {
+            register,
+            len: inst.len,
+        });
+    }
+    if inst.op == Op::X87 {
+        return translate_x87_stack(inst);
+    }
     match inst.op {
         Op::Jmp => {
             return Some(JitInstruction::Jump {
@@ -414,6 +455,25 @@ fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
         .or_else(|| translate_cmp(inst))
         .or_else(|| translate_lea(inst))
         .or_else(|| translate_sse(inst))
+}
+
+fn translate_x87_stack(inst: Inst) -> Option<JitInstruction> {
+    let modrm = inst.imm as u8;
+    if modrm >> 6 != 3 {
+        return None;
+    }
+    let reg = (modrm >> 3) & 7;
+    let index = modrm & 7;
+    let op = match (inst.cc, reg) {
+        (1, 0) => X87StackOp::Load(index),
+        (1, 1) => X87StackOp::Exchange(index),
+        (1, 3) => X87StackOp::StorePop(index),
+        (0, operation @ (0 | 1 | 4 | 5 | 6 | 7)) => {
+            X87StackOp::Arithmetic { index, operation }
+        }
+        _ => return None,
+    };
+    Some(JitInstruction::X87Stack { op, len: inst.len })
 }
 
 fn translate_add(inst: Inst) -> Option<JitInstruction> {
@@ -523,7 +583,7 @@ fn translate_sse(inst: Inst) -> Option<JitInstruction> {
             }
             _ => None,
         },
-        Op::Fp(kind @ (FpK::Add | FpK::Mul), Prec::Pd) => {
+        Op::Fp(kind @ (FpK::Add | FpK::Mul | FpK::Sub | FpK::Div), Prec::Pd) => {
             let (Opnd::Xmm(dst), Opnd::Xmm(source)) = (inst.ops[0], inst.ops[1]) else {
                 return None;
             };
@@ -606,8 +666,8 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
     let mut code = Vec::new();
     // Locals: execution scratch, GPRs, both XMM lanes, RIP/count/TSC, and 64-bit ALU scratch.
     code.extend_from_slice(&[
-        0x08, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03, 0x7e,
-        0x03, 0x7e,
+        0x0b, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03,
+        0x7e, 0x03, 0x7e, 0x01, 0x7f, 0x03, 0x7e, 0x01, 0x7f,
     ]);
     let (initial_gprs, written_gprs, initial_xmms, written_xmms) = register_masks(instructions);
     for register in 0..16 {
@@ -640,7 +700,10 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::XmmMove { len, .. }
             | JitInstruction::XmmStore { len, .. }
             | JitInstruction::XmmFp { len, .. } => *len,
-            JitInstruction::Jump { len, .. } | JitInstruction::Branch { len, .. } => *len,
+            JitInstruction::X87Stack { len, .. }
+            | JitInstruction::Jump { len, .. }
+            | JitInstruction::JumpRegister { len, .. }
+            | JitInstruction::Branch { len, .. } => *len,
         };
         rip = rip.wrapping_add(len as u64);
         let mut rip_after = rip;
@@ -729,8 +792,6 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                 emit_effective_address(*address, &mut code);
                 emit_tlb_guard(true, 8, &mut code);
                 emit_frame_address(&mut code);
-                code.push(0x20);
-                uleb(4, &mut code);
                 code.push(0x29); // i64.load old destination
                 uleb(3, &mut code);
                 uleb(0, &mut code);
@@ -746,8 +807,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                     ALU64_RESULT_LOCAL,
                     &mut code,
                 );
-                code.push(0x20);
-                uleb(4, &mut code);
+                emit_frame_address(&mut code);
                 code.push(0x20);
                 uleb(ALU64_RESULT_LOCAL, &mut code);
                 code.push(0x37); // i64.store updated destination
@@ -772,7 +832,14 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::XmmFp {
                 dst, source, kind, ..
             } => emit_xmm_fp(*dst, *source, *kind, &mut code),
+            JitInstruction::X87Stack { op, .. } => emit_x87_stack(*op, &mut code),
             JitInstruction::Jump { target, .. } => rip_after = *target,
+            JitInstruction::JumpRegister { register, .. } => {
+                code.push(0x20);
+                uleb(gpr_local(*register), &mut code);
+                code.push(0x21);
+                uleb(RIP_LOCAL, &mut code);
+            }
             JitInstruction::Branch { cc, target, .. } => {
                 emit_condition(*cc, &mut code);
                 code.extend_from_slice(&[0x04, 0x7e]); // if (result i64)
@@ -788,7 +855,10 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
         }
 
         // RIP and counters stay in locals for the entire emitted block.
-        if !matches!(instruction, JitInstruction::Branch { .. }) {
+        if !matches!(
+            instruction,
+            JitInstruction::Branch { .. } | JitInstruction::JumpRegister { .. }
+        ) {
             code.push(0x42);
             sleb(rip_after as i64, &mut code);
             code.push(0x21);
@@ -931,7 +1001,9 @@ fn emit_xmm_memory_store(source: u8, code: &mut Vec<u8>) {
 fn emit_xmm_fp(dst: u8, source: u8, kind: FpK, code: &mut Vec<u8>) {
     let operation = match kind {
         FpK::Add => 0xa0, // f64.add
+        FpK::Sub => 0xa1, // f64.sub
         FpK::Mul => 0xa2, // f64.mul
+        FpK::Div => 0xa3, // f64.div
         _ => unreachable!("only packed add and multiply are translated"),
     };
     for lane in 0..2 {
@@ -978,6 +1050,209 @@ fn emit_xmm_fp_guard(local: u32, code: &mut Vec<u8>) {
     code.push(0x42);
     sleb(0x7ff0_0000_0000_0000u64 as i64, code);
     code.push(0x51); // i64.eq: infinity/NaN exponent
+    emit_fallback_if_true(code);
+}
+
+fn emit_x87_stack(op: X87StackOp, code: &mut Vec<u8>) {
+    emit_x87_top_guard(code);
+    match op {
+        X87StackOp::Load(index) => {
+            emit_x87_stack_load(index, code);
+            code.push(0x21);
+            uleb(X87_VALUE0_LOCAL, code);
+            code.push(0x20);
+            uleb(X87_TOP_LOCAL, code);
+            code.push(0x41);
+            sleb(1, code);
+            code.push(0x6b); // i32.sub: push decrements TOP modulo eight
+            code.push(0x41);
+            sleb(7, code);
+            code.push(0x71); // i32.and
+            code.push(0x21);
+            uleb(X87_TOP_LOCAL, code);
+            emit_x87_write_top(code);
+            emit_x87_stack_store(0, X87_VALUE0_LOCAL, code);
+            emit_x87_tag_update(false, code);
+        }
+        X87StackOp::Exchange(index) => {
+            emit_x87_stack_load(0, code);
+            code.push(0x21);
+            uleb(X87_VALUE0_LOCAL, code);
+            emit_x87_stack_load(index, code);
+            code.push(0x21);
+            uleb(X87_VALUE1_LOCAL, code);
+            emit_x87_stack_store(0, X87_VALUE1_LOCAL, code);
+            emit_x87_stack_store(index, X87_VALUE0_LOCAL, code);
+        }
+        X87StackOp::StorePop(index) => {
+            emit_x87_stack_load(0, code);
+            code.push(0x21);
+            uleb(X87_VALUE0_LOCAL, code);
+            emit_x87_stack_store(index, X87_VALUE0_LOCAL, code);
+            emit_x87_tag_update(true, code);
+            code.push(0x20);
+            uleb(X87_TOP_LOCAL, code);
+            code.push(0x41);
+            sleb(1, code);
+            code.push(0x6a); // i32.add: pop increments TOP modulo eight
+            code.push(0x41);
+            sleb(7, code);
+            code.push(0x71); // i32.and
+            code.push(0x21);
+            uleb(X87_TOP_LOCAL, code);
+            emit_x87_write_top(code);
+        }
+        X87StackOp::Arithmetic { index, operation } => {
+            emit_x87_stack_load(0, code);
+            code.push(0x21);
+            uleb(X87_VALUE0_LOCAL, code);
+            emit_x87_stack_load(index, code);
+            code.push(0x21);
+            uleb(X87_VALUE1_LOCAL, code);
+            emit_x87_value_guard(X87_VALUE0_LOCAL, code);
+            emit_x87_value_guard(X87_VALUE1_LOCAL, code);
+            let (lhs, rhs) = if matches!(operation, 5 | 7) {
+                (X87_VALUE1_LOCAL, X87_VALUE0_LOCAL)
+            } else {
+                (X87_VALUE0_LOCAL, X87_VALUE1_LOCAL)
+            };
+            code.push(0x20);
+            uleb(lhs, code);
+            code.push(0xbf); // i64.reinterpret_f64
+            code.push(0x20);
+            uleb(rhs, code);
+            code.push(0xbf);
+            code.push(match operation {
+                0 => 0xa0, // f64.add
+                1 => 0xa2, // f64.mul
+                4 | 5 => 0xa1, // f64.sub
+                6 | 7 => 0xa3, // f64.div
+                _ => unreachable!("translation restricts x87 arithmetic selectors"),
+            });
+            code.push(0xbd); // i64.reinterpret_f64
+            code.push(0x21);
+            uleb(X87_RESULT_LOCAL, code);
+            emit_x87_stack_store(0, X87_RESULT_LOCAL, code);
+        }
+    }
+}
+
+fn emit_x87_top_guard(code: &mut Vec<u8>) {
+    emit_x87_field_address(FPU_TOP_OFFSET, code);
+    code.push(0x28); // i32.load TOP
+    uleb(2, code);
+    uleb(0, code);
+    code.push(0x22); // local.tee TOP
+    uleb(X87_TOP_LOCAL, code);
+    code.push(0x41);
+    sleb(7, code);
+    code.push(0x4b); // i32.gt_u
+    emit_fallback_if_true(code);
+}
+
+fn emit_x87_field_address(offset: u32, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x41);
+    sleb(offset as i64, code);
+    code.push(0x6a); // i32.add state pointer and field offset
+}
+
+fn emit_x87_stack_address(index: u8, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x41);
+    sleb(FPU_ST_OFFSET as i64, code);
+    code.push(0x20);
+    uleb(X87_TOP_LOCAL, code);
+    if index != 0 {
+        code.push(0x41);
+        sleb(index as i64, code);
+        code.push(0x6a); // i32.add logical ST index
+    }
+    code.push(0x41);
+    sleb(7, code);
+    code.push(0x71); // i32.and, physical register = (TOP + index) & 7
+    code.push(0x41);
+    sleb(3, code);
+    code.push(0x74); // i32.shl by three for the u64 slot offset
+    code.push(0x6a); // add physical slot offset to the field offset
+    code.push(0x6a); // add state pointer
+}
+
+fn emit_x87_stack_load(index: u8, code: &mut Vec<u8>) {
+    emit_x87_stack_address(index, code);
+    code.push(0x29); // i64.load x87 slot bits
+    uleb(3, code);
+    uleb(0, code);
+}
+
+fn emit_x87_stack_store(index: u8, value: u32, code: &mut Vec<u8>) {
+    emit_x87_stack_address(index, code);
+    code.push(0x20);
+    uleb(value, code);
+    code.push(0x37); // i64.store x87 slot bits
+    uleb(3, code);
+    uleb(0, code);
+}
+
+fn emit_x87_write_top(code: &mut Vec<u8>) {
+    emit_x87_field_address(FPU_TOP_OFFSET, code);
+    code.push(0x20);
+    uleb(X87_TOP_LOCAL, code);
+    code.push(0x36); // i32.store TOP
+    uleb(2, code);
+    uleb(0, code);
+}
+
+fn emit_x87_tag_update(set_empty: bool, code: &mut Vec<u8>) {
+    emit_x87_field_address(FPU_TW_OFFSET, code);
+    code.push(0x28); // i32.load tag word
+    uleb(2, code);
+    uleb(0, code);
+    code.push(0x41);
+    sleb(3, code);
+    code.push(0x20);
+    uleb(X87_TOP_LOCAL, code);
+    code.push(0x41);
+    sleb(1, code);
+    code.push(0x74); // i32.shl TOP by one for the two-bit tag slot
+    code.push(0x74); // i32.shl tag mask 3 by 2*TOP
+    if set_empty {
+        code.push(0x72); // i32.or: mark popped slot empty
+    } else {
+        code.push(0x41);
+        sleb(-1, code);
+        code.push(0x73); // i32.xor: invert mask
+        code.push(0x71); // i32.and: mark pushed slot valid
+    }
+    code.push(0x21);
+    uleb(X87_TAG_LOCAL, code);
+    emit_x87_field_address(FPU_TW_OFFSET, code);
+    code.push(0x20);
+    uleb(X87_TAG_LOCAL, code);
+    code.push(0x36); // i32.store tag word
+    uleb(2, code);
+    uleb(0, code);
+}
+
+fn emit_x87_value_guard(local: u32, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(local, code);
+    code.push(0x42);
+    sleb(0x7ff0_0000_0000_0000u64 as i64, code);
+    code.push(0x83); // i64.and exponent bits
+    code.push(0x50); // i64.eqz: zero or subnormal
+    emit_fallback_if_true(code);
+
+    code.push(0x20);
+    uleb(local, code);
+    code.push(0x42);
+    sleb(0x7ff0_0000_0000_0000u64 as i64, code);
+    code.push(0x83);
+    code.push(0x42);
+    sleb(0x7ff0_0000_0000_0000u64 as i64, code);
+    code.push(0x51); // i64.eq: infinity or NaN
     emit_fallback_if_true(code);
 }
 
@@ -1294,6 +1569,8 @@ fn emit_xor_gpr(dst: u8, source: u8, width: u8, code: &mut Vec<u8>) {
         uleb(gpr_local(dst), code);
         code.push(0xa7);
         code.push(0x21);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
         uleb(ADD_LHS_LOCAL, code);
         code.push(0x20);
         uleb(gpr_local(source), code);
@@ -1664,6 +1941,10 @@ fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
             JitInstruction::Nop { .. }
             | JitInstruction::Jump { .. }
             | JitInstruction::Branch { .. } => {}
+            JitInstruction::JumpRegister { register, .. } => {
+                require_initial_register(*register, initialized, &mut initial_reads);
+            }
+            JitInstruction::X87Stack { .. } => {}
             JitInstruction::Mov(mov) => {
                 if let MovSource::Register { index, .. } = mov.source {
                     require_initial_register(index, initialized, &mut initial_reads);
@@ -2036,6 +2317,54 @@ mod tests {
 
         assert_eq!(emitted.instruction_count(), 3);
         assert_eq!(emitted.first_register_register, Some(1));
+    }
+
+    #[test]
+    fn emits_a_register_indirect_jmp_exit() {
+        let indirect_jmp_rax = decode(&[0xff, 0xe0], 0x7100).unwrap();
+        assert_eq!(indirect_jmp_rax.op, Op::JmpInd);
+
+        let emitted = emit_mov_block(73, 0x7100, &[indirect_jmp_rax], 1)
+            .expect("register-indirect JMP should be emitted as a block exit");
+        assert_eq!(emitted.instruction_count(), 1);
+    }
+
+    #[test]
+    fn emits_packed_double_subtract_and_divide() {
+        let subpd = decode(&[0x66, 0x0f, 0x5c, 0xc1], 0x7200).unwrap();
+        let divpd = decode(&[0x66, 0x0f, 0x5e, 0xc1], 0x7204).unwrap();
+
+        let emitted = emit_mov_block(74, 0x7200, &[subpd, divpd], 1)
+            .expect("normal packed-double subtract and divide should be emitted");
+        assert_eq!(emitted.instruction_count(), 2);
+    }
+
+    #[test]
+    fn packed_double_memory_arithmetic_stays_on_the_interpreter_path() {
+        let addpd_memory = decode(&[0x66, 0x0f, 0x58, 0x00], 0x7208).unwrap();
+        assert!(emit_mov_block(77, 0x7208, &[addpd_memory], 1).is_none());
+    }
+
+    #[test]
+    fn emits_supported_x87_register_stack_operations() {
+        let fld_st1 = decode(&[0xd9, 0xc1], 0x7300).unwrap();
+        let fxch_st1 = decode(&[0xd9, 0xc9], 0x7302).unwrap();
+        let fstp_st1 = decode(&[0xd9, 0xd9], 0x7304).unwrap();
+        let fadd_st0_st1 = decode(&[0xd8, 0xc1], 0x7306).unwrap();
+
+        for (id, (address, instruction)) in [
+            (0x7300, fld_st1),
+            (0x7302, fxch_st1),
+            (0x7304, fstp_st1),
+            (0x7306, fadd_st0_st1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let emitted = emit_mov_block(id as u32 + 75, address, &[instruction], 1)
+                .expect("selected x87 register-stack instruction should be emitted");
+            assert_eq!(emitted.instruction_count(), 1);
+        }
     }
 
     #[test]

@@ -131,7 +131,7 @@ try {
   check('Chrome executes opt-in emitted blocks including register-register MOVs',
     jitBrowser.emitted.status === jitBrowser.exited && jitBrowser.emitted.exitCode === 0 &&
       jitBrowser.emitted.jitStats.executions > 0 && jitBrowser.emitted.jitStats.registerRegisterHits > 0 &&
-      jitBrowser.emitted.jitStats.fallbacks === 1 && jitBrowser.emitted.out.includes('primes<20000=2262') &&
+      jitBrowser.emitted.jitStats.fallbacks === 2 && jitBrowser.emitted.out.includes('primes<20000=2262') &&
       jitBrowser.emitted.out.includes('fp=609') && jitBrowser.emitted.out.includes('gpa=ok'),
     JSON.stringify(jitBrowser.emitted));
   check('Chrome cached-only run matches emitted output and retired count',

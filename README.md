@@ -10,9 +10,25 @@ WASM module.
 > **Status: early.** Console programs run, including real mingw-compiled programs that import the
 > actual `msvcrt.dll` API, and a **Direct3D 11 program renders through WebGPU** (verified
 > pixel-for-pixel on a coloured triangle). There is **no audio, no threads, no GDI**, the D3D11
-> surface is a vertical slice, and the interpreter is ~20 M instructions/s (games need 10-50x more). See
+> surface is a vertical slice, and cached-only guest execution is around 20 M instructions/s on the
+> current benchmark fixtures (games need 10-50x more). An experimental WASM JIT is available behind
+> explicit opt-in and remains disabled by default. See
 > [docs/STATUS.md](docs/STATUS.md) for exactly what is verified and what is not, and
 > [docs/EVALUATION.md](docs/EVALUATION.md) for the prior-art research (WineBrowser, retrowin32, ...).
+
+## Experimental WASM JIT
+
+The opt-in emitter handles selected integer moves and additions, guarded memory operations,
+control-flow exits, packed-double arithmetic, and a narrow x87 register-stack subset. It executes
+from a complete CPU snapshot and returns unsupported instructions or unsafe memory/FP cases to the
+interpreter. The browser harness also checks resuming cached emitted code after growing WASM memory.
+
+In a same-build, ten-round paired fixture benchmark, forced emission improved memory-heavy execution
+by 232.2% and SSE-float by 62.2%; compute, call-heavy, and block-chain workloads regressed by
+68.8%, 75.1%, and 73.6%. The measurements matched guest output and retired counts. Since the results
+are workload-specific, emission stays off by default. The full Chromium run passes JIT, memory-growth,
+and graphics checks, while seven separate input/canvas assertions remain failing; see
+[docs/STATUS.md](docs/STATUS.md) for scope and details.
 
 ## Layout
 

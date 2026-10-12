@@ -550,6 +550,54 @@ mod tests {
     }
 
     #[test]
+    fn alternating_hot_accesses_across_four_pages_preserve_each_tlb_entry() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x10_000, 4 * PAGE_SIZE, PROT_RW));
+
+        for pass in 0..8u64 {
+            for page in 0..4u64 {
+                let address = 0x10_000 + page * PAGE_SIZE + 24;
+                let value = (pass << 32) | page;
+                memory.write_u64(address, value).unwrap();
+                assert_eq!(memory.read_u64(address).unwrap(), value);
+            }
+        }
+    }
+
+    #[test]
+    fn mapping_protection_and_unmapping_invalidate_cached_translations() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x20_000, PAGE_SIZE, PROT_RW));
+        memory.write_u8(0x20_000, 0x5a).unwrap();
+        assert_eq!(memory.read_u8(0x20_000).unwrap(), 0x5a);
+
+        assert!(memory.protect(0x20_000, PAGE_SIZE, PROT_R));
+        assert_eq!(memory.read_u8(0x20_000).unwrap(), 0x5a);
+        assert!(memory.write_u8(0x20_000, 0x33).unwrap_err().protection);
+
+        assert!(memory.protect(0x20_000, PAGE_SIZE, PROT_RW));
+        memory.write_u8(0x20_000, 0x33).unwrap();
+        memory.unmap(0x20_000, PAGE_SIZE);
+        assert_eq!(memory.read_u8(0x20_000).unwrap_err().addr, 0x20_000);
+
+        assert!(memory.map(0x20_000, PAGE_SIZE, PROT_R));
+        assert_eq!(memory.read_u8(0x20_000).unwrap(), 0);
+        assert!(memory.write_u8(0x20_000, 0x11).unwrap_err().protection);
+    }
+
+    #[test]
+    fn cross_page_access_checks_both_pages() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x30_000, PAGE_SIZE, PROT_RW));
+        memory.write_u64(0x30_ff8, 0x1122_3344_5566_7788).unwrap();
+
+        let error = memory.read_u64(0x30_ffc).unwrap_err();
+        assert_eq!(error.addr, 0x31_000);
+        assert_eq!(error.access, Access::Read);
+        assert!(!error.protection);
+    }
+
+    #[test]
     fn faults() {
         let mut m = Memory::new();
         assert_eq!(

@@ -29,6 +29,12 @@ try {
     ['bench_memory', 'bench_memory.exe'],
     ['bench_sse', 'bench_sse.exe'],
     ['jit_sse', 'jit_sse.exe'],
+    ['jit_sse_mxcsr', 'jit_sse_mxcsr.exe'],
+    ['jit_x87', 'jit_x87.exe'],
+    ['jit_x87_exception', 'jit_x87_exception.exe'],
+    ['jit_indirect', 'jit_indirect.exe'],
+    ['jit_badjmp', 'jit_badjmp.exe'],
+    ['jit_hle', 'jit_hle.exe'],
     ['callback_budget', 'callback_budget.exe'],
     ['jit_state', 'jit_state.exe'],
   ]) {
