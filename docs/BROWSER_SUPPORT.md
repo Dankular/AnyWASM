@@ -91,6 +91,7 @@ descriptors by adding red to target 0 while target 1 overwrites its clear colour
 The blend fixture also checks all four D3D11 `SRC1_*` color and alpha factors using the
 second pixel-shader output, including inverse factors and a fractional source alpha. A channel
 write-mask check writes red and blue while preserving the cleared green and alpha channels. A
+separate-alpha check uses `ONE/ZERO/ADD` for RGB and `ONE/ONE/SUBTRACT` for alpha. A
 depth write-mask check confirms `ZERO` lets a farther later draw pass while `ALL` keeps the nearer
 fragment visible; the depth-disabled control also renders its later draw. Stencil coverage includes
 a partial `0x0f` write that preserves the upper nibble and a `0x0f` read mask that compares only the

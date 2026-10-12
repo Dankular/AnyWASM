@@ -3615,6 +3615,17 @@ try {
       maskedBlendView.setUint32(0, 23, true); // state id
       maskedBlendView.setUint32(40, 0x5, true); // write red and blue only
       command(9, maskedBlend);
+      const separateAlphaBlend = new Uint8Array(268), separateAlphaBlendView = new DataView(separateAlphaBlend.buffer);
+      separateAlphaBlendView.setUint32(0, 24, true); // state id
+      separateAlphaBlendView.setUint32(12, 1, true); // RenderTarget[0].BlendEnable
+      separateAlphaBlendView.setUint32(16, 2, true); // color SrcBlend = ONE
+      separateAlphaBlendView.setUint32(20, 1, true); // color DestBlend = ZERO
+      separateAlphaBlendView.setUint32(24, 1, true); // color BlendOp = ADD
+      separateAlphaBlendView.setUint32(28, 2, true); // alpha SrcBlend = ONE
+      separateAlphaBlendView.setUint32(32, 2, true); // alpha DestBlend = ONE
+      separateAlphaBlendView.setUint32(36, 2, true); // alpha BlendOp = SUBTRACT
+      separateAlphaBlendView.setUint32(40, 0xf, true);
+      command(9, separateAlphaBlend);
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
@@ -3642,6 +3653,10 @@ try {
       command(22, words(1, 0x42800000, 0, 0x41800000, 0x42000000, 0, 0x3f800000)); // viewport x=64, width=16
       command(23, words(1, 64, 0, 80, 32));
       command(29, words(3, 0));
+      command(24, words(24, 0, 0, 0, 0, 0xffffffff));
+      command(22, words(1, 0x42800000, 0x42000000, 0x41800000, 0x42000000, 0, 0x3f800000)); // viewport x=64, y=32
+      command(23, words(1, 64, 32, 80, 64));
+      command(29, words(3, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y) => {
@@ -3657,6 +3672,7 @@ try {
         srcAlpha: factorAt(0), dstAlpha: factorAt(1), srcAlphaSaturate: factorAt(2),
         srcColor: factorAt(3), dstColor: factorAt(4), blendConstant: factorAt(5),
         channelMask: at(72, 16),
+        separateAlpha: at(72, 48),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -3666,14 +3682,14 @@ try {
     }
   });
   check('D3D11 ADD, SUBTRACT, MIN, and MAX blend operations match channel-wise pixels',
-    blendModesResult.draws === 11 && blendModesResult.errors.length === 0
+    blendModesResult.draws === 12 && blendModesResult.errors.length === 0
       && near(blendModesResult.add, [191, 153, 128, 255], 1)
       && near(blendModesResult.subtract, [0, 102, 0, 128], 1)
       && near(blendModesResult.min, [64, 26, 26, 77], 1)
       && near(blendModesResult.max, [128, 128, 102, 204], 1),
     JSON.stringify(blendModesResult));
   check('D3D11 blend factors cover alpha, color, saturate, and blend-constant paths',
-    blendModesResult.draws === 11 && blendModesResult.errors.length === 0
+    blendModesResult.draws === 12 && blendModesResult.errors.length === 0
       && ['srcAlpha', 'dstAlpha', 'srcAlphaSaturate', 'srcColor', 'dstColor', 'blendConstant']
         .every((name) => Array.isArray(blendModesResult[name]))
       && near(blendModesResult.srcAlpha, [77, 107, 41, 77], 1)
@@ -3684,8 +3700,12 @@ try {
       && near(blendModesResult.blendConstant, [112, 77, 45, 77], 1),
     JSON.stringify(blendModesResult));
   check('D3D11 render target write mask preserves disabled color and alpha channels',
-    blendModesResult.draws === 11 && blendModesResult.errors.length === 0
+    blendModesResult.draws === 12 && blendModesResult.errors.length === 0
       && near(blendModesResult.channelMask || [], [64, 26, 26, 77], 1),
+    JSON.stringify(blendModesResult));
+  check('D3D11 color and alpha blend factors and operations apply independently',
+    blendModesResult.draws === 12 && blendModesResult.errors.length === 0
+      && near(blendModesResult.separateAlpha || [], [64, 128, 26, 128], 1),
     JSON.stringify(blendModesResult));
 
   const mrtResult = await page.evaluate(async () => {
