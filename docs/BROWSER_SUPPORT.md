@@ -47,19 +47,22 @@ validation plus matching pixels. A fresh run on 2026-10-12 used Chromium `154.0.
 three engines. Chromium and Firefox reported WebGPU and OffscreenCanvas worker transfer, exited the
 hello and D3D11 triangle fixtures successfully (three frames), and passed the emitted-module
 cache-pressure probe. Both passed 640x480 back-buffer checks and visible-canvas checks at 640x453;
-each reported clear pixel `[0,0,51,255]`, triangle center `[85,86,85,255]`, and no WebGPU validation
+each reported clear pixel `[0,0,51,255]`, back-buffer center `[85,86,85,255]`, visible-canvas center
+`[85,85,84,255]`, and no WebGPU validation
 errors. WebKit exited hello, passed cache pressure, and returned the expected explicit
 graphics-unavailable status because WebGPU and OffscreenCanvas worker transfer are unavailable.
 These results are specific to the installed browser builds and platform.
 
-Fresh Chromium suite on 2026-10-12: Chrome `151.0.7922.34`, selected through `CHROMIUM` on Windows
+Fresh Chromium suite on 2026-10-12: Chrome `154.0.8037.98`, selected through `CHROMIUM` on Windows
 x64. `node test/browser/run.mjs` passed the worker, emitted-module, input, D3D11 triangle, textured,
 and compute checks. The `?test=1` triangle back-buffer readback matched barycentric samples at 216
 pixels (worst error 1/255); a separate visible-canvas screenshot verified the clear colour and
 interpolated centre pixel. The textured fixture passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
 following pixel shader sampled that result. The run reported no WebGPU validation errors or page
-errors. It does not add target-game or non-Chromium pixel coverage.
+errors. The D3D9 fixed-function fixture also passed pixel checks for stage-0 SELECTARG1/SELECTARG2,
+MODULATE/MODULATE2X, ADD/SUBTRACT, alpha testing, and blending. It does not add target-game or
+non-Chromium pixel coverage beyond the D3D11 triangle.
 
 | Browser or feature | Evidence and current status |
 |---|---|

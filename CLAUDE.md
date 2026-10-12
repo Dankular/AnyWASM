@@ -149,9 +149,11 @@ register-stack subset):
       probe. The 640x480 back buffer is displayed at 640x453 when the guest client area is 624x441;
       the screenshot check follows that aspect ratio. Playwright WebKit 18.2 runs hello and the CSP
       probe but reports graphics unavailable because OffscreenCanvas transfer is missing. Full
-      graphics coverage on other engines remains open. The Chromium full browser suite passes its
-      graphics and input checks but currently has three unrelated JIT assertions failing for emitted
-      register-register MOV and warmed memory/JMP/Jcc paths.
+      graphics coverage on other engines remains open. Firefox 141 passes the triangle pixel checks
+      in the cross-engine suite; its graphics coverage remains limited to that fixture. WebKit 18.2
+      lacks WebGPU and OffscreenCanvas transfer, so only the explicit graphics-unavailable status is
+      verified there. The Chromium full browser suite passes its current graphics, input, and JIT
+      assertions.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: a deterministic FIFO cooperative scheduler now saves full CPU state, private

@@ -133,10 +133,10 @@
   faults, and executable-page write invalidation. The emitted memory fixture walks multiple pages
   and compares complete CPU/memory state. The Chromium page and worker checks compare output/counts;
   the page test grows WASM memory by one page after emission starts and confirms execution resumes
-  with matching cached-only output/count. The JIT-specific browser checks pass. The latest full
-  Chromium run has seven unrelated input/canvas assertion failures (mouse-coordinate scaling,
-  mouse-leave delivery and input-fixture exit, plus screenshot extent/interpolated-pixel checks);
-  JIT and graphics checks pass without page errors or WebGPU validation errors. Module-cache pressure
+  with matching cached-only output/count. The JIT-specific browser checks pass. A fresh full browser
+  suite on Chrome 154.0.8037.98 passed the JIT, input, graphics, and compute assertions, including
+  mouse-coordinate scaling, mouse-leave delivery, and visible-canvas pixel checks. It reported no
+  page errors or WebGPU validation errors. Module-cache pressure
   and emitted-path CSP checks pass in Node, Chromium, Firefox, and WebKit.
 
   Latest paired Node benchmark: one warm-up plus 10 alternating cached-only/emitted rounds on one
