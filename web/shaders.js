@@ -120,7 +120,10 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
   if (uavs.length !== 1) return spirv;
   const formats = {
     2: { dataType: 5, spirvFormat: 1 }, // R32G32B32A32_FLOAT
+    10: { dataType: 5, spirvFormat: 2 }, // R16G16B16A16_FLOAT
     28: { dataType: 5, spirvFormat: 4 }, // R8G8B8A8_UNORM
+    30: { dataType: 4, spirvFormat: 32 }, // R8G8B8A8_UINT
+    32: { dataType: 3, spirvFormat: 23 }, // R8G8B8A8_SINT
     41: { dataType: 5, spirvFormat: 3 }, // R32_FLOAT
     42: { dataType: 4, spirvFormat: 33 }, // R32_UINT
     43: { dataType: 3, spirvFormat: 24 }, // R32_SINT
