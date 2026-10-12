@@ -1705,11 +1705,44 @@ try {
       let r8Offset = 0; for (const part of stream) { r8Commands.set(part, r8Offset); r8Offset += part.length; }
       gpu.execute(r8Commands);
       const r8Pixels = await gpu.readBackbuffer(1);
+
+      stream.length = 0;
+      command(4, words(23, 1, 1, 1, 1, 49, 8, 0, 1, 0)); // two-channel RG8_UNORM texture
+      const rg8Upload = new Uint8Array(40);
+      rg8Upload.set(words(23, 0, 0, 0, 0, 1, 1, 4, 4));
+      rg8Upload[36] = 128; rg8Upload[37] = 64;
+      command(5, rg8Upload);
+      command(12, words(24, 2, 23, 49, 4, 0, 1, 0, 1));
+      command(8, sampler(22, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+      command(19, words(1, 0, 1, 24)); command(20, words(1, 0, 1, 22));
+      command(29, words(3, 0));
+      const rg8Size = stream.reduce((total, part) => total + part.length, 0), rg8Commands = new Uint8Array(rg8Size);
+      let rg8Offset = 0; for (const part of stream) { rg8Commands.set(part, rg8Offset); rg8Offset += part.length; }
+      gpu.execute(rg8Commands);
+      const rg8Pixels = await gpu.readBackbuffer(1);
+
+      stream.length = 0;
+      command(4, words(25, 1, 1, 1, 1, 85, 8, 0, 1, 0)); // RGB B5G6R5_UNORM texture
+      const r565Upload = new Uint8Array(40);
+      r565Upload.set(words(25, 0, 0, 0, 0, 1, 1, 4, 4));
+      r565Upload[37] = 0xf8; // opaque red (R=31, G=0, B=0)
+      command(5, r565Upload);
+      command(12, words(26, 2, 25, 85, 4, 0, 1, 0, 1));
+      command(8, sampler(23, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+      command(19, words(1, 0, 1, 26)); command(20, words(1, 0, 1, 23));
+      command(29, words(3, 0));
+      const r565Size = stream.reduce((total, part) => total + part.length, 0), r565Commands = new Uint8Array(r565Size);
+      let r565Offset = 0; for (const part of stream) { r565Commands.set(part, r565Offset); r565Offset += part.length; }
+      gpu.execute(r565Commands);
+      const r565Pixels = await gpu.readBackbuffer(1);
       const result = {
         wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35),
         mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
         linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32),
-        r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48), draws: gpu.stats.draws, errors: gpu.stats.errors,
+        r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48),
+        rg8BorderEdge: at(rg8Pixels, 16), rg8BorderOutside: at(rg8Pixels, 48),
+        rgbBorderEdge: at(r565Pixels, 16), rgbBorderOutside: at(r565Pixels, 48),
+        draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
       return result;
@@ -1717,8 +1750,8 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler repeat/mirror/clamp/MIRROR_ONCE/BORDER modes and linear filtering match sampled texels',
-    samplerAddressResult.draws === 5 && samplerAddressResult.errors.length === 0
+  check('D3D11 sampler modes match pixels and BORDER defaults follow R8/RG8/RGB SRV formats',
+    samplerAddressResult.draws === 7 && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1730,6 +1763,10 @@ try {
       && near(samplerAddressResult.borderBias || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.r8BorderEdge || [], [192, 0, 0, 255], 2)
       && near(samplerAddressResult.r8BorderOutside || [], [255, 0, 0, 255], 1)
+      && near(samplerAddressResult.rg8BorderEdge || [], [192, 64, 0, 255], 2)
+      && near(samplerAddressResult.rg8BorderOutside || [], [255, 64, 0, 255], 1)
+      && near(samplerAddressResult.rgbBorderEdge || [], [255, 32, 64, 255], 2)
+      && near(samplerAddressResult.rgbBorderOutside || [], [255, 64, 128, 255], 1)
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
