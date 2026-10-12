@@ -454,6 +454,158 @@ try {
   check('GenerateMips reaches the final 1x1 level with the full-image average',
     near(copyRegionResult.mip2, [60, 60, 0, 255], 1), JSON.stringify(copyRegionResult.mip2));
 
+  const d3d9FixedResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(21, words(1, 2, 0));
+      const viewport = new Uint8Array(28), viewportView = new DataView(viewport.buffer);
+      viewportView.setUint32(0, 1, true);
+      [0, 0, 64, 64, 0, 1].forEach((value, i) => viewportView.setFloat32(4 + i * 4, value, true));
+      command(22, viewport);
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true);
+      clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
+      clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
+      command(27, clear);
+      command(45, words(0x44, 64, 64)); // D3DFVF_XYZRHW | D3DFVF_DIFFUSE
+      command(2, words(11, 60, 1, 0, 0, 20));
+      const vertexData = new Uint8Array(60), vertexView = new DataView(vertexData.buffer);
+      [[8, 8], [56, 8], [32, 56]].forEach(([x, y], i) => {
+        const offset = i * 20;
+        vertexView.setFloat32(offset, x, true);
+        vertexView.setFloat32(offset + 4, y, true);
+        vertexView.setFloat32(offset + 8, 0.5, true);
+        vertexView.setFloat32(offset + 12, 1, true);
+        vertexView.setUint32(offset + 16, 0xffff0000, true); // D3DCOLOR red, stored BGRA
+      });
+      const write = new Uint8Array(12 + vertexData.length);
+      write.set(words(11, 0, vertexData.length)); write.set(vertexData, 12); command(3, write);
+      command(13, words(0, 1, 11, 20, 0));
+      command(16, words(4)); // triangle list
+      command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x, y) => {
+        const i = (y * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = { pixel: at(32, 20), background: at(1, 1), stats: gpu.stats };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D9 FVF fixed-function triangle draws with no WebGPU validation errors',
+    d3d9FixedResult.stats?.draws === 1 && d3d9FixedResult.stats.errors.length === 0,
+    JSON.stringify(d3d9FixedResult));
+  check('D3D9 XYZRHW and D3DCOLOR become screen-space geometry with the correct pixel color',
+    near(d3d9FixedResult.pixel, [255, 0, 0, 255], 1) && near(d3d9FixedResult.background, [0, 0, 0, 255], 1),
+    JSON.stringify(d3d9FixedResult));
+
+  const discardResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        float4 main(float4 position : SV_Position) : SV_Target {
+          clip(32.0 - position.x);
+          return float4(1.0, 0.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(7, words(10, 0)); // vertex shader uses SV_VertexID only
+      shader(6, 0, vertex); shader(7, 1, pixel);
+      command(15, words(10));
+      command(17, words(0, 6)); command(17, words(1, 7));
+      command(16, words(4)); command(21, words(1, 2, 0));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true);
+      clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
+      clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
+      command(27, clear);
+      command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x, y) => {
+        const i = (y * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = { kept: at(16, 32), discarded: at(48, 32), stats: gpu.stats };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('DXBC clip/discard pipeline validates and draws without WebGPU errors',
+    discardResult.stats?.draws === 1 && discardResult.stats.errors.length === 0,
+    JSON.stringify(discardResult));
+  check('DXBC clip preserves fragments below the threshold and discards the rest',
+    near(discardResult.kept, [255, 0, 0, 255], 1) && near(discardResult.discarded, [0, 0, 0, 255], 1),
+    JSON.stringify(discardResult));
+
   const computeResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');

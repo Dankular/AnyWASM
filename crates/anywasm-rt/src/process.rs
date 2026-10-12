@@ -272,7 +272,26 @@ fn align_up(v: u64, a: u64) -> u64 {
 /// caller cleanup. Keep this table explicit so an unknown signature cannot silently corrupt ESP.
 fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
     if group == "com" {
+        // COM methods use stdcall on x86, with `this` included in the callee-popped
+        // argument list. Keep the shared IUnknown entries here; graphics and input
+        // interfaces have additional signatures below.
+        if name.ends_with("::QueryInterface") {
+            return 12;
+        }
+        if name.ends_with("::AddRef") || name.ends_with("::Release") {
+            return 4;
+        }
+        match name {
+            // DirectDraw7::GetAvailableVidMem(this, caps, total, free)
+            "IDirectDraw7::GetAvailableVidMem" => return 16,
+            // DirectSound8::GetCaps(this, caps)
+            "IDirectSound8::GetCaps" => return 8,
+            _ => {}
+        }
         if let Some(bytes) = hle::directinput8::stdcall_stack_bytes(name) {
+            return bytes;
+        }
+        if let Some(bytes) = hle::d3d9::stdcall_stack_bytes(name) {
             return bytes;
         }
     }

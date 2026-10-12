@@ -1,4 +1,4 @@
-// WebGPU executor: replays the binary command stream produced by the runtime's Direct3D 11 layer
+// WebGPU executor: replays the binary command stream produced by the runtime's Direct3D layers
 // (see crates/anywasm-rt/src/hle/gpu.rs for the wire format and opcodes).
 //
 // Ordering model: D3D11 is an immediate-mode API, WebGPU records command buffers. Every upload
@@ -14,6 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
+  SET_FIXED_FUNCTION: 45,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -112,6 +113,8 @@ export class GpuExecutor {
     this.shaders = new Map();
     this.layouts = new Map();  // input layouts
     this.samplers = new Map();
+    this.fixedFunctionShaders = new Map();
+    this.fixedFunctionNextId = 0xfffffff0;
     this.blends = new Map();
     this.rasters = new Map();
     this.depths = new Map();
@@ -281,6 +284,7 @@ export class GpuExecutor {
       case OP.SET_INDEX_BUFFER: st.ib = { buf: u(0), format: u(1), offset: u(2) }; break;
       case OP.SET_INPUT_LAYOUT: st.layout = u(0); break;
       case OP.SET_TOPOLOGY: st.topology = u(0); break;
+      case OP.SET_FIXED_FUNCTION: this.setFixedFunction(u(0), u(1), u(2)); break;
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
       case OP.SET_CBUFFERS: case OP.SET_SRVS: case OP.SET_SAMPLERS: {
         const arr = (op === OP.SET_CBUFFERS ? st.cb : op === OP.SET_SRVS ? st.srv : st.smp)[u(0)];
@@ -405,6 +409,69 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
+  setFixedFunction(fvf, width, height) {
+    if (fvf !== 0x42 && fvf !== 0x44) {
+      this.st.shader[0] = 0;
+      this.st.shader[1] = 0;
+      this.st.layout = 0;
+      this.log(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
+      return;
+    }
+    const key = `${fvf}/${width}/${height}`;
+    let fixed = this.fixedFunctionShaders.get(key);
+    if (!fixed) {
+      const transformed = fvf === 0x44;
+      const positionFormat = transformed ? 2 : 6;
+      const colorOffset = transformed ? 16 : 12;
+      const inputPosition = transformed ? 'vec4<f32>' : 'vec3<f32>';
+      const positionCode = transformed
+        ? `let invW = 1.0 / max(input.position.w, 0.000001);
+           output.position = vec4<f32>(
+             (input.position.x * (2.0 / ${Math.max(width, 1)}.0) - 1.0) * invW,
+             (1.0 - input.position.y * (2.0 / ${Math.max(height, 1)}.0)) * invW,
+             input.position.z * invW, invW);`
+        : 'output.position = vec4<f32>(input.position, 1.0);';
+      const code = `
+        struct VertexInput {
+          @location(0) position: ${inputPosition},
+          @location(1) color: vec4<f32>,
+        };
+        struct VertexOutput {
+          @builtin(position) position: vec4<f32>,
+          @location(0) color: vec4<f32>,
+        };
+        @vertex fn vs(input: VertexInput) -> VertexOutput {
+          var output: VertexOutput;
+          ${positionCode}
+          output.color = input.color.bgra;
+          return output;
+        }
+        @fragment fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
+          return input.color;
+        }
+      `;
+      const module = this.device.createShaderModule({ code });
+      fixed = {
+        vsId: this.fixedFunctionNextId--,
+        psId: this.fixedFunctionNextId--,
+        layoutId: this.fixedFunctionNextId--,
+        layout: [
+          { location: 0, format: positionFormat, slot: 0, offset: 0, cls: 0, step: 0 },
+          { location: 1, format: 28, slot: 0, offset: colorOffset, cls: 0, step: 0 },
+        ],
+        vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
+        ps: { stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
+      };
+      this.fixedFunctionShaders.set(key, fixed);
+    }
+    this.shaders.set(fixed.vsId, fixed.vs);
+    this.shaders.set(fixed.psId, fixed.ps);
+    this.layouts.set(fixed.layoutId, fixed.layout);
+    this.st.shader[0] = fixed.vsId;
+    this.st.shader[1] = fixed.psId;
+    this.st.layout = fixed.layoutId;
+  }
+
   viewFormat(dxgi, tex) {
     const f = dxgi ? this.texFormat(dxgi, tex.bind) : tex.format;
     return f === tex.format || f === SRGB_PAIR[tex.format] || f === UNSRGB[tex.format] ? f : tex.format;

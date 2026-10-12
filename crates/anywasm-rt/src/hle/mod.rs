@@ -8,6 +8,7 @@ pub mod com;
 pub mod crt;
 pub mod d3d11;
 pub mod ddraw;
+pub mod d3d9;
 pub mod directinput8;
 pub mod dsound;
 pub mod dxgi;
@@ -114,6 +115,7 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "shlwapi" => shlwapi::lookup(name),
         "winmm" => user32::lookup_winmm(name),
         "d3d11" => d3d11::lookup(name),
+        "d3d9" => d3d9::lookup(name),
         "dsound" => dsound::lookup(name),
         "ddraw" => ddraw::lookup(name),
         "dinput8" => directinput8::lookup(name),
