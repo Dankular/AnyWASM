@@ -262,7 +262,9 @@ register-stack subset):
       a bounded visual comparison in `docs/TARGETS.md`. Its 128x128 R32_FLOAT SDF UAV is independently
       read back with all finite values inside the shader's ±4 bound, and a controlled seed-1 browser
       replay traverses the maze to its teleport; other UAV formats, pixel equivalence, graphics
-      states, other gameplay states, and broad game acceptance remain unverified. Target-driven Tab
+      states, other gameplay states, and broad game acceptance remain unverified. The random-map
+      flashlight probe now selects an unobstructed SDF ray to a wall within the light range and
+      checks local pixels; two fresh Release-bundle launches passed. Target-driven Tab
       map reset is pixel-checked after adding D3D11 `Flush1` event signaling and event-query
       completion; other query types are not supported. Browser fixtures also cover typed R32/RGBA
       textures, structured/raw/typed buffer UAV ranges, and a 3D texture UAV. Other UAV formats,

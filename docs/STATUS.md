@@ -169,12 +169,13 @@
   DirectInput/XInput, 32-bit PE, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
   fixed-function subset is limited to the checked FVF layouts, stage-0 texture selection, triangle
   fans, and alpha testing. GDI support is limited to virtual display DCs and basic caps.
-- DLL initialization remains partial: bundled DLL `DllMain` calls follow module creation order,
-  static TLS data is initialized, but TLS callbacks are not invoked. Named forwarded exports are
-  resolved opportunistically, with failed names omitted. The selected Diligent EXE and three DLLs
-  have no TLS callbacks or forwarded exports, so they do not verify those paths. The bounded target
-  replay completed process attach for the D3D11 engine and D3DCompiler; Archiver was not observed
-  loading. See [`docs/TARGETS.md`](TARGETS.md).
+- DLL initialization remains partial: bundled DLL `DllMain` calls now follow dependency-first graph
+  order during initial loading and `LoadLibrary`, with synthetic regressions for both paths. Static
+  TLS data is initialized, but TLS callbacks are not invoked. Named forwarded exports are resolved
+  opportunistically, with failed names omitted. The selected Diligent EXE and three DLLs have no
+  TLS callbacks or forwarded exports, so they do not verify those paths. The bounded target replay
+  completed process attach for the D3D11 engine and D3DCompiler; Archiver was not observed loading.
+  See [`docs/TARGETS.md`](TARGETS.md).
 - Direct3D 11 coverage is a vertical slice. Focused browser pixel/readback checks cover the coloured
   triangle (216 pixels), constant-factor and source-alpha blending, reverse-subtract/add/subtract/
   min/max blending, texture/vertex/index-buffer copies, texture region copies and uploads,
@@ -184,7 +185,8 @@
   ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
   rendering, stage-0 texture selection, and alpha-test comparisons. These checks do not establish
   broad API or game compatibility. Target-level D3D11 checks cover visible SDF output, W movement,
-  and Tab map regeneration; the triangle canvas screenshot checks its clear colour and centre pixel.
+  Tab map regeneration, and a flashlight response measured along an unobstructed SDF ray in two
+  fresh random-map runs; the triangle canvas screenshot checks its clear colour and centre pixel.
   Remaining D3D11 gaps include other buffer-copy classes, more format/resolve and sampler pixel
   comparisons, render-state combinations, other query types, geometry/tessellation, general staging
   read-back, deferred contexts, and system values beyond the basics. Compute browser fixtures cover

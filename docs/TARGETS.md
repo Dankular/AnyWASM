@@ -230,17 +230,19 @@ A 30,000,000-instruction AnyWASM replay with `--mode d3d11` reached `user32!Crea
 `d3d11!D3D11CreateDevice`, then executed code in the bundled D3D11 engine and `D3Dcompiler_47.dll`
 before reaching the step cap. This confirms that the selected target maps and executes code in those
 DLLs; it does not verify their initialization order. Source inspection shows `load_image` reserves a
-module before recursively loading its imports, while `run_dll_inits` invokes `DllMain` in module
-creation order. The engine and compiler DLLs have nonzero entry points; their process-attach calls
-returned successfully in that order. `Archiver_64r.dll` also has an entry point, but its runtime load
-was not observed. The initialization order is not dependency-first. Static TLS data is initialized,
-but the loader does not invoke `Pe::tls_callbacks()`. Named forwarded exports are resolved opportunistically;
-ordinal forwarders are dropped, while failed named forwarders are omitted and only fail if later
-imported.
+module before recursively loading its imports; the loader now records those dependency edges and
+traverses them dependency-first before calling `DllMain`. Synthetic regressions exercise nested
+dependencies during initial loading and `LoadLibrary`. The engine and compiler DLLs have nonzero
+entry points; their process-attach calls returned successfully, but these selected images do not
+establish target-specific ordering. `Archiver_64r.dll` also has an entry point, but its runtime load
+was not observed. Static TLS data is initialized, but the loader does not invoke
+`Pe::tls_callbacks()`. Named forwarded exports are resolved opportunistically; ordinal forwarders
+are dropped, while failed named forwarders are omitted and only fail if later imported.
 
-The selected artifacts leave the callback and forwarder cases untested. Use a representative DLL
-that contains those features before claiming support; separately verify dependency-first `DllMain`
-ordering against that target.
+The selected artifacts leave TLS callback and forwarded-export cases untested. Use a representative
+DLL that contains those features before claiming support. Dependency-first `DllMain` ordering is
+covered by synthetic nested-DLL regressions but still lacks a target trace with a bundled dependency
+chain.
 
 ### Bounded AnyWASM trial
 
@@ -541,12 +543,21 @@ are saved at [after W](images/glfwdemo-first-frame.after-w.png) and
 
 The general `Release` bundle command above uses a map binary whose `GenerateMap` seeds `std::mt19937`
 from `std::random_device`; each process launch can therefore produce a different maze. On 2026-10-11,
-two runs of the same packed bundle produced 3,744 and 4,048 negative texels in the SDF. The full
-input/flashlight command failed its 100-bright-pixel flashlight threshold on one map (36 additional
-bright pixels); the other input, map-reset, and SDF checks passed on a separate launch. The stored
-+1,796-pixel flashlight result above is from the separately seeded build and does not make the
-random-bundle flashlight check deterministic. Exact hashes and measurements are in
-[`target-data/glfwdemo-random-run-flashlight.json`](target-data/glfwdemo-random-run-flashlight.json).
+the whole-frame 100-bright-pixel assertion failed on one map with only 36 additional bright pixels,
+although the other input, map-reset, and SDF checks passed. That global count was sensitive to walls
+elsewhere in the random map and did not establish whether the selected beam path was lit.
+
+The flashlight probe now maps the marker through the centered square game viewport, chooses an SDF
+ray that stays in positive-clearance space until it reaches a wall within the 25-map-pixel flashlight
+range, and compares 3x3 pixel patches at consecutive SDF texels along that ray before and after
+input. It requires at least three consecutive patches to gain more than 8 mean luminance; the
+whole-frame bright-pixel count remains diagnostic. Two independent Chromium launches of the freshly
+rebuilt random-map Release bundle passed with different selected rays. One run increased the
+whole-frame count by 12,795 and produced 21 consecutive illuminated patches; the other increased the
+whole-frame count by 5,582 and produced 16 consecutive patches. Both had no WebGPU validation errors.
+The executable and packed-bundle hashes plus ray measurements are in
+[`target-data/glfwdemo-random-run-flashlight-ray-check.json`](target-data/glfwdemo-random-run-flashlight-ray-check.json).
+This verifies the flashlight response in two random layouts, not general gameplay acceptance.
 
 ![GLFW Demo after W moves the player](images/glfwdemo-first-frame.after-w.png)
 
@@ -604,11 +615,8 @@ is diagnostic test routing only.
 ## Next evidence needed
 
 - A controlled seed-1 maze traversal is now recorded, but it does not establish general gameplay
-  acceptance. Flashlight behavior outside the single seeded check, other gameplay states, other UAV
-  formats, and general staging readback remain untested. Stabilize the flashlight browser assertion
-  for the random Release bundle (or make it consume a deterministic seeded build); the current
-  100-bright-pixel threshold failed once at +36 pixels when the random wall layout occluded most of
-  the beam.
+  acceptance. Flashlight behavior across more maps and aim positions, other gameplay states, other
+  UAV formats, and general staging readback remain untested.
 - Make the selected target's synchronous guest callbacks suspend and resume across normal worker
   slices; the large-slice replay does not address the default browser scheduling limit.
 - Extend the virtual registry only from observed target paths and required values. The current

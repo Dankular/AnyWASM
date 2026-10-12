@@ -7,7 +7,11 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { buildPlaythroughPlan } from './target-playthrough.mjs';
-import { mapFlashlightOrigin, selectClearFlashlightDirection } from './target-flashlight.mjs';
+import {
+  mapFlashlightOrigin,
+  measureFlashlightRayResponse,
+  selectClearFlashlightDirection,
+} from './target-flashlight.mjs';
 
 const bundlePath = resolve(process.argv[2] || '');
 const options = process.argv.slice(3);
@@ -168,10 +172,10 @@ try {
   assert.ok(result.nonBlack > 0, 'the target frame should contain visible colour');
   writeFileSync(outputPath, Buffer.from(result.png, 'base64'));
   delete result.png;
-  const capturePixels = async () => {
+  const capturePixels = async (includePixels = false) => {
     await page.evaluate(() => { window.__pixels = null; window.__worker?.postMessage({ type: 'capture' }); });
     await page.waitForFunction(() => window.__pixels, null, { timeout: 30_000 });
-    return page.evaluate(() => {
+    return page.evaluate((includePixels) => {
       const p = window.__pixels, d = p.data;
       let xTotal = 0, yTotal = 0, count = 0, luminance = 0, brightPixels = 0;
       for (let y = 0; y < p.height; y++) for (let x = 0; x < p.width; x++) {
@@ -187,8 +191,9 @@ try {
         greenMarker: count ? { x: xTotal / count, y: yTotal / count, pixels: count } : null,
         meanLuminance: luminance / (p.width * p.height),
         brightPixels,
+        pixels: includePixels ? Array.from(d) : undefined,
       };
-    });
+    }, includePixels);
   };
   let movement;
   let mapReset;
@@ -431,32 +436,46 @@ try {
     const before = await capturePixels();
     const marker = before.greenMarker || result.greenMarker;
     assert.ok(marker, 'the current frame should show the player marker for SDF ray selection');
-    const origin = mapFlashlightOrigin(marker, result.width, result.height, sdf.width, sdf.height);
-    const direction = selectClearFlashlightDirection(sdf.values, sdf.width, sdf.height, origin);
+    const mapAspect = 1;
+    const mapWidth = 64;
+    const flashlightRange = 25;
+    const origin = mapFlashlightOrigin(marker, result.width, result.height, sdf.width, sdf.height, { mapAspect });
+    const maxDistanceTexels = flashlightRange * sdf.width / mapWidth;
+    const direction = selectClearFlashlightDirection(sdf.values, sdf.width, sdf.height, {
+      ...origin,
+      maxDistanceTexels,
+    });
     const offset = Math.min(bounds.width, bounds.height) * 0.2;
     const x = bounds.x + marker.x * bounds.width / result.width + direction.dx * offset;
     const y = bounds.y + marker.y * bounds.height / result.height + direction.dy * offset;
     await page.mouse.move(x, y);
     await page.waitForTimeout(100);
-    const dark = await capturePixels();
+    const dark = await capturePixels(true);
     await page.mouse.down({ button: 'left' });
     await page.waitForTimeout(1000);
-    const lit = await capturePixels();
+    const lit = await capturePixels(true);
     await page.mouse.up({ button: 'left' });
+    const rayResponse = measureFlashlightRayResponse(
+      dark.pixels, lit.pixels, result.width, result.height, sdf.width, sdf.height,
+      origin, direction,
+    );
     flashlight = {
       direction: direction.direction,
       sdfOrigin: origin,
       playerMarker: marker,
       clearTexels: direction.clearTexels,
+      wallDistanceTexels: direction.wallDistanceTexels,
+      maxDistanceTexels,
       minimumClearance: direction.minimumClearance,
       before: { meanLuminance: dark.meanLuminance, brightPixels: dark.brightPixels },
       after: { meanLuminance: lit.meanLuminance, brightPixels: lit.brightPixels },
       meanLuminanceDelta: lit.meanLuminance - dark.meanLuminance,
       brightPixelDelta: lit.brightPixels - dark.brightPixels,
+      rayResponse,
     };
-    assert.ok(flashlight.brightPixelDelta > 100,
-      `holding the left mouse button should illuminate the maze: ${JSON.stringify(flashlight)}`);
     writeFileSync(outputPath.replace(/\.png$/i, '.flashlight.json'), `${JSON.stringify(flashlight, null, 2)}\n`);
+    assert.ok(rayResponse.longestIlluminatedRun >= 3,
+      `holding the left mouse button should brighten at least three adjacent patches along the selected clear ray: ${JSON.stringify(flashlight)}`);
   }
   console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, flashlight, mapReset, playthrough: playthroughReplay, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
 } finally {

@@ -1,0 +1,45 @@
+{
+  "generated_utc": "2026-10-12",
+  "binary": {
+    "path": "target-eval/DiligentBuild-GLFWDemo-staticcrt/DiligentSamples/Samples/GLFWDemo/Release/GLFWDemo.exe",
+    "sha256": "05060A8B2A29B9210CBF8299DE98C601C81794B0D2EE6431127DD29F36A443E3",
+    "map_generation": "rebuilt from the current Game.cpp source using std::random_device"
+  },
+  "bundle": {
+    "path": "%TEMP%/anywasm-glfwdemo-flashlight-random.awb",
+    "sha256": "616170BFD0423741FB05ACD6645E89396948C4CDA7CD8A12EC92524F6188988B",
+    "files": 8
+  },
+  "browser": "Chrome headless with WebGPU",
+  "assertion": {
+    "ray": "positive SDF clearance to the first wall, within the 25-map-pixel flashlight range",
+    "pixel_patch": "3x3 pixels sampled at consecutive SDF texels along the selected ray",
+    "required_consecutive_patches": 3,
+    "required_mean_luminance_delta_per_patch": 8
+  },
+  "replays": [
+    {
+      "direction": "right",
+      "clear_texels": 23,
+      "wall_distance_texels": 24,
+      "max_distance_texels": 50,
+      "best_ray_patch_luminance_delta": 87.3333,
+      "longest_illuminated_patch_run": 21,
+      "whole_frame_bright_pixel_delta": 12795,
+      "webgpu_validation_errors": 0,
+      "result": "passed"
+    },
+    {
+      "direction": "up-left",
+      "clear_texels": 18,
+      "wall_distance_texels": 26.8701,
+      "max_distance_texels": 50,
+      "best_ray_patch_luminance_delta": 80.1111,
+      "longest_illuminated_patch_run": 16,
+      "whole_frame_bright_pixel_delta": 5582,
+      "webgpu_validation_errors": 0,
+      "result": "passed"
+    }
+  ],
+  "interpretation": "Two independent launches selected different clear rays and produced runs of 21 and 16 consecutive bright patches along those rays. The whole-frame bright-pixel count is diagnostic only; the assertion measures local beam output rather than unrelated map-wide pixels."
+}
