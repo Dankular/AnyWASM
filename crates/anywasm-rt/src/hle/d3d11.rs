@@ -611,7 +611,13 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     let Some(rid) = kind_of(p, res).and_then(|k| k.host_id()) else { return Ok(E_INVALIDARG) };
     let info = p.extra.com.res.get(&rid).cloned().unwrap_or_default();
     let default_dim = if info.is_buffer { 1 } else if info.is_3d { 8 } else { 4 };
-    let (mut format, mut dim, mut a, mut b, mut c, mut d) = (info.format, default_dim, 0u32, info.mips.max(1), 0u32, info.array.max(1));
+    let default_buffer_stride = if info.misc & 0x20 != 0 { 4 } else { info.stride.max(4) };
+    let default_count = if info.is_buffer {
+        info.size / default_buffer_stride
+    } else {
+        info.mips.max(1)
+    };
+    let (mut format, mut dim, mut a, mut b, mut c, mut d) = (info.format, default_dim, 0u32, default_count, 0u32, info.array.max(1));
     if desc != 0 {
         let f = p.rd32(desc)?;
         if f != 0 {
@@ -623,6 +629,15 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
             (ViewKind::Srv, 4) => {
                 a = p.rd32(desc + 8)?; // MostDetailedMip
                 b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
+            }
+            (ViewKind::Srv, 1) => {
+                a = p.rd32(desc + 8)?; // FirstElement
+                b = p.rd32(desc + 12)?; // NumElements
+            }
+            (ViewKind::Srv, 11) => {
+                a = p.rd32(desc + 8)?; // FirstElement
+                b = p.rd32(desc + 12)?; // NumElements
+                c = p.rd32(desc + 16)?; // BUFFEREX flags
             }
             (ViewKind::Srv, 5) => {
                 a = p.rd32(desc + 8)?;
@@ -670,7 +685,11 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
         }
     }
     if b == u32::MAX {
-        b = info.mips.max(1) - a.min(info.mips.max(1) - 1);
+        if info.is_buffer {
+            b = info.size.saturating_sub(a.saturating_mul(default_buffer_stride)) / default_buffer_stride;
+        } else {
+            b = info.mips.max(1) - a.min(info.mips.max(1) - 1);
+        }
     }
     let id = p.extra.gpu.new_id();
     let kind_code = match vk {

@@ -257,7 +257,7 @@ export class GpuExecutor {
       case OP.CREATE_BUFFER: {
         const size = Math.max(16, (u(1) + 15) & ~15);
         const gpu = this.device.createBuffer({ size, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), shadow: new Uint8Array(size) });
+        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), misc: u(4), stride: u(5), shadow: new Uint8Array(size) });
         break;
       }
       case OP.BUFFER_WRITE: {
@@ -427,8 +427,12 @@ export class GpuExecutor {
         access: ({ write: 'write-only', read: 'read-only', read_write: 'read-write' })[m[4]],
       };
     }
+    const storageBuffers = { 1: {}, 3: {} };
+    for (const m of wgsl.matchAll(/@group\((1|3)\)\s*@binding\((\d+)\)\s*var<storage,\s*(read|read_write)>\s+\w+\s*:/g)) {
+      storageBuffers[+m[1]][+m[2]] = { access: m[3] };
+    }
     const module = this.device.createShaderModule({ code: wgsl });
-    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, storageTextures, usesDrawParameters, wgsl });
+    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, storageTextures, storageBuffers, usesDrawParameters, wgsl });
   }
 
   // ── views ────────────────────────────────────────────────────────────────
@@ -559,7 +563,18 @@ export class GpuExecutor {
     if (!v) return null;
     if (v.cache) return v.cache;
     const tex = this.res.get(v.resource);
-    if (!tex || tex.kind !== 'texture') return null;
+    if (!tex) return null;
+    if (tex.kind === 'buffer') {
+      const raw = (v.slice & 1) !== 0 || (tex.misc & 0x20) !== 0;
+      const structured = (tex.misc & 0x40) !== 0;
+      const stride = raw ? 4 : structured ? tex.stride : v.format ? BYTES(this.texFormat(v.format, tex.bind)) : 0;
+      const offset = v.mip * stride;
+      const size = Math.min(v.mips * stride, tex.d3dSize - offset);
+      if (!stride || offset < 0 || offset % 4 !== 0 || size <= 0 || size % 4 !== 0) return null;
+      v.cache = { buffer: tex.gpu, bufferResource: tex, offset, size, dim: 'buffer', format: v.format };
+      return v.cache;
+    }
+    if (tex.kind !== 'texture') return null;
     const format = this.viewFormat(v.format, tex);
     const d = { format };
     if (isDepth(format)) d.aspect = hasStencil(format) && v.kind === 2 ? 'depth-only' : 'all';
@@ -723,6 +738,17 @@ export class GpuExecutor {
     for (const [reg, { d, vis }] of groups[1]) {
       const vid = this.st.srv[(vis & GPUShaderStage.FRAGMENT) ? 1 : 0][reg] || this.st.srv[1][reg] || this.st.srv[0][reg] || 0;
       const view = this.getView(vid);
+      const bufferDeclaration = vs.storageBuffers?.[1]?.[reg] || ps?.storageBuffers?.[1]?.[reg];
+      if (bufferDeclaration) {
+        const prepared = view?.dim === 'buffer' && this.prepareStorageBufferView(view, false);
+        if (!prepared) {
+          this.log(`draw skipped: buffer SRV t${reg} is unavailable or has an unsupported range`);
+          return;
+        }
+        layoutEntries[1].push({ binding: reg, visibility: vis, buffer: { type: bufferDeclaration.access === 'read' ? 'read-only-storage' : 'storage' } });
+        resolved[1].push({ binding: reg, resource: prepared.resource });
+        continue;
+      }
       const dim = d.resourceType === 4 ? '2d' : d.resourceType === 5 ? '2d-array' : d.resourceType === 7 ? 'cube' : d.resourceType === 3 ? '2d' : '2d';
       const sampleType = this.sampleTypeOf(view?.format);
       layoutEntries[1].push({ binding: reg, visibility: vis, texture: { sampleType, viewDimension: view?.dim || dim } });
@@ -958,6 +984,19 @@ export class GpuExecutor {
     return expanded;
   }
 
+  prepareStorageBufferView(view, writable) {
+    const size = view.size & ~3;
+    if (!view.bufferResource || size <= 0 || size !== view.size || view.offset % 4 !== 0) return null;
+    const scratch = this.device.createBuffer({
+      size: Math.max(4, size),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.transientBuffers.push(scratch);
+    this.endPass();
+    this.encoder().copyBufferToBuffer(view.bufferResource.gpu, view.offset, scratch, 0, size);
+    return { resource: { buffer: scratch, offset: 0, size }, copyBack: writable ? { scratch, view, size } : null };
+  }
+
   dispatchCompute(x, y, z) {
     const st = this.st;
     const shader = this.shaders.get(st.shader[2]);
@@ -975,6 +1014,7 @@ export class GpuExecutor {
     }
     const layoutEntries = [[], [], [], []];
     const resolved = [[], [], [], []];
+    const storageBufferCopies = [];
 
     for (const [reg] of groups[0]) {
       const declared = shader.cbSizes[reg] || 65536;
@@ -983,6 +1023,17 @@ export class GpuExecutor {
     }
     for (const [reg, d] of groups[1]) {
       const view = this.getView(st.srv[2][reg] || 0);
+      const bufferDeclaration = shader.storageBuffers?.[1]?.[reg];
+      if (bufferDeclaration) {
+        const prepared = view?.dim === 'buffer' && this.prepareStorageBufferView(view, false);
+        if (!prepared) {
+          this.log(`compute dispatch skipped: buffer SRV t${reg} is unavailable or has an unsupported range`);
+          return;
+        }
+        layoutEntries[1].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, buffer: { type: bufferDeclaration.access === 'read' ? 'read-only-storage' : 'storage' } });
+        resolved[1].push({ binding: reg, resource: prepared.resource });
+        continue;
+      }
       const fallbackDimension = d.resourceType === 5 ? '2d-array' : d.resourceType === 7 ? 'cube' : '2d';
       const viewDimension = view?.dim || fallbackDimension;
       const sampleType = this.sampleTypeOf(view?.format);
@@ -996,9 +1047,21 @@ export class GpuExecutor {
     }
     for (const [reg] of groups[3]) {
       const binding = reg + 1;
+      const bufferDeclaration = shader.storageBuffers?.[3]?.[binding];
       const declaration = shader.storageTextures[binding];
       const uav = st.uav[reg];
       const view = uav && this.getView(uav.id);
+      if (bufferDeclaration) {
+        const prepared = view?.dim === 'buffer' && this.prepareStorageBufferView(view, bufferDeclaration.access === 'read_write');
+        if (!prepared) {
+          this.log(`compute dispatch skipped: buffer UAV u${reg} is unavailable or has an unsupported range`);
+          return;
+        }
+        layoutEntries[3].push({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: bufferDeclaration.access === 'read' ? 'read-only-storage' : 'storage' } });
+        resolved[3].push({ binding, resource: prepared.resource });
+        if (prepared.copyBack) storageBufferCopies.push(prepared.copyBack);
+        continue;
+      }
       if (!declaration || !view || declaration.format !== view.format || declaration.dimension !== view.dim) {
         this.log(`compute dispatch skipped: UAV u${reg} declaration=${JSON.stringify(declaration || null)} view=${JSON.stringify(view && { format: view.format, dimension: view.dim })}`);
         return;
@@ -1052,6 +1115,9 @@ export class GpuExecutor {
     for (let group = 0; group < bindGroups.length; group++) if (bindGroups[group]) pass.setBindGroup(group, bindGroups[group]);
     pass.dispatchWorkgroups(x, y, z);
     pass.end();
+    for (const copy of storageBufferCopies) {
+      this.encoder().copyBufferToBuffer(copy.scratch, 0, copy.view.bufferResource.gpu, copy.view.offset, copy.size);
+    }
     this.stats.dispatches++;
   }
 

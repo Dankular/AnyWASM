@@ -274,8 +274,16 @@ function lowerBufferImagesToStorageBuffers(spirv) {
   const valueTypes = new Map();
   for (const inst of instructions) {
     const opcode = inst[0] & 0xffff;
-    if ([43, 44, 45, 61, 80, 81, 83].includes(opcode) && inst.length >= 3) valueTypes.set(inst[2], inst[1]);
+    if (([43, 44, 45, 61, 80, 81, 83].includes(opcode) || opcode >= 109 && opcode <= 200) && inst.length >= 3) valueTypes.set(inst[2], inst[1]);
   }
+  const hasSameIntegerShape = (sourceTypeId, targetTypeId) => {
+    const sourceVector = vectorTypes.get(sourceTypeId), targetVector = vectorTypes.get(targetTypeId);
+    const sourceScalar = scalarTypes.get(sourceVector?.componentType || sourceTypeId);
+    const targetScalar = scalarTypes.get(targetVector?.componentType || targetTypeId);
+    return sourceScalar?.kind === 'int' && targetScalar?.kind === 'int'
+      && sourceScalar.width === targetScalar.width
+      && (sourceVector?.count || 1) === (targetVector?.count || 1);
+  };
   const emittedTypeDeclarations = new Set();
   const output = Array.from({ length: 5 }, (_, i) => input.getUint32(i * 4, true));
   let annotationsEmitted = false, constantsEmitted = false;
@@ -293,12 +301,22 @@ function lowerBufferImagesToStorageBuffers(spirv) {
 
   for (const original of instructions) {
     const inst = original.slice(), opcode = inst[0] & 0xffff;
+    if ([194, 195, 196].includes(opcode)) { // Normalize integer shift operand signedness for Naga.
+      for (const operandIndex of [3, 4]) {
+        const sourceId = inst[operandIndex], sourceTypeId = valueTypes.get(sourceId);
+        if (!sourceTypeId || sourceTypeId === inst[1] || !hasSameIntegerShape(sourceTypeId, inst[1])) continue;
+        const castId = nextId++;
+        pushInst([(4 << 16) | 124, inst[1], castId, sourceId]); // OpBitcast to the shift result type.
+        inst[operandIndex] = castId;
+      }
+    }
     if (!annotationsEmitted && opcode >= 19 && opcode <= 39) {
       for (const decoration of newDecorations) pushInst(decoration);
       annotationsEmitted = true;
     }
     if (opcode === 17 && (inst[1] === 46 || inst[1] === 47)) continue; // Remove SampledBuffer/ImageBuffer.
     if (opcode === 25 && infoByType.has(inst[1])) continue; // Remove the unsupported OpTypeImage.
+    if (opcode === 71 && infoByVariable.has(inst[1]) && inst[2] === 25) continue; // WGSL storage buffers have no write-only access mode.
     if (opcode === 5 && infoByType.has(inst[1])) inst[1] = infoByType.get(inst[1]).structType; // OpName.
     if (opcode === 32 && infoByPointer.has(inst[1])) {
       const info = infoByPointer.get(inst[1]);
@@ -381,10 +399,19 @@ function lowerBufferImagesToStorageBuffers(spirv) {
     const firstFunction = output.findIndex((word) => (word & 0xffff) === 54);
     if (firstFunction >= 0) output.splice(firstFunction, 0, ...newConstants.flat());
   }
+  // StorageBuffer became a core storage class in SPIR-V 1.3.
+  output[1] = Math.max(output[1], 0x00010300);
+  let capabilityAt = 5, hasDynamicBufferIndexing = false;
+  while (capabilityAt < output.length) {
+    const first = output[capabilityAt], opcode = first & 0xffff, wordCount = first >>> 16;
+    if (opcode !== 17) break;
+    if (output[capabilityAt + 1] === 30) hasDynamicBufferIndexing = true;
+    capabilityAt += wordCount;
+  }
+  if (!hasDynamicBufferIndexing) output.splice(capabilityAt, 0, (2 << 16) | 17, 30); // StorageBufferArrayDynamicIndexing.
   output[3] = nextId;
   const result = new Uint8Array(output.length * 4), resultView = new DataView(result.buffer);
   output.forEach((word, i) => resultView.setUint32(i * 4, word, true));
-  if (globalThis.__anywasmDebugBufferImages) globalThis.__anywasmDebugBufferImages = result;
   return result;
 }
 

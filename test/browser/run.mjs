@@ -941,7 +941,6 @@ try {
     const canvas = document.createElement('canvas');
     canvas.width = 64; canvas.height = 64;
     const logs = [];
-    let shaderDetails;
     try {
       const tool = new ShaderTool(new URL('/shaders/', location.href));
       await tool.init();
@@ -952,31 +951,6 @@ try {
         [numthreads(1, 1, 1)]
         void main(uint3 id : SV_DispatchThreadID) { output[id.x] = 123; }
       `, 'main', 'cs_5_0');
-      const descriptors = tool.scan(compute);
-      const records = new Uint32Array(descriptors.length * 7);
-      descriptors.forEach((d, i) => records.set([
-        d.type, d.space, d.register, d.resourceType,
-        ({ 2: 0, 0: 1, 3: 2, 1: 3 })[d.type], d.register + (d.type === 1 ? 1 : 0), d.count,
-      ], i * 7));
-      const rawSpirv = tool._withBytes(compute, (pointer) => {
-        const table = records.length ? tool.vk._malloc(records.byteLength) : 0;
-        if (table) tool.vk.HEAPU8.set(new Uint8Array(records.buffer), table);
-        try {
-          if (tool.vk._wb_dxbc_compile_bound(pointer, compute.length, table, descriptors.length) !== 1) throw new Error('DXBC->SPIR-V: ' + tool._msg());
-          return tool._result();
-        } finally { if (table) tool.vk._free(table); tool.vk._wb_clear(); }
-      });
-      const spirvWords = new Uint32Array(rawSpirv.buffer, rawSpirv.byteOffset, rawSpirv.byteLength / 4);
-      const instructions = [];
-      for (let i = 5; i < spirvWords.length;) {
-        const count = spirvWords[i] >>> 16, opcode = spirvWords[i] & 0xffff;
-        if (!count || i + count > spirvWords.length) break;
-        instructions.push([opcode, ...Array.from(spirvWords.slice(i + 1, i + count))]);
-        i += count;
-      }
-      shaderDetails = { descriptors, instructions };
-      globalThis.__anywasmDebugBufferImages = true;
-      const translated = tool.translate(compute);
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -1014,21 +988,9 @@ try {
       await readback.mapAsync(GPUMapMode.READ);
       const values = Array.from(new Uint32Array(readback.getMappedRange().slice(0)));
       readback.unmap(); readback.destroy(); gpu.device.destroy();
-      return { values, dispatches: gpu.stats.dispatches, errors: gpu.stats.errors, logs, descriptors: translated.descriptors, wgsl: translated.wgsl };
+      return { values, dispatches: gpu.stats.dispatches, errors: gpu.stats.errors, logs };
     } catch (error) {
-      const lowered = globalThis.__anywasmDebugBufferImages;
-      let loweredInstructions;
-      if (lowered instanceof Uint8Array) {
-        const words = new Uint32Array(lowered.buffer, lowered.byteOffset, lowered.byteLength / 4);
-        loweredInstructions = [];
-        for (let i = 5; i < words.length;) {
-          const count = words[i] >>> 16, opcode = words[i] & 0xffff;
-          if (!count || i + count > words.length) break;
-          loweredInstructions.push([opcode, ...Array.from(words.slice(i + 1, i + count))]);
-          i += count;
-        }
-      }
-      return { error: String(error), stack: error?.stack, logs, shaderDetails, loweredInstructions };
+      return { error: String(error), logs };
     }
   });
   const sentinelsOutsideStructuredView = structuredBufferUavResult.values?.every((value, i) =>
