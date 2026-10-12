@@ -220,6 +220,32 @@ static void check_staging_r16_float(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     ID3D11Texture2D_Release(source);
 }
 
+static void check_staging_r10g10b10a2(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const UINT expected[4] = { 0x12345678, 0x9abcdef0, 0x55aa33cc, 0xffffffff };
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init = { expected, 2 * sizeof(UINT), sizeof expected };
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, &init, &source);
+    if (FAILED(hr)) { printf("staging R10G10B10A2_UNORM source hr=%08lx\n", (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const UINT *values = (const UINT *)mapped.pData;
+            printf("staging R10G10B10A2_UNORM readback=%08x,%08x,%08x,%08x row_pitch=%u\n",
+                values[0], values[1], values[2], values[3], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging R10G10B10A2_UNORM Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging R10G10B10A2_UNORM staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
@@ -335,6 +361,7 @@ int main(void) {
             check_staging_texture3d(dev, ctx);
             check_staging_bgra8(dev, ctx);
             check_staging_r16_float(dev, ctx);
+            check_staging_r10g10b10a2(dev, ctx);
         }
         D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
