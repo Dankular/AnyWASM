@@ -1125,7 +1125,7 @@ export class GpuExecutor {
     const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
     const d3d9PipelineStates = [8, 7, 14, 23, 22, 15, 24, 25, 27, 19, 20, 171, 206, 207, 208, 209, 168]
       .map((state) => st.d3d9RenderStates.get(state) ?? null);
-    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, d3d9PipelineStates, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
+    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.blend.mask, st.raster, st.depth.id, d3d9PipelineStates, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);
     if (!pipe) {
       pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed, topology);
@@ -1573,6 +1573,7 @@ export class GpuExecutor {
     const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
     desc.multisample = {
       count: sampleCount,
+      mask: st.blend.mask,
       alphaToCoverageEnabled: sampleCount > 1 && !!blend?.getUint32(0, true),
     };
     if (ps) desc.fragment = { module: ps.module, entryPoint: ps.entry, targets };

@@ -82,9 +82,9 @@ and render-target blending are also checked. It does not add target-game or
 non-Chromium pixel coverage beyond the D3D11 triangle.
 
 On 2026-10-12, `node test/browser/run.mjs` was rerun on Windows x64 with Chrome `151.0.7922.34`;
-the full suite passed with no WebGPU validation errors or page errors. It includes a 4x MSAA D3D11
-alpha-to-coverage regression that resolves half-alpha red over a blue clear and checks partial
-red/blue sample coverage.
+the full suite passed with no WebGPU validation errors or page errors. Its 4x MSAA D3D11 regressions
+resolve half-alpha red over a blue clear to verify alpha-to-coverage, and verify that sample mask
+`0x5` preserves two of four samples.
 
 | Browser or feature | Evidence and current status |
 |---|---|

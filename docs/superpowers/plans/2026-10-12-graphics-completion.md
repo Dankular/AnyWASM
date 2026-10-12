@@ -56,6 +56,7 @@
 - [ ] Add boundary-focused pixel/readback cases for each open behavior, including preservation outside copied/cleared regions.
 - [ ] Implement only the failing HLE/executor behavior and rerun the affected browser checks plus the full Chromium suite.
 - [x] Forward D3D11 alpha-to-coverage into multisampled WebGPU pipelines; the 4x RGBA8 resolve regression verifies partial red/blue sample coverage from a half-alpha draw in Chromium.
+- [x] Forward the `OMSetBlendState` sample mask into WebGPU multisample state and its pipeline cache key; the 4x RGBA8 resolve regression verifies that mask `0x5` preserves two of four samples.
 
 **Gate:** Every render-state, copy, resolve, packing, and staging item listed open by the checklist has a named passing regression.
 

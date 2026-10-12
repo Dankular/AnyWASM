@@ -748,6 +748,14 @@ try {
       command(24, words(13, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xffffffff));
       command(29, words(3, 0));
       command(47, words(25, 0, 23, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
+      command(4, words(26, 8, 8, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 sample-mask target
+      command(12, words(27, 0, 26, 28, 4, 0, 1, 0, 1));
+      command(27, words(27, 0, 0, 0x3f800000, 0x3f800000)); // clear to blue
+      command(4, words(28, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      command(21, words(1, 27, 0));
+      command(24, words(0, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0x5)); // enable samples 0 and 2
+      command(29, words(3, 0));
+      command(47, words(28, 0, 26, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -759,6 +767,8 @@ try {
       const bgraSrgbPixels = await gpu.readBackTexture(35);
       const alphaCoveragePixels = await gpu.readBackTexture(25);
       const alphaCoverageIndex = (4 * alphaCoveragePixels.width + 4) * 4;
+      const sampleMaskPixels = await gpu.readBackTexture(28);
+      const sampleMaskIndex = (4 * sampleMaskPixels.width + 4) * 4;
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
@@ -779,6 +789,8 @@ try {
         coveragePixelsMatch: coveragePixels.data.every((value, i) => Math.abs(value - [128, 0, 0, 255][i % 4]) <= 1),
         alphaCoverageSamples: gpu.res.get(23)?.samples,
         alphaCoveragePixel: Array.from(alphaCoveragePixels.data.slice(alphaCoverageIndex, alphaCoverageIndex + 4)),
+        sampleMaskSamples: gpu.res.get(26)?.samples,
+        sampleMaskPixel: Array.from(sampleMaskPixels.data.slice(sampleMaskIndex, sampleMaskIndex + 4)),
         rgbaSrgbSamples: gpu.res.get(30)?.samples,
         rgbaSrgbFormat: rgbaSrgbPixels.format,
         rgbaSrgbPixelsMatch: rgbaSrgbPixels.data.every((value, i) => Math.abs(value - [137, 188, 225, 255][i % 4]) <= 1),
@@ -807,7 +819,12 @@ try {
       && msaaResolveResult.coveragePixelsMatch && msaaResolveResult.rgbaSrgbSamples === 4
       && msaaResolveResult.rgbaSrgbFormat === 'rgba8unorm-srgb' && msaaResolveResult.rgbaSrgbPixelsMatch
       && msaaResolveResult.bgraSrgbSamples === 4 && msaaResolveResult.bgraSrgbFormat === 'bgra8unorm-srgb'
-      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.draws === 7 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.draws === 8 && msaaResolveResult.errors?.length === 0,
+    JSON.stringify(msaaResolveResult));
+  check('D3D11 OMSetBlendState sample mask restricts 4x MSAA coverage',
+    msaaResolveResult.sampleMaskSamples === 4
+      && near(msaaResolveResult.sampleMaskPixel || [], [128, 0, 128, 191], 1)
+      && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('D3D11 alpha-to-coverage resolves a partial sample mask over preserved clear pixels',
     msaaResolveResult.alphaCoverageSamples === 4
