@@ -1899,7 +1899,10 @@ try {
       const r565Pixels = await gpu.readBackbuffer(1);
       const bcSkipped = !gpu.features.has('texture-compression-bc');
       let bcPixels = null;
+      let bc2Pixels = null;
+      let bc3Pixels = null;
       let bc4Pixels = null;
+      let bc5Pixels = null;
       if (!bcSkipped) {
         stream.length = 0;
         command(4, words(27, 4, 4, 1, 1, 71, 8, 0, 1, 0)); // opaque red BC1 texture
@@ -1929,6 +1932,56 @@ try {
         let bc4Offset = 0; for (const part of stream) { bc4Commands.set(part, bc4Offset); bc4Offset += part.length; }
         gpu.execute(bc4Commands);
         bc4Pixels = await gpu.readBackbuffer(1);
+
+        stream.length = 0;
+        shader(41, 1, r8BorderPixel);
+        command(4, words(33, 4, 4, 1, 1, 74, 16, 0, 1, 0)); // BC2_UNORM with half alpha
+        const bc2Upload = new Uint8Array(52);
+        bc2Upload.set(words(33, 0, 0, 0, 0, 4, 4, 16, 16));
+        bc2Upload.fill(0x88, 36, 44); // explicit alpha 8/15 in every texel
+        bc2Upload[45] = 0xf8; // BC1 color endpoint 0 is red; all indices select endpoint 0
+        command(5, bc2Upload);
+        command(12, words(34, 2, 33, 74, 4, 0, 1, 0, 1));
+        command(8, sampler(26, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+        command(19, words(1, 0, 1, 34)); command(20, words(1, 0, 1, 26));
+        command(29, words(3, 0));
+        const bc2Size = stream.reduce((total, part) => total + part.length, 0), bc2Commands = new Uint8Array(bc2Size);
+        let bc2Offset = 0; for (const part of stream) { bc2Commands.set(part, bc2Offset); bc2Offset += part.length; }
+        gpu.execute(bc2Commands);
+        bc2Pixels = await gpu.readBackbuffer(1);
+
+        stream.length = 0;
+        command(4, words(35, 4, 4, 1, 1, 77, 16, 0, 1, 0)); // BC3_UNORM with interpolated alpha
+        const bc3Upload = new Uint8Array(52);
+        bc3Upload.set(words(35, 0, 0, 0, 0, 4, 4, 16, 16));
+        bc3Upload[36] = 255; bc3Upload[37] = 0; // alpha endpoints for an interpolated alpha palette
+        bc3Upload.set([0x92, 0x24, 0x49, 0x92, 0x24, 0x49], 38); // every texel selects alpha palette index 2
+        bc3Upload[45] = 0xf8; // BC1 color endpoint 0 is red; all indices select endpoint 0
+        command(5, bc3Upload);
+        command(12, words(36, 2, 35, 77, 4, 0, 1, 0, 1));
+        command(8, sampler(27, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+        command(19, words(1, 0, 1, 36)); command(20, words(1, 0, 1, 27));
+        command(29, words(3, 0));
+        const bc3Size = stream.reduce((total, part) => total + part.length, 0), bc3Commands = new Uint8Array(bc3Size);
+        let bc3Offset = 0; for (const part of stream) { bc3Commands.set(part, bc3Offset); bc3Offset += part.length; }
+        gpu.execute(bc3Commands);
+        bc3Pixels = await gpu.readBackbuffer(1);
+
+        stream.length = 0;
+        command(4, words(37, 4, 4, 1, 1, 83, 16, 0, 1, 0)); // BC5_UNORM with two constant channels
+        const bc5Upload = new Uint8Array(52);
+        bc5Upload.set(words(37, 0, 0, 0, 0, 4, 4, 16, 16));
+        bc5Upload[36] = 128; bc5Upload[37] = 128; // red block
+        bc5Upload[44] = 128; bc5Upload[45] = 128; // green block
+        command(5, bc5Upload);
+        command(12, words(38, 2, 37, 83, 4, 0, 1, 0, 1));
+        command(8, sampler(28, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+        command(19, words(1, 0, 1, 38)); command(20, words(1, 0, 1, 28));
+        command(29, words(3, 0));
+        const bc5Size = stream.reduce((total, part) => total + part.length, 0), bc5Commands = new Uint8Array(bc5Size);
+        let bc5Offset = 0; for (const part of stream) { bc5Commands.set(part, bc5Offset); bc5Offset += part.length; }
+        gpu.execute(bc5Commands);
+        bc5Pixels = await gpu.readBackbuffer(1);
       }
 
       stream.length = 0;
@@ -1958,7 +2011,10 @@ try {
         rg8BorderEdge: at(rg8Pixels, 16), rg8BorderOutside: at(rg8Pixels, 48),
         rgbBorderEdge: at(r565Pixels, 16), rgbBorderOutside: at(r565Pixels, 48),
         bcSkipped, bcBorderEdge: bcPixels && at(bcPixels, 16), bcBorderOutside: bcPixels && at(bcPixels, 48),
+        bc2BorderEdge: bc2Pixels && at(bc2Pixels, 16), bc2BorderOutside: bc2Pixels && at(bc2Pixels, 48),
+        bc3BorderEdge: bc3Pixels && at(bc3Pixels, 16), bc3BorderOutside: bc3Pixels && at(bc3Pixels, 48),
         bc4BorderEdge: bc4Pixels && at(bc4Pixels, 16), bc4BorderOutside: bc4Pixels && at(bc4Pixels, 48),
+        bc5BorderEdge: bc5Pixels && at(bc5Pixels, 16), bc5BorderOutside: bc5Pixels && at(bc5Pixels, 48),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -1968,7 +2024,7 @@ try {
     }
   });
   check('D3D11 sampler modes, anisotropic BORDER, and R8/RG8/RGB/A8 border defaults match pixels',
-    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 11 : 13) && samplerAddressResult.errors.length === 0
+    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 11 : 16) && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -2004,6 +2060,18 @@ try {
   check(`D3D11 BC4 BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'single-channel defaults'}`,
     samplerAddressResult.bcSkipped || near(samplerAddressResult.bc4BorderEdge || [], [128, 0, 0, 255], 2)
       && near(samplerAddressResult.bc4BorderOutside || [], [255, 0, 0, 255], 1),
+    JSON.stringify(samplerAddressResult));
+  check(`D3D11 BC2_UNORM BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'explicit alpha pixels'}`,
+    samplerAddressResult.bcSkipped || near(samplerAddressResult.bc2BorderEdge || [], [255, 32, 64, 100], 2)
+      && near(samplerAddressResult.bc2BorderOutside || [], [255, 64, 128, 64], 1),
+    JSON.stringify(samplerAddressResult));
+  check(`D3D11 BC3_UNORM BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'block alpha pixels'}`,
+    samplerAddressResult.bcSkipped || near(samplerAddressResult.bc3BorderEdge || [], [255, 32, 64, 141], 2)
+      && near(samplerAddressResult.bc3BorderOutside || [], [255, 64, 128, 64], 1),
+    JSON.stringify(samplerAddressResult));
+  check(`D3D11 BC5_UNORM BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'two-channel defaults'}`,
+    samplerAddressResult.bcSkipped || near(samplerAddressResult.bc5BorderEdge || [], [192, 96, 0, 255], 2)
+      && near(samplerAddressResult.bc5BorderOutside || [], [255, 64, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
   const gatherBorderResult = await page.evaluate(async () => {

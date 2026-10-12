@@ -249,7 +249,8 @@ register-stack subset):
       comparison BORDER verifies all eight comparison functions for fully outside point-filtered
       SampleCmpLevelZero taps and for edge-straddling and fully outside linearly filtered SampleCmp
       footprints; R8_UNORM, RG8_UNORM, A8_UNORM, B5G6R5_UNORM, BC1, and BC4 BORDER tests verify SRV
-      channel defaults. 2D and 2D-array RGBA8 Gather verify edge-straddling and fully outside taps,
+      channel defaults; BC2/BC3 alpha and BC5 RG defaults are also pixel-checked. 2D and 2D-array
+      RGBA8 Gather verify edge-straddling and fully outside taps,
       including an explicit nonzero offset; D32_FLOAT GatherCmp and R8_UNORM missing-alpha Gather
       defaults are also pixel-checked. An 8x anisotropic Texture2D SampleLevel outside sample and an
       in-range SampleGrad footprint crossing the right edge are pixel-checked.
