@@ -1712,6 +1712,13 @@ try {
         SamplerState borderSampler : register(s0);
         float4 main() : SV_Target { return image.SampleBias(borderSampler, float2(0.9, 0.5), 0.0); }
       `, 'main', 'ps_5_0');
+      const anisotropicBorderPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState anisotropicBorderSampler : register(s5);
+        float4 main() : SV_Target {
+          return image.SampleLevel(anisotropicBorderSampler, float2(2.0, 0.5), 0.0);
+        }
+      `, 'main', 'ps_5_0');
       const r8BorderPixel = tool.compileHlsl(`
         Texture2D<float4> image : register(t0);
         SamplerState borderSampler : register(s0);
@@ -1745,11 +1752,11 @@ try {
       texels.set([255, 0, 0, 255, 0, 255, 0, 255], 36);
       command(5, texels);
       command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1));
-      const sampler = (id, addressU, filter = 0, borderColor = [0, 0, 0, 0]) => {
+      const sampler = (id, addressU, filter = 0, borderColor = [0, 0, 0, 0], maxAnisotropy = 1) => {
         const data = new Uint8Array(56), view = new DataView(data.buffer);
         view.setUint32(0, id, true); view.setUint32(4, filter, true);
         view.setUint32(8, addressU, true); view.setUint32(12, 3, true); view.setUint32(16, 3, true);
-        view.setUint32(24, 1, true); view.setUint32(28, 1, true);
+        view.setUint32(24, maxAnisotropy, true); view.setUint32(28, 1, true);
         borderColor.forEach((value, index) => view.setFloat32(32 + index * 4, value, true));
         view.setFloat32(48, 0, true); view.setFloat32(52, 0, true);
         return data;
@@ -1769,6 +1776,15 @@ try {
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
+      stream.length = 0;
+      shader(13, 1, anisotropicBorderPixel);
+      command(8, sampler(26, 4, 0x55, [0.25, 0.5, 0.75, 1], 8)); // 8x anisotropic filter with BORDER U
+      command(17, words(1, 13)); command(20, words(1, 5, 1, 26)); command(29, words(3, 0));
+      const anisotropicSize = stream.reduce((total, part) => total + part.length, 0), anisotropicCommands = new Uint8Array(anisotropicSize);
+      let anisotropicOffset = 0; for (const part of stream) { anisotropicCommands.set(part, anisotropicOffset); anisotropicOffset += part.length; }
+      gpu.execute(anisotropicCommands);
+      const anisotropicPixels = await gpu.readBackbuffer(1);
+
       stream.length = 0;
       command(17, words(1, 9));
       command(20, words(1, 0, 1, 17));
@@ -1874,6 +1890,7 @@ try {
       const result = {
         wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35),
         mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
+        anisotropicBorderOutside: at(anisotropicPixels, 32),
         linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32),
         r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48),
         rg8BorderEdge: at(rg8Pixels, 16), rg8BorderOutside: at(rg8Pixels, 48),
@@ -1888,8 +1905,8 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler modes match pixels and BORDER defaults follow R8/RG8/RGB SRV formats',
-    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 7 : 9) && samplerAddressResult.errors.length === 0
+  check('D3D11 sampler modes, anisotropic BORDER, and R8/RG8/RGB border defaults match pixels',
+    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 8 : 10) && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1897,6 +1914,7 @@ try {
       && near(samplerAddressResult.mirrorOnceNegative || [], [0, 255, 0, 255], 1)
       && near(samplerAddressResult.borderOut || [], [0, 0, 255, 255], 1)
       && near(samplerAddressResult.borderStraddle || [], [0, 179, 77, 255], 2)
+      && near(samplerAddressResult.anisotropicBorderOutside || [], [64, 128, 191, 255], 1)
       && near(samplerAddressResult.borderGrad || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.borderBias || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.r8BorderEdge || [], [192, 0, 0, 255], 2)

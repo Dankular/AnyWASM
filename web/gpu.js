@@ -709,6 +709,29 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
           continue;
         }
       }
+      if (settings?.anisotropic && !settings.comparison && mode && textureType.component === 'f32'
+        && dimension > 0 && dimension <= 3) {
+        const coordExpr = coord.text.trim();
+        const outside = borderMask.map((isBorder, axis) => {
+          if (!isBorder) return null;
+          const value = dimension === 1 ? `(${coordExpr})` : `(${coordExpr}).${['x', 'y', 'z'][axis]}`;
+          return `(${value} < 0.0 || ${value} > 1.0)`;
+        }).filter(Boolean).join(' || ');
+        if (outside) {
+          const borderColor = samplerBorderColors.get(samplerIndex) || [0, 0, 0, 0];
+          const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+          const borderValues = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
+            ? borderColor[index]
+            : index === 3 ? 1 : 0);
+          const floatLiteral = (value) => Number.isInteger(value) ? `${value}.0` : String(value);
+          const borderValue = `vec4<f32>(${borderValues.map(floatLiteral).join(', ')})`;
+          call = `select(${call}, ${borderValue}, ${outside})`;
+          result += wgsl.slice(cursor, match.index) + call;
+          cursor = close + 1;
+          changed = true;
+          continue;
+        }
+      }
       unsupported.add(`${samplerName}: BORDER ${match[1]} could not be specialized for ${textureType.kind}`);
     }
 
