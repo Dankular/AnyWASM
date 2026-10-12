@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples GLFW Demo maze",
+  "bundle": "seed-1 D3D11-only /MT target bundle",
+  "bundleSha256": "34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36",
+  "browser": "Playwright Chromium revision 1234",
+  "workerSliceInstructions": 250000,
+  "callbackSuspensionGate": "passed",
+  "asyncify": {
+    "yields": 16,
+    "resumes": 16
+  },
+  "gpuStats": {
+    "draws": 3,
+    "dispatches": 1,
+    "presents": 3,
+    "errors": []
+  },
+  "processStatus": "Starting",
+  "playthrough": {
+    "actualTravelPixels": 137.118854238661,
+    "finalDistanceFromStartPixels": 210.535032714273,
+    "completed": false
+  },
+  "command": "REQUIRE_TARGET_CALLBACK_SUSPENSIONS=1 node test/browser/target.mjs <seed-1-bundle.awb> <frame.png> --normal-slices --playthrough=docs/target-data/glfwdemo-seed1-playthrough.json",
+  "limitations": [
+    "The process remained in its running state when captured.",
+    "The seeded route did not finish.",
+    "This verifies browser/WebAssembly callback continuation across worker slices, not nested callback scheduling or native CLI continuation."
+  ]
+}

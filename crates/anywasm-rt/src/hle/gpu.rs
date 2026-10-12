@@ -130,7 +130,10 @@ mod tests {
     fn roundtrip_and_padding() {
         let mut g = GpuStream::default();
         g.emit(op::DRAW, Pk::new().u32(3).u32(0));
-        g.emit(op::BUFFER_WRITE, Pk::new().u32(1).u32(0).u32(3).bytes(&[7, 8, 9]));
+        g.emit(
+            op::BUFFER_WRITE,
+            Pk::new().u32(1).u32(0).u32(3).bytes(&[7, 8, 9]),
+        );
         let d = decode(&g.buf);
         assert_eq!(d.len(), 2);
         assert_eq!(d[0], (op::DRAW, vec![3, 0, 0, 0, 0, 0, 0, 0]));

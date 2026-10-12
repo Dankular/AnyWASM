@@ -1,4 +1,4 @@
-use anywasm_cpu::cpu::{Cpu, RAX, CF, OF, PF, SF, ZF};
+use anywasm_cpu::cpu::{Cpu, CF, OF, PF, RAX, SF, ZF};
 use anywasm_cpu::decode::{decode, Opnd};
 use anywasm_cpu::exec::step;
 use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RW, PROT_RWX};

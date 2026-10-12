@@ -3,7 +3,11 @@ use anywasm_rt::hle::gpu::{decode, op};
 use anywasm_rt::{Process, Stop, Vfs};
 
 fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/../../fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read(format!(
+        "{}/../../fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 /// Run to exit, collecting the GPU stream across presented frames.
@@ -26,16 +30,27 @@ fn run_collect(name: &str) -> (Vec<(u32, Vec<u8>)>, String, Stop) {
 }
 
 fn u32s(b: &[u8]) -> Vec<u32> {
-    b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+    b.chunks(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 #[test]
 fn triangle_program_produces_the_expected_gpu_stream() {
     let (cmds, out, stop) = run_collect("d3d11_triangle.exe");
     assert_eq!(stop, Stop::Exit(0), "stdout:\n{out}");
-    assert!(out.contains("create device hr=00000000 feature_level=b000"), "{out}");
+    assert!(
+        out.contains("create device hr=00000000 feature_level=b000"),
+        "{out}"
+    );
     assert!(out.contains("frames=3"), "{out}");
-    for l in ["rtv hr=00000000", "vb hr=00000000", "vs hr=00000000", "ps hr=00000000", "layout hr=00000000"] {
+    for l in [
+        "rtv hr=00000000",
+        "vb hr=00000000",
+        "vs hr=00000000",
+        "ps hr=00000000",
+        "layout hr=00000000",
+    ] {
         assert!(out.contains(l), "missing `{l}` in:\n{out}");
     }
 
@@ -50,8 +65,17 @@ fn triangle_program_produces_the_expected_gpu_stream() {
 
     // Creation commands precede the first draw.
     let first_draw = ops.iter().position(|&o| o == op::DRAW).unwrap();
-    for creator in [op::SWAPCHAIN, op::CREATE_SHADER, op::CREATE_INPUT_LAYOUT, op::CREATE_BUFFER, op::CREATE_VIEW] {
-        assert!(ops.iter().position(|&o| o == creator).unwrap() < first_draw, "op {creator} after first draw");
+    for creator in [
+        op::SWAPCHAIN,
+        op::CREATE_SHADER,
+        op::CREATE_INPUT_LAYOUT,
+        op::CREATE_BUFFER,
+        op::CREATE_VIEW,
+    ] {
+        assert!(
+            ops.iter().position(|&o| o == creator).unwrap() < first_draw,
+            "op {creator} after first draw"
+        );
     }
 
     // Shaders are forwarded as untouched DXBC containers (vertex = stage 0, pixel = stage 1).
@@ -63,7 +87,10 @@ fn triangle_program_produces_the_expected_gpu_stream() {
     }
 
     // Input layout: POSITION -> register 0 (R32G32B32_FLOAT=6 @0), COLOR -> register 1 (R32G32B32A32_FLOAT=2 @12).
-    let il = cmds.iter().find(|c| c.0 == op::CREATE_INPUT_LAYOUT).unwrap();
+    let il = cmds
+        .iter()
+        .find(|c| c.0 == op::CREATE_INPUT_LAYOUT)
+        .unwrap();
     let w = u32s(&il.1);
     assert_eq!(w[1], 2, "two elements");
     assert_eq!(&w[2..8], &[0, 6, 0, 0, 0, 0], "POSITION");
@@ -71,20 +98,33 @@ fn triangle_program_produces_the_expected_gpu_stream() {
 
     // Vertex data upload matches what the program wrote.
     let writes: Vec<_> = cmds.iter().filter(|c| c.0 == op::BUFFER_WRITE).collect();
-    let vb = writes.iter().find(|c| u32s(&c.1)[2] == 3 * 28).expect("vertex buffer upload");
-    let floats: Vec<f32> = vb.1[12..12 + 84].chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let vb = writes
+        .iter()
+        .find(|c| u32s(&c.1)[2] == 3 * 28)
+        .expect("vertex buffer upload");
+    let floats: Vec<f32> = vb.1[12..12 + 84]
+        .chunks(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     assert_eq!(&floats[0..7], &[0.0, 0.6, 0.0, 1.0, 0.0, 0.0, 1.0]);
     assert_eq!(&floats[7..14], &[0.6, -0.6, 0.0, 0.0, 1.0, 0.0, 1.0]);
 
     // Frame state: clear color, draw size, vertex stride.
     let clear = cmds.iter().find(|c| c.0 == op::CLEAR_RTV).unwrap();
-    let cc: Vec<f32> = u32s(&clear.1)[1..5].iter().map(|b| f32::from_bits(*b)).collect();
+    let cc: Vec<f32> = u32s(&clear.1)[1..5]
+        .iter()
+        .map(|b| f32::from_bits(*b))
+        .collect();
     assert_eq!(cc, vec![0.0, 0.0, 0.2, 1.0]);
     let draw = cmds.iter().find(|c| c.0 == op::DRAW).unwrap();
     assert_eq!(u32s(&draw.1), vec![3, 0]);
     let svb = cmds.iter().find(|c| c.0 == op::SET_VERTEX_BUFFERS).unwrap();
     let w = u32s(&svb.1);
-    assert_eq!((w[0], w[1], w[3], w[4]), (0, 1, 28, 0), "slot 0, one buffer, stride 28, offset 0");
+    assert_eq!(
+        (w[0], w[1], w[3], w[4]),
+        (0, 1, 28, 0),
+        "slot 0, one buffer, stride 28, offset 0"
+    );
     let vp = cmds.iter().find(|c| c.0 == op::SET_VIEWPORTS).unwrap();
     let w = u32s(&vp.1);
     assert_eq!(w[0], 1);
@@ -139,9 +179,9 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
         .collect();
     assert_eq!(blend_descs.len(), 2);
     assert!(
-        blend_descs.iter().any(|words| {
-            words.len() >= 11 && words[1..11] == [0, 0, 1, 5, 6, 1, 2, 1, 1, 0xf]
-        }),
+        blend_descs
+            .iter()
+            .any(|words| { words.len() >= 11 && words[1..11] == [0, 0, 1, 5, 6, 1, 2, 1, 1, 0xf] }),
         "expected SRC_ALPHA / INV_SRC_ALPHA RGB factors and opaque alpha output: {blend_descs:?}"
     );
     assert_eq!(count(op::TEXTURE_WRITE), 3);
@@ -200,15 +240,16 @@ fn textured_program_produces_texture_depth_and_indexed_draw_commands() {
         );
     }
 
-    let texture = cmds.iter().find(|c| c.0 == op::CREATE_TEXTURE2D && u32s(&c.1)[1] == 2).unwrap();
+    let texture = cmds
+        .iter()
+        .find(|c| c.0 == op::CREATE_TEXTURE2D && u32s(&c.1)[1] == 2)
+        .unwrap();
     assert_eq!(&u32s(&texture.1)[1..4], &[2, 2, 1], "2x2, one mip");
     let upload = cmds.iter().find(|c| c.0 == op::TEXTURE_WRITE).unwrap();
     assert_eq!(&u32s(&upload.1)[1..9], &[0, 0, 0, 0, 2, 2, 8, 16]);
     assert_eq!(
         &upload.1[36..52],
-        &[
-            0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
-        ]
+        &[0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
     );
 
     let index_buffer = cmds.iter().find(|c| c.0 == op::SET_INDEX_BUFFER).unwrap();

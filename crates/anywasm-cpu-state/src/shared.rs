@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::Cpu;
 
 pub const ABI_MAGIC: u32 = u32::from_le_bytes(*b"AWSH");
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 pub const GUEST_PAGE_SIZE: u32 = 4096;
 
 pub const SLOT_IDLE: u32 = 0;
@@ -48,7 +48,8 @@ pub struct SharedHeader {
     pub code_generation: AtomicU32,
     pub dispatch_generation: AtomicU32,
     pub flags: AtomicU32,
-    reserved: [u32; 2],
+    /// One bit per packed guest page; workers set a bit after writing that frame.
+    pub dirty_map: Region,
 }
 
 impl SharedHeader {
@@ -59,6 +60,7 @@ impl SharedHeader {
         slots: Region,
         contexts: Region,
         page_map: Region,
+        dirty_map: Region,
         frames: Region,
     ) -> Self {
         Self {
@@ -71,13 +73,13 @@ impl SharedHeader {
             slots,
             contexts,
             page_map,
+            dirty_map,
             frames,
             page_map_count: AtomicU32::new(0),
             mapping_generation: AtomicU32::new(0),
             code_generation: AtomicU32::new(0),
             dispatch_generation: AtomicU32::new(0),
             flags: AtomicU32::new(0),
-            reserved: [0; 2],
         }
     }
 
@@ -89,7 +91,7 @@ impl SharedHeader {
         if self.version != ABI_VERSION {
             return Err(LayoutError::BadVersion);
         }
-        if self.flags.load(Ordering::Relaxed) != 0 || self.reserved != [0; 2] {
+        if self.flags.load(Ordering::Relaxed) != 0 {
             return Err(LayoutError::UnsupportedFlags);
         }
         if self.header_bytes != core::mem::size_of::<Self>() as u32 {
@@ -122,6 +124,10 @@ impl SharedHeader {
         if self.page_map_count.load(Ordering::Acquire) > map_capacity {
             return Err(LayoutError::RegionTooSmall);
         }
+        let dirty_map_required = map_capacity.div_ceil(8);
+        if self.dirty_map.length < dirty_map_required {
+            return Err(LayoutError::RegionTooSmall);
+        }
 
         let regions = [
             Region {
@@ -131,9 +137,10 @@ impl SharedHeader {
             self.slots,
             self.contexts,
             self.page_map,
+            self.dirty_map,
             self.frames,
         ];
-        let alignments = [64, 64, 16, 8, GUEST_PAGE_SIZE];
+        let alignments = [64, 64, 16, 8, 1, GUEST_PAGE_SIZE];
         for (index, region) in regions.iter().enumerate() {
             if region.length == 0 && index == 3 {
                 continue;
@@ -530,6 +537,7 @@ const fn join_u64(low: u32, high: u32) -> u64 {
 const _: [(); 128] = [(); core::mem::size_of::<SharedHeader>()];
 const _: [(); 56] = [(); core::mem::offset_of!(SharedHeader, page_map_count)];
 const _: [(); 60] = [(); core::mem::offset_of!(SharedHeader, mapping_generation)];
+const _: [(); 76] = [(); core::mem::offset_of!(SharedHeader, dirty_map)];
 const _: [(); 64] = [(); core::mem::size_of::<WorkerSlot>()];
 const _: [(); 64] = [(); core::mem::align_of::<WorkerSlot>()];
 const _: [(); 16] = [(); core::mem::size_of::<MappingEntry>()];

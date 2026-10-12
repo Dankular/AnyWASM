@@ -64,6 +64,9 @@ pub(crate) struct JitMemoryView {
     pub frames_len: u32,
     pub tlb_read: u32,
     pub tlb_write: u32,
+    pub dirty_frames: u32,
+    pub dirty_frame_indices: u32,
+    pub dirty_frame_count: u32,
 }
 
 struct Leaf(Box<[Slot; L_SIZE]>);
@@ -72,6 +75,18 @@ struct Mid(Vec<Option<Leaf>>);
 pub struct Memory {
     top: Vec<Option<Mid>>,
     frames: Vec<u8>,
+    /// One byte per allocated frame for coordinator-to-worker incremental publication.
+    dirty_frames: Vec<u8>,
+    /// Fixed-capacity list populated when a frame first becomes dirty after publication.
+    dirty_frame_indices: Vec<u32>,
+    dirty_frame_count: u32,
+    /// Mapping-row caches are rebuilt only when the map or protections change.
+    shared_row_frames: Vec<u32>,
+    shared_row_guest_pages: Vec<u64>,
+    frame_mapping_rows: Vec<u32>,
+    shared_frame_base: Option<u32>,
+    shared_mapping_generation: u32,
+    shared_cache_generation: u32,
     free_frames: Vec<u32>,
     pages_mapped: u64,
     /// Bumped on every write to a page that has ever been fetched from (self-modifying code
@@ -106,6 +121,15 @@ impl Memory {
         Memory {
             top,
             frames: Vec::new(),
+            dirty_frames: Vec::new(),
+            dirty_frame_indices: Vec::new(),
+            dirty_frame_count: 0,
+            shared_row_frames: Vec::new(),
+            shared_row_guest_pages: Vec::new(),
+            frame_mapping_rows: Vec::new(),
+            shared_frame_base: None,
+            shared_mapping_generation: 1,
+            shared_cache_generation: 0,
             free_frames: Vec::new(),
             pages_mapped: 0,
             code_epoch: 0,
@@ -119,11 +143,15 @@ impl Memory {
         self.pages_mapped
     }
 
+    pub fn shared_mapping_generation(&self) -> u32 {
+        self.shared_mapping_generation
+    }
+
     /// Copy the authoritative page table and frames into coordinator-owned buffers suitable for
     /// publication to a shared worker memory. `frame_base` is the shared-memory offset where the
     /// packed frame region begins; each mapping's frame offset is absolute from that base memory.
     pub fn export_shared_snapshot(
-        &self,
+        &mut self,
         frame_base: u32,
         mappings: &mut [MappingEntry],
         frame_bytes: &mut [u8],
@@ -136,10 +164,238 @@ impl Memory {
         if mappings.len() < page_count || frame_bytes.len() < required_frame_bytes {
             return Err(SharedSnapshotError::BufferTooSmall);
         }
+        self.export_shared_mappings(frame_base, mappings)?;
+        let mut row_frames = Vec::with_capacity(page_count);
+        let mut row_guest_pages = Vec::with_capacity(page_count);
+        let mut frame_mapping_rows = vec![u32::MAX; self.dirty_frames.len()];
+        for (output_index, mapping) in mappings[..page_count].iter().enumerate() {
+            let Some(slot) = self.slot(mapping.guest_page) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            let frame_index = (slot >> 32) as usize;
+            let source_start = frame_index
+                .checked_mul(PAGE_SIZE as usize)
+                .ok_or(SharedSnapshotError::AddressOverflow)?;
+            let source_end = source_start + PAGE_SIZE as usize;
+            let destination_start = output_index * PAGE_SIZE as usize;
+            let destination_end = destination_start + PAGE_SIZE as usize;
+            let Some(source) = self.frames.get(source_start..source_end) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            frame_bytes[destination_start..destination_end].copy_from_slice(source);
+            let frame_index =
+                u32::try_from(frame_index).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+            row_frames.push(frame_index);
+            row_guest_pages.push(mapping.guest_page);
+            let Some(mapping_row) = frame_mapping_rows.get_mut(frame_index as usize) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            *mapping_row = output_index as u32;
+        }
+        self.shared_row_frames = row_frames;
+        self.shared_row_guest_pages = row_guest_pages;
+        self.frame_mapping_rows = frame_mapping_rows;
+        self.shared_cache_generation = self.shared_mapping_generation;
+        self.shared_frame_base = Some(frame_base);
+        Ok(())
+    }
+
+    /// Export only host-dirty pages using the mapping cache from the last full publication.
+    /// Dirtiness is retained until the caller acknowledges a successful publication.
+    pub fn export_shared_delta(
+        &self,
+        dirty_pages: &mut [u32],
+        dirty_frames: &mut [u8],
+    ) -> Result<usize, SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        let required_frame_bytes = page_count
+            .checked_mul(PAGE_SIZE as usize)
+            .ok_or(SharedSnapshotError::AddressOverflow)?;
+        if dirty_pages.len() < page_count || dirty_frames.len() < required_frame_bytes {
+            return Err(SharedSnapshotError::BufferTooSmall);
+        }
+        if self.shared_cache_generation != self.shared_mapping_generation
+            || self.shared_row_frames.len() != page_count
+        {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        let mut dirty_count = 0usize;
+        if self.dirty_frame_count as usize > self.dirty_frame_indices.len() {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        for frame_index in self.dirty_frame_indices[..self.dirty_frame_count as usize]
+            .iter()
+            .copied()
+        {
+            if self
+                .dirty_frames
+                .get(frame_index as usize)
+                .copied()
+                .unwrap_or(0)
+                == 0
+            {
+                continue;
+            }
+            let mapping_index = *self
+                .frame_mapping_rows
+                .get(frame_index as usize)
+                .ok_or(SharedSnapshotError::MappingMismatch)?;
+            if mapping_index == u32::MAX {
+                continue;
+            }
+            dirty_pages[dirty_count] = mapping_index;
+            dirty_count += 1;
+        }
+        dirty_pages[..dirty_count].sort_unstable();
+        for (dirty_position, mapping_index) in
+            dirty_pages[..dirty_count].iter().copied().enumerate()
+        {
+            let frame_index = *self
+                .shared_row_frames
+                .get(mapping_index as usize)
+                .ok_or(SharedSnapshotError::MappingMismatch)?
+                as usize;
+            let source_start = frame_index
+                .checked_mul(PAGE_SIZE as usize)
+                .ok_or(SharedSnapshotError::AddressOverflow)?;
+            let source_end = source_start + PAGE_SIZE as usize;
+            let destination_start = dirty_position * PAGE_SIZE as usize;
+            let destination_end = destination_start + PAGE_SIZE as usize;
+            let Some(source) = self.frames.get(source_start..source_end) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            dirty_frames[destination_start..destination_end].copy_from_slice(source);
+        }
+        Ok(dirty_count)
+    }
+
+    /// Clear selected host-dirty bits after their packed mapping rows are published.
+    pub fn clear_shared_dirty_pages(
+        &mut self,
+        dirty_pages: &[u32],
+    ) -> Result<(), SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        if dirty_pages.iter().enumerate().any(|(index, page)| {
+            *page as usize >= page_count || (index > 0 && dirty_pages[index - 1] >= *page)
+        }) {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        if self.shared_cache_generation != self.shared_mapping_generation
+            || self.shared_row_frames.len() != page_count
+        {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        for mapping_index in dirty_pages.iter().copied() {
+            let Some(&frame_index) = self.shared_row_frames.get(mapping_index as usize) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            let Some(dirty) = self.dirty_frames.get_mut(frame_index as usize) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            *dirty = 0;
+        }
+        self.compact_shared_dirty_frames();
+        Ok(())
+    }
+
+    /// Clear all host-dirty bits after a full snapshot is published.
+    pub fn clear_all_shared_dirty(&mut self) {
+        self.dirty_frames.fill(0);
+        self.dirty_frame_count = 0;
+    }
+
+    fn compact_shared_dirty_frames(&mut self) {
+        let mut write_index = 0usize;
+        for read_index in 0..self.dirty_frame_count as usize {
+            let frame_index = self.dirty_frame_indices[read_index];
+            if self.dirty_frames[frame_index as usize] != 0 {
+                self.dirty_frame_indices[write_index] = frame_index;
+                write_index += 1;
+            }
+        }
+        self.dirty_frame_count = write_index as u32;
+    }
+
+    /// Import selected worker-written pages after validating their map rows against this process.
+    /// The input page bytes are densely packed in `dirty_pages` order.
+    pub fn import_shared_dirty_snapshot(
+        &mut self,
+        frame_base: u32,
+        mapping_generation: u32,
+        dirty_pages: &[u32],
+        frame_bytes: &[u8],
+    ) -> Result<(), SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        let required_bytes = dirty_pages
+            .len()
+            .checked_mul(PAGE_SIZE as usize)
+            .ok_or(SharedSnapshotError::AddressOverflow)?;
+        if frame_bytes.len() < required_bytes {
+            return Err(SharedSnapshotError::BufferTooSmall);
+        }
         if frame_base % GUEST_PAGE_SIZE != 0 {
             return Err(SharedSnapshotError::AddressOverflow);
         }
+        if mapping_generation != self.shared_mapping_generation
+            || self.shared_cache_generation != self.shared_mapping_generation
+            || self.shared_frame_base != Some(frame_base)
+            || self.shared_row_frames.len() != page_count
+            || self.shared_row_guest_pages.len() != page_count
+        {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        let mut previous = None;
+        let mut executable_page_written = false;
+        for (dirty_position, mapping_index) in dirty_pages.iter().copied().enumerate() {
+            let mapping_index = mapping_index as usize;
+            if mapping_index >= page_count || previous.is_some_and(|index| index >= mapping_index) {
+                return Err(SharedSnapshotError::MappingMismatch);
+            }
+            previous = Some(mapping_index);
+            let frame_index = self.shared_row_frames[mapping_index] as usize;
+            let guest_page = self.shared_row_guest_pages[mapping_index];
+            let Some(slot) = self.slot(guest_page) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            if (slot >> 32) as usize != frame_index {
+                return Err(SharedSnapshotError::MappingMismatch);
+            }
+            let protection = ((slot >> 1) & 7) as u8;
+            let destination_start = frame_index
+                .checked_mul(PAGE_SIZE as usize)
+                .ok_or(SharedSnapshotError::AddressOverflow)?;
+            let destination_end = destination_start + PAGE_SIZE as usize;
+            let source_start = dirty_position * PAGE_SIZE as usize;
+            let source_end = source_start + PAGE_SIZE as usize;
+            let Some(destination) = self.frames.get_mut(destination_start..destination_end) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            destination.copy_from_slice(&frame_bytes[source_start..source_end]);
+            executable_page_written |= protection & PROT_X != 0;
+        }
+        if executable_page_written {
+            self.code_epoch = self.code_epoch.wrapping_add(1);
+        }
+        self.flush_tlb();
+        Ok(())
+    }
 
+    fn export_shared_mappings(
+        &self,
+        frame_base: u32,
+        mappings: &mut [MappingEntry],
+    ) -> Result<(), SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        if mappings.len() < page_count {
+            return Err(SharedSnapshotError::BufferTooSmall);
+        }
+        if frame_base % GUEST_PAGE_SIZE != 0 {
+            return Err(SharedSnapshotError::AddressOverflow);
+        }
         let mut output_index = 0usize;
         for (top_index, mid) in self.top.iter().enumerate() {
             let Some(mid) = mid else { continue };
@@ -149,9 +405,6 @@ impl Memory {
                     if slot & PRESENT == 0 {
                         continue;
                     }
-                    let guest_page = ((top_index as u64) << (2 * L_BITS))
-                        | ((mid_index as u64) << L_BITS)
-                        | leaf_index as u64;
                     let frame_offset = frame_base
                         .checked_add(
                             u32::try_from(output_index)
@@ -161,22 +414,13 @@ impl Memory {
                         )
                         .ok_or(SharedSnapshotError::AddressOverflow)?;
                     mappings[output_index] = MappingEntry {
-                        guest_page,
+                        guest_page: ((top_index as u64) << (2 * L_BITS))
+                            | ((mid_index as u64) << L_BITS)
+                            | leaf_index as u64,
                         frame_offset,
                         protection: ((slot >> 1) & 7) as u8,
                         reserved: [0; 3],
                     };
-                    let frame_index = (slot >> 32) as usize;
-                    let source_start = frame_index
-                        .checked_mul(PAGE_SIZE as usize)
-                        .ok_or(SharedSnapshotError::AddressOverflow)?;
-                    let source_end = source_start + PAGE_SIZE as usize;
-                    let destination_start = output_index * PAGE_SIZE as usize;
-                    let destination_end = destination_start + PAGE_SIZE as usize;
-                    let Some(source) = self.frames.get(source_start..source_end) else {
-                        return Err(SharedSnapshotError::MappingMismatch);
-                    };
-                    frame_bytes[destination_start..destination_end].copy_from_slice(source);
                     output_index += 1;
                 }
             }
@@ -259,6 +503,24 @@ impl Memory {
         self.tlb_w.set(TlbEntry::INVALID);
     }
 
+    #[inline]
+    fn mark_frame_dirty(&mut self, frame_offset: usize) {
+        let frame_index = frame_offset / PAGE_SIZE as usize;
+        if self.dirty_frames.get(frame_index).copied() == Some(0)
+            && (self.dirty_frame_count as usize) < self.dirty_frame_indices.len()
+        {
+            self.dirty_frames[frame_index] = 1;
+            self.dirty_frame_indices[self.dirty_frame_count as usize] = frame_index as u32;
+            self.dirty_frame_count += 1;
+        }
+    }
+
+    #[inline]
+    fn bump_shared_mapping_generation(&mut self) {
+        let next = self.shared_mapping_generation.wrapping_add(1);
+        self.shared_mapping_generation = if next == u32::MAX { 0 } else { next };
+    }
+
     fn slot(&self, page: u64) -> Option<Slot> {
         if page >> (3 * L_BITS) != 0 {
             return None;
@@ -295,11 +557,14 @@ impl Memory {
         if let Some(f) = self.free_frames.pop() {
             let o = f as usize * PAGE_SIZE as usize;
             self.frames[o..o + PAGE_SIZE as usize].fill(0);
+            self.dirty_frames[f as usize] = 1;
             return f;
         }
         let f = (self.frames.len() / PAGE_SIZE as usize) as u32;
         self.frames
             .resize(self.frames.len() + PAGE_SIZE as usize, 0);
+        self.dirty_frames.push(1);
+        self.dirty_frame_indices.push(0);
         f
     }
 
@@ -321,6 +586,9 @@ impl Memory {
                 self.exec_page_count += 1;
             }
         }
+        if start < end {
+            self.bump_shared_mapping_generation();
+        }
         self.flush_tlb();
         self.code_epoch += 1;
         true
@@ -339,10 +607,14 @@ impl Memory {
     }
 
     pub fn unmap(&mut self, addr: u64, len: u64) {
+        let previous_pages_mapped = self.pages_mapped;
         let start = addr >> 12;
         let end = (addr.saturating_add(len).saturating_add(PAGE_MASK)) >> 12;
         for p in start..end.min(1u64 << (3 * L_BITS)) {
             self.unmap_page(p);
+        }
+        if self.pages_mapped != previous_pages_mapped {
+            self.bump_shared_mapping_generation();
         }
         self.flush_tlb();
         self.code_epoch += 1;
@@ -357,16 +629,22 @@ impl Memory {
                 return false;
             }
         }
+        let mut changed = false;
         for p in start..end {
             let s = self.slot_mut(p, false).unwrap();
             let was_x = (*s >> 1) & PROT_X as u64 != 0;
-            *s = (*s & !(7 << 1)) | ((prot as u64 & 7) << 1);
+            let new_slot = (*s & !(7 << 1)) | ((prot as u64 & 7) << 1);
+            changed |= *s != new_slot;
+            *s = new_slot;
             let now_x = prot & PROT_X != 0;
             match (was_x, now_x) {
                 (false, true) => self.exec_page_count += 1,
                 (true, false) => self.exec_page_count -= 1,
                 _ => {}
             }
+        }
+        if changed {
+            self.bump_shared_mapping_generation();
         }
         self.flush_tlb();
         self.code_epoch += 1;
@@ -478,6 +756,9 @@ impl Memory {
             frames_len: self.frames.len() as u32,
             tlb_read: self.tlb_r.as_ptr() as usize as u32,
             tlb_write: self.tlb_w.as_ptr() as usize as u32,
+            dirty_frames: self.dirty_frames.as_mut_ptr() as usize as u32,
+            dirty_frame_indices: self.dirty_frame_indices.as_mut_ptr() as usize as u32,
+            dirty_frame_count: &mut self.dirty_frame_count as *mut u32 as usize as u32,
         }
     }
 
@@ -504,6 +785,7 @@ impl Memory {
             let off = self.translate(a, Access::Write)?;
             let n = ((PAGE_SIZE - (a & PAGE_MASK)) as usize).min(src.len() - done);
             self.frames[off..off + n].copy_from_slice(&src[done..done + n]);
+            self.mark_frame_dirty(off);
             if self.exec_page_count != 0
                 && self
                     .slot(a >> 12)
@@ -530,6 +812,7 @@ impl Memory {
             let off = (s >> 32) as usize * PAGE_SIZE as usize + (a & PAGE_MASK) as usize;
             let n = ((PAGE_SIZE - (a & PAGE_MASK)) as usize).min(src.len() - done);
             self.frames[off..off + n].copy_from_slice(&src[done..done + n]);
+            self.mark_frame_dirty(off);
             done += n;
             a = a.wrapping_add(n as u64);
         }
@@ -629,6 +912,7 @@ impl Memory {
         if (a & PAGE_MASK) as usize + b.len() <= PAGE_SIZE as usize {
             let o = self.translate(a, Access::Write)?;
             self.frames[o..o + b.len()].copy_from_slice(b);
+            self.mark_frame_dirty(o);
             if self.exec_page_count != 0
                 && self
                     .slot(a >> 12)
@@ -765,6 +1049,122 @@ mod tests {
         assert_eq!(error.addr, 0x31_000);
         assert_eq!(error.access, Access::Read);
         assert!(!error.protection);
+    }
+
+    #[test]
+    fn shared_delta_tracks_cross_page_host_writes_and_acknowledgement() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x1000, 3 * PAGE_SIZE, PROT_RW));
+        let frame_base = 0x8000;
+        let mut mappings = vec![MappingEntry::default(); 3];
+        let mut full_frames = vec![0; 3 * PAGE_SIZE as usize];
+        memory
+            .export_shared_snapshot(frame_base, &mut mappings, &mut full_frames)
+            .unwrap();
+        memory.clear_all_shared_dirty();
+        memory
+            .write_from(0x2ffe, &[0xa1, 0xa2, 0xb1, 0xb2])
+            .unwrap();
+
+        let mut dirty_pages = [u32::MAX; 3];
+        let mut dirty_frames = vec![0; 3 * PAGE_SIZE as usize];
+        let count = memory
+            .export_shared_delta(&mut dirty_pages, &mut dirty_frames)
+            .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(&dirty_pages[..count], &[1, 2]);
+        assert_eq!(
+            &dirty_frames[PAGE_SIZE as usize - 2..PAGE_SIZE as usize],
+            &[0xa1, 0xa2]
+        );
+        assert_eq!(
+            &dirty_frames[PAGE_SIZE as usize..PAGE_SIZE as usize + 2],
+            &[0xb1, 0xb2]
+        );
+        memory
+            .clear_shared_dirty_pages(&dirty_pages[..count])
+            .unwrap();
+        assert_eq!(
+            memory
+                .export_shared_delta(&mut dirty_pages, &mut dirty_frames)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn shared_mapping_generation_invalidates_cached_delta_rows() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x4000, 2 * PAGE_SIZE, PROT_RW));
+        let mut mappings = vec![MappingEntry::default(); 2];
+        let mut full_frames = vec![0; 2 * PAGE_SIZE as usize];
+        memory
+            .export_shared_snapshot(0xc000, &mut mappings, &mut full_frames)
+            .unwrap();
+        memory.clear_all_shared_dirty();
+        memory.write_u8(0x4000, 0x5a).unwrap();
+
+        let mut dirty_pages = [u32::MAX; 2];
+        let mut dirty_frames = vec![0; 2 * PAGE_SIZE as usize];
+        assert_eq!(
+            memory
+                .export_shared_delta(&mut dirty_pages, &mut dirty_frames)
+                .unwrap(),
+            1
+        );
+        memory.clear_shared_dirty_pages(&dirty_pages[..1]).unwrap();
+
+        let old_generation = memory.shared_mapping_generation();
+        assert!(memory.protect(0x4000, PAGE_SIZE, PROT_R));
+        assert_ne!(memory.shared_mapping_generation(), old_generation);
+        assert_eq!(
+            memory.export_shared_delta(&mut dirty_pages, &mut dirty_frames),
+            Err(SharedSnapshotError::MappingMismatch)
+        );
+
+        memory
+            .export_shared_snapshot(0xc000, &mut mappings, &mut full_frames)
+            .unwrap();
+        memory.clear_all_shared_dirty();
+        assert_eq!(
+            memory
+                .export_shared_delta(&mut dirty_pages, &mut dirty_frames)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn shared_dirty_import_changes_only_selected_mapped_pages() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x1000, 3 * PAGE_SIZE, PROT_RW));
+        let frame_base = 0x9000;
+        let mut mappings = vec![MappingEntry::default(); 3];
+        let mut full_frames = vec![0; 3 * PAGE_SIZE as usize];
+        memory
+            .export_shared_snapshot(frame_base, &mut mappings, &mut full_frames)
+            .unwrap();
+        memory.clear_all_shared_dirty();
+        let worker_page = vec![0x5c; PAGE_SIZE as usize];
+        let mapping_generation = memory.shared_mapping_generation();
+
+        memory
+            .import_shared_dirty_snapshot(frame_base, mapping_generation, &[1], &worker_page)
+            .unwrap();
+
+        assert_eq!(memory.read_u8(0x1000).unwrap(), 0);
+        assert_eq!(memory.read_u8(0x2000).unwrap(), 0x5c);
+        assert_eq!(memory.read_u8(0x3000).unwrap(), 0);
+        assert_eq!(
+            memory.import_shared_dirty_snapshot(
+                frame_base,
+                mapping_generation.wrapping_add(1),
+                &[1],
+                &worker_page,
+            ),
+            Err(SharedSnapshotError::MappingMismatch)
+        );
     }
 
     #[test]

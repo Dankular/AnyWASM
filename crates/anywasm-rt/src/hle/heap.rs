@@ -20,7 +20,15 @@ const BLOCK_PREFIX: u64 = 0x30;
 
 impl Heap {
     pub fn new() -> Self {
-        Heap { process_heap: 0x7ffb_0000, chunk_next: HEAP_REGION, cur: 0, cur_end: 0, sizes: HashMap::new(), free: BTreeMap::new(), bytes_in_use: 0 }
+        Heap {
+            process_heap: 0x7ffb_0000,
+            chunk_next: HEAP_REGION,
+            cur: 0,
+            cur_end: 0,
+            sizes: HashMap::new(),
+            free: BTreeMap::new(),
+            bytes_in_use: 0,
+        }
     }
 
     /// Allocate `n` bytes (16-byte aligned, zeroed because freshly mapped frames are zero and freed

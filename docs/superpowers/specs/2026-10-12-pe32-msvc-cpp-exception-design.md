@@ -1,7 +1,8 @@
 # Native MSVC C++ Exception Support for PE32
 
-**Status:** design for the next PE32 exception-runtime workstream. The broader compatibility
-goal remains active across Win32, PE32, DLLs, graphics, CPU features, browser, and packaging.
+**Status:** EH3 metadata search and a bounded second-pass catch transfer are implemented and compile,
+but have not been exercised with a native x86 fixture. The broader compatibility goal remains active
+across Win32, PE32, DLLs, graphics, CPU features, browser, and packaging.
 
 ## Goal
 
@@ -15,13 +16,14 @@ behavior.
 
 - `exception32.rs` dispatches through the x86 TEB registration chain, validates stack bounds and
   cycles, and invokes each handler with the exception record, registration node, context record,
-  and a null fourth argument. It currently treats nested/collided dispositions as unimplemented and
-  does not consume `GuestUnwind`.
+  and a null fourth argument. For a selected C++ catch it now performs a bounded second pass,
+  invokes handlers with `EXCEPTION_UNWINDING` and the target flag, removes registrations above the
+  target, and resumes from the target context. Nested/collided dispositions remain unimplemented.
 - `Process::run` treats an escaped `GuestUnwind` as a crash. The x86 exception dispatcher must
   consume its own nonlocal transfers before returning to the main run loop.
-- `msvc_eh.rs` implements relative-pointer x64 EH3/EH4 metadata and `_CxxThrowException`; its throw
-  entry explicitly rejects PE32.
-- The installed MSVC 14.44 `ehdata.h` defines the i386 registration node as `pNext`, `frameHandler`,
+- `msvc_eh.rs` implements relative-pointer x64 EH3/EH4 metadata. PE32 dispatch now branches to
+  `msvc_eh32.rs` for absolute-pointer EH3 metadata and the three-parameter x86 throw record.
+- The installed MSVC 14.29.30133 `ehdata.h` defines the i386 registration node as `pNext`, `frameHandler`,
   and signed `state`, with a saved stack pointer immediately before the node. The same header selects
   absolute pointers for non-relative `FuncInfo`, `TryBlockMapEntry`, `HandlerType`, and throw type
   metadata. Its x86 `DispatcherContext` is a `void` placeholder, and its x86 exception record has
@@ -30,6 +32,10 @@ behavior.
   dispatcher-context arguments are unused on Intel processors. The handler therefore has to derive
   function state and metadata from x86 registration data and the exception record, not x64
   `DISPATCHER_CONTEXT` fields.
+- A compile-only x86 build of the existing fixture with MSVC 19.29.30159 and `/d2FH4-` confirmed the
+  actual per-function thunk: it reads the registration node, performs its stack-cookie checks, loads
+  the absolute `FuncInfo` address into EAX, then jumps to `__CxxFrameHandler3`. The runtime uses EAX
+  for the function metadata and the registration node's `state` field for the active state.
 
 ## Design
 
@@ -43,17 +49,17 @@ to fit both address models.
 Extend `_CxxThrowException` to accept PE32 stdcall arguments. Validate the `ThrowInfo` and its
 metadata pointers against the owning loaded image, validate copy/unwind routines as executable guest
 addresses, and validate the thrown-object range as readable guest memory. Then raise exception
-`0xe06d7363` through `exception32::dispatch_raised_exception` with the three x86 language
+`0xe06d7363` through the PE32 exception dispatcher with the three x86 language
 parameters: magic `0x19930520`, thrown-object pointer, and `ThrowInfo` pointer. Do not append the
 x64-only image-base parameter. Preserve noncontinuable exception behavior and report malformed
 metadata as a guest diagnostic.
 
-Implement `__CxxFrameHandler3` for PE32 using the registration node's current state and the
-function's EH3 `FuncInfo`. Before implementation of the reader, a small native x86 fixture must
-confirm how the supported MSVC compiler version makes each function's `FuncInfo` reachable through
-the handler call. The implementation must follow that emitted ABI and the installed header layouts;
-it must not infer an x64-style dispatcher context or assume that the registration node alone holds
-all function metadata.
+The `__CxxFrameHandler3` path reads PE32 absolute-pointer EH3 metadata and uses the registration
+node's current state. The compile-only fixture established that its compiler thunk supplies
+`FuncInfo` in EAX; it is not passed through an x64-style dispatcher context. A selected catch is
+recorded during search, then the dispatcher performs a second pass over registrations through the
+target, runs EH state actions, unlinks frames above the target, and installs the saved target stack
+and catch IP in the x86 `CONTEXT`. Runtime behavior of this transfer remains unverified.
 
 The first-pass handler searches active try blocks in compiler order, matches typed catches and
 catch-all only for native C++ exceptions, and records a target catch together with its registration
@@ -78,13 +84,17 @@ silently selecting a handler.
 
 ## Compatibility and error behavior
 
-- The first implementation covers MSVC x86 EH3 metadata and the native `/EHsc` model. Build the
-  fixture with EH4 disabled so it exercises `__CxxFrameHandler3` explicitly.
+- The current implementation slice covers MSVC x86 EH3 metadata and the dispatcher path for local
+  or outer-frame `/EHsc` catches. Build the fixture with EH4 disabled so it exercises
+  `__CxxFrameHandler3` explicitly.
 - x64 PE32+ EH3/EH4 parsing and dispatch remain on the existing code path.
 - `/EHa` conversion of arbitrary CPU faults into C++ catches, CLR/WinRT exceptions, x86 EH4,
   exception specifications, `exception_ptr`, and future compiler encodings remain out of scope.
-- By-value copy constructors, destructors, unwind funclets, and catch funclets execute as guest
-  code. Faults from that code are dispatched normally; the HLE must not swallow them.
+- Cross-registration-frame catch transfer is implemented but unverified. Custom x86 catch-copy
+  closures and the post-catch thrown-object destructor are not implemented; trivial by-value copies
+  use a checked guest-memory copy. Nested/collided SEH unwind dispositions remain unsupported.
+- Unwind funclets execute as guest code and lower their registration state before running. Nested
+  exception behavior during cleanup has not been verified.
 - An unmatched C++ exception continues through outer registration frames, then follows the existing
   top-level filter and unhandled-exception behavior.
 

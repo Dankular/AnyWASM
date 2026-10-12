@@ -10,7 +10,7 @@
   one case: 16-bit `shld/shrd` with count > 16, which the SDM calls undefined and vendors differ
   on (the first CI run caught this; that range is now excluded from the corpus and the interpreter
   keeps the Intel behaviour, documented in `exec.rs`).
-- `anywasm-rt`: PE64 loader (relocations, imports, delay imports, validated `.pdata`, per-thread static TLS, TEB/PEB with loader lists,
+- `anywasm-rt`: PE32/PE32+ loader (relocations, imports, delay imports, validated x64 `.pdata`, per-thread static TLS, TEB/PEB with loader lists,
   bundled DLLs) + host-implemented kernel32/ntdll/CRT. 31 end-to-end tests run **real Windows x64
   executables**: freestanding fixtures cover console I/O, relocated pointer tables, heap, SSE2 math,
   indirect calls, GetProcAddress, thread synchronization, static TLS isolation, version checks,
@@ -18,6 +18,8 @@
   mingw-w64 program imports the real `msvcrt.dll` (argv, qsort with guest callbacks,
   printf family, malloc/realloc, math, setjmp/longjmp, file I/O on the VFS, sscanf, atexit, exit
   code, stderr). The mingw program's output matches the same source compiled natively.
+  Synthetic PE32 coverage also checks TLS callback stdcall arguments and private static TLS blocks
+  through the four-byte TEB vector at `TEB+0x2c`.
 - `printf` engine: unit tests for flags/width/precision/length modifiers/floats.
 - `anywasm` CLI (`analyze`, `run`, `pack`) and `.awb` bundles. `run` and `pack` support `--cwd`,
   bundles retain that guest directory, and the WASM loader restores it; relative Win32 and CRT file
@@ -79,9 +81,11 @@
   cached-only and 580,774,467 / 76.18 s with prefix 1; both again reached eight frames. These
   repeats show substantial elapsed-time variation, not a stable speed comparison.
   These guest/HLE Node timings do not execute the target command stream through WebGPU and are not
-  host frame times or a product performance target. The runtime enforces the run-slice cap; a
-  synchronous callback that exhausts that slice fails loudly because it cannot be resumed, and an
-  atexit callback budget failure is propagated instead of becoming a clean exit. Full data and
+  host frame times or a product performance target. The native CLI enforces the run-slice cap; a
+  synchronous callback that exhausts it cannot resume and fails loudly, and an atexit callback
+  budget failure is propagated instead of becoming a clean exit. In WASM/browser, Asyncify can
+  resume callbacks across worker slices; one normal-slice target replay is recorded in
+  `docs/TARGETS.md`. Full data and
   reproduction commands are in `docs/TARGETS.md`.
 - CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
   hardware-differential suite, on the hosted runner.
@@ -96,9 +100,10 @@
   remain excluded from bit-exact host differential checks. Sources: [Intel SDM, Volume 2B
   (RCPPS/RSQRTPS)](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf),
   [AMD64 Architecture Programmer's Manual, Volume 1](https://docs.amd.com/v/u/en-US/24592_3.24).
-- Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic, XOR,
-  rounding/conversion, `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the
-  exact list in `CLAUDE.md`). The target BZHI memory form is also checked against the host CPU on
+- Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic,
+  including packed-single `VADDPS`/`VMULPS`, `VPERMILPS`/`VPERMILPD`, XOR, rounding/conversion,
+  `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the exact list in
+  `CLAUDE.md`). The target BZHI memory form is also checked against the host CPU on
   Linux CI across index boundary cases, excluding undefined AF/PF. This is not broad AVX/AVX2/BMI
   coverage; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
@@ -165,20 +170,61 @@
   could not be resumed. A fresh 30,000,000-step CLI replay continued after that call and hit the step
   cap in D3DCompiler; a separate high-cap guest trace reached later guest calls. None of these runs
   verified a host window or renderer. Nested synchronous callback scheduling and alertable waits
-  remain unsupported. A synchronous callback cannot suspend when its active run slice expires, so the
-  runtime stops with a diagnostic instead of exceeding the budget. PE64 unwind metadata and a
-  selected version 1 unwind subset are tested,
-  including one target-grounded MSVC C++ catch; general SEH dispatch, vectored handlers, audio,
+  remain unsupported. The native CLI cannot suspend a synchronous callback when its active run
+  slice expires and stops with a diagnostic; the WASM/browser path uses Asyncify and has passed the
+  selected target's normal worker-slice callback-resumption gate. PE64 unwind metadata and a
+  selected version 1 unwind subset are tested, including one target-grounded MSVC C++ catch.
+  Ordinary x64 `RaiseException` records now search registered vectored handlers and
+  `__C_specific_handler` scope tables, with synthetic coverage for handler order, filters, catch-all
+  scopes, continuation, termination handlers, and target unwind. The source now also dispatches
+  vectored-continue callbacks on resumed exceptions and invokes the registered top-level filter
+  after an exhausted search; synthetic coverage checks callback ordering, filter replacement, and
+  context resumption. Selected x64 access violations, integer divide errors, illegal instructions,
+  privileged instructions, and software breakpoints now enter this dispatcher; synthetic tests
+  check Windows exception records, CONTEXT.Rip edits, and MXCSR round-tripping. A first PE32 slice
+  now writes x86 EXCEPTION_RECORD and CONTEXT layouts, invokes vectored handlers and linked
+  NT_TIB.ExceptionList handlers, resumes edited contexts, and honors RaiseException's four-argument
+  stdcall frame. Guest execution covers selected x86 illegal, privileged, divide, and breakpoint
+  exceptions, while a scheduler regression checks per-thread ExceptionList state. PE32 nested and
+  collided unwind plus compiler-specific C/C++ runtime behavior remain open; the new C++ EH3 search
+  and two-pass catch-transfer path is compile-checked but not runtime-verified. Other CPU exits, audio,
   DirectInput/XInput, 32-bit PE, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
   fixed-function subset covers the checked FVF layouts, stage-0 SELECTARG1/SELECTARG2,
-  MODULATE/MODULATE2X, ADD/SUBTRACT, triangle fans, alpha blending, and alpha testing across all
-  comparison functions at the equality boundary. GDI support is
+  MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH, signed-add and modulate-add operations,
+  BLENDTEXTUREALPHA/BLENDFACTORALPHA, DOTPRODUCT3, triangle fans, alpha blending, and alpha
+  testing across all comparison functions at the equality boundary. GDI support is
   limited to virtual display DCs and basic caps.
-- DLL initialization remains partial: bundled DLL `DllMain` calls now follow dependency-first graph
-  order during initial loading and `LoadLibrary`, with synthetic regressions for both paths. Static
-  TLS data is initialized, but TLS callbacks are not invoked. Named forwarded exports are resolved
-  opportunistically, with failed names omitted. The selected Diligent EXE and three DLLs have no
-  TLS callbacks or forwarded exports, so they do not verify those paths. The bounded target replay
+- Browser guest threads are still cooperative. The 2026-10-12 SharedArrayBuffer feasibility probe
+  reached two concurrent no-std Wasm workers with disjoint contexts/stacks and an exact shared
+  atomic count. Full-runtime-shaped instances alias mutable statics and a stand-in cursor value; the
+  probe does not exercise `std`'s allocator, and the production runtime still cannot link against
+  shared memory because its prebuilt `std` lacks atomics/bulk-memory. A coordinator/CPU-worker split
+  is documented in
+  [`sharedarraybuffer-guest-threads-design.md`](superpowers/specs/2026-10-12-sharedarraybuffer-guest-threads-design.md);
+  `anywasm-cpu-state` contains the `no_std` fixed-layout CPU context, decoder, generic instruction
+  executor, versioned shared-memory header, atomic worker-slot handoff, and permission-checked
+  shared-frame view. A separate `anywasm-cpu-worker` module claims a slot, validates its context and
+  map generation, runs bounded integer/control-flow and SSE slices against copied shared frames,
+  stops at the coordinator's HLE-thunk range, and publishes its full CPU context. The process
+  snapshot ABI and browser copy-back are wired into the opt-in `?sharedCpuWorkers` path. A
+  cross-origin-isolated headless Chrome smoke started the CPU worker and ran `hello.exe` to exit 0.
+  This proves worker startup and the serial active-context handoff only; concurrent guest-thread
+  scheduling, x87 worker execution, locked guest operations, and target-level acceptance remain
+  open. The worker artifact uses the unstable `+atomics` feature and LLD `--no-check-features`
+  because the installed sysroot core objects lack shared-memory feature metadata. A separate
+  HLE-only Tutorial01 probe confirmed cross-origin isolation and rendered 719 draws and 360 presents
+  in 30 seconds with no WebGPU errors; the process remained active, so target completion is not
+  established. Shared memory now uses worker/coordinator dirty-page tracking, cached mapping rows,
+  and full refreshes after mapping or protection changes. The live probe found and fixed a scheduler
+  fallback that stepped one instruction per turn after a worker quantum expired. The target trace
+  and limits are in `docs/TARGETS.md`.
+- DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
+  dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE
+  callbacks run after DLL initialization and before the EXE entry point. Synthetic regressions cover
+  callback order, process-attach arguments, EXE startup, and the DLL dependency chain. Static TLS
+  data is initialized. Named forwarded exports are resolved opportunistically, with failed names
+  omitted. The selected Diligent EXE and three DLLs have no TLS callbacks or forwarded exports, so
+  they do not verify those paths. The bounded target replay
   completed process attach for the D3D11 engine and D3DCompiler; Archiver was not observed loading.
   See [`docs/TARGETS.md`](TARGETS.md).
 - Direct3D 11 coverage is a vertical slice. Focused browser pixel/readback checks cover the coloured
@@ -188,7 +234,8 @@
   sampler request, instance step rates, render-to-texture, multiple render targets, cube/array/3D
   texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, and D3D11.1 constant-buffer
   ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
-  rendering, stage-0 SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD/SUBTRACT, and all alpha-test
+  rendering, stage-0 SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH,
+  signed-add, modulate-add, texture/factor-alpha blending, DOTPRODUCT3, and all alpha-test
   comparison functions at equality. These
   checks do not establish broad API or game compatibility. Target-level D3D11 checks cover visible
   SDF output, W movement, and Tab map regeneration; two fresh random-map runs measure a flashlight
@@ -218,14 +265,70 @@
 
 ## Remaining target-level and project work
 - The section 1–6 checklist in `CLAUDE.md` tracks unfinished JIT, runtime, graphics, CPU, and
-  productisation work. Broad items such as additional SEH/C++ dispatch, more D3D11 coverage, AVX,
-  and 32-bit PE support need a representative target and dedicated design/verification before
-  implementation.
+  productisation work. Additional SEH/C++ dispatch, more D3D11 coverage, AVX, and 32-bit PE support
+  remain broad workstreams; the existing PE32 C++ exception design is being implemented in slices.
+- A focused x64 MSVC C++ exception workstream now has EH3/EH4 metadata readers, catch matching,
+  and `/MD` compiler fixtures. Local MSVC source confirms that EH3 `dispFrame` applies while
+  execution is already inside a catch; try-body catches use the establisher frame. The HLE-only
+  guest runs for both FH3 and FH4 fixtures now return 0 under a 2,000,000-step cap, including
+  adjusted base-reference, catch-all, nested catch, and unwind-funclet paths. The focused EH suite
+  passes 30 tests; the runtime library suite passes 172. HLE-only runs and runs with the installed
+  VCRUNTIME redist plus the actual system `ucrtbase.dll` both return 0. Runtime traces confirm guest
+  execution in `ucrtbase.dll` and VCRUNTIME; API-set contracts without physical VFS DLLs still use
+  HLE. The host `--workspace` build succeeds: the worker crate enables `no_std` only on `wasm32` and
+  uses the host `std` runtime elsewhere. The shared-memory `wasm32` worker build also succeeds with
+  atomics and imported-memory linker flags. Browser execution of the exception fixtures remains.
+  PE32 EH3 now reads absolute-pointer throw/function metadata, searches the x86 registration state's
+  active try blocks, and contains a bounded second-pass unwind to a selected registration frame.
+  The dispatcher sets the x86 unwind flags, runs intervening frame handlers, unlinks frames above
+  the target, and resumes through the selected catch funclet. A compile-only MSVC 19.29 x86 assembly
+  probe confirmed compiler-generated handler thunks place the absolute FuncInfo pointer in EAX
+  before jumping to `__CxxFrameHandler3`. The handler and dispatcher compile, but no PE32 C++ runtime
+  fixture has exercised this path yet. Custom x86 catch-copy closures, x86 EH4, and nested/collided
+  SEH unwind dispositions remain unsupported.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
-  `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` have now been run with `--mode d3d11` under
-  AnyWASM. Both reach virtual D3D11 device discovery/creation before stopping at the first unresolved
-  `MSVCP140.dll` `basic_ios<char>` constructor. They do not reach shader creation, guest `Present`,
-  or pixel verification; Asteroids remains analyzer-only pending licence review.
+  Historical `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` runs with `--mode d3d11` reached
+  virtual D3D11 device discovery/creation before stopping at the unresolved `MSVCP140.dll`
+  `basic_ios<char>` constructor. The runtime now maps MSVCP imports to a dedicated HLE group and
+  initializes the observed narrow, UTF-16, and wide `basic_ios` constructor layouts. A local
+  `Tutorial01_HelloTriangle` probe package with the installed MSVC runtime DLLs and UCRT then passed
+  DLL initialization, the observed one-package processor-topology query, and D3D11 resource setup;
+  its 30,000,000-step trace hit the cap in D3DCompiler. A separate 100,000,000-step run hit the cap
+  at `Tutorial01_HelloTriangle.exe+0x2cbb` in a string-buffer growth path. The later 250,000,000-step
+  Release replay was stopped before its result was captured. With a separate local probe package and
+  the installed MSVC/UCRT DLLs, `Tutorial03_Texturing` reached two guest vertex/pixel shader-object
+  creation sequences, input layouts, and buffer creation before its 100,000,000-step cap at
+  `tutorial03_texturing.exe+0x44280`. Its trace contains no guest `Present` or unresolved-import stop.
+  A current-source HLE-only CLI probe without MSVC/UCRT DLLs reached D3DCompiler `HeapAlloc` calls,
+  then stopped at the synchronous callback budget; no unresolved MSVCP call appeared in that short
+  trace. The current-source analyzer report lists 205 implemented / 46 missing static imports for
+  Tutorial03, including 26 of 65 MSVCP140 imports and 3 of 18 VCRUNTIME140 imports still missing.
+  The full report is in `docs/target-imports/tutorial03-current-source.json`; its preflight is static
+  review only. These local DLLs are not a product package. The first
+  browser report with that package stopped at unsupported `VPERMILPS xmm0,xmm5,0x55` with zero GPU
+  work. The CPU source now handles target-used `VPERMILPS`/`VPERMILPD` and packed-single
+  `VMULPS`/`VADDPS`; the release browser Wasm was rebuilt and Asyncify-processed from current source.
+  A bounded current-source capture passed that instruction sequence and showed the textured Diligent
+  cube on the page canvas, with 59 draws, 30 presents, two pipelines, and zero WebGPU validation
+  errors. The report captures on first GPU stats, before terminal process status, and logged one 404
+  resource error; later execution remains unverified. A later current-source HLE-only browser replay
+  without local MSVC/UCRT DLLs passed the stream, clock, and numeric formatting imports and continued
+  rendering: the latest 45-second report recorded 2,759 draws, 1,380 presents, 5,519 passes, two
+  pipelines, and zero WebGPU validation errors. It remained in `Starting` when the report timed out,
+  with no terminal process status. The only 404 was the browser's `/favicon.ico` request; the page
+  context reported no failed requests or HTTP errors for sample resources. An earlier HLE-only CLI capture stopped at
+  `tutorial03_texturing.exe+0x34fc` after 11,248 guest instructions while reading the vtable for an
+  uninitialized auxiliary ostream during insertion of the ANSI string `\x1b[39m`; that capture
+  predates the current stream handlers. An earlier analyzer snapshot reported 165 implemented /
+  86 missing imports, including 61 of 65 MSVCP140 imports missing. The current-source report now
+  records 205 implemented / 46 missing, including 26 of 65 MSVCP140 imports missing. The local
+  runtime DLLs are not a product dependency or redistribution decision.
+  A separate HLE-only browser bundle of Tutorial01_HelloTriangle, also without local MSVC/UCRT DLLs,
+  now renders the colored triangle at the normal 250,000-instruction worker slice: 659 draws, 330
+  presents, two pipelines, 16 Asyncify yields/resumes, and no WebGPU validation errors. Its page
+  remained in `Starting` and the report recorded one generic console 404 without identifying a failed
+  HTTP response. The capture details are in `docs/TARGETS.md`.
+  Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in
   D3Dcompiler. A prior status note listed 96, which this build does not reproduce; analyzing each
@@ -250,15 +353,27 @@
   read back. The frame is not compared with native output, and no general gameplay acceptance pass is
   claimed.
   Native and WASM fixtures cover secure
-  `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
-  `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes
-  one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and verifies a following
-  draw samples it into a pixel. A follow-up headless Chromium replay fixes the group's hidden
+  `SystemFunction036`; PE `.pdata` parsing and `RtlLookupFunctionEntry` over static and registered
+  dynamic function tables work through ntdll and forwarded kernel32 imports. `RtlAddFunctionTable`
+  and `RtlDeleteFunctionTable` now register and remove guest-owned tables. Callback and growable
+  function-table APIs remain open. The dynamic-table path is build-checked but not runtime-verified.
+  A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
+  executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
+  this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested
+  x64 CPU-fault subset and first PE32 linked-handler subset. PE32 C++ EH3 now has an unverified
+  outer-frame catch-transfer path; x86 nested/collided unwind dispositions, custom catch-copy
+  closures, and EH4 are not implemented. Across the x64 and PE32 subsets, tested
+  CPU-fault statuses include access violations, integer divide errors, illegal and privileged
+  instructions, and software breakpoints. A browser
+  fixture now executes one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and
+  verifies a following draw samples it into a pixel. A follow-up headless Chromium replay fixes the group's hidden
   draw-parameter binding and captures a nonempty 1040x807 frame from the selected target with one
   dispatch, five draws, and no WebGPU validation errors. The initial, W-movement, and Tab-regeneration
-  frames are saved in `docs/images/` and can be reproduced with `test/browser/target.mjs`. The normal
-  worker slice still stops in a synchronous callback that cannot resume. Target UAV values and native
-  comparison remain unverified; other movement directions and gameplay acceptance are open. See
+  frames are saved in `docs/images/` and can be reproduced with `test/browser/target.mjs`. A separate
+  normal-slice replay verified 16 Asyncify yields and resumes, three draws, one dispatch, and three
+  presents without WebGPU errors; its process remained in `Starting`, and its stored route did not
+  finish. Target UAV values and native comparison remain unverified; other movement directions and
+  gameplay acceptance are open. See
   [`docs/TARGETS.md`](TARGETS.md) for exact traces and limits.
 - The D3D11 textured fixture has Rust command-stream and WASM smoke coverage, and its tested WebGPU
   rendering states have pixel checks in `test/browser/run.mjs`. Other rendering states listed in

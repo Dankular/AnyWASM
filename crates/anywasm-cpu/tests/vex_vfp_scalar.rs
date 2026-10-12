@@ -20,7 +20,8 @@ fn vdivsd_register_form_divides_and_merges_high_qword_from_vvvv() {
     const MERGE_SOURCE_HIGH: u64 = 0x0123_4567_89ab_cdef;
     let mut mem = Memory::new();
     assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
-    mem.write_force(CODE, &[0xc4, 0x41, 0x7b, 0x5e, 0xc1]).unwrap();
+    mem.write_force(CODE, &[0xc4, 0x41, 0x7b, 0x5e, 0xc1])
+        .unwrap();
 
     let mut cpu = Cpu::new();
     cpu.rip = CODE;
@@ -47,7 +48,8 @@ fn vdivsd_memory_source_reads_all_eight_bytes() {
     assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
     assert!(mem.map(DATA, PAGE_SIZE, PROT_RW));
     mem.write_force(CODE, &[0xc5, 0xfb, 0x5e, 0x00]).unwrap(); // vdivsd xmm0, xmm0, [rax]
-    mem.write_force(DATA, &3.0f64.to_bits().to_le_bytes()).unwrap();
+    mem.write_force(DATA, &3.0f64.to_bits().to_le_bytes())
+        .unwrap();
 
     let mut cpu = Cpu::new();
     cpu.rip = CODE;

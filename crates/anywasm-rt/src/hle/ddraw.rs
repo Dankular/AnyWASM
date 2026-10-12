@@ -68,8 +68,8 @@ fn create_ex(p: &mut Process) -> R {
     }
     let iid = p.read_bytes(iid, 16)?;
     const IID_IDIRECTDRAW7: [u8; 16] = [
-        0xc0, 0x5e, 0xe6, 0x15, 0x9c, 0x3b, 0xd2, 0x11, 0xb9, 0x2f, 0x00, 0x60, 0x97, 0x97,
-        0xea, 0x5b,
+        0xc0, 0x5e, 0xe6, 0x15, 0x9c, 0x3b, 0xd2, 0x11, 0xb9, 0x2f, 0x00, 0x60, 0x97, 0x97, 0xea,
+        0x5b,
     ];
     if iid.as_slice() != IID_IDIRECTDRAW7 {
         return Ok(E_INVALIDARG);
@@ -103,7 +103,13 @@ fn get_caps(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
-fn write_display_mode(p: &mut Process, out: u64, width: u32, height: u32, bpp: u32) -> Result<bool, Stop> {
+fn write_display_mode(
+    p: &mut Process,
+    out: u64,
+    width: u32,
+    height: u32,
+    bpp: u32,
+) -> Result<bool, Stop> {
     if !zero_struct(p, out, DDSURFACEDESC2_SIZE)? {
         return Ok(false);
     }
@@ -126,11 +132,13 @@ fn write_display_mode(p: &mut Process, out: u64, width: u32, height: u32, bpp: u
 
 fn get_display_mode(p: &mut Process) -> R {
     let mode = p.extra.ddraw_mode.unwrap_or(DESKTOP_MODE);
-    Ok(if write_display_mode(p, p.arg(1), mode.0, mode.1, mode.2)? {
-        S_OK
-    } else {
-        E_INVALIDARG
-    })
+    Ok(
+        if write_display_mode(p, p.arg(1), mode.0, mode.1, mode.2)? {
+            S_OK
+        } else {
+            E_INVALIDARG
+        },
+    )
 }
 
 fn set_display_mode(p: &mut Process) -> R {

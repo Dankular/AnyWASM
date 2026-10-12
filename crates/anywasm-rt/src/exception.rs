@@ -1,22 +1,45 @@
 //! Win64 PE unwind primitives used by ntdll's `RtlVirtualUnwind` export.
 
 use crate::process::{GuestUnwind, Process, Stop, TEB_ADDR};
-use anywasm_cpu::cpu::{Cpu, RBP, RBX, RDI, RSI, RSP};
+use anywasm_cpu::cpu::{Cpu, CpuMode, RBP, RBX, RDI, RSI, RSP};
+use anywasm_cpu::mem::{Access, PROT_X};
+use anywasm_cpu::{DecodeError, Exit};
 
 const CONTEXT_GPR_BASE: u64 = 0x78;
+const CONTEXT_MXCSR: u64 = 0x34;
 const CONTEXT_RFLAGS: u64 = 0x44;
 const CONTEXT_RIP: u64 = 0xf8;
 const CONTEXT_XMM_BASE: u64 = 0x1a0;
 const CONTEXT_SIZE: u64 = 0x4d0;
 const EXCEPTION_RECORD_SIZE: u64 = 0x98;
+const EXCEPTION_RECORD_PARAMETERS: u64 = 24;
+const EXCEPTION_RECORD_ARGUMENTS: u64 = 32;
 const DISPATCHER_CONTEXT_SIZE: u64 = 0x50;
 const EXCEPTION_CONTINUE_EXECUTION: u64 = 0;
 const EXCEPTION_CONTINUE_SEARCH: u64 = 1;
+const EXCEPTION_CONTINUE_SEARCH_FILTER: i32 = 0;
+const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
+const EXCEPTION_CONTINUE_EXECUTION_FILTER: i32 = -1;
+const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
 const EXCEPTION_UNWINDING: u32 = 0x2;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
+const DISPATCHER_CONTROL_PC: u64 = 0x00;
+const DISPATCHER_IMAGE_BASE: u64 = 0x08;
+const DISPATCHER_TARGET_IP: u64 = 0x20;
+const DISPATCHER_HANDLER_DATA: u64 = 0x38;
+const DISPATCHER_HISTORY_TABLE: u64 = 0x40;
+const DISPATCHER_SCOPE_INDEX: u64 = 0x48;
+const EXCEPTION_POINTERS_SIZE: u64 = 16;
+const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
+const STATUS_INTEGER_DIVIDE_BY_ZERO: u32 = 0xc000_0094;
+const STATUS_ILLEGAL_INSTRUCTION: u32 = 0xc000_001d;
+const STATUS_PRIVILEGED_INSTRUCTION: u32 = 0xc000_0096;
+const STATUS_BREAKPOINT: u32 = 0x8000_0003;
+const STATUS_UNWIND_CONSOLIDATE: u32 = 0x8000_0029;
 const MSVC_CPP_EXCEPTION: u32 = 0xe06d_7363;
 const MSVC_CPP_MAGIC: u64 = 0x1993_0520;
 const MAX_EXCEPTION_FRAMES: usize = 128;
+const MAX_C_SCOPE_ENTRIES: u32 = 4096;
 const UNW_FLAG_EHANDLER: u8 = 1;
 const UNW_FLAG_UHANDLER: u8 = 2;
 const UNW_FLAG_CHAININFO: u8 = 4;
@@ -29,6 +52,7 @@ struct Context64 {
     xmm: [u128; 16],
     rip: u64,
     rflags: u64,
+    mxcsr: u32,
 }
 
 #[derive(Default)]
@@ -47,7 +71,7 @@ struct ExceptionFrame {
     context: Context64,
 }
 
-/// Search guest frames for a handler for the selected target's MSVC C++ exception form.
+/// Search guest frames for language handlers for a raised exception.
 pub(crate) fn dispatch_raised_exception(
     p: &mut Process,
     code: u32,
@@ -55,34 +79,41 @@ pub(crate) fn dispatch_raised_exception(
     args: &[u64],
     caller: u64,
 ) -> Result<u64, Stop> {
-    if code != MSVC_CPP_EXCEPTION || args.len() != 4 || args[0] != MSVC_CPP_MAGIC {
+    if p.cpu.mode == CpuMode::X86_32 {
+        return crate::exception32::dispatch_raised_exception(p, code, flags, args, caller);
+    }
+    if p.cpu.mode != CpuMode::X86_64 {
+        return Err(Stop::Unimplemented {
+            dll: "ntdll".into(),
+            name: "PE32 structured exception dispatch".into(),
+        });
+    }
+    if args.len() > 15 {
         return Err(Stop::Crash(format!(
-            "RaiseException code={code:#x} flags={flags:#x} is outside the supported MSVC C++ form"
+            "RaiseException received {} parameters (maximum is 15)",
+            args.len()
         )));
     }
-    let image_base = args[3];
-    let throw_info = args[2];
-    let module = p
-        .modules
-        .iter()
-        .find(|module| {
+    if code == MSVC_CPP_EXCEPTION {
+        if args.len() != 4 || args[0] != MSVC_CPP_MAGIC {
+            return Err(Stop::Crash(format!(
+                "MSVC C++ exception code has an unsupported parameter layout ({} parameters)",
+                args.len()
+            )));
+        }
+        let throw_info = args[2];
+        let image_base = args[3];
+        if !p.modules.iter().any(|module| {
             module.hle_group.is_none()
                 && module.base == image_base
                 && throw_info >= module.base
                 && throw_info < module.base.saturating_add(module.size)
-        })
-        .ok_or_else(|| {
-            Stop::Crash(format!(
+        }) {
+            return Err(Stop::Crash(format!(
                 "MSVC C++ ThrowInfo {throw_info:#x} is outside loaded image {image_base:#x}"
-            ))
-        })?;
-    if module.runtime_functions.is_empty() {
-        return Err(Stop::Crash(format!(
-            "MSVC C++ throw image {} has no PE runtime-function table",
-            module.name
-        )));
+            )));
+        }
     }
-
     let stack_base = p.rd64(TEB_ADDR + 0x08)?;
     let stack_limit = p.rd64(TEB_ADDR + 0x10)?;
     let hle_rsp = p.cpu.gpr[RSP];
@@ -97,32 +128,145 @@ pub(crate) fn dispatch_raised_exception(
         )));
     }
 
+    // RaiseException is an HLE call. Model its guest frame as already popped before beginning
+    // the search, leaving the original guest callsite PC and the caller's pre-call RSP.
+    let context = context_from_cpu(&p.cpu, caller, hle_rsp + 8);
+    dispatch_context_exception(p, code, flags, args, caller, context, true)
+}
+
+/// Convert selected CPU exits into Windows exception records and dispatch them through the
+/// process's VEH, PE language handlers, vectored-continue handlers, and top-level filter.
+pub(crate) fn dispatch_cpu_exception(p: &mut Process, exit: &Exit) -> Result<bool, Stop> {
+    if p.cpu.mode == CpuMode::X86_32 {
+        return crate::exception32::dispatch_cpu_exception(p, exit);
+    }
+    if p.cpu.mode != CpuMode::X86_64 {
+        return Ok(false);
+    }
+    let (Ok(stack_base), Ok(stack_limit)) = (p.rd64(TEB_ADDR + 0x08), p.rd64(TEB_ADDR + 0x10))
+    else {
+        return Ok(false);
+    };
+    let rsp = p.cpu.gpr[RSP];
+    if stack_limit >= stack_base || rsp < stack_limit || rsp >= stack_base {
+        return Ok(false);
+    }
+    let (code, args, exception_address) = match exit {
+        Exit::Fault(fault) => {
+            let access = match fault.access {
+                Access::Read => 0,
+                Access::Write => 1,
+                Access::Exec => 8,
+            };
+            (STATUS_ACCESS_VIOLATION, vec![access, fault.addr], p.cpu.rip)
+        }
+        Exit::DivideError => (STATUS_INTEGER_DIVIDE_BY_ZERO, Vec::new(), p.cpu.rip),
+        Exit::Decode(DecodeError::Undefined(_)) => {
+            (STATUS_ILLEGAL_INSTRUCTION, Vec::new(), p.cpu.rip)
+        }
+        Exit::IllegalInstruction => (STATUS_ILLEGAL_INSTRUCTION, Vec::new(), p.cpu.rip),
+        Exit::PrivilegedInstruction => (STATUS_PRIVILEGED_INSTRUCTION, Vec::new(), p.cpu.rip),
+        Exit::Breakpoint => (STATUS_BREAKPOINT, Vec::new(), p.cpu.rip.saturating_sub(1)),
+        _ => return Ok(false),
+    };
+    let context = context_from_cpu(&p.cpu, p.cpu.rip, p.cpu.gpr[RSP]);
+    dispatch_context_exception(p, code, 0, &args, exception_address, context, false)?;
+    Ok(true)
+}
+
+fn dispatch_context_exception(
+    p: &mut Process,
+    code: u32,
+    flags: u32,
+    args: &[u64],
+    exception_address: u64,
+    context: Context64,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    let thread_id = p.current_thread_id;
+    let depth = p.guest_exception_depths.entry(thread_id).or_default();
+    *depth = depth.saturating_add(1);
+
+    let result = dispatch_context_exception_inner(
+        p,
+        code,
+        flags,
+        args,
+        exception_address,
+        context,
+        skip_ret_on_resume,
+    );
+
+    let remove_depth = if let Some(depth) = p.guest_exception_depths.get_mut(&thread_id) {
+        *depth = depth.saturating_sub(1);
+        *depth == 0
+    } else {
+        false
+    };
+    if remove_depth {
+        p.guest_exception_depths.remove(&thread_id);
+    }
+    result
+}
+
+fn dispatch_context_exception_inner(
+    p: &mut Process,
+    code: u32,
+    flags: u32,
+    args: &[u64],
+    exception_address: u64,
+    mut context: Context64,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    let stack_base = p.rd64(TEB_ADDR + 0x08)?;
+    let stack_limit = p.rd64(TEB_ADDR + 0x10)?;
+    let initial_rsp = context.gpr[RSP];
+    if stack_limit >= stack_base || initial_rsp < stack_limit || initial_rsp >= stack_base {
+        return Err(Stop::Crash(format!(
+            "exception guest stack pointer {initial_rsp:#x} is outside TEB bounds {stack_limit:#x}..{stack_base:#x}"
+        )));
+    }
+
     let exception_record = crate::hle::kernel32::alloc_block(p, EXCEPTION_RECORD_SIZE, true);
     let context_record = crate::hle::kernel32::alloc_block(p, CONTEXT_SIZE, true);
     let dispatcher_context = crate::hle::kernel32::alloc_block(p, DISPATCHER_CONTEXT_SIZE, true);
-    write_exception_record(p, exception_record, code, flags, caller, args)?;
+    write_exception_record(p, exception_record, code, flags, exception_address, args)?;
     p.wr32(context_record + 0x30, 0x0010_000b)?; // CONTEXT_AMD64 | CONTROL | INTEGER | FLOATING_POINT
-    p.wr32(context_record + 0x34, 0x1f80)?; // Default guest MXCSR.
 
-    // RaiseException is an HLE call. Model its guest frame as already popped before beginning
-    // the search, leaving the original guest callsite PC and the caller's pre-call RSP.
-    let mut context = context_from_cpu(&p.cpu, caller, hle_rsp + 8);
     let exception_context = context.clone();
     write_context(p, context_record, &context)?;
-    let mut control_pc = caller;
+    let mut control_pc = context.rip;
     let mut last_rsp = context.gpr[RSP];
     let mut frames = Vec::new();
 
+    if dispatch_vectored_exception_handlers(p, exception_record, context_record)? {
+        return resume_exception(p, exception_record, context_record, skip_ret_on_resume);
+    }
+
     for frame_number in 0..MAX_EXCEPTION_FRAMES {
         if control_pc == 0 || last_rsp < stack_limit || last_rsp >= stack_base {
-            return Err(Stop::Crash(format!(
-                "MSVC C++ exception search left guest stack after {frame_number} frames (pc={control_pc:#x}, rsp={last_rsp:#x})"
-            )));
+            return dispatch_unhandled_exception(
+                p,
+                exception_record,
+                context_record,
+                code,
+                flags,
+                skip_ret_on_resume,
+                format!(
+                    "search left guest stack after {frame_number} frames (pc={control_pc:#x}, rsp={last_rsp:#x})"
+                ),
+            );
         }
         let Some((module_base, function_entry)) = lookup_frame(p, control_pc) else {
-            return Err(Stop::Crash(format!(
-                "MSVC C++ exception search reached non-module PC {control_pc:#x} after {frame_number} frames"
-            )));
+            return dispatch_unhandled_exception(
+                p,
+                exception_record,
+                context_record,
+                code,
+                flags,
+                skip_ret_on_resume,
+                format!("search reached non-module PC {control_pc:#x} after {frame_number} frames"),
+            );
         };
         let frame_context = context.clone();
         let mut caller_context = frame_context.clone();
@@ -190,8 +334,12 @@ pub(crate) fn dispatch_raised_exception(
             ) {
                 Ok(disposition) => disposition as u32,
                 Err(Stop::GuestUnwind(unwind)) => {
+                    let context_record = unwind.context_record;
                     complete_guest_unwind(p, &frames, dispatcher_context, unwind)?;
-                    p.skip_ret = true;
+                    // The continue handlers see the final context after phase-two unwind.
+                    p.wr32(exception_record + 4, flags)?;
+                    dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
+                    restore_exception_context(p, context_record, skip_ret_on_resume)?;
                     return Ok(0);
                 }
                 Err(stop) => return Err(stop),
@@ -208,16 +356,23 @@ pub(crate) fn dispatch_raised_exception(
             match disposition as u64 {
                 EXCEPTION_CONTINUE_SEARCH => {}
                 EXCEPTION_CONTINUE_EXECUTION => {
-                    return Err(Stop::Crash(format!(
-                        "noncontinuable MSVC C++ exception handler at {:#x} returned ExceptionContinueExecution",
-                        result.handler
-                    )))
+                    if flags & EXCEPTION_NONCONTINUABLE != 0 {
+                        return Err(Stop::Crash(format!(
+                            "noncontinuable exception code={code:#x} cannot continue execution"
+                        )));
+                    }
+                    return resume_exception(
+                        p,
+                        exception_record,
+                        context_record,
+                        skip_ret_on_resume,
+                    );
                 }
                 value => {
                     return Err(Stop::Unimplemented {
                         dll: "ntdll".into(),
                         name: format!(
-                            "MSVC C++ exception handler disposition {value} at {:#x}",
+                            "exception handler disposition {value} at {:#x}",
                             result.handler
                         ),
                     })
@@ -229,13 +384,19 @@ pub(crate) fn dispatch_raised_exception(
         let next_pc = caller_context.rip;
         if next_rsp <= last_rsp || next_rsp > stack_base {
             return Err(Stop::Crash(format!(
-                "MSVC C++ exception search made invalid stack progress {last_rsp:#x} -> {next_rsp:#x}"
+                "exception search made invalid stack progress {last_rsp:#x} -> {next_rsp:#x}"
             )));
         }
         if next_pc == 0 {
-            return Err(Stop::Crash(format!(
-                "MSVC C++ exception search exhausted the guest stack after {frame_number} frames"
-            )));
+            return dispatch_unhandled_exception(
+                p,
+                exception_record,
+                context_record,
+                code,
+                flags,
+                skip_ret_on_resume,
+                format!("search exhausted the guest stack after {frame_number} frames"),
+            );
         }
         context = caller_context;
         control_pc = next_pc;
@@ -243,8 +404,351 @@ pub(crate) fn dispatch_raised_exception(
     }
 
     Err(Stop::Crash(format!(
-        "MSVC C++ exception search exceeded {MAX_EXCEPTION_FRAMES} frames"
+        "exception search exceeded {MAX_EXCEPTION_FRAMES} frames"
     )))
+}
+
+/// Implement kernel32's UnhandledExceptionFilter using the process top-level filter.
+pub(crate) fn unhandled_exception_filter(p: &mut Process) -> Result<u64, Stop> {
+    if p.cpu.mode == CpuMode::X86_32 {
+        return crate::exception32::unhandled_exception_filter(p);
+    }
+    let exception_pointers = p.arg(0);
+    let exception_record = match p.cpu.mode {
+        CpuMode::X86_32 => p.rd32(exception_pointers)? as u64,
+        CpuMode::X86_64 => p.rd64(exception_pointers)?,
+    };
+    let exception_flags = p.rd32(exception_record + 4)?;
+    let disposition = call_top_level_exception_filter(p, exception_pointers)?;
+    if disposition == EXCEPTION_CONTINUE_EXECUTION_FILTER
+        && exception_flags & EXCEPTION_NONCONTINUABLE != 0
+    {
+        return Err(Stop::Crash(format!(
+            "noncontinuable exception code={:#x} cannot continue execution",
+            p.rd32(exception_record)?
+        )));
+    }
+    Ok(disposition as i64 as u64)
+}
+
+fn call_top_level_exception_filter(p: &mut Process, exception_pointers: u64) -> Result<i32, Stop> {
+    if p.top_level_exception_filter == 0 {
+        return Ok(EXCEPTION_EXECUTE_HANDLER);
+    }
+    let disposition = p.call_guest(p.top_level_exception_filter, &[exception_pointers])? as i32;
+    if !matches!(
+        disposition,
+        EXCEPTION_CONTINUE_SEARCH_FILTER
+            | EXCEPTION_EXECUTE_HANDLER
+            | EXCEPTION_CONTINUE_EXECUTION_FILTER
+    ) {
+        return Err(Stop::Crash(format!(
+            "top-level exception filter {:#x} returned invalid disposition {disposition}",
+            p.top_level_exception_filter
+        )));
+    }
+    Ok(disposition)
+}
+
+fn dispatch_unhandled_exception(
+    p: &mut Process,
+    exception_record: u64,
+    context_record: u64,
+    code: u32,
+    flags: u32,
+    skip_ret_on_resume: bool,
+    reason: String,
+) -> Result<u64, Stop> {
+    let exception_pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS_SIZE, true);
+    dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
+    p.wr64(exception_pointers, exception_record)?;
+    p.wr64(exception_pointers + 8, context_record)?;
+    let disposition = call_top_level_exception_filter(p, exception_pointers)?;
+    if disposition == EXCEPTION_CONTINUE_EXECUTION_FILTER {
+        if flags & EXCEPTION_NONCONTINUABLE != 0 {
+            return Err(Stop::Crash(format!(
+                "noncontinuable exception code={code:#x} cannot continue execution"
+            )));
+        }
+        return restore_exception_context(p, context_record, skip_ret_on_resume);
+    }
+    Err(Stop::Crash(format!(
+        "unhandled exception code={code:#x}, flags={flags:#x}: {reason}; top-level filter returned {disposition}"
+    )))
+}
+
+fn resume_exception(
+    p: &mut Process,
+    exception_record: u64,
+    context_record: u64,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
+    restore_exception_context(p, context_record, skip_ret_on_resume)
+}
+
+fn restore_exception_context(
+    p: &mut Process,
+    context_record: u64,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    let resumed = read_context(p, context_record)?;
+    p.cpu.gpr = resumed.gpr;
+    p.cpu.xmm = resumed.xmm;
+    p.cpu.rip = resumed.rip;
+    p.cpu.rflags = resumed.rflags;
+    p.cpu.mxcsr = resumed.mxcsr;
+    p.skip_ret = skip_ret_on_resume;
+    Ok(0)
+}
+
+fn dispatch_vectored_exception_handlers(
+    p: &mut Process,
+    exception_record: u64,
+    context_record: u64,
+) -> Result<bool, Stop> {
+    let handlers = p.vectored_exception_handlers.clone();
+    if handlers.is_empty() {
+        return Ok(false);
+    }
+    let exception_pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS_SIZE, true);
+    p.wr64(exception_pointers, exception_record)?;
+    p.wr64(exception_pointers + 8, context_record)?;
+    let exception_flags = p.rd32(exception_record + 4)?;
+    for (handle, callback) in handlers {
+        let disposition = p.call_guest(callback, &[exception_pointers])? as i32;
+        if p.trace_imports {
+            p.stderr.extend_from_slice(
+                format!(
+                    "[seh] vectored handler handle={handle:#x} callback={callback:#x} disposition={disposition}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        match disposition {
+            EXCEPTION_CONTINUE_EXECUTION_FILTER => {
+                if exception_flags & EXCEPTION_NONCONTINUABLE != 0 {
+                    return Err(Stop::Crash(format!(
+                        "noncontinuable exception code={:#x} reached vectored continue-execution handler {callback:#x}",
+                        p.rd32(exception_record)?
+                    )));
+                }
+                return Ok(true);
+            }
+            0 => {}
+            value => {
+                return Err(Stop::Unimplemented {
+                    dll: "ntdll".into(),
+                    name: format!("vectored exception handler {callback:#x} disposition {value}"),
+                })
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn dispatch_vectored_continue_handlers(
+    p: &mut Process,
+    exception_record: u64,
+    context_record: u64,
+) -> Result<(), Stop> {
+    let handlers = p.vectored_continue_handlers.clone();
+    if handlers.is_empty() {
+        return Ok(());
+    }
+    let exception_pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS_SIZE, true);
+    p.wr64(exception_pointers, exception_record)?;
+    p.wr64(exception_pointers + 8, context_record)?;
+    for (handle, callback) in handlers {
+        // Windows ignores vectored continue handler return values; each registered callback runs.
+        let disposition = p.call_guest(callback, &[exception_pointers])? as i32;
+        if p.trace_imports {
+            p.stderr.extend_from_slice(
+                format!(
+                    "[seh] vectored continue handler handle={handle:#x} callback={callback:#x} disposition={disposition}\n"
+                )
+                .as_bytes(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Implement the x64 scope-table personality used by `__try`, `__except`, and `__finally`.
+pub(crate) fn c_specific_handler(p: &mut Process) -> Result<u64, Stop> {
+    if p.cpu.mode != CpuMode::X86_64 {
+        return Err(Stop::Unimplemented {
+            dll: "crt".into(),
+            name: "__C_specific_handler for PE32".into(),
+        });
+    }
+    let (exception_record, establisher, context_record, dispatcher_context) =
+        (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
+    let exception_flags = p.rd32(exception_record + 4)?;
+    let control_pc = p.rd64(dispatcher_context + DISPATCHER_CONTROL_PC)?;
+    let image_base = p.rd64(dispatcher_context + DISPATCHER_IMAGE_BASE)?;
+    let target_ip = p.rd64(dispatcher_context + DISPATCHER_TARGET_IP)?;
+    let handler_data = p.rd64(dispatcher_context + DISPATCHER_HANDLER_DATA)?;
+    let mut scope_index = p.rd32(dispatcher_context + DISPATCHER_SCOPE_INDEX)?;
+    let Some(image_end) = p
+        .modules
+        .iter()
+        .find(|module| module.hle_group.is_none() && module.base == image_base)
+        .map(|module| module.base.saturating_add(module.size))
+    else {
+        return Err(Stop::Crash(format!(
+            "__C_specific_handler image base {image_base:#x} is not a loaded image"
+        )));
+    };
+    let table_end = handler_data
+        .checked_add(4)
+        .ok_or_else(|| Stop::Crash("__C_specific_handler scope table overflow".into()))?;
+    if handler_data < image_base || table_end > image_end {
+        return Err(Stop::Crash(format!(
+            "__C_specific_handler scope table {handler_data:#x} is outside image {image_base:#x}..{image_end:#x}"
+        )));
+    }
+    let count = p.rd32(handler_data)?;
+    let entries_bytes = (count as u64)
+        .checked_mul(16)
+        .ok_or_else(|| Stop::Crash("__C_specific_handler scope count overflow".into()))?;
+    if count > MAX_C_SCOPE_ENTRIES || table_end.saturating_add(entries_bytes) > image_end {
+        return Err(Stop::Crash(format!(
+            "__C_specific_handler scope table has invalid count {count}"
+        )));
+    }
+    if scope_index > count {
+        return Err(Stop::Crash(format!(
+            "__C_specific_handler scope index {scope_index} exceeds count {count}"
+        )));
+    }
+    let control_rva = control_pc.checked_sub(image_base).ok_or_else(|| {
+        Stop::Crash(format!(
+            "__C_specific_handler control PC {control_pc:#x} precedes image {image_base:#x}"
+        ))
+    })?;
+    let target_rva = if target_ip == 0 {
+        0
+    } else {
+        target_ip.checked_sub(image_base).ok_or_else(|| {
+            Stop::Crash(format!(
+                "__C_specific_handler target IP {target_ip:#x} precedes image {image_base:#x}"
+            ))
+        })?
+    };
+    let is_unwinding = exception_flags & EXCEPTION_UNWINDING != 0;
+
+    while scope_index < count {
+        let index = scope_index;
+        scope_index += 1;
+        p.wr32(dispatcher_context + DISPATCHER_SCOPE_INDEX, scope_index)?;
+        let entry = handler_data + 4 + index as u64 * 16;
+        let begin = p.rd32(entry)? as u64;
+        let end = p.rd32(entry + 4)? as u64;
+        let filter_or_finally = p.rd32(entry + 8)?;
+        let jump_target = p.rd32(entry + 12)? as u64;
+        if begin >= end || end > image_end - image_base {
+            return Err(Stop::Crash(format!(
+                "__C_specific_handler scope {index} has invalid image range {begin:#x}..{end:#x}"
+            )));
+        }
+        if control_rva < begin || control_rva >= end {
+            continue;
+        }
+
+        if is_unwinding {
+            if exception_flags & EXCEPTION_TARGET_UNWIND != 0
+                && target_rva >= begin
+                && target_rva < end
+            {
+                return Ok(EXCEPTION_CONTINUE_SEARCH);
+            }
+            if jump_target == 0 {
+                if filter_or_finally == 0 {
+                    return Err(Stop::Crash(format!(
+                        "__C_specific_handler scope {index} has a null termination handler"
+                    )));
+                }
+                let handler = c_scope_image_address(
+                    image_base,
+                    image_end,
+                    filter_or_finally as u64,
+                    "termination handler",
+                )?;
+                p.call_guest(handler, &[1, establisher])?;
+            } else if jump_target == target_rva {
+                return Ok(EXCEPTION_CONTINUE_SEARCH);
+            }
+            continue;
+        }
+
+        if jump_target == 0 {
+            continue;
+        }
+        let filter_result = if filter_or_finally == EXCEPTION_EXECUTE_HANDLER as u32 {
+            EXCEPTION_EXECUTE_HANDLER
+        } else {
+            if filter_or_finally == 0 {
+                return Err(Stop::Crash(format!(
+                    "__C_specific_handler scope {index} has a null filter"
+                )));
+            }
+            let filter =
+                c_scope_image_address(image_base, image_end, filter_or_finally as u64, "filter")?;
+            let exception_pointers =
+                crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS_SIZE, true);
+            p.wr64(exception_pointers, exception_record)?;
+            p.wr64(exception_pointers + 8, context_record)?;
+            p.call_guest(filter, &[exception_pointers, establisher])? as i32
+        };
+        match filter_result {
+            EXCEPTION_CONTINUE_EXECUTION_FILTER => {
+                if exception_flags & EXCEPTION_NONCONTINUABLE != 0 {
+                    return Err(Stop::Crash(format!(
+                        "noncontinuable exception filter at scope {index} requested continuation"
+                    )));
+                }
+                return Ok(EXCEPTION_CONTINUE_EXECUTION);
+            }
+            EXCEPTION_EXECUTE_HANDLER => {
+                let target_ip =
+                    c_scope_image_address(image_base, image_end, jump_target, "landing pad")?;
+                if lookup_frame(p, target_ip).is_none() {
+                    return Err(Stop::Crash(format!(
+                        "__C_specific_handler landing pad {target_ip:#x} is outside loaded guest images"
+                    )));
+                }
+                return Err(Stop::GuestUnwind(GuestUnwind {
+                    target_frame: establisher,
+                    target_ip,
+                    call_rsp: p.cpu.gpr[RSP],
+                    exception_record,
+                    return_value: p.rd32(exception_record)? as u64,
+                    context_record,
+                    history_table: p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(EXCEPTION_CONTINUE_SEARCH)
+}
+
+fn c_scope_image_address(
+    image_base: u64,
+    image_end: u64,
+    rva: u64,
+    kind: &str,
+) -> Result<u64, Stop> {
+    image_base
+        .checked_add(rva)
+        .filter(|address| *address < image_end)
+        .ok_or_else(|| {
+            Stop::Crash(format!(
+                "__C_specific_handler {kind} RVA {rva:#x} is outside image {image_base:#x}..{image_end:#x}"
+            ))
+        })
 }
 
 /// Capture the target's non-returning `RtlUnwindEx` request for the active dispatcher.
@@ -358,8 +862,15 @@ fn complete_guest_unwind(
         )));
     };
     let target_frame = &frames[target_index];
+    let cpp_exception = p.rd32(unwind.exception_record)? == MSVC_CPP_EXCEPTION;
+    let is_cpp_catch_funclet = cpp_exception
+        && target_frame.image_base == target_image_base
+        && target_frame.function_entry != target_function_entry
+        && p.mem
+            .prot_of(unwind.target_ip)
+            .is_some_and(|protection| protection & PROT_X != 0);
     if target_frame.image_base != target_image_base
-        || target_frame.function_entry != target_function_entry
+        || target_frame.function_entry != target_function_entry && !is_cpp_catch_funclet
     {
         return Err(Stop::Crash(format!(
             "RtlUnwindEx target IP {:#x} does not belong to target frame {:#x}",
@@ -494,7 +1005,77 @@ fn complete_guest_unwind(
         p.wr32(unwind.exception_record + 4, EXCEPTION_UNWINDING)?;
     }
 
-    transfer_context.rip = unwind.target_ip;
+    let consolidation_callback = if p.rd32(unwind.exception_record)? == STATUS_UNWIND_CONSOLIDATE {
+        let parameter_count = p.rd32(unwind.exception_record + EXCEPTION_RECORD_PARAMETERS)?;
+        if !(12..=15).contains(&parameter_count) {
+            return Err(Stop::Crash(format!(
+                "RtlUnwindEx consolidation record has invalid parameter count {parameter_count}"
+            )));
+        }
+        let callback = p.rd64(unwind.exception_record + EXCEPTION_RECORD_ARGUMENTS)?;
+        if callback == 0
+            || p.mem
+                .prot_of(callback)
+                .is_none_or(|protection| protection & PROT_X == 0)
+        {
+            return Err(Stop::Crash(format!(
+                "RtlUnwindEx consolidation callback {callback:#x} is not executable"
+            )));
+        }
+        let callback_context =
+            p.rd64(unwind.exception_record + EXCEPTION_RECORD_ARGUMENTS + 4 * 8)?;
+        if callback_context != unwind.context_record {
+            return Err(Stop::Crash(format!(
+                "RtlUnwindEx consolidation context {callback_context:#x} does not match CONTEXT {:#x}",
+                unwind.context_record
+            )));
+        }
+
+        p.cpu.gpr = transfer_context.gpr;
+        p.cpu.xmm = transfer_context.xmm;
+        p.cpu.rip = transfer_context.rip;
+        p.cpu.rflags = transfer_context.rflags;
+        p.cpu.mxcsr = transfer_context.mxcsr;
+        let continuation = p.call_guest(callback, &[unwind.exception_record])?;
+        if continuation == 0 {
+            return Err(Stop::Crash(
+                "RtlUnwindEx consolidation callback returned a null continuation".into(),
+            ));
+        }
+        if p.trace_imports {
+            p.stderr.extend_from_slice(
+                format!(
+                    "[seh] consolidation callback={callback:#x} returned continuation={continuation:#x}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        Some(continuation)
+    } else {
+        None
+    };
+    let dispatcher_target_ip = p.rd64(dispatcher_context + DISPATCHER_TARGET_IP)?;
+    let transfer_ip = consolidation_callback.unwrap_or_else(|| {
+        if cpp_exception && dispatcher_target_ip != unwind.target_ip {
+            dispatcher_target_ip
+        } else {
+            unwind.target_ip
+        }
+    });
+    let Some((transfer_image_base, transfer_function_entry)) = lookup_frame(p, transfer_ip) else {
+        return Err(Stop::Crash(format!(
+            "exception target continuation {transfer_ip:#x} is outside loaded guest images"
+        )));
+    };
+    if transfer_image_base != target_frame.image_base
+        || transfer_function_entry != target_frame.function_entry
+    {
+        return Err(Stop::Crash(format!(
+            "exception target continuation {transfer_ip:#x} does not belong to target frame {:#x}",
+            unwind.target_frame
+        )));
+    }
+    transfer_context.rip = transfer_ip;
     transfer_context.gpr[anywasm_cpu::cpu::RAX] = unwind.return_value;
     write_context(p, unwind.context_record, &transfer_context)?;
     p.cpu.gpr = transfer_context.gpr;
@@ -504,7 +1085,7 @@ fn complete_guest_unwind(
     if p.trace_imports {
         p.stderr.extend_from_slice(
             format!(
-                "[seh] transfer frame={:#x} ip={:#x} rsp={:#x} rax={:#x}\n",
+                "[seh] transfer frame={:#x} ip={transfer_ip:#x} requested={:#x} rsp={:#x} rax={:#x}\n",
                 unwind.target_frame,
                 unwind.target_ip,
                 p.cpu.gpr[RSP],
@@ -524,6 +1105,7 @@ fn context_from_cpu(cpu: &Cpu, rip: u64, rsp: u64) -> Context64 {
         xmm: cpu.xmm,
         rip,
         rflags: cpu.rflags,
+        mxcsr: cpu.mxcsr,
     }
 }
 
@@ -576,7 +1158,52 @@ fn write_dispatcher_context(
     Ok(())
 }
 
-fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
+pub(crate) fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
+    for table in &p.dynamic_function_tables {
+        let Some(rva) = control_pc.checked_sub(table.base) else {
+            continue;
+        };
+        let mut low = 0usize;
+        let mut high = table.entry_count as usize;
+        let mut valid = true;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let Some(entry) = table.table.checked_add(middle as u64 * 12) else {
+                valid = false;
+                break;
+            };
+            let Ok(begin) = p.rd32(entry) else {
+                valid = false;
+                break;
+            };
+            let begin = begin as u64;
+            if begin <= rva {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if !valid {
+            continue;
+        }
+        let Some(index) = low.checked_sub(1) else {
+            continue;
+        };
+        let Some(entry) = table.table.checked_add(index as u64 * 12) else {
+            continue;
+        };
+        let Some(end_address) = entry.checked_add(4) else {
+            continue;
+        };
+        let Ok(end) = p.rd32(end_address) else {
+            continue;
+        };
+        let end = end as u64;
+        if rva < end {
+            return Some((table.base, entry));
+        }
+    }
+
     let module = p.modules.iter().find(|module| {
         module.hle_group.is_none()
             && control_pc >= module.base
@@ -587,11 +1214,21 @@ fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
         .runtime_functions
         .partition_point(|function| function.begin_address as u64 <= rva)
         .checked_sub(1)
-        .filter(|index| rva < module.runtime_functions[*index].end_address as u64)?;
-    Some((
-        module.base,
-        module.base + module.exception_table_rva as u64 + index as u64 * 12,
-    ))
+        .filter(|index| rva < module.runtime_functions[*index].end_address as u64);
+    if let Some(index) = index {
+        return Some((
+            module.base,
+            module.base + module.exception_table_rva as u64 + index as u64 * 12,
+        ));
+    }
+
+    // PE leaf functions have no RUNTIME_FUNCTION entry. Keep this internal marker distinct
+    // from an unknown PC so exception dispatch can apply the ordinary one-return unwind. The
+    // public RtlLookupFunctionEntry wrapper still turns entry 0 into a null result.
+    p.mem
+        .prot_of(control_pc)
+        .is_some_and(|protection| protection & PROT_X != 0)
+        .then_some((module.base, 0))
 }
 
 /// Emulate the x64 `RtlVirtualUnwind` subset described in the runtime design.
@@ -667,6 +1304,7 @@ fn read_context(p: &Process, address: u64) -> Result<Context64, Stop> {
         xmm,
         rip: p.rd64(address + CONTEXT_RIP)?,
         rflags: p.rd32(address + CONTEXT_RFLAGS)? as u64,
+        mxcsr: p.rd32(address + CONTEXT_MXCSR)?,
     })
 }
 
@@ -688,6 +1326,7 @@ fn write_context(p: &mut Process, address: u64, context: &Context64) -> Result<(
     }
     p.wr64(address + CONTEXT_RIP, context.rip)?;
     p.wr32(address + CONTEXT_RFLAGS, context.rflags as u32)?;
+    p.wr32(address + CONTEXT_MXCSR, context.mxcsr)?;
     Ok(())
 }
 
@@ -1110,7 +1749,7 @@ fn unsupported<T>(p: &mut Process, detail: String) -> Result<T, Stop> {
 mod tests {
     use super::*;
     use crate::vfs::Vfs;
-    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
+    use anywasm_cpu::mem::{Fault, PAGE_SIZE, PROT_RW, PROT_RWX};
 
     const INFO: u64 = 0x10000;
     const STACK: u64 = 0x20000;
@@ -1128,6 +1767,7 @@ mod tests {
             xmm: [0; 16],
             rip: 0,
             rflags: 0,
+            mxcsr: 0x1f80,
         }
     }
 
@@ -1139,6 +1779,7 @@ mod tests {
             size: 0x2000,
             entry: 0x1400_00100,
             is_dll: false,
+            tls_callbacks: Vec::new(),
             exports: Default::default(),
             ordinals: Default::default(),
             exception_table_rva: 0x500,
@@ -1173,6 +1814,526 @@ mod tests {
         assert_eq!(process.rd32(INFO + 24).unwrap(), 4);
         assert_eq!(process.rd64(INFO + 32).unwrap(), MSVC_CPP_MAGIC);
         assert_eq!(process.rd64(INFO + 56).unwrap(), 0x1400_0000_0);
+    }
+
+    #[test]
+    fn context_roundtrip_preserves_mxcsr_and_honors_handler_edits() {
+        const ORIGINAL_MXCSR: u32 = 0x5f80;
+        const RESUMED_MXCSR: u32 = 0x3f80;
+        let mut process = process_with_memory();
+        process.cpu.mxcsr = ORIGINAL_MXCSR;
+        let context = context_from_cpu(&process.cpu, 0x1400_0100, STACK + 0x800);
+
+        write_context(&mut process, INFO, &context).unwrap();
+
+        assert_eq!(process.rd32(INFO + 0x34).unwrap(), ORIGINAL_MXCSR);
+        process.wr32(INFO + 0x34, RESUMED_MXCSR).unwrap();
+        restore_exception_context(&mut process, INFO, false).unwrap();
+        assert_eq!(process.cpu.mxcsr, RESUMED_MXCSR);
+    }
+
+    #[test]
+    fn vectored_continue_execution_stops_later_first_chance_handlers() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const EXCEPTION_RECORD: u64 = INFO;
+        const CONTEXT_RECORD: u64 = INFO + 0x100;
+        const MARKER: u64 = INFO + 0x200;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x1000, PROT_RWX));
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            0xe123_4567,
+            0,
+            IMAGE_BASE + 0x10,
+            &[],
+        )
+        .unwrap();
+        process
+            .write_bytes(
+                IMAGE_BASE + 0x100,
+                &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3], // return EXCEPTION_CONTINUE_EXECUTION
+            )
+            .unwrap();
+        let mut later_handler = vec![0x48, 0xb8]; // mov rax, MARKER
+        later_handler.extend_from_slice(&MARKER.to_le_bytes());
+        later_handler.extend_from_slice(&[
+            0xc7, 0x00, 0x01, 0x00, 0x00, 0x00, // mov dword ptr [rax], 1
+            0x31, 0xc0, 0xc3,
+        ]);
+        process
+            .write_bytes(IMAGE_BASE + 0x200, &later_handler)
+            .unwrap();
+        process.vectored_exception_handlers = vec![
+            (0x7000_0000, IMAGE_BASE + 0x100),
+            (0x7000_0001, IMAGE_BASE + 0x200),
+        ];
+        process.cpu.gpr[RSP] = STACK + 0x800;
+
+        assert!(dispatch_vectored_exception_handlers(
+            &mut process,
+            EXCEPTION_RECORD,
+            CONTEXT_RECORD
+        )
+        .unwrap());
+        assert_eq!(process.rd32(MARKER).unwrap(), 0);
+    }
+
+    #[test]
+    fn unhandled_filter_can_resume_and_vectored_continue_handlers_all_run() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const CALLER: u64 = 0xdead_beef;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x700;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const FIRST_MARKER: u64 = INFO + 0x300;
+        const SECOND_MARKER: u64 = INFO + 0x304;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x1000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+
+        let mut first_vch = vec![0x48, 0xb8]; // mov rax, FIRST_MARKER
+        first_vch.extend_from_slice(&FIRST_MARKER.to_le_bytes());
+        first_vch.extend_from_slice(&[
+            0xc7, 0x00, 1, 0, 0, 0, // mov dword ptr [rax], 1
+            0xb8, 0xff, 0xff, 0xff,
+            0xff, // return EXCEPTION_CONTINUE_EXECUTION (ignored for VCH)
+            0xc3,
+        ]);
+        process.write_bytes(IMAGE_BASE + 0x100, &first_vch).unwrap();
+
+        let mut second_vch = vec![0x48, 0xb8]; // mov rax, SECOND_MARKER
+        second_vch.extend_from_slice(&SECOND_MARKER.to_le_bytes());
+        second_vch.extend_from_slice(&[
+            0xc7, 0x00, 1, 0, 0, 0, // mov dword ptr [rax], 1
+            0x31, 0xc0, // return EXCEPTION_CONTINUE_SEARCH
+            0xc3,
+        ]);
+        process
+            .write_bytes(IMAGE_BASE + 0x200, &second_vch)
+            .unwrap();
+
+        let mut top_filter = vec![0x48, 0x8b, 0x41, 0x08]; // mov rax, [rcx + ContextRecord]
+        top_filter.extend_from_slice(&[0x48, 0xba]); // mov rdx, LANDING_PAD
+        top_filter.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        top_filter.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // return EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+        process
+            .write_bytes(IMAGE_BASE + 0x300, &top_filter)
+            .unwrap();
+        process.top_level_exception_filter = IMAGE_BASE + 0x300;
+        process.vectored_continue_handlers = vec![
+            (0x7000_0000, IMAGE_BASE + 0x100),
+            (0x7000_0001, IMAGE_BASE + 0x200),
+        ];
+        process.cpu.gpr[RSP] = RAISE_RSP;
+
+        let result = dispatch_raised_exception(&mut process, 0xe123_4567, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(FIRST_MARKER).unwrap(), 1);
+        assert_eq!(process.rd32(SECOND_MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert!(process.skip_ret);
+    }
+
+    #[test]
+    fn cpu_fault_records_use_windows_codes_arguments_and_instruction_context() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const FAULT_RIP: u64 = IMAGE_BASE + 0x500;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x700;
+        const MARKER: u64 = INFO + 0x300;
+        const FAULT_ADDRESS: u64 = 0xdead_0000;
+
+        let mut handler = vec![
+            0x48, 0x8b, 0x01, // mov rax, [rcx] -- EXCEPTION_RECORD
+            0x49, 0x89, 0xcd, // mov r13, rcx -- preserve EXCEPTION_POINTERS
+            0x8b, 0x10, // mov edx, [rax] -- ExceptionCode
+            0x48, 0xbb, // mov rbx, MARKER
+        ];
+        handler.extend_from_slice(&MARKER.to_le_bytes());
+        handler.extend_from_slice(&[
+            0x89, 0x13, // mov [rbx], edx
+            0x48, 0x8b, 0x50, 0x10, // mov rdx, [rax + 16] -- ExceptionAddress
+            0x48, 0x89, 0x53, 0x08, // mov [rbx + 8], rdx
+            0x8b, 0x48, 0x18, // mov ecx, [rax + 24] -- NumberParameters
+            0x89, 0x4b, 0x10, // mov [rbx + 16], ecx
+            0x48, 0x8b, 0x50, 0x20, // mov rdx, [rax + 32] -- ExceptionInformation[0]
+            0x48, 0x89, 0x53, 0x18, // mov [rbx + 24], rdx
+            0x48, 0x8b, 0x50, 0x28, // mov rdx, [rax + 40] -- ExceptionInformation[1]
+            0x48, 0x89, 0x53, 0x20, // mov [rbx + 32], rdx
+            0x49, 0x8b, 0x45, 0x08, // mov rax, [r13 + 8] -- CONTEXT
+            0x48, 0x8b, 0x90, 0xf8, 0, 0, 0, // mov rdx, [rax + CONTEXT.Rip]
+            0x48, 0xbb, // mov rbx, MARKER + 40
+        ]);
+        handler.extend_from_slice(&(MARKER + 40).to_le_bytes());
+        handler.extend_from_slice(&[
+            0x48, 0x89, 0x13, // mov [rbx], rdx
+            0x49, 0x8b, 0x45, 0x08, // mov rax, [r13 + 8] -- CONTEXT
+            0x48, 0xba, // mov rdx, LANDING_PAD
+        ]);
+        handler.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        handler.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // return EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+
+        let cases = [
+            (
+                Exit::Fault(Fault {
+                    addr: FAULT_ADDRESS,
+                    access: Access::Write,
+                    protection: false,
+                }),
+                STATUS_ACCESS_VIOLATION,
+                FAULT_RIP,
+                2,
+                1,
+                FAULT_ADDRESS,
+                FAULT_RIP,
+            ),
+            (
+                Exit::DivideError,
+                STATUS_INTEGER_DIVIDE_BY_ZERO,
+                FAULT_RIP,
+                0,
+                0,
+                0,
+                FAULT_RIP,
+            ),
+            (
+                Exit::Breakpoint,
+                STATUS_BREAKPOINT,
+                FAULT_RIP,
+                0,
+                0,
+                0,
+                FAULT_RIP + 1,
+            ),
+            (
+                Exit::IllegalInstruction,
+                STATUS_ILLEGAL_INSTRUCTION,
+                FAULT_RIP,
+                0,
+                0,
+                0,
+                FAULT_RIP,
+            ),
+            (
+                Exit::PrivilegedInstruction,
+                STATUS_PRIVILEGED_INSTRUCTION,
+                FAULT_RIP,
+                0,
+                0,
+                0,
+                FAULT_RIP,
+            ),
+        ];
+
+        for (exit, code, address, count, access, fault_address, context_rip) in cases {
+            let mut process = process_with_memory();
+            assert!(process.mem.map(IMAGE_BASE, 0x1000, PROT_RWX));
+            assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+            assert!(process.mem.map(MARKER, PAGE_SIZE, PROT_RW));
+            process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+            process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+            process.write_bytes(IMAGE_BASE + 0x100, &handler).unwrap();
+            process.vectored_exception_handlers = vec![(0x7000_0000, IMAGE_BASE + 0x100)];
+            process.cpu.rip = match &exit {
+                Exit::Breakpoint => FAULT_RIP + 1,
+                _ => FAULT_RIP,
+            };
+            process.cpu.gpr[RSP] = STACK + 0x800;
+
+            assert!(dispatch_cpu_exception(&mut process, &exit).unwrap());
+            assert_eq!(process.rd32(MARKER).unwrap(), code);
+            assert_eq!(process.rd64(MARKER + 8).unwrap(), address);
+            assert_eq!(process.rd32(MARKER + 16).unwrap(), count);
+            assert_eq!(process.rd64(MARKER + 24).unwrap(), access);
+            assert_eq!(process.rd64(MARKER + 32).unwrap(), fault_address);
+            assert_eq!(process.rd64(MARKER + 40).unwrap(), context_rip);
+            assert_eq!(process.cpu.rip, LANDING_PAD);
+            assert!(!process.skip_ret);
+        }
+    }
+
+    #[test]
+    fn c_scope_table_catch_all_requests_unwind_to_its_landing_pad() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const EXCEPTION_RECORD: u64 = INFO;
+        const CONTEXT_RECORD: u64 = INFO + 0x100;
+        const DISPATCHER_CONTEXT: u64 = INFO + 0x200;
+        const SCOPE_TABLE: u64 = IMAGE_BASE + 0x700;
+        const ESTABLISHER: u64 = STACK + 0x180;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        let mut module = test_module();
+        module.runtime_functions[0].end_address = 0x400;
+        process.modules.push(module);
+        process
+            .write_bytes(EXCEPTION_RECORD, &{
+                let mut bytes = vec![0; EXCEPTION_RECORD_SIZE as usize];
+                bytes[0..4].copy_from_slice(&CODE.to_le_bytes());
+                bytes[16..24].copy_from_slice(&(IMAGE_BASE + 0x110).to_le_bytes());
+                bytes
+            })
+            .unwrap();
+        process.wr32(SCOPE_TABLE, 1).unwrap();
+        process.wr32(SCOPE_TABLE + 4, 0x100).unwrap();
+        process.wr32(SCOPE_TABLE + 8, 0x120).unwrap();
+        process.wr32(SCOPE_TABLE + 12, 1).unwrap(); // Catch-all filter.
+        process.wr32(SCOPE_TABLE + 16, 0x300).unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT, IMAGE_BASE + 0x110)
+            .unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 8, IMAGE_BASE).unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 24, ESTABLISHER).unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT + 40, CONTEXT_RECORD)
+            .unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 64, 0).unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 56, SCOPE_TABLE).unwrap();
+        process.wr32(DISPATCHER_CONTEXT + 72, 0).unwrap();
+        process.cpu.gpr[anywasm_cpu::cpu::RCX] = EXCEPTION_RECORD;
+        process.cpu.gpr[anywasm_cpu::cpu::RDX] = ESTABLISHER;
+        process.cpu.gpr[anywasm_cpu::cpu::R8] = CONTEXT_RECORD;
+        process.cpu.gpr[anywasm_cpu::cpu::R9] = DISPATCHER_CONTEXT;
+        process.cpu.gpr[RSP] = STACK + 0x400;
+
+        let result = c_specific_handler(&mut process);
+
+        let Err(Stop::GuestUnwind(unwind)) = result else {
+            panic!("catch-all scope should request an unwind, got {result:?}");
+        };
+        assert_eq!(unwind.target_frame, ESTABLISHER);
+        assert_eq!(unwind.target_ip, IMAGE_BASE + 0x300);
+        assert_eq!(unwind.exception_record, EXCEPTION_RECORD);
+        assert_eq!(unwind.return_value, CODE as u64);
+        assert_eq!(unwind.context_record, CONTEXT_RECORD);
+        assert_eq!(unwind.history_table, 0);
+        assert_eq!(process.rd32(DISPATCHER_CONTEXT + 72).unwrap(), 1);
+    }
+
+    #[test]
+    fn c_scope_filter_receives_exception_pointers_and_frame() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const EXCEPTION_RECORD: u64 = INFO;
+        const CONTEXT_RECORD: u64 = INFO + 0x100;
+        const DISPATCHER_CONTEXT: u64 = INFO + 0x200;
+        const FILTER_OUTPUT: u64 = INFO + 0x400;
+        const SCOPE_TABLE: u64 = IMAGE_BASE + 0x700;
+        const ESTABLISHER: u64 = STACK + 0x180;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        let mut module = test_module();
+        module.runtime_functions[0].end_address = 0x400;
+        process.modules.push(module);
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            0xe123_4567,
+            0,
+            IMAGE_BASE + 0x110,
+            &[],
+        )
+        .unwrap();
+        process.wr32(SCOPE_TABLE, 1).unwrap();
+        process.wr32(SCOPE_TABLE + 4, 0x100).unwrap();
+        process.wr32(SCOPE_TABLE + 8, 0x120).unwrap();
+        process.wr32(SCOPE_TABLE + 12, 0x500).unwrap();
+        process.wr32(SCOPE_TABLE + 16, 0x300).unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT, IMAGE_BASE + 0x110)
+            .unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 8, IMAGE_BASE).unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 24, ESTABLISHER).unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT + 40, CONTEXT_RECORD)
+            .unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 56, SCOPE_TABLE).unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 64, 0).unwrap();
+        process.wr32(DISPATCHER_CONTEXT + 72, 0).unwrap();
+
+        let mut filter = vec![0x48, 0xb8]; // mov rax, FILTER_OUTPUT
+        filter.extend_from_slice(&FILTER_OUTPUT.to_le_bytes());
+        filter.extend_from_slice(&[0x48, 0x89, 0x08]); // mov [rax], rcx
+        filter.extend_from_slice(&[0x48, 0xb8]);
+        filter.extend_from_slice(&(FILTER_OUTPUT + 8).to_le_bytes());
+        filter.extend_from_slice(&[
+            0x48, 0x89, 0x10, // mov [rax], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // mov eax, EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+        process.write_bytes(IMAGE_BASE + 0x500, &filter).unwrap();
+        process.cpu.gpr[anywasm_cpu::cpu::RCX] = EXCEPTION_RECORD;
+        process.cpu.gpr[anywasm_cpu::cpu::RDX] = ESTABLISHER;
+        process.cpu.gpr[anywasm_cpu::cpu::R8] = CONTEXT_RECORD;
+        process.cpu.gpr[anywasm_cpu::cpu::R9] = DISPATCHER_CONTEXT;
+        process.cpu.gpr[RSP] = STACK + 0x400;
+
+        let result = c_specific_handler(&mut process);
+
+        assert_eq!(result, Ok(EXCEPTION_CONTINUE_EXECUTION));
+        let exception_pointers = process.rd64(FILTER_OUTPUT).unwrap();
+        assert_eq!(process.rd64(exception_pointers).unwrap(), EXCEPTION_RECORD);
+        assert_eq!(
+            process.rd64(exception_pointers + 8).unwrap(),
+            CONTEXT_RECORD
+        );
+        assert_eq!(process.rd64(FILTER_OUTPUT + 8).unwrap(), ESTABLISHER);
+    }
+
+    #[test]
+    fn c_scope_table_runs_finally_during_unwind() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const EXCEPTION_RECORD: u64 = INFO;
+        const CONTEXT_RECORD: u64 = INFO + 0x100;
+        const DISPATCHER_CONTEXT: u64 = INFO + 0x200;
+        const FINALLY_OUTPUT: u64 = INFO + 0x400;
+        const SCOPE_TABLE: u64 = IMAGE_BASE + 0x700;
+        const ESTABLISHER: u64 = STACK + 0x180;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        let mut module = test_module();
+        module.runtime_functions[0].end_address = 0x400;
+        process.modules.push(module);
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            0xe123_4567,
+            EXCEPTION_UNWINDING,
+            IMAGE_BASE + 0x110,
+            &[],
+        )
+        .unwrap();
+        process.wr32(SCOPE_TABLE, 1).unwrap();
+        process.wr32(SCOPE_TABLE + 4, 0x100).unwrap();
+        process.wr32(SCOPE_TABLE + 8, 0x120).unwrap();
+        process.wr32(SCOPE_TABLE + 12, 0x500).unwrap(); // Finally funclet.
+        process.wr32(SCOPE_TABLE + 16, 0).unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT, IMAGE_BASE + 0x110)
+            .unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 8, IMAGE_BASE).unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 24, ESTABLISHER).unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT + 32, IMAGE_BASE + 0x300)
+            .unwrap();
+        process
+            .wr64(DISPATCHER_CONTEXT + 40, CONTEXT_RECORD)
+            .unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 56, SCOPE_TABLE).unwrap();
+        process.wr64(DISPATCHER_CONTEXT + 64, 0).unwrap();
+        process.wr32(DISPATCHER_CONTEXT + 72, 0).unwrap();
+
+        let mut finally_body = vec![0x48, 0xb8]; // mov rax, FINALLY_OUTPUT
+        finally_body.extend_from_slice(&FINALLY_OUTPUT.to_le_bytes());
+        finally_body.extend_from_slice(&[0x48, 0x89, 0x08]); // mov [rax], rcx
+        finally_body.extend_from_slice(&[0x48, 0xb8]);
+        finally_body.extend_from_slice(&(FINALLY_OUTPUT + 8).to_le_bytes());
+        finally_body.extend_from_slice(&[
+            0x48, 0x89, 0x10, // mov [rax], rdx
+            0x31, 0xc0, // xor eax, eax
+            0xc3,
+        ]);
+        process
+            .write_bytes(IMAGE_BASE + 0x500, &finally_body)
+            .unwrap();
+        process.cpu.gpr[anywasm_cpu::cpu::RCX] = EXCEPTION_RECORD;
+        process.cpu.gpr[anywasm_cpu::cpu::RDX] = ESTABLISHER;
+        process.cpu.gpr[anywasm_cpu::cpu::R8] = CONTEXT_RECORD;
+        process.cpu.gpr[anywasm_cpu::cpu::R9] = DISPATCHER_CONTEXT;
+        process.cpu.gpr[RSP] = STACK + 0x400;
+
+        assert_eq!(
+            c_specific_handler(&mut process),
+            Ok(EXCEPTION_CONTINUE_SEARCH)
+        );
+        assert_eq!(process.rd64(FINALLY_OUTPUT).unwrap(), 1);
+        assert_eq!(process.rd64(FINALLY_OUTPUT + 8).unwrap(), ESTABLISHER);
+        assert_eq!(process.rd32(DISPATCHER_CONTEXT + 72).unwrap(), 1);
+    }
+
+    #[test]
+    fn raise_exception_dispatches_a_non_msvc_record_to_a_catch_all_scope() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const CALLER: u64 = IMAGE_BASE + 0x110;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x160;
+        const CODE: u32 = 0xe123_4567;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const VEH_MARKER: u64 = INFO + 0x500;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions[0].end_address = 0x180;
+        process.modules.push(module);
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+        process.wr64(RAISE_RSP + 8, IMAGE_BASE + 0x120).unwrap();
+
+        // One x64 runtime-function entry with both exception and unwind handlers.
+        process.wr32(IMAGE_BASE + 0x500, 0x100).unwrap();
+        process.wr32(IMAGE_BASE + 0x504, 0x120).unwrap();
+        process.wr32(IMAGE_BASE + 0x508, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 0x19).unwrap(); // version 1, EHANDLER | UHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0x304, 0x600).unwrap();
+
+        let scope_table = IMAGE_BASE + 0x308;
+        process.wr32(scope_table, 1).unwrap();
+        process.wr32(scope_table + 4, 0x100).unwrap();
+        process.wr32(scope_table + 8, 0x180).unwrap();
+        process.wr32(scope_table + 12, 1).unwrap();
+        process.wr32(scope_table + 16, 0x160).unwrap();
+
+        let c_handler = process
+            .thunk_for("crt", "__C_specific_handler", true)
+            .unwrap();
+        let mut shim = vec![0x48, 0xb8]; // mov rax, __C_specific_handler thunk
+        shim.extend_from_slice(&c_handler.to_le_bytes());
+        shim.extend_from_slice(&[0xff, 0xe0]); // jmp rax
+        process.write_bytes(IMAGE_BASE + 0x600, &shim).unwrap();
+
+        let mut vectored_handler = vec![0x48, 0xb8]; // mov rax, VEH_MARKER
+        vectored_handler.extend_from_slice(&VEH_MARKER.to_le_bytes());
+        vectored_handler.extend_from_slice(&[
+            0xc7, 0x00, 0x01, 0x00, 0x00, 0x00, // mov dword ptr [rax], 1
+            0x31, 0xc0, // xor eax, eax (EXCEPTION_CONTINUE_SEARCH)
+            0xc3,
+        ]);
+        process
+            .write_bytes(IMAGE_BASE + 0x580, &vectored_handler)
+            .unwrap();
+        process
+            .vectored_exception_handlers
+            .push((0x7000_0000, IMAGE_BASE + 0x580));
+
+        process.cpu.gpr[RSP] = RAISE_RSP;
+
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[0xaaaa, 0xbbbb], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], CODE as u64);
+        assert!(process.skip_ret);
+        assert_eq!(process.rd32(VEH_MARKER).unwrap(), 1);
     }
 
     #[test]
@@ -1226,6 +2387,88 @@ mod tests {
 
         assert_eq!(context.rip, 0x1400_1234);
         assert_eq!(context.gpr[RSP], STACK);
+    }
+
+    #[test]
+    fn unwind_consolidation_calls_the_runtime_catch_callback() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const TARGET_PC: u64 = IMAGE_BASE + 0x110;
+        const CONTINUATION: u64 = IMAGE_BASE + 0x120;
+        const CALLBACK: u64 = IMAGE_BASE + 0x180;
+        const MARKER: u64 = STACK + 0x300;
+        const TARGET_FRAME: u64 = STACK + 0x800;
+        const CALL_RSP: u64 = STACK + 0x600;
+        const EXCEPTION_RECORD: u64 = INFO;
+        const CONTEXT_RECORD: u64 = INFO + 0x100;
+        const DISPATCHER_CONTEXT: u64 = INFO + 0x200;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions = vec![anywasm_pe::RuntimeFunction {
+            begin_address: 0x100,
+            end_address: 0x200,
+            unwind_info_address: 0x300,
+        }];
+        process.modules.push(module);
+        process.wr32(IMAGE_BASE + 0x500, 0x100).unwrap();
+        process.wr32(IMAGE_BASE + 0x504, 0x200).unwrap();
+        process.wr32(IMAGE_BASE + 0x508, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 1).unwrap(); // version 1, no handler
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+
+        let mut callback_code = vec![0x48, 0xb8]; // mov rax, MARKER
+        callback_code.extend_from_slice(&MARKER.to_le_bytes());
+        callback_code.extend_from_slice(&[
+            0xc7, 0x00, 0x01, 0x00, 0x00, 0x00, // mov dword ptr [rax], 1
+            0x48, 0xb8, // mov rax, CONTINUATION
+        ]);
+        callback_code.extend_from_slice(&CONTINUATION.to_le_bytes());
+        callback_code.push(0xc3); // ret
+        process.write_bytes(CALLBACK, &callback_code).unwrap();
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            0x8000_0029, // STATUS_UNWIND_CONSOLIDATE
+            EXCEPTION_NONCONTINUABLE,
+            TARGET_PC,
+            &[CALLBACK, 0, 0, 0, CONTEXT_RECORD, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+
+        let mut target_context = context();
+        target_context.rip = TARGET_PC;
+        target_context.gpr[RSP] = TARGET_FRAME;
+        write_context(&mut process, CONTEXT_RECORD, &target_context).unwrap();
+        process.wr32(DISPATCHER_CONTEXT + 0x48, 0).unwrap();
+        process.cpu.gpr[RSP] = CALL_RSP;
+        let frames = [ExceptionFrame {
+            control_pc: TARGET_PC,
+            image_base: IMAGE_BASE,
+            function_entry: IMAGE_BASE + 0x500,
+            establisher: TARGET_FRAME,
+            context: target_context,
+        }];
+        let unwind = GuestUnwind {
+            target_frame: TARGET_FRAME,
+            target_ip: TARGET_PC,
+            call_rsp: CALL_RSP,
+            exception_record: EXCEPTION_RECORD,
+            return_value: 0,
+            context_record: CONTEXT_RECORD,
+            history_table: 0,
+        };
+
+        complete_guest_unwind(&mut process, &frames, DISPATCHER_CONTEXT, unwind).unwrap();
+
+        assert_eq!(process.rd32(MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, CONTINUATION);
+        assert_eq!(process.cpu.gpr[RSP], TARGET_FRAME);
     }
 
     #[test]

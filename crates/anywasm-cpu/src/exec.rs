@@ -82,6 +82,10 @@ struct CachedBlock {
     instructions: Vec<CachedInstruction>,
     #[cfg(target_arch = "wasm32")]
     emitted: Option<crate::jit::EmittedBlock>,
+    #[cfg(target_arch = "wasm32")]
+    jit_hits: u8,
+    #[cfg(target_arch = "wasm32")]
+    jit_attempted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +135,38 @@ impl BlockCache {
     pub fn set_jit_min_prefix(&mut self, min_jit_prefix: usize) {
         self.min_jit_prefix = min_jit_prefix.max(1);
         self.blocks.clear();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn maybe_emit_hot_block(&mut self, start: u64, mode: CpuMode) {
+        const HOT_BLOCK_EXECUTIONS: u8 = 2;
+        let min_prefix = self.min_jit_prefix;
+        let Some((block_start, instructions)) = (|| {
+            let block = self.blocks.get_mut(&start)?;
+            if block.jit_attempted || min_prefix > block.decoded.instructions.len() {
+                return None;
+            }
+            block.jit_hits = block.jit_hits.saturating_add(1);
+            if block.jit_hits < HOT_BLOCK_EXECUTIONS {
+                return None;
+            }
+            block.jit_attempted = true;
+            Some((block.decoded.start, block.decoded.instructions.clone()))
+        })() else {
+            return;
+        };
+
+        let Some(emitted) = crate::jit::emit_mov_block_mode(
+            self.next_jit_id,
+            block_start,
+            &instructions,
+            min_prefix,
+            mode,
+        ) else {
+            return;
+        };
+        self.next_jit_id = self.next_jit_id.wrapping_add(1).max(1);
+        self.blocks.get_mut(&start).unwrap().emitted = Some(emitted);
     }
 
     /// Return a cached block or decode a straight-line block beginning at `start`.
@@ -184,10 +220,14 @@ impl BlockCache {
             return (0, Ok(()));
         }
 
-        let block = match self.get_cached_block(cpu.rip, mem, cpu.mode) {
-            Ok(block) => block,
+        let block_start = cpu.rip;
+        match self.get_cached_block(block_start, mem, cpu.mode) {
+            Ok(_) => {}
             Err(error) => return (0, Err(error)),
-        };
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.maybe_emit_hot_block(block_start, cpu.mode);
+        let block = self.blocks.get(&block_start).unwrap();
         #[cfg(target_arch = "wasm32")]
         let (mut executed, start_index, interpreter_only) = match block.emitted.as_ref() {
             Some(emitted) => match emitted.execute(cpu, mem, max_instructions) {
@@ -252,27 +292,15 @@ impl BlockCache {
                 .copied()
                 .map(translate_instruction)
                 .collect();
-            #[cfg(target_arch = "wasm32")]
-            let emitted =
-                if mode == CpuMode::X86_32 || self.min_jit_prefix > decoded.instructions.len() {
-                    None
-                } else {
-                    crate::jit::emit_mov_block(
-                        self.next_jit_id,
-                        decoded.start,
-                        &decoded.instructions,
-                        self.min_jit_prefix,
-                    )
-                };
-            #[cfg(target_arch = "wasm32")]
-            if emitted.is_some() {
-                self.next_jit_id = self.next_jit_id.wrapping_add(1).max(1);
-            }
             let block = CachedBlock {
                 decoded,
                 instructions,
                 #[cfg(target_arch = "wasm32")]
-                emitted,
+                emitted: None,
+                #[cfg(target_arch = "wasm32")]
+                jit_hits: 0,
+                #[cfg(target_arch = "wasm32")]
+                jit_attempted: false,
             };
             self.blocks.insert(start, block);
         }

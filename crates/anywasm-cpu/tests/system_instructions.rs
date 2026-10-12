@@ -1,5 +1,5 @@
 use anywasm_cpu::cpu::{RAX, RBX, RCX, RDX};
-use anywasm_cpu::mem::{PROT_RWX, PAGE_SIZE};
+use anywasm_cpu::mem::{PAGE_SIZE, PROT_RWX};
 use anywasm_cpu::{step, Cpu, Exit, Memory};
 
 const CODE: u64 = 0x1000_0000;
@@ -36,7 +36,10 @@ fn cpuid_reports_the_guest_vendor_and_hides_unsupported_vector_features() {
     let (mut cpu, mut mem) = machine(&[0x0f, 0xa2]);
     cpu.gpr[RAX] = 7;
     step(&mut cpu, &mut mem).unwrap();
-    assert_eq!([cpu.gpr[RAX], cpu.gpr[RBX], cpu.gpr[RCX], cpu.gpr[RDX]], [0; 4]);
+    assert_eq!(
+        [cpu.gpr[RAX], cpu.gpr[RBX], cpu.gpr[RCX], cpu.gpr[RDX]],
+        [0; 4]
+    );
 }
 
 #[test]
@@ -82,4 +85,26 @@ fn syscall_returns_an_explicit_exit_after_its_instruction_bytes() {
 
     assert_eq!(step(&mut cpu, &mut mem), Err(Exit::Syscall));
     assert_eq!(cpu.rip, CODE + 2);
+}
+
+#[test]
+fn ud2_keeps_an_illegal_instruction_distinct_from_generic_undefined() {
+    let (mut cpu, mut mem) = machine(&[0x0f, 0x0b]);
+
+    let result = step(&mut cpu, &mut mem);
+
+    assert_eq!(result, Err(Exit::IllegalInstruction));
+    assert_eq!(cpu.rip, CODE);
+}
+
+#[test]
+fn cli_and_sti_keep_privileged_instruction_faults_distinct() {
+    for instruction in [&[0xfa][..], &[0xfb][..]] {
+        let (mut cpu, mut mem) = machine(instruction);
+
+        let result = step(&mut cpu, &mut mem);
+
+        assert_eq!(result, Err(Exit::PrivilegedInstruction));
+        assert_eq!(cpu.rip, CODE);
+    }
 }

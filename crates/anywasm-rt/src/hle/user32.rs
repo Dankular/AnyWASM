@@ -47,12 +47,8 @@ const WS_CHILD: u32 = 0x4000_0000;
 const WS_POPUP: u32 = 0x8000_0000;
 
 fn set_windows_hook(p: &mut Process) -> R {
-    let (hook_type, callback, module, thread_id) = (
-        p.arg(0) as u32 as i32,
-        p.arg(1),
-        p.arg(2),
-        p.arg(3) as u32,
-    );
+    let (hook_type, callback, module, thread_id) =
+        (p.arg(0) as u32 as i32, p.arg(1), p.arg(2), p.arg(3) as u32);
     if callback == 0 || !(-1..=14).contains(&hook_type) {
         p.set_last_error(87); // ERROR_INVALID_PARAMETER
         return Ok(0);
@@ -178,7 +174,11 @@ fn class_name(p: &Process, ptr: u64, wide: bool) -> Result<String, Stop> {
     if ptr < 0x10000 {
         return Ok(format!("#atom{ptr}"));
     }
-    if wide { p.read_wstr(ptr) } else { p.read_cstr(ptr) }
+    if wide {
+        p.read_wstr(ptr)
+    } else {
+        p.read_cstr(ptr)
+    }
 }
 
 pub fn lookup_winmm(name: &str) -> Option<HleFn> {
@@ -252,9 +252,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(p.new_handle(Handle::Other))
         },
-        "UnregisterDeviceNotification" => |p| {
-            Ok(p.handles.remove(&p.arg(0)).is_some() as u64)
-        },
+        "UnregisterDeviceNotification" => |p| Ok(p.handles.remove(&p.arg(0)).is_some() as u64),
         "EnumDisplayDevicesW" => enum_display_devices_w,
         "EnumDisplaySettingsW" => enum_display_settings_w,
         "EnumDisplayMonitors" => enum_display_monitors,
@@ -274,17 +272,29 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(if hwnd == HWND_DESKTOP {
                 1
             } else {
-                p.extra.win.windows.get(&hwnd).map(|w| w.visible as u64).unwrap_or(0)
+                p.extra
+                    .win
+                    .windows
+                    .get(&hwnd)
+                    .map(|w| w.visible as u64)
+                    .unwrap_or(0)
             })
         },
-        "IsWindowUnicode" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.unicode as u64).unwrap_or(0)),
+        "IsWindowUnicode" => |p| {
+            Ok(p.extra
+                .win
+                .windows
+                .get(&p.arg(0))
+                .map(|w| w.unicode as u64)
+                .unwrap_or(0))
+        },
         "IsIconic" | "IsZoomed" => |_| Ok(0),
         "GetMessageA" | "GetMessageW" => get_message,
         "PeekMessageA" | "PeekMessageW" => peek_message,
         "TranslateMessage" => |_| Ok(1),
         "DispatchMessageA" | "DispatchMessageW" => |p| {
             let m = p.arg(0);
-            let (h, msg, wp, lp) = (p.rd64(m)?, p.rd32(m + 8)? as u64, p.rd64(m + 16)?, p.rd64(m + 24)?);
+            let (h, msg, wp, lp) = read_message_fields(p, m)?;
             send(p, h, msg, wp, lp)
         },
         "PostQuitMessage" => |p| {
@@ -333,7 +343,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let (w, ht) = if h == HWND_DESKTOP {
                 (system_metric(0) as i32, system_metric(1) as i32)
             } else {
-                p.extra.win.windows.get(&h).map(|x| (x.client_w, x.client_h)).unwrap_or((0, 0))
+                p.extra
+                    .win
+                    .windows
+                    .get(&h)
+                    .map(|x| (x.client_w, x.client_h))
+                    .unwrap_or((0, 0))
             };
             write_rect(p, r, 0, 0, w, ht)?;
             Ok((h == HWND_DESKTOP || p.extra.win.windows.contains_key(&h)) as u64)
@@ -343,7 +358,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let (x, y, w, ht) = if h == HWND_DESKTOP {
                 (0, 0, system_metric(0) as i32, system_metric(1) as i32)
             } else {
-                p.extra.win.windows.get(&h).map(|x| (x.x, x.y, x.w, x.h)).unwrap_or((0, 0, 0, 0))
+                p.extra
+                    .win
+                    .windows
+                    .get(&h)
+                    .map(|x| (x.x, x.y, x.w, x.h))
+                    .unwrap_or((0, 0, 0, 0))
             };
             write_rect(p, r, x, y, x + w, y + ht)?;
             Ok(1)
@@ -352,12 +372,30 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "AdjustWindowRectEx" => |p| adjust_window_rect(p, true, false),
         "AdjustWindowRectExForDpi" => |p| adjust_window_rect(p, true, true),
         "SetWindowPos" => |p| {
-            let (h, x, y, cx, cy, flags) = (p.arg(0), p.arg(2) as i32, p.arg(3) as i32, p.arg(4) as i32, p.arg(5) as i32, p.arg(6));
-            resize_window(p, h, (flags & 2 == 0).then_some((x, y)), (flags & 1 == 0).then_some((cx, cy)))?;
+            let (h, x, y, cx, cy, flags) = (
+                p.arg(0),
+                p.arg(2) as i32,
+                p.arg(3) as i32,
+                p.arg(4) as i32,
+                p.arg(5) as i32,
+                p.arg(6),
+            );
+            resize_window(
+                p,
+                h,
+                (flags & 2 == 0).then_some((x, y)),
+                (flags & 1 == 0).then_some((cx, cy)),
+            )?;
             Ok(1)
         },
         "MoveWindow" => |p| {
-            let (h, x, y, w, ht) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32, p.arg(3) as i32, p.arg(4) as i32);
+            let (h, x, y, w, ht) = (
+                p.arg(0),
+                p.arg(1) as i32,
+                p.arg(2) as i32,
+                p.arg(3) as i32,
+                p.arg(4) as i32,
+            );
             resize_window(p, h, Some((x, y)), Some((w, ht)))?;
             Ok(1)
         },
@@ -377,7 +415,13 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "GetWindowTextA" => |p| {
             let (h, buf, n) = (p.arg(0), p.arg(1), p.arg(2) as usize);
-            let t = p.extra.win.windows.get(&h).map(|w| w.title.clone()).unwrap_or_default();
+            let t = p
+                .extra
+                .win
+                .windows
+                .get(&h)
+                .map(|w| w.title.clone())
+                .unwrap_or_default();
             if n > 0 {
                 let s = &t[..t.len().min(n - 1)];
                 p.write_cstr(buf, s)?;
@@ -404,17 +448,30 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                 _ => 0,
             })
         },
-        "GetParent" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.parent).unwrap_or(0)),
+        "GetParent" => |p| {
+            Ok(p.extra
+                .win
+                .windows
+                .get(&p.arg(0))
+                .map(|w| w.parent)
+                .unwrap_or(0))
+        },
         "GetDlgItem" => |p| {
             let (parent, id) = (p.arg(0), p.arg(1) as u32);
             if !p.extra.win.windows.contains_key(&parent) {
                 return Ok(0);
             }
-            Ok(p.extra.win.windows.iter().find_map(|(&h, w)| {
-                (w.parent == parent && w.style & WS_CHILD != 0 && w.control_id == id).then_some(h)
-            }).unwrap_or(0))
+            Ok(p.extra
+                .win
+                .windows
+                .iter()
+                .find_map(|(&h, w)| {
+                    (w.parent == parent && w.style & WS_CHILD != 0 && w.control_id == id)
+                        .then_some(h)
+                })
+                .unwrap_or(0))
         },
-        "MapVirtualKeyW" => map_virtual_key_w,
+        "MapVirtualKeyA" | "MapVirtualKeyW" => map_virtual_key_w,
         "ToUnicode" => to_unicode,
         "GetDC" | "GetWindowDC" => |p| Ok(0x7000_0000 + p.arg(0)),
         "ReleaseDC" | "DeleteDC" => |_| Ok(1),
@@ -434,7 +491,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(1)
         },
-        "LoadCursorA" | "LoadCursorW" | "LoadIconA" | "LoadIconW" | "LoadImageA" | "LoadImageW" | "CopyIcon" => |_| Ok(0x6000),
+        "LoadCursorA" | "LoadCursorW" | "LoadIconA" | "LoadIconW" | "LoadImageA" | "LoadImageW"
+        | "CopyIcon" => |_| Ok(0x6000),
         "SetCursor" | "ShowCursor" | "ClipCursor" => |_| Ok(0),
         "GetCursorPos" => |p| {
             let a = p.arg(0);
@@ -450,7 +508,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "ScreenToClient" | "ClientToScreen" => |_| Ok(1),
         "GetAsyncKeyState" | "GetKeyState" => |p| {
             let vk = (p.arg(0) & 0xff) as usize;
-            Ok(p.extra.win.keys.get(vk).map(|&d| if d != 0 { 0x8000u64 } else { 0 }).unwrap_or(0))
+            Ok(p.extra
+                .win
+                .keys
+                .get(vk)
+                .map(|&d| if d != 0 { 0x8000u64 } else { 0 })
+                .unwrap_or(0))
         },
         "GetKeyboardLayout" => |_| Ok(0x0409_0409), // US English HKL for the current thread.
         "SetWindowsHookExA" | "SetWindowsHookExW" => set_windows_hook,
@@ -488,19 +551,26 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "MessageBoxA" => |p| {
             let (t, c) = (p.read_cstr(p.arg(1))?, p.read_cstr(p.arg(2))?);
-            p.stderr.extend_from_slice(format!("[MessageBox] {c}: {t}\n").as_bytes());
+            p.stderr
+                .extend_from_slice(format!("[MessageBox] {c}: {t}\n").as_bytes());
             Ok(1)
         },
         "MessageBoxW" => |p| {
             let (t, c) = (p.read_wstr(p.arg(1))?, p.read_wstr(p.arg(2))?);
-            p.stderr.extend_from_slice(format!("[MessageBox] {c}: {t}\n").as_bytes());
+            p.stderr
+                .extend_from_slice(format!("[MessageBox] {c}: {t}\n").as_bytes());
             Ok(1)
         },
-        "SetTimer" => |p| {
-            let (h, id, ms, f) = (p.arg(0), p.arg(1), p.arg(2) as u32, p.arg(3));
-            p.extra.win.timers.push((h, id, ms, f));
-            Ok(id.max(1))
-        },
+        "SetTimer" => {
+            |p| {
+                let (h, id, ms, f) = (p.arg(0), p.arg(1), p.arg(2) as u32, p.arg(3));
+                if p.trace_gta_eventvol {
+                    p.stderr.extend_from_slice(format!("[gta-eventvol] SetTimer hwnd={h:#x} id={id:#x} ms={ms} callback={f:#x}\n").as_bytes());
+                }
+                p.extra.win.timers.push((h, id, ms, f));
+                Ok(id.max(1))
+            }
+        }
         "KillTimer" => |p| {
             let (h, id) = (p.arg(0), p.arg(1));
             p.extra.win.timers.retain(|t| !(t.0 == h && t.1 == id));
@@ -520,7 +590,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr32(a + 36, 1)?;
             Ok(1)
         },
-        "SetProcessDPIAware" | "SetProcessDpiAwarenessContext" | "EnableWindow" | "SetLayeredWindowAttributes" | "SystemParametersInfoA" | "SystemParametersInfoW" => |_| Ok(1),
+        "SetProcessDPIAware"
+        | "SetProcessDpiAwarenessContext"
+        | "EnableWindow"
+        | "SetLayeredWindowAttributes"
+        | "SystemParametersInfoA"
+        | "SystemParametersInfoW" => |_| Ok(1),
         "GetDpiForWindow" | "GetDpiForSystem" => |_| Ok(96),
         _ => return None,
     })
@@ -576,7 +651,13 @@ fn get_window_placement(p: &mut Process) -> R {
         p.set_last_error(87); // ERROR_INVALID_PARAMETER
         return Ok(0);
     }
-    let Some((x, y, w, h)) = p.extra.win.windows.get(&hwnd).map(|win| (win.x, win.y, win.w, win.h)) else {
+    let Some((x, y, w, h)) = p
+        .extra
+        .win
+        .windows
+        .get(&hwnd)
+        .map(|win| (win.x, win.y, win.w, win.h))
+    else {
         p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
         return Ok(0);
     };
@@ -613,7 +694,13 @@ fn set_window_placement(p: &mut Process) -> R {
     };
     let outer_w = right.saturating_sub(left);
     let outer_h = bottom.saturating_sub(top);
-    let (client_w, client_h) = client_size_from_outer(outer_w, outer_h, window.style, window.ex_style, window.has_menu);
+    let (client_w, client_h) = client_size_from_outer(
+        outer_w,
+        outer_h,
+        window.style,
+        window.ex_style,
+        window.has_menu,
+    );
     let changed = (window.client_w, window.client_h) != (client_w, client_h);
     window.x = left;
     window.y = top;
@@ -625,8 +712,20 @@ fn set_window_placement(p: &mut Process) -> R {
     window.needs_paint |= window.visible;
     let gpu_id = window.gpu_id;
     if changed {
-        p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(client_w as u32).u32(client_h as u32));
-        send(p, hwnd, WM_SIZE, 0, ((client_h as u64) << 16) | (client_w as u64 & 0xffff))?;
+        p.extra.gpu.emit(
+            op::WINDOW,
+            Pk::new()
+                .u32(gpu_id)
+                .u32(client_w as u32)
+                .u32(client_h as u32),
+        );
+        send(
+            p,
+            hwnd,
+            WM_SIZE,
+            0,
+            ((client_h as u64) << 16) | (client_w as u64 & 0xffff),
+        )?;
     }
     Ok(1)
 }
@@ -637,8 +736,16 @@ fn adjust_window_rect(p: &mut Process, extended: bool, dpi_aware: bool) -> R {
         p.set_last_error(87); // ERROR_INVALID_PARAMETER
         return Ok(0);
     }
-    let (style, menu, ex_style) = (p.arg(1) as u32, p.arg(2) != 0, if extended { p.arg(3) as u32 } else { 0 });
-    let dpi = if dpi_aware { (p.arg(4) as u32).max(1) } else { 96 };
+    let (style, menu, ex_style) = (
+        p.arg(1) as u32,
+        p.arg(2) != 0,
+        if extended { p.arg(3) as u32 } else { 0 },
+    );
+    let dpi = if dpi_aware {
+        (p.arg(4) as u32).max(1)
+    } else {
+        96
+    };
     let (x, y, bottom_inset) = nonclient_insets(style, ex_style, menu, dpi);
     let (left, top, right, bottom) = (
         p.rd32(rect)? as i32,
@@ -658,19 +765,43 @@ fn nonclient_insets(style: u32, ex_style: u32, menu: bool, dpi: u32) -> (i32, i3
     let thick = style & 0x0004_0000 != 0;
     let border = style & (0x0080_0000 | 0x0040_0000) != 0;
     let edge = ex_style & (0x0000_0200 | 0x0001_0000) != 0;
-    let x = scale(if thick { 8 } else if border { 1 } else { 0 }) + scale(edge as u32 * 2);
-    let mut y = scale(if thick { 8 } else if border { 1 } else { 0 }) + scale(edge as u32 * 2);
+    let x = scale(if thick {
+        8
+    } else if border {
+        1
+    } else {
+        0
+    }) + scale(edge as u32 * 2);
+    let mut y = scale(if thick {
+        8
+    } else if border {
+        1
+    } else {
+        0
+    }) + scale(edge as u32 * 2);
     if style & 0x00c0_0000 != 0 {
         y += scale(system_metric(4) as u32);
     }
     if menu {
         y += scale(system_metric(15) as u32);
     }
-    let bottom = scale(if thick { 8 } else if border { 1 } else { 0 });
+    let bottom = scale(if thick {
+        8
+    } else if border {
+        1
+    } else {
+        0
+    });
     (x, y, bottom)
 }
 
-fn client_size_from_outer(outer_w: i32, outer_h: i32, style: u32, ex_style: u32, has_menu: bool) -> (i32, i32) {
+fn client_size_from_outer(
+    outer_w: i32,
+    outer_h: i32,
+    style: u32,
+    ex_style: u32,
+    has_menu: bool,
+) -> (i32, i32) {
     let (left_right, top, bottom) = nonclient_insets(style, ex_style, has_menu, 96);
     (
         outer_w.saturating_sub(left_right.saturating_mul(2)).max(0),
@@ -792,7 +923,11 @@ fn to_unicode(p: &mut Process) -> R {
     if capacity <= 0 || buffer == 0 {
         return Ok(0);
     }
-    let state: [u8; 256] = if key_state == 0 { [0; 256] } else { p.read_bytes(key_state, 256)?.try_into().unwrap() };
+    let state: [u8; 256] = if key_state == 0 {
+        [0; 256]
+    } else {
+        p.read_bytes(key_state, 256)?.try_into().unwrap()
+    };
     let shift = [0x10, 0xa0, 0xa1].iter().any(|&key| state[key] & 0x80 != 0);
     let control = [0x11, 0xa2, 0xa3].iter().any(|&key| state[key] & 0x80 != 0);
     let alt = [0x12, 0xa4, 0xa5].iter().any(|&key| state[key] & 0x80 != 0);
@@ -800,7 +935,9 @@ fn to_unicode(p: &mut Process) -> R {
         return Ok(0);
     }
     let caps = state[0x14] & 1 != 0;
-    let Some(ch) = translate_us_key(vk, shift, caps) else { return Ok(0) };
+    let Some(ch) = translate_us_key(vk, shift, caps) else {
+        return Ok(0);
+    };
     p.wr16(buffer, ch)?;
     Ok(1)
 }
@@ -822,18 +959,90 @@ fn translate_us_key(vk: u32, shift: bool, caps: bool) -> Option<u16> {
         0x09 => 0x0009,
         0x0d => 0x000d,
         0x20 => 0x0020,
-        0xba => if shift { b':' as u16 } else { b';' as u16 },
-        0xbb => if shift { b'+' as u16 } else { b'=' as u16 },
-        0xbc => if shift { b'<' as u16 } else { b',' as u16 },
-        0xbd => if shift { b'_' as u16 } else { b'-' as u16 },
-        0xbe => if shift { b'>' as u16 } else { b'.' as u16 },
-        0xbf => if shift { b'?' as u16 } else { b'/' as u16 },
-        0xc0 => if shift { b'~' as u16 } else { b'`' as u16 },
-        0xdb => if shift { b'{' as u16 } else { b'[' as u16 },
-        0xdc => if shift { b'|' as u16 } else { b'\\' as u16 },
-        0xdd => if shift { b'}' as u16 } else { b']' as u16 },
-        0xde => if shift { b'"' as u16 } else { b'\'' as u16 },
-        0xe2 => if shift { b'|' as u16 } else { b'\\' as u16 },
+        0xba => {
+            if shift {
+                b':' as u16
+            } else {
+                b';' as u16
+            }
+        }
+        0xbb => {
+            if shift {
+                b'+' as u16
+            } else {
+                b'=' as u16
+            }
+        }
+        0xbc => {
+            if shift {
+                b'<' as u16
+            } else {
+                b',' as u16
+            }
+        }
+        0xbd => {
+            if shift {
+                b'_' as u16
+            } else {
+                b'-' as u16
+            }
+        }
+        0xbe => {
+            if shift {
+                b'>' as u16
+            } else {
+                b'.' as u16
+            }
+        }
+        0xbf => {
+            if shift {
+                b'?' as u16
+            } else {
+                b'/' as u16
+            }
+        }
+        0xc0 => {
+            if shift {
+                b'~' as u16
+            } else {
+                b'`' as u16
+            }
+        }
+        0xdb => {
+            if shift {
+                b'{' as u16
+            } else {
+                b'[' as u16
+            }
+        }
+        0xdc => {
+            if shift {
+                b'|' as u16
+            } else {
+                b'\\' as u16
+            }
+        }
+        0xdd => {
+            if shift {
+                b'}' as u16
+            } else {
+                b']' as u16
+            }
+        }
+        0xde => {
+            if shift {
+                b'"' as u16
+            } else {
+                b'\'' as u16
+            }
+        }
+        0xe2 => {
+            if shift {
+                b'|' as u16
+            } else {
+                b'\\' as u16
+            }
+        }
         _ => return None,
     })
 }
@@ -844,13 +1053,24 @@ fn map_virtual_key(code: u32, map_type: u32) -> u32 {
         1 => scan_to_vk(code, false),
         2 => vk_to_char(code),
         3 => scan_to_vk(code, true),
-        4 => vk_to_scan(code).map(|(scan, extended)| if extended { 0xe000 | scan as u32 } else { scan as u32 }).unwrap_or(0),
+        4 => vk_to_scan(code)
+            .map(|(scan, extended)| {
+                if extended {
+                    0xe000 | scan as u32
+                } else {
+                    scan as u32
+                }
+            })
+            .unwrap_or(0),
         _ => 0,
     }
 }
 
 fn vk_to_scan(vk: u32) -> Option<(u8, bool)> {
-    const LETTERS: [u8; 26] = [0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c];
+    const LETTERS: [u8; 26] = [
+        0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18,
+        0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c,
+    ];
     const KEYPAD: [u8; 10] = [0x52, 0x4f, 0x50, 0x51, 0x4b, 0x4c, 0x4d, 0x47, 0x48, 0x49];
     if (0x41..=0x5a).contains(&vk) {
         return Some((LETTERS[(vk - 0x41) as usize], false));
@@ -862,7 +1082,13 @@ fn vk_to_scan(vk: u32) -> Option<(u8, bool)> {
         return Some((0x3b + (vk - 0x70) as u8, false));
     }
     if (0x30..=0x39).contains(&vk) {
-        return Some((match vk { 0x30 => 0x0b, _ => 0x02 + (vk - 0x31) as u8 }, false));
+        return Some((
+            match vk {
+                0x30 => 0x0b,
+                _ => 0x02 + (vk - 0x31) as u8,
+            },
+            false,
+        ));
     }
     Some(match vk {
         0x08 => (0x0e, false), // backspace
@@ -874,7 +1100,7 @@ fn vk_to_scan(vk: u32) -> Option<(u8, bool)> {
         0xa3 => (0x1d, true),
         0x12 | 0xa4 => (0x38, false),
         0xa5 => (0x38, true),
-        0x13 => (0x1d, true), // pause (E1)
+        0x13 => (0x1d, true),  // pause (E1)
         0x14 => (0x3a, false), // caps lock
         0x1b => (0x01, false), // escape
         0x20 => (0x39, false), // space
@@ -928,8 +1154,20 @@ fn scan_to_vk(code: u32, distinguish: bool) -> u32 {
     }
     if prefix == 0xe0 {
         return match scan {
-            0x1d => if distinguish { 0xa3 } else { 0x11 },
-            0x38 => if distinguish { 0xa5 } else { 0x12 },
+            0x1d => {
+                if distinguish {
+                    0xa3
+                } else {
+                    0x11
+                }
+            }
+            0x38 => {
+                if distinguish {
+                    0xa5
+                } else {
+                    0x12
+                }
+            }
             0x47 => 0x24,
             0x48 => 0x26,
             0x49 => 0x21,
@@ -953,7 +1191,13 @@ fn scan_to_vk(code: u32, distinguish: bool) -> u32 {
         0x38 => return if distinguish { 0xa4 } else { 0x12 },
         _ => {}
     }
-    (0..=0xff).find_map(|vk| vk_to_scan(vk).filter(|(s, extended)| *s == scan && !extended).map(|_| vk)).unwrap_or(0)
+    (0..=0xff)
+        .find_map(|vk| {
+            vk_to_scan(vk)
+                .filter(|(s, extended)| *s == scan && !extended)
+                .map(|_| vk)
+        })
+        .unwrap_or(0)
 }
 
 fn vk_to_char(vk: u32) -> u32 {
@@ -984,27 +1228,51 @@ fn write_rect(p: &mut Process, a: u64, l: i32, t: i32, r: i32, b: i32) -> Result
 }
 
 fn read_rect(p: &Process, a: u64) -> Result<(i32, i32, i32, i32), Stop> {
-    Ok((p.rd32(a)? as i32, p.rd32(a + 4)? as i32, p.rd32(a + 8)? as i32, p.rd32(a + 12)? as i32))
+    Ok((
+        p.rd32(a)? as i32,
+        p.rd32(a + 4)? as i32,
+        p.rd32(a + 8)? as i32,
+        p.rd32(a + 12)? as i32,
+    ))
 }
 
 fn offset_rect(p: &mut Process) -> R {
     let (a, dx, dy) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32);
     let (l, t, r, b) = read_rect(p, a)?;
-    write_rect(p, a, l.wrapping_add(dx), t.wrapping_add(dy), r.wrapping_add(dx), b.wrapping_add(dy))?;
+    write_rect(
+        p,
+        a,
+        l.wrapping_add(dx),
+        t.wrapping_add(dy),
+        r.wrapping_add(dx),
+        b.wrapping_add(dy),
+    )?;
     Ok(1)
 }
 
 fn inflate_rect(p: &mut Process) -> R {
     let (a, dx, dy) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32);
     let (l, t, r, b) = read_rect(p, a)?;
-    write_rect(p, a, l.wrapping_sub(dx), t.wrapping_sub(dy), r.wrapping_add(dx), b.wrapping_add(dy))?;
+    write_rect(
+        p,
+        a,
+        l.wrapping_sub(dx),
+        t.wrapping_sub(dy),
+        r.wrapping_add(dx),
+        b.wrapping_add(dy),
+    )?;
     Ok(1)
 }
 
 fn intersect_rect(p: &mut Process) -> R {
     let (dst, a, b) = (p.arg(0), p.arg(1), p.arg(2));
     let (r1, r2) = (read_rect(p, a)?, read_rect(p, b)?);
-    let out = (r1.0.max(r2.0), r1.1.max(r2.1), r1.2.min(r2.2), r1.3.min(r2.3));
+    let out = (
+        r1.0.max(r2.0),
+        r1.1.max(r2.1),
+        r1.2.min(r2.2),
+        r1.3.min(r2.3),
+    );
     let nonempty = out.0 < out.2 && out.1 < out.3;
     if nonempty {
         write_rect(p, dst, out.0, out.1, out.2, out.3)?;
@@ -1023,14 +1291,25 @@ fn union_rect(p: &mut Process) -> R {
         (true, true) => (0, 0, 0, 0),
         (true, false) => r2,
         (false, true) => r1,
-        (false, false) => (r1.0.min(r2.0), r1.1.min(r2.1), r1.2.max(r2.2), r1.3.max(r2.3)),
+        (false, false) => (
+            r1.0.min(r2.0),
+            r1.1.min(r2.1),
+            r1.2.max(r2.2),
+            r1.3.max(r2.3),
+        ),
     };
     write_rect(p, dst, out.0, out.1, out.2, out.3)?;
     Ok((!empty1 || !empty2) as u64)
 }
 
 fn set_rect(p: &mut Process) -> R {
-    let (a, l, t, r, b) = (p.arg(0), p.arg(1) as i32, p.arg(2) as i32, p.arg(3) as i32, p.arg(4) as i32);
+    let (a, l, t, r, b) = (
+        p.arg(0),
+        p.arg(1) as i32,
+        p.arg(2) as i32,
+        p.arg(3) as i32,
+        p.arg(4) as i32,
+    );
     write_rect(p, a, l, t, r, b)?;
     Ok(1)
 }
@@ -1065,19 +1344,21 @@ fn register_class(p: &mut Process, wide: bool, ex: bool) -> R {
     p.extra.win.next_atom += 1;
     let atom = 0xc000 + p.extra.win.next_atom;
     p.extra.win.atoms.insert(atom, name.clone());
-    p.extra.win.classes.insert(name.clone(), Class { wndproc, name, unicode: wide });
+    p.extra.win.classes.insert(
+        name.clone(),
+        Class {
+            wndproc,
+            name,
+            unicode: wide,
+        },
+    );
     Ok(atom as u64)
 }
 
 fn wsprintf_a(p: &mut Process) -> R {
     let (buffer, format_ptr) = (p.arg(0), p.arg(1));
     let format = p.read_cstr(format_ptr)?;
-    let output = printf::format(
-        p,
-        format.as_bytes(),
-        &mut printf::SlotArgs(2),
-        false,
-    )?;
+    let output = printf::format(p, format.as_bytes(), &mut printf::SlotArgs(2), false)?;
     p.write_bytes(buffer, &output)?;
     p.wr8(buffer + output.len() as u64, 0)?;
     Ok(output.len() as u64)
@@ -1111,7 +1392,13 @@ fn char_case_a(p: &mut Process, upper: bool, buffered: bool) -> R {
     };
     let bytes: Vec<u8> = bytes
         .into_iter()
-        .map(|byte| if upper { byte.to_ascii_uppercase() } else { byte.to_ascii_lowercase() })
+        .map(|byte| {
+            if upper {
+                byte.to_ascii_uppercase()
+            } else {
+                byte.to_ascii_lowercase()
+            }
+        })
         .collect();
     if buffered {
         let len = bytes.len();
@@ -1126,15 +1413,48 @@ fn char_case_a(p: &mut Process, upper: bool, buffered: bool) -> R {
 
 fn create_window(p: &mut Process, wide: bool) -> R {
     let (ex_style, cls, title, style) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as u32);
-    let (x, y, w, h) = (p.arg(4) as i32, p.arg(5) as i32, p.arg(6) as i32, p.arg(7) as i32);
+    let (x, y, w, h) = (
+        p.arg(4) as i32,
+        p.arg(5) as i32,
+        p.arg(6) as i32,
+        p.arg(7) as i32,
+    );
     let (parent, menu, inst, param) = (p.arg(8), p.arg(9), p.arg(10), p.arg(11));
-    let cname = if cls < 0x10000 && cls >= 0xc000 { p.extra.win.atoms.get(&(cls as u16)).cloned().unwrap_or_default() } else { lc(&class_name(p, cls, wide)?) };
-    let Some(class) = p.extra.win.classes.get(&cname).cloned().or_else(|| builtin_class(&cname)) else {
+    let cname = if cls < 0x10000 && cls >= 0xc000 {
+        p.extra
+            .win
+            .atoms
+            .get(&(cls as u16))
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        lc(&class_name(p, cls, wide)?)
+    };
+    let Some(class) = p
+        .extra
+        .win
+        .classes
+        .get(&cname)
+        .cloned()
+        .or_else(|| builtin_class(&cname))
+    else {
         p.set_last_error(1407); // ERROR_CANNOT_FIND_WND_CLASS
         return Ok(0);
     };
-    let title_s = if title == 0 { String::new() } else if wide { p.read_wstr(title)? } else { p.read_cstr(title)? };
-    let cw = |v: i32, d: i32| if v == i32::MIN || v == 0x8000_0000u32 as i32 { d } else { v };
+    let title_s = if title == 0 {
+        String::new()
+    } else if wide {
+        p.read_wstr(title)?
+    } else {
+        p.read_cstr(title)?
+    };
+    let cw = |v: i32, d: i32| {
+        if v == i32::MIN || v == 0x8000_0000u32 as i32 {
+            d
+        } else {
+            v
+        }
+    };
     let (w, h) = (cw(w, 1280), cw(h, 720));
     let (x, y) = (cw(x, 0), cw(y, 0));
     let has_menu = menu != 0;
@@ -1142,13 +1462,47 @@ fn create_window(p: &mut Process, wide: bool) -> R {
     p.extra.win.next = p.extra.win.next.max(HWND_BASE) + 0x10;
     let hwnd = p.extra.win.next;
     let gpu_id = p.extra.gpu.new_id();
-    let control_id = if parent != 0 && style & WS_CHILD != 0 { menu as u32 } else { 0 };
-    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, client_w, client_h, visible: false, style, ex_style, has_menu, user_data: 0, parent, control_id, unicode: class.unicode, needs_paint: false, gpu_id });
+    let control_id = if parent != 0 && style & WS_CHILD != 0 {
+        menu as u32
+    } else {
+        0
+    };
+    p.extra.win.windows.insert(
+        hwnd,
+        Window {
+            class: cname,
+            wndproc: class.wndproc,
+            title: title_s.clone(),
+            x,
+            y,
+            w,
+            h,
+            client_w,
+            client_h,
+            visible: false,
+            style,
+            ex_style,
+            has_menu,
+            user_data: 0,
+            parent,
+            control_id,
+            unicode: class.unicode,
+            needs_paint: false,
+            gpu_id,
+        },
+    );
     if p.extra.win.main_window == 0 && parent == 0 {
         p.extra.win.main_window = hwnd;
         p.extra.win.focus = hwnd;
     }
-    p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(client_w as u32).u32(client_h as u32).bytes(title_s.as_bytes()));
+    p.extra.gpu.emit(
+        op::WINDOW,
+        Pk::new()
+            .u32(gpu_id)
+            .u32(client_w as u32)
+            .u32(client_h as u32)
+            .bytes(title_s.as_bytes()),
+    );
     // CREATESTRUCT (x64, 80 bytes): lpCreateParams, hInstance, hMenu, hwndParent, cy, cx, y, x, style, lpszName, lpszClass, dwExStyle
     let cs = kernel32::alloc_block(p, 96, true);
     p.wr64(cs, param)?;
@@ -1173,13 +1527,27 @@ fn create_window(p: &mut Process, wide: bool) -> R {
         p.extra.win.windows.remove(&hwnd);
         return Ok(0);
     }
-    send(p, hwnd, WM_SIZE, 0, ((client_h as u64) << 16) | (client_w as u64 & 0xffff))?;
+    send(
+        p,
+        hwnd,
+        WM_SIZE,
+        0,
+        ((client_h as u64) << 16) | (client_w as u64 & 0xffff),
+    )?;
     Ok(hwnd)
 }
 
 /// System classes created by name (BUTTON, EDIT, STATIC...) behave as inert windows for now.
 fn builtin_class(name: &str) -> Option<Class> {
-    matches!(name, "button" | "edit" | "static" | "combobox" | "listbox" | "scrollbar" | "#32770").then(|| Class { wndproc: 0, name: name.to_string(), unicode: true })
+    matches!(
+        name,
+        "button" | "edit" | "static" | "combobox" | "listbox" | "scrollbar" | "#32770"
+    )
+    .then(|| Class {
+        wndproc: 0,
+        name: name.to_string(),
+        unicode: true,
+    })
 }
 
 fn destroy_window(p: &mut Process, h: u64) -> Result<(), Stop> {
@@ -1231,12 +1599,26 @@ fn get_prop(p: &mut Process, wide: bool, remove: bool) -> R {
     })
 }
 
-pub fn set_fullscreen_window(p: &mut Process, hwnd: u64, width: u32, height: u32) -> Result<(), Stop> {
+pub fn set_fullscreen_window(
+    p: &mut Process,
+    hwnd: u64,
+    width: u32,
+    height: u32,
+) -> Result<(), Stop> {
     let width = width.min(i32::MAX as u32) as i32;
     let height = height.min(i32::MAX as u32) as i32;
-    let Some(window) = p.extra.win.windows.get_mut(&hwnd) else { return Ok(()); };
-    let changed = (window.x, window.y, window.w, window.h, window.client_w, window.client_h, window.style)
-        != (0, 0, width, height, width, height, WS_POPUP);
+    let Some(window) = p.extra.win.windows.get_mut(&hwnd) else {
+        return Ok(());
+    };
+    let changed = (
+        window.x,
+        window.y,
+        window.w,
+        window.h,
+        window.client_w,
+        window.client_h,
+        window.style,
+    ) != (0, 0, width, height, width, height, WS_POPUP);
     window.x = 0;
     window.y = 0;
     window.w = width;
@@ -1248,13 +1630,27 @@ pub fn set_fullscreen_window(p: &mut Process, hwnd: u64, width: u32, height: u32
     window.has_menu = false;
     let gpu_id = window.gpu_id;
     if changed {
-        p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(width as u32).u32(height as u32));
-        send(p, hwnd, WM_SIZE, 0, ((height as u64) << 16) | (width as u64 & 0xffff))?;
+        p.extra.gpu.emit(
+            op::WINDOW,
+            Pk::new().u32(gpu_id).u32(width as u32).u32(height as u32),
+        );
+        send(
+            p,
+            hwnd,
+            WM_SIZE,
+            0,
+            ((height as u64) << 16) | (width as u64 & 0xffff),
+        )?;
     }
     Ok(())
 }
 
-fn resize_window(p: &mut Process, h: u64, pos: Option<(i32, i32)>, size: Option<(i32, i32)>) -> Result<(), Stop> {
+fn resize_window(
+    p: &mut Process,
+    h: u64,
+    pos: Option<(i32, i32)>,
+    size: Option<(i32, i32)>,
+) -> Result<(), Stop> {
     let mut changed = None;
     if let Some(w) = p.extra.win.windows.get_mut(&h) {
         if let Some((x, y)) = pos {
@@ -1265,20 +1661,25 @@ fn resize_window(p: &mut Process, h: u64, pos: Option<(i32, i32)>, size: Option<
             if (cx, cy) != (w.w, w.h) {
                 w.w = cx;
                 w.h = cy;
-                (w.client_w, w.client_h) = client_size_from_outer(cx, cy, w.style, w.ex_style, w.has_menu);
+                (w.client_w, w.client_h) =
+                    client_size_from_outer(cx, cy, w.style, w.ex_style, w.has_menu);
                 changed = Some((w.client_w, w.client_h, w.gpu_id));
             }
         }
     }
     if let Some((cx, cy, id)) = changed {
-        p.extra.gpu.emit(op::WINDOW, Pk::new().u32(id).u32(cx as u32).u32(cy as u32));
+        p.extra
+            .gpu
+            .emit(op::WINDOW, Pk::new().u32(id).u32(cx as u32).u32(cy as u32));
         send(p, h, WM_SIZE, 0, ((cy as u64) << 16) | (cx as u64 & 0xffff))?;
     }
     Ok(())
 }
 
 pub fn send(p: &mut Process, hwnd: u64, msg: u64, wparam: u64, lparam: u64) -> R {
-    let Some(w) = p.extra.win.windows.get(&hwnd) else { return Ok(0) };
+    let Some(w) = p.extra.win.windows.get(&hwnd) else {
+        return Ok(0);
+    };
     let wndproc = w.wndproc;
     if wndproc == 0 {
         return def_window_proc(p, hwnd, msg, wparam, lparam);
@@ -1296,11 +1697,24 @@ pub fn send(p: &mut Process, hwnd: u64, msg: u64, wparam: u64, lparam: u64) -> R
 fn post(p: &mut Process, hwnd: u64, msg: u64, wparam: u64, lparam: u64) {
     let t = ((p.cpu.icount + p.extra.sleep_adjust) / 100_000) as u32;
     let pt = p.extra.win.cursor;
-    p.extra.win.queue.push_back(Msg { hwnd, msg, wparam, lparam, time: t, pt });
+    p.extra.win.queue.push_back(Msg {
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+        time: t,
+        pt,
+    });
 }
 
 fn paint_now(p: &mut Process, h: u64) -> Result<(), Stop> {
-    if p.extra.win.windows.get(&h).map(|w| w.needs_paint && w.visible).unwrap_or(false) {
+    if p.extra
+        .win
+        .windows
+        .get(&h)
+        .map(|w| w.needs_paint && w.visible)
+        .unwrap_or(false)
+    {
         send(p, h, WM_PAINT, 0, 0)?;
     }
     Ok(())
@@ -1327,7 +1741,12 @@ fn def_window_proc(p: &mut Process, h: u64, msg: u64, _w: u64, _l: u64) -> R {
 /// Fill the `MSG` at `out`. Returns false when nothing is available.
 fn fetch(p: &mut Process, out: u64, filter_hwnd: u64, remove: bool) -> Result<bool, Stop> {
     // Queued messages first (input, posted messages).
-    let idx = p.extra.win.queue.iter().position(|m| filter_hwnd == 0 || m.hwnd == filter_hwnd);
+    let idx = p
+        .extra
+        .win
+        .queue
+        .iter()
+        .position(|m| filter_hwnd == 0 || m.hwnd == filter_hwnd);
     let msg = if let Some(i) = idx {
         let m = p.extra.win.queue[i];
         if remove {
@@ -1339,34 +1758,87 @@ fn fetch(p: &mut Process, out: u64, filter_hwnd: u64, remove: bool) -> Result<bo
             p.extra.win.quit = None;
             p.extra.win.queue.clear();
         }
-        Some(Msg { hwnd: 0, msg: WM_QUIT, wparam: code as u64, lparam: 0, time: 0, pt: (0, 0) })
-    } else if let Some((&h, _)) = p.extra.win.windows.iter().find(|(_, w)| w.needs_paint && w.visible) {
+        Some(Msg {
+            hwnd: 0,
+            msg: WM_QUIT,
+            wparam: code as u64,
+            lparam: 0,
+            time: 0,
+            pt: (0, 0),
+        })
+    } else if let Some((&h, _)) = p
+        .extra
+        .win
+        .windows
+        .iter()
+        .find(|(_, w)| w.needs_paint && w.visible)
+    {
         // WM_PAINT is generated lazily, like Windows does when the queue is otherwise empty.
         if remove {
             if let Some(w) = p.extra.win.windows.get_mut(&h) {
                 w.needs_paint = false;
             }
         }
-        Some(Msg { hwnd: h, msg: WM_PAINT, wparam: 0, lparam: 0, time: 0, pt: (0, 0) })
+        Some(Msg {
+            hwnd: h,
+            msg: WM_PAINT,
+            wparam: 0,
+            lparam: 0,
+            time: 0,
+            pt: (0, 0),
+        })
     } else {
         None
     };
     let Some(m) = msg else { return Ok(false) };
-    p.wr64(out, m.hwnd)?;
-    p.wr32(out + 8, m.msg as u32)?;
-    p.wr32(out + 12, 0)?;
-    p.wr64(out + 16, m.wparam)?;
-    p.wr64(out + 24, m.lparam)?;
-    p.wr32(out + 32, m.time)?;
-    p.wr32(out + 36, m.pt.0 as u32)?;
-    p.wr32(out + 40, m.pt.1 as u32)?;
+    if p.cpu.mode == CpuMode::X86_32 {
+        p.wr32(out, m.hwnd as u32)?;
+        p.wr32(out + 4, m.msg as u32)?;
+        p.wr32(out + 8, m.wparam as u32)?;
+        p.wr32(out + 12, m.lparam as u32)?;
+        p.wr32(out + 16, m.time)?;
+        p.wr32(out + 20, m.pt.0 as u32)?;
+        p.wr32(out + 24, m.pt.1 as u32)?;
+    } else {
+        p.wr64(out, m.hwnd)?;
+        p.wr32(out + 8, m.msg as u32)?;
+        p.wr32(out + 12, 0)?;
+        p.wr64(out + 16, m.wparam)?;
+        p.wr64(out + 24, m.lparam)?;
+        p.wr32(out + 32, m.time)?;
+        p.wr32(out + 36, m.pt.0 as u32)?;
+        p.wr32(out + 40, m.pt.1 as u32)?;
+    }
     Ok(true)
+}
+
+fn read_message_fields(p: &Process, m: u64) -> Result<(u64, u64, u64, u64), Stop> {
+    if p.cpu.mode == CpuMode::X86_32 {
+        Ok((
+            p.rd32(m)? as u64,
+            p.rd32(m + 4)? as u64,
+            p.rd32(m + 8)? as u64,
+            p.rd32(m + 12)? as u64,
+        ))
+    } else {
+        Ok((
+            p.rd64(m)?,
+            p.rd32(m + 8)? as u64,
+            p.rd64(m + 16)?,
+            p.rd64(m + 24)?,
+        ))
+    }
+}
+
+fn read_message_type(p: &Process, m: u64) -> Result<u64, Stop> {
+    let offset = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
+    Ok(p.rd32(m + offset)? as u64)
 }
 
 fn get_message(p: &mut Process) -> R {
     let (m, h) = (p.arg(0), p.arg(1));
     if fetch(p, m, h, true)? {
-        let msg = p.rd32(m + 8)? as u64;
+        let msg = read_message_type(p, m)?;
         return Ok((msg != WM_QUIT) as u64);
     }
     // Nothing to do: hand control back to the host and retry this call when input arrives.
@@ -1375,7 +1847,20 @@ fn get_message(p: &mut Process) -> R {
 
 fn peek_message(p: &mut Process) -> R {
     let (m, h, flags) = (p.arg(0), p.arg(1), p.arg(4));
-    Ok(fetch(p, m, h, flags & PM_REMOVE != 0)? as u64)
+    let before = p.extra.win.queue.len();
+    let result = fetch(p, m, h, flags & PM_REMOVE != 0)?;
+    if p.trace_gta_eventvol && before != 0 {
+        let next = p.extra.win.queue.front().map(|m| (m.hwnd, m.msg));
+        p.stderr.extend_from_slice(
+            format!(
+                "[gta-eventvol] PeekMessageA filter={h:#x} flags={flags:#x} removed={} queue={before}->{} next={next:?}\n",
+                result && (flags & PM_REMOVE != 0),
+                p.extra.win.queue.len(),
+            )
+            .as_bytes(),
+        );
+    }
+    Ok(result as u64)
 }
 
 /// Select the browser input target, skipping hidden GLFW helper windows.
@@ -1486,8 +1971,16 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result
         }
         3 => {
             if p.extra.win.mouse_position_valid {
-                p.extra.win.mouse_dx = p.extra.win.mouse_dx.saturating_add(a as i32 - p.extra.win.cursor.0);
-                p.extra.win.mouse_dy = p.extra.win.mouse_dy.saturating_add(b as i32 - p.extra.win.cursor.1);
+                p.extra.win.mouse_dx = p
+                    .extra
+                    .win
+                    .mouse_dx
+                    .saturating_add(a as i32 - p.extra.win.cursor.0);
+                p.extra.win.mouse_dy = p
+                    .extra
+                    .win
+                    .mouse_dy
+                    .saturating_add(b as i32 - p.extra.win.cursor.1);
             }
             p.extra.win.cursor = (a as i32, b as i32);
             p.extra.win.mouse_position_valid = true;
@@ -1514,8 +2007,16 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result
         6 => {
             p.extra.win.mouse_wheel = p.extra.win.mouse_wheel.saturating_add(a as i32);
             let mouse_data = (a as i32 as u32) << 16;
-            if !invoke_low_level_hooks(p, 14, WM_MOUSEWHEEL, (b as i32, c as i32), mouse_data, 0)? && h != 0 {
-                post(p, h, WM_MOUSEWHEEL, ((a as u64) & 0xffff) << 16, packed(b, c));
+            if !invoke_low_level_hooks(p, 14, WM_MOUSEWHEEL, (b as i32, c as i32), mouse_data, 0)?
+                && h != 0
+            {
+                post(
+                    p,
+                    h,
+                    WM_MOUSEWHEEL,
+                    ((a as u64) & 0xffff) << 16,
+                    packed(b, c),
+                );
             }
         }
         7 => {
@@ -1581,4 +2082,32 @@ mod tests {
         assert_eq!(input_target_window(&win), game);
     }
 
+    #[test]
+    fn fetch_writes_win32_msg_with_the_x86_layout() {
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(0x10000, 0x1000, PROT_RW));
+        p.extra.win.queue.push_back(Msg {
+            hwnd: 0x1122_3344,
+            msg: WM_LBUTTONDOWN,
+            wparam: 0xaabb_ccdd,
+            lparam: 0x5566_7788,
+            time: 0x1020_3040,
+            pt: (-2, 3),
+        });
+
+        assert!(fetch(&mut p, 0x10000, 0, true).unwrap());
+        assert_eq!(p.rd32(0x10000).unwrap(), 0x1122_3344);
+        assert_eq!(p.rd32(0x10004).unwrap(), WM_LBUTTONDOWN as u32);
+        assert_eq!(p.rd32(0x10008).unwrap(), 0xaabb_ccdd);
+        assert_eq!(p.rd32(0x1000c).unwrap(), 0x5566_7788);
+        assert_eq!(p.rd32(0x10010).unwrap(), 0x1020_3040);
+        assert_eq!(p.rd32(0x10014).unwrap(), (-2i32) as u32);
+        assert_eq!(p.rd32(0x10018).unwrap(), 3);
+        assert_eq!(read_message_type(&p, 0x10000).unwrap(), WM_LBUTTONDOWN);
+        assert_eq!(
+            read_message_fields(&p, 0x10000).unwrap(),
+            (0x1122_3344, WM_LBUTTONDOWN, 0xaabb_ccdd, 0x5566_7788)
+        );
+    }
 }

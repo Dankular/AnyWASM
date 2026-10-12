@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples Tutorial01_HelloTriangle",
+  "bundle": "HLE-only D3D11 Release package; no local MSVC/UCRT runtime DLLs",
+  "bundleSha256": "c027ddc6dea26ed77c0e7a01d7f9164e7d899ffa4edd4791b792fb03c32c39a6",
+  "browser": "Playwright Chromium revision 1234",
+  "workerSliceInstructions": 250000,
+  "canvas": {
+    "width": 1280,
+    "height": 1024,
+    "visibleTriangle": true
+  },
+  "asyncify": {
+    "yields": 16,
+    "resumes": 16
+  },
+  "gpuStats": {
+    "draws": 659,
+    "dispatches": 0,
+    "presents": 330,
+    "passes": 1319,
+    "pipelines": 2,
+    "errors": []
+  },
+  "processStatus": "Starting",
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "failedHttpResponses": [],
+  "commands": {
+    "pack": ".\\target\\debug\\anywasm.exe pack <Tutorial01_HelloTriangle.exe> -o .\\target\\Tutorial01_HelloTriangle-hle.awb --dir <Tutorial01 Release directory> --args '--mode d3d11'",
+    "capture": "node .\\target\\tutorial01-browser-report.mjs"
+  },
+  "limitations": [
+    "The page remained running and no terminal process status was captured.",
+    "One generic resource 404 was printed to the browser console; the report did not observe a failed HTTP response, so its resource is unidentified.",
+    "The bundle, screenshot, and one-off capture script are ignored local artifacts under target/ and are not included in the repository."
+  ]
+}

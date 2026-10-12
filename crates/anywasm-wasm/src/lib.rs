@@ -25,6 +25,7 @@ struct State {
 }
 
 static mut STATE: Option<State> = None;
+const DEBUG_RSP_INDEX: usize = 4;
 
 #[allow(static_mut_refs)]
 fn state() -> Option<&'static mut State> {
@@ -172,6 +173,10 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             s.message = b"internal guest unwind escaped its exception dispatcher".to_vec();
             3
         }
+        Stop::GuestCatch32(_) => {
+            s.message = b"internal PE32 C++ catch transfer escaped its exception dispatcher".to_vec();
+            3
+        }
     }
 }
 
@@ -181,6 +186,231 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
 pub extern "C" fn aw_jit_set_min_prefix(min_prefix: u32) {
     if let Some(s) = state() {
         s.p.block_cache.set_jit_min_prefix(min_prefix as usize);
+    }
+}
+
+/// Enable targeted GTA event volume diagnostics used by the browser run harness.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn aw_set_gta_eventvol_trace(enabled: u32) {
+    if let Some(s) = state() {
+        s.p.trace_gta_eventvol = enabled != 0;
+    }
+}
+
+/// Current guest instruction pointer for targeted browser diagnostics.
+#[no_mangle]
+pub extern "C" fn aw_debug_rip() -> u64 {
+    state().map(|s| s.p.cpu.rip).unwrap_or(0)
+}
+
+/// Current guest thread ID for targeted browser diagnostics.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_id() -> u32 {
+    state().map(|s| s.p.current_thread_id).unwrap_or(0)
+}
+
+/// Number of guest thread contexts, including the active CPU context.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_count() -> u32 {
+    state()
+        .map(|s| s.p.guest_threads.len() as u32 + u32::from(!s.p.current_thread_saved))
+        .unwrap_or(0)
+}
+
+/// Guest thread ID at a stable sorted index; the active context is listed first.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_at(index: u32) -> u32 {
+    let Some(s) = state() else { return 0 };
+    let p = &s.p;
+    if !p.current_thread_saved {
+        if index == 0 {
+            return p.current_thread_id;
+        }
+        let mut ids: Vec<u32> = p
+            .guest_threads
+            .keys()
+            .copied()
+            .filter(|id| *id != p.current_thread_id)
+            .collect();
+        ids.sort_unstable();
+        return ids.get((index - 1) as usize).copied().unwrap_or(0);
+    }
+    let mut ids: Vec<u32> = p.guest_threads.keys().copied().collect();
+    ids.sort_unstable();
+    ids.get(index as usize).copied().unwrap_or(0)
+}
+
+/// Packed state for a guest thread: state in bits 0..7, wait kind in 8..15, guest flag in bit 16.
+/// State values: 1 ready, 2 running, 3 suspended, 4 blocked, 5 exited.
+/// Wait kinds: 1 handle, 2 multiple handles, 3 sleep, 4 critical section, 5 SRW lock, 6 condition.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_state(thread_id: u32) -> u32 {
+    use anywasm_rt::process::{ThreadState, ThreadWait};
+    let Some(s) = state() else { return 0 };
+    let p = &s.p;
+    let (thread_state, wait_kind, is_guest) =
+        if !p.current_thread_saved && thread_id == p.current_thread_id {
+            (&p.current_thread_state, 0, p.current_thread_is_guest)
+        } else if let Some(thread) = p.guest_threads.get(&thread_id) {
+            let wait_kind = match &thread.state {
+                ThreadState::Blocked(ThreadWait::Handle { .. }) => 1,
+                ThreadState::Blocked(ThreadWait::Multiple { .. }) => 2,
+                ThreadState::Blocked(ThreadWait::Sleep { .. }) => 3,
+                ThreadState::Blocked(ThreadWait::CriticalAcquire { .. }) => 4,
+                ThreadState::Blocked(ThreadWait::SrwAcquire { .. }) => 5,
+                ThreadState::Blocked(ThreadWait::Condition { .. }) => 6,
+                _ => 0,
+            };
+            (&thread.state, wait_kind, thread.is_guest)
+        } else {
+            return 0;
+        };
+    let state_code = match thread_state {
+        ThreadState::Ready => 1,
+        ThreadState::Running => 2,
+        ThreadState::Suspended => 3,
+        ThreadState::Blocked(_) => 4,
+        ThreadState::Exited(_) => 5,
+    };
+    state_code | (wait_kind << 8) | (u32::from(is_guest) << 16)
+}
+
+/// Saved or active guest instruction pointer for targeted thread diagnostics.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_rip(thread_id: u32) -> u64 {
+    let Some(s) = state() else { return 0 };
+    let p = &s.p;
+    if !p.current_thread_saved && thread_id == p.current_thread_id {
+        p.cpu.rip
+    } else {
+        p.guest_threads
+            .get(&thread_id)
+            .map(|thread| thread.cpu.rip)
+            .unwrap_or(0)
+    }
+}
+
+/// Handle awaited by a blocked guest thread, or zero when it is not waiting on a handle.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_wait_handle(thread_id: u32) -> u64 {
+    use anywasm_rt::process::ThreadWait;
+    let Some(s) = state() else { return 0 };
+    let p = &s.p;
+    let thread_state = if !p.current_thread_saved && thread_id == p.current_thread_id {
+        &p.current_thread_state
+    } else if let Some(thread) = p.guest_threads.get(&thread_id) {
+        &thread.state
+    } else {
+        return 0;
+    };
+    match thread_state {
+        anywasm_rt::process::ThreadState::Blocked(ThreadWait::Handle { handle, .. }) => *handle,
+        anywasm_rt::process::ThreadState::Blocked(ThreadWait::Multiple { handles, .. }) => {
+            handles.first().copied().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// Handle type and signal state: 1 event, 2 mutex, 3 semaphore, 4 thread, 0 unknown.
+#[no_mangle]
+pub extern "C" fn aw_debug_handle_state(handle: u64) -> u32 {
+    use anywasm_rt::process::Handle;
+    let Some(s) = state() else { return 0 };
+    match s.p.handles.get(&handle) {
+        Some(Handle::Event { signaled, manual }) => {
+            1 | (u32::from(*signaled) << 8) | (u32::from(*manual) << 9)
+        }
+        Some(Handle::Mutex { owner, .. }) => 2 | (u32::from(owner.is_none()) << 8),
+        Some(Handle::Semaphore { count, .. }) => 3 | ((*count).min(0xffff) << 8),
+        Some(Handle::Thread { exit_code, .. }) => 4 | (u32::from(exit_code.is_some()) << 8),
+        _ => 0,
+    }
+}
+
+/// Stack pointer for an active or saved guest thread.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_sp(thread_id: u32) -> u64 {
+    let Some(s) = state() else { return 0 };
+    let p = &s.p;
+    if !p.current_thread_saved && thread_id == p.current_thread_id {
+        p.cpu.gpr[DEBUG_RSP_INDEX]
+    } else {
+        p.guest_threads
+            .get(&thread_id)
+            .map(|thread| thread.cpu.gpr[DEBUG_RSP_INDEX])
+            .unwrap_or(0)
+    }
+}
+
+/// 32-bit word from an active or saved guest thread's stack.
+#[no_mangle]
+pub extern "C" fn aw_debug_thread_stack_word(thread_id: u32, index: u32) -> u32 {
+    let Some(s) = state() else { return 0 };
+    let p = &s.p;
+    let sp = if !p.current_thread_saved && thread_id == p.current_thread_id {
+        p.cpu.gpr[DEBUG_RSP_INDEX]
+    } else if let Some(thread) = p.guest_threads.get(&thread_id) {
+        thread.cpu.gpr[DEBUG_RSP_INDEX]
+    } else {
+        return 0;
+    };
+    p.rd32(sp.wrapping_add(index as u64 * 4)).unwrap_or(0)
+}
+
+/// Current guest GPR as a 32-bit value for targeted x86 diagnostics.
+#[no_mangle]
+pub extern "C" fn aw_debug_gpr(index: u32) -> u32 {
+    state()
+        .and_then(|s| s.p.cpu.gpr.get(index as usize).copied())
+        .unwrap_or(0) as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aw_debug_rflags() -> u32 {
+    state().map(|s| s.p.cpu.rflags as u32).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn aw_debug_guest_u16(address: u32) -> u32 {
+    state()
+        .and_then(|s| s.p.mem.read_u16(address as u64).ok())
+        .unwrap_or(0) as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aw_debug_guest_u32(address: u32) -> u32 {
+    state()
+        .and_then(|s| s.p.mem.read_u32(address as u64).ok())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn aw_debug_tick_ms() -> u64 {
+    state().map(|s| s.p.tick_ms).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn aw_debug_window_queue_len() -> u32 {
+    state()
+        .map(|s| s.p.extra.win.queue.len() as u32)
+        .unwrap_or(0)
+}
+
+/// Win32 message field: 0 hwnd, 1 message, 2 wParam, 3 lParam.
+#[no_mangle]
+pub extern "C" fn aw_debug_window_message(index: u32, field: u32) -> u32 {
+    let Some(s) = state() else { return 0 };
+    let Some(message) = s.p.extra.win.queue.get(index as usize) else {
+        return 0;
+    };
+    match field {
+        0 => message.hwnd as u32,
+        1 => message.msg as u32,
+        2 => message.wparam as u32,
+        3 => message.lparam as u32,
+        _ => 0,
     }
 }
 

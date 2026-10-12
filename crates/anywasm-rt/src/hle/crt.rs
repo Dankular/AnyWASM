@@ -9,7 +9,11 @@ pub enum FileKind {
     Stdin,
     Stdout,
     Stderr,
-    Vfs { path: String, pos: usize, write: bool },
+    Vfs {
+        path: String,
+        pos: usize,
+        write: bool,
+    },
 }
 
 pub struct CFile {
@@ -20,46 +24,90 @@ pub struct CFile {
 }
 
 const FILE_SIZE: u64 = 0x30;
+pub const MSVC_STD_COUT_SYMBOL: &str = "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+pub const MSVC_STD_CERR_SYMBOL: &str = "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+const MSVC_STD_COUT_OBJECT: &str = "msvcp:std::cout:object";
+const MSVC_STD_CERR_OBJECT: &str = "msvcp:std::cerr:object";
+const MSVC_STD_COUT_BUFFER: &str = "msvcp:std::cout:streambuf";
+const MSVC_STD_CERR_BUFFER: &str = "msvcp:std::cerr:streambuf";
+const MSVC_STD_OSTREAM_VTABLE: &str = "msvcp:std::ostream:vtable";
+const MSVC_STD_STREAMBUF_VTABLE: &str = "msvcp:std::streambuf:vtable";
+const MSVC_STD_OSTREAM_VBTABLE: &str = "msvcp:std::ostream:vbtable";
+const MSVC_STD_LOCALE: &str = "msvcp:std::locale";
 
 /// Data imports (variables): returns the guest address of the cell and initialises it.
-pub fn data_import(p: &mut Process, name: &str, size: u64) -> u64 {
+pub fn data_import(p: &mut Process, name: &str, size: u64) -> Result<u64, Stop> {
+    if matches!(name, MSVC_STD_COUT_SYMBOL | MSVC_STD_CERR_SYMBOL) {
+        return msvc_standard_ostream_import(p, name);
+    }
+
     let a = data_cell(p, name, size);
     match name {
         "__argc" => {
             let argc = p.extra.argc.max(1) as u64;
-            let _ = p.wr32(a, argc as u32);
+            p.wr32(a, argc as u32)?;
         }
         "__argv" | "_acmdln" | "_pgmptr" => {
-            let _ = ensure_args(p);
-            let v = if name == "__argv" { p.extra.argv } else if name == "_pgmptr" { p.extra.argv } else { p.extra.cmdline_a };
-            let _ = p.wr64(a, v);
+            ensure_args(p)?;
+            let v = if name == "__argv" {
+                p.extra.argv
+            } else if name == "_pgmptr" {
+                p.extra.argv
+            } else {
+                p.extra.cmdline_a
+            };
+            p.wr64(a, v)?;
         }
         "_iob" => {
-            let _ = ensure_iob(p);
+            ensure_iob(p)?;
             // `_iob` is an array of FILE, not a pointer: callers take its address.
-            return p.extra.iob;
+            return Ok(p.extra.iob);
         }
         "_environ" => {
-            let _ = p.wr64(a, 0);
+            p.wr64(a, 0)?;
         }
         "__mb_cur_max" => {
-            let _ = p.wr32(a, 1);
+            p.wr32(a, 1)?;
         }
         "_winmajor" => {
-            let _ = p.wr32(a, 10);
+            p.wr32(a, 10)?;
         }
         _ => {}
     }
-    a
+    Ok(a)
 }
 
 fn ensure_iob(p: &mut Process) -> Result<u64, Stop> {
     if p.extra.iob == 0 {
         let a = kernel32::alloc_block(p, FILE_SIZE * 3, true);
         p.extra.iob = a;
-        p.extra.files.insert(a, CFile { kind: FileKind::Stdin, eof: false, err: false, ungot: None });
-        p.extra.files.insert(a + FILE_SIZE, CFile { kind: FileKind::Stdout, eof: false, err: false, ungot: None });
-        p.extra.files.insert(a + 2 * FILE_SIZE, CFile { kind: FileKind::Stderr, eof: false, err: false, ungot: None });
+        p.extra.files.insert(
+            a,
+            CFile {
+                kind: FileKind::Stdin,
+                eof: false,
+                err: false,
+                ungot: None,
+            },
+        );
+        p.extra.files.insert(
+            a + FILE_SIZE,
+            CFile {
+                kind: FileKind::Stdout,
+                eof: false,
+                err: false,
+                ungot: None,
+            },
+        );
+        p.extra.files.insert(
+            a + 2 * FILE_SIZE,
+            CFile {
+                kind: FileKind::Stderr,
+                eof: false,
+                err: false,
+                ungot: None,
+            },
+        );
     }
     Ok(p.extra.iob)
 }
@@ -115,7 +163,10 @@ fn setlocale(p: &mut Process) -> R {
         return Ok(0);
     }
     if locale != 0 {
-        let requested = p.mem.read_cstr(locale, 256).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+        let requested = p
+            .mem
+            .read_cstr(locale, 256)
+            .map_err(|e| Stop::Crash(format!("{e:?}")))?;
         if !requested.is_empty() && requested != b"C" {
             let errno = errno_cell(p);
             p.wr32(errno, 22)?; // EINVAL
@@ -130,6 +181,36 @@ fn setlocale(p: &mut Process) -> R {
     p.write_cstr(name, "C")?;
     p.extra.data_cells.insert(key.to_string(), name);
     Ok(name)
+}
+
+fn wsetlocale(p: &mut Process) -> R {
+    let category = p.arg(0) as i32;
+    let locale = p.arg(1);
+    if !(0..=5).contains(&category) {
+        let errno = errno_cell(p);
+        p.wr32(errno, 22)?; // EINVAL
+        return Ok(0);
+    }
+    if locale != 0 {
+        let requested = p.read_wstr(locale)?;
+        if !requested.is_empty() && requested != "C" {
+            let errno = errno_cell(p);
+            p.wr32(errno, 22)?; // EINVAL
+            return Ok(0);
+        }
+    }
+    let key = "wsetlocale:C";
+    if let Some(&name) = p.extra.data_cells.get(key) {
+        return Ok(name);
+    }
+    let name = kernel32::alloc_block(p, 4, true);
+    p.write_wstr(name, "C")?;
+    p.extra.data_cells.insert(key.to_string(), name);
+    Ok(name)
+}
+
+fn msvc_query_perf_counter(p: &mut Process) -> R {
+    Ok(kernel32::query_performance_counter_value(p))
 }
 
 /// CommandLineToArgv-style splitting (quotes and backslash rules simplified to the common case).
@@ -195,7 +276,8 @@ fn stream_read(p: &mut Process, fp: u64, len: usize) -> Result<Vec<u8>, Stop> {
     };
     match &f.kind {
         FileKind::Stdin => {
-            let mut out = Vec::with_capacity(len.min(p.stdin.len() + usize::from(f.ungot.is_some())));
+            let mut out =
+                Vec::with_capacity(len.min(p.stdin.len() + usize::from(f.ungot.is_some())));
             if let Some(byte) = f.ungot {
                 out.push(byte);
             }
@@ -214,7 +296,8 @@ fn stream_read(p: &mut Process, fp: u64, len: usize) -> Result<Vec<u8>, Stop> {
                 .vfs
                 .read_range(&path, pos as u64, disk_len)
                 .map_err(|error| Stop::Crash(format!("file read failed for {path}: {error:?}")))?;
-            let mut out = Vec::with_capacity(len.min(disk_bytes.len() + usize::from(ungot.is_some())));
+            let mut out =
+                Vec::with_capacity(len.min(disk_bytes.len() + usize::from(ungot.is_some())));
             if let Some(byte) = ungot {
                 out.push(byte);
             }
@@ -239,11 +322,23 @@ fn stream_read_byte(p: &mut Process, fp: u64) -> Result<Option<u8>, Stop> {
 }
 
 fn do_printf(p: &mut Process, fmt: u64, args: &mut dyn Args, wide: bool) -> Result<Vec<u8>, Stop> {
-    let f = if wide { p.read_wstr(fmt)?.into_bytes() } else { p.mem.read_cstr(fmt, 1 << 20).map_err(|e| Stop::Crash(format!("{e:?}")))? };
+    let f = if wide {
+        p.read_wstr(fmt)?.into_bytes()
+    } else {
+        p.mem
+            .read_cstr(fmt, 1 << 20)
+            .map_err(|e| Stop::Crash(format!("{e:?}")))?
+    };
     printf::format(p, &f, args, wide)
 }
 
-fn store_formatted(p: &mut Process, buf: u64, cap: Option<u64>, out: &[u8], wide: bool) -> Result<(), Stop> {
+fn store_formatted(
+    p: &mut Process,
+    buf: u64,
+    cap: Option<u64>,
+    out: &[u8],
+    wide: bool,
+) -> Result<(), Stop> {
     if buf == 0 {
         return Ok(());
     }
@@ -277,8 +372,1246 @@ fn len_for(out: &[u8], wide: bool) -> u64 {
     }
 }
 
+/// Initialize the MSVC `basic_ios` subobject using the layout emitted by MSVCP140's
+/// default constructor. Its synthetic vtable leaves the destructor as an explicit import trap.
+fn msvc_basic_ios_default(p: &mut Process, key: &str, destructor: &str, wide: bool) -> R {
+    let vtable = data_cell(p, key, 0x20);
+    if p.rd64(vtable)? == 0 {
+        let destructor = p
+            .thunk_for("msvcp", destructor, true)
+            .expect("creating an MSVCP destructor thunk");
+        p.wr64(vtable, destructor)?;
+    }
+
+    let this = p.arg(0);
+    p.wr64(this, vtable)?;
+    p.wr64(this + 0x08, 0)?;
+    p.wr64(this + 0x10, 0)?;
+    p.wr32(this + 0x18, 0)?;
+    for offset in [0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50] {
+        p.wr64(this + offset, 0)?;
+    }
+    if wide {
+        p.wr16(this + 0x58, 0)?;
+    } else {
+        p.wr8(this + 0x58, 0)?;
+    }
+    Ok(this)
+}
+
+/// MSVC's default `basic_streambuf<char>` `_Lock` and `_Unlock` virtuals are
+/// no-ops. Preserve RAX just as their native `ret 0` bodies do.
+fn msvc_basic_streambuf_char_lock_noop(p: &mut Process) -> R {
+    Ok(p.cpu.gpr[RAX])
+}
+
+/// `sputn` is a wrapper around the object's virtual `xsputn` method.
+fn msvc_basic_streambuf_char_sputn(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let vtable = p.rd64(this)?;
+    let xsputn = p.rd64(vtable + 9 * 8)?;
+    p.call_guest(xsputn, &[this, p.arg(1), p.cpu.gpr[R8]])
+}
+
+/// `sputc` writes directly when the put area has room and otherwise calls `overflow`.
+fn msvc_basic_streambuf_char_sputc(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let character = p.arg(1) as u8;
+    let put_next_cell = p.rd64(this + 0x40)?;
+    let put_count_cell = p.rd64(this + 0x58)?;
+    let put_next = p.rd64(put_next_cell)?;
+    let put_count = if put_next == 0 {
+        0
+    } else {
+        p.rd32(put_count_cell)? as i32
+    };
+    if put_next != 0 && put_count > 0 {
+        p.wr8(put_next, character)?;
+        p.wr64(put_next_cell, put_next.wrapping_add(1))?;
+        p.wr32(put_count_cell, (put_count - 1) as u32)?;
+        return Ok(character as u64);
+    }
+
+    let vtable = p.rd64(this)?;
+    let overflow = p.rd64(vtable + 3 * 8)?;
+    p.call_guest(overflow, &[this, character as u64])
+}
+
+/// MSVC's base `xsputn` copies to the current put area and calls virtual
+/// `overflow` when that area is exhausted.
+fn msvc_basic_streambuf_xsputn(p: &mut Process, char_type: &str, char_size: usize) -> R {
+    let this = p.arg(0);
+    let mut remaining = p.cpu.gpr[R8] as i64;
+    if remaining <= 0 {
+        return Ok(0);
+    }
+
+    let expected_vtable = data_cell(
+        p,
+        &format!("msvcp:basic_streambuf:{char_type}:vtable"),
+        0x80,
+    );
+    let vtable = p.rd64(this)?;
+    let source = p.arg(1);
+    let put_next_cell = p.rd64(this + 0x40)?;
+    let put_count_cell = p.rd64(this + 0x58)?;
+    let mut written = 0u64;
+
+    while remaining > 0 {
+        let put_next = p.rd64(put_next_cell)?;
+        let put_count = if put_next == 0 {
+            0
+        } else {
+            p.rd32(put_count_cell)? as i32
+        };
+        if put_next != 0 && put_count > 0 {
+            let count = remaining.min(put_count as i64) as usize;
+            let byte_count = count * char_size;
+            let bytes =
+                p.read_bytes(source.wrapping_add(written * char_size as u64), byte_count)?;
+            p.write_bytes(put_next, &bytes)?;
+            written += count as u64;
+            remaining -= count as i64;
+            p.wr64(
+                put_next_cell,
+                put_next.wrapping_add((count * char_size) as u64),
+            )?;
+            p.wr32(put_count_cell, (put_count - count as i32) as u32)?;
+        } else {
+            let source_offset = source.wrapping_add(written * char_size as u64);
+            let character = if char_size == 1 {
+                p.rd8(source_offset)? as u32
+            } else {
+                p.rd16(source_offset)? as u32
+            };
+            if vtable == expected_vtable {
+                // The base overflow method returns EOF when no put area exists.
+                break;
+            }
+            let overflow = p.rd64(vtable + 3 * 8)?;
+            let result = p.call_guest(overflow, &[this, character as u64])?;
+            let failed = if char_size == 1 {
+                result as u32 == u32::MAX
+            } else {
+                result as u16 == u16::MAX
+            };
+            if failed {
+                break;
+            }
+            written += 1;
+            remaining -= 1;
+        }
+    }
+
+    Ok(written)
+}
+
+fn msvc_basic_streambuf_char_xsputn(p: &mut Process) -> R {
+    msvc_basic_streambuf_xsputn(p, "char", 1)
+}
+
+fn msvc_basic_streambuf_wchar_xsputn(p: &mut Process) -> R {
+    msvc_basic_streambuf_xsputn(p, "wchar", 2)
+}
+
+/// The base `basic_streambuf<char>::sync()` succeeds without doing anything.
+fn msvc_basic_streambuf_char_sync(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_standard_streambuf_kind(p: &Process, streambuf: u64) -> Result<bool, Stop> {
+    if p.extra.data_cells.get(MSVC_STD_COUT_BUFFER).copied() == Some(streambuf) {
+        Ok(false)
+    } else if p.extra.data_cells.get(MSVC_STD_CERR_BUFFER).copied() == Some(streambuf) {
+        Ok(true)
+    } else {
+        Err(Stop::Unimplemented {
+            dll: "msvcp".into(),
+            name: "standard ostream streambuf is not a registered global".into(),
+        })
+    }
+}
+
+fn msvc_standard_streambuf_write(
+    p: &mut Process,
+    streambuf: u64,
+    bytes: &[u8],
+) -> Result<(), Stop> {
+    if msvc_standard_streambuf_kind(p, streambuf)? {
+        p.stderr.extend_from_slice(bytes);
+    } else {
+        p.stdout.extend_from_slice(bytes);
+    }
+    Ok(())
+}
+
+fn msvc_standard_streambuf_char_overflow(p: &mut Process) -> R {
+    let streambuf = p.arg(0);
+    let character = p.arg(1) as u32;
+    if character == u32::MAX {
+        return Ok(u32::MAX as u64);
+    }
+    msvc_standard_streambuf_write(p, streambuf, &[character as u8])?;
+    Ok(character as u8 as u64)
+}
+
+fn msvc_standard_streambuf_xsputn(p: &mut Process) -> R {
+    let streambuf = p.arg(0);
+    let count = p.cpu.gpr[R8] as i64;
+    if count <= 0 {
+        return Ok(0);
+    }
+    let bytes = p.read_bytes(p.arg(1), count as usize)?;
+    msvc_standard_streambuf_write(p, streambuf, &bytes)?;
+    Ok(count as u64)
+}
+
+fn msvc_standard_streambuf_sync(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_standard_streambuf_init(p: &mut Process, streambuf: u64) -> Result<(), Stop> {
+    let vtable = data_cell(p, MSVC_STD_STREAMBUF_VTABLE, 0x80);
+    let unsupported = p
+        .thunk_for(
+            "msvcp",
+            "__anywasm_unimplemented_basic_streambuf_char_virtual",
+            true,
+        )
+        .expect("creating an explicit MSVCP streambuf virtual-call trap");
+    for offset in (0..0x80).step_by(8) {
+        p.wr64(vtable + offset, unsupported)?;
+    }
+    for (offset, name) in [
+        (
+            0,
+            "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+        ),
+        (8, "__anywasm_basic_streambuf_char_lock_noop"),
+        (16, "__anywasm_basic_streambuf_char_lock_noop"),
+        (3 * 8, "__anywasm_standard_streambuf_char_overflow"),
+        (9 * 8, "__anywasm_standard_streambuf_xsputn"),
+        (13 * 8, "__anywasm_standard_streambuf_sync"),
+    ] {
+        let target = p
+            .thunk_for("msvcp", name, true)
+            .expect("creating an MSVCP standard streambuf thunk");
+        p.wr64(vtable + offset, target)?;
+    }
+
+    let locale = msvc_locale_value(p, MSVC_STD_LOCALE)?;
+
+    p.wr64(streambuf, vtable)?;
+    p.wr64(streambuf + 0x08, 0)?;
+    p.wr64(streambuf + 0x10, 0)?;
+    p.wr64(streambuf + 0x18, streambuf + 0x08)?;
+    p.wr64(streambuf + 0x20, streambuf + 0x10)?;
+    p.wr64(streambuf + 0x28, 0)?;
+    p.wr64(streambuf + 0x30, 0)?;
+    p.wr64(streambuf + 0x38, streambuf + 0x28)?;
+    p.wr64(streambuf + 0x40, streambuf + 0x30)?;
+    p.wr64(streambuf + 0x48, 0)?;
+    p.wr64(streambuf + 0x50, streambuf + 0x48)?;
+    p.wr64(streambuf + 0x58, streambuf + 0x4c)?;
+    p.wr64(streambuf + 0x60, locale)?;
+    Ok(())
+}
+
+fn msvc_standard_ostream_init(
+    p: &mut Process,
+    stream: u64,
+    streambuf: u64,
+    unitbuf: bool,
+    tied_to: u64,
+) -> Result<(), Stop> {
+    let vtable = data_cell(p, MSVC_STD_OSTREAM_VTABLE, 0x80);
+    let unsupported = p
+        .thunk_for(
+            "msvcp",
+            "__anywasm_unimplemented_basic_iostream_char_virtual",
+            true,
+        )
+        .expect("creating an explicit MSVCP ostream virtual-call trap");
+    for offset in (0..0x80).step_by(8) {
+        p.wr64(vtable + offset, unsupported)?;
+    }
+    let destructor = p
+        .thunk_for(
+            "msvcp",
+            "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+            true,
+        )
+        .expect("creating an MSVCP basic_ios destructor thunk");
+    p.wr64(vtable, destructor)?;
+
+    let vbtable = data_cell(p, MSVC_STD_OSTREAM_VBTABLE, 12);
+    p.wr32(vbtable, 0)?;
+    p.wr32(vbtable + 4, 0x10)?;
+    p.wr32(vbtable + 8, 0)?;
+    p.wr64(stream, vbtable)?;
+    p.wr64(stream + 0x08, 0)?;
+
+    let ios = stream + 0x10;
+    p.wr64(ios, vtable)?;
+    p.wr64(ios + 0x08, 0)?;
+    p.wr32(ios + 0x10, 0)?;
+    p.wr32(ios + 0x14, 0)?;
+    p.wr32(ios + 0x18, 0x201 | if unitbuf { 0x2 } else { 0 })?;
+    p.wr64(ios + 0x20, 6)?;
+    p.wr64(ios + 0x28, 0)?;
+    p.wr64(ios + 0x30, 0)?;
+    p.wr64(ios + 0x38, 0)?;
+    let locale = msvc_locale_value(p, MSVC_STD_LOCALE)?;
+    p.wr64(ios + 0x40, locale)?;
+    p.wr64(ios + 0x48, streambuf)?;
+    p.wr64(ios + 0x50, tied_to)?;
+    p.wr8(ios + 0x58, 0x20)?;
+    msvc_standard_streambuf_init(p, streambuf)
+}
+
+fn msvc_standard_ostream_import(p: &mut Process, name: &str) -> Result<u64, Stop> {
+    let cout = data_cell(p, MSVC_STD_COUT_OBJECT, 0xe0);
+    let cout_init_key = "msvcp:std::cout:initialized";
+    if !p.extra.data_cells.contains_key(cout_init_key) {
+        let streambuf = cout + 0x70;
+        p.extra
+            .data_cells
+            .insert(MSVC_STD_COUT_BUFFER.into(), streambuf);
+        msvc_standard_ostream_init(p, cout, streambuf, false, 0)?;
+        p.extra.data_cells.insert(cout_init_key.into(), 1);
+    }
+    if name == MSVC_STD_COUT_SYMBOL {
+        return Ok(cout);
+    }
+
+    let cerr = data_cell(p, MSVC_STD_CERR_OBJECT, 0xe0);
+    let cerr_init_key = "msvcp:std::cerr:initialized";
+    if !p.extra.data_cells.contains_key(cerr_init_key) {
+        let streambuf = cerr + 0x70;
+        p.extra
+            .data_cells
+            .insert(MSVC_STD_CERR_BUFFER.into(), streambuf);
+        msvc_standard_ostream_init(p, cerr, streambuf, true, cout)?;
+        p.extra.data_cells.insert(cerr_init_key.into(), 1);
+    }
+    Ok(cerr)
+}
+
+fn msvc_standard_ostream_flush(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let ios = msvc_basic_ostream_ios(p, this)?;
+    let state = p.rd32(ios + 0x10)?;
+    if state != 0 {
+        return Ok(this);
+    }
+    let streambuf = p.rd64(ios + 0x48)?;
+    if streambuf == 0 {
+        p.wr32(ios + 0x10, (state | 0x4) & 0x17)?;
+        return Ok(this);
+    }
+    let vtable = p.rd64(streambuf)?;
+    let sync = p.rd64(vtable + 13 * 8)?;
+    if p.call_guest(sync, &[streambuf])? as i32 == -1 {
+        let state = (state | 0x4) & 0x17;
+        p.wr32(ios + 0x10, state)?;
+        if state & p.rd32(ios + 0x14)? != 0 {
+            return Err(Stop::Unimplemented {
+                dll: "msvcp".into(),
+                name: "basic_ostream<char>::flush throwing ios_base::failure".into(),
+            }
+            .record(p));
+        }
+    }
+    Ok(this)
+}
+
+/// Match MSVC's `_Thrd_hardware_concurrency`: count logical processors from
+/// `RelationProcessorPackage` records returned by GetLogicalProcessorInformationEx.
+fn msvc_thrd_hardware_concurrency(p: &mut Process) -> R {
+    const RELATION_PROCESSOR_PACKAGE: u32 = 3;
+    const INITIAL_BUFFER_SIZE: u32 = 48;
+
+    let api = p
+        .thunk_for("kernel32", "GetLogicalProcessorInformationEx", true)
+        .expect("creating a GetLogicalProcessorInformationEx thunk");
+    let length = data_cell(p, "msvcp:_Thrd_hardware_concurrency:length", 4);
+    let mut buffer_size = INITIAL_BUFFER_SIZE;
+    let mut buffer = data_cell(
+        p,
+        "msvcp:_Thrd_hardware_concurrency:buffer",
+        buffer_size as u64,
+    );
+
+    for _ in 0..4 {
+        p.wr32(length, buffer_size)?;
+        let success = p.call_guest(api, &[RELATION_PROCESSOR_PACKAGE as u64, buffer, length])?;
+        if success != 0 {
+            let bytes_returned = p.rd32(length)? as u64;
+            let mut offset = 0u64;
+            let mut processors = 0u32;
+            while offset + 8 <= bytes_returned {
+                let relationship = p.rd32(buffer + offset)?;
+                let record_size = p.rd32(buffer + offset + 4)? as u64;
+                if record_size < 8 || offset + record_size > bytes_returned {
+                    return Ok(0);
+                }
+                if relationship == RELATION_PROCESSOR_PACKAGE {
+                    if record_size < 32 {
+                        return Ok(0);
+                    }
+                    let groups = p.rd16(buffer + offset + 30)? as u64;
+                    if 32 + groups * 16 > record_size {
+                        return Ok(0);
+                    }
+                    for group in 0..groups {
+                        processors = processors.saturating_add(
+                            p.rd64(buffer + offset + 32 + group * 16)?.count_ones(),
+                        );
+                    }
+                }
+                offset += record_size;
+            }
+            return Ok(processors as u64);
+        }
+
+        let required = p.rd32(length)?;
+        if required <= buffer_size || required > 1 << 20 {
+            return Ok(0);
+        }
+        buffer_size = required;
+        buffer = kernel32::alloc_block(p, buffer_size as u64, true);
+    }
+
+    Ok(0)
+}
+
+/// Release the synthetic locale cell owned by an HLE-created stream buffer.
+fn msvc_basic_streambuf_char_destructor(p: &mut Process) -> R {
+    p.wr64(p.arg(0) + 0x60, 0)?;
+    Ok(0)
+}
+
+fn msvc_basic_streambuf_wchar_destructor(p: &mut Process) -> R {
+    p.wr64(p.arg(0) + 0x60, 0)?;
+    Ok(0)
+}
+
+/// MSVC declares the `basic_iostream<char>` destructor with an empty body.
+fn msvc_basic_iostream_char_destructor(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_basic_iostream_wchar_destructor(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+/// MSVC declares the `basic_ios<char>` destructor with an empty body.
+fn msvc_basic_ios_char_destructor(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_basic_ostream_ios(p: &mut Process, this: u64) -> R {
+    let vbtable = p.rd64(this)?;
+    let ios_offset = p.rd32(vbtable + 4)? as i32;
+    if ios_offset >= 0 {
+        this.checked_add(ios_offset as u64)
+    } else {
+        this.checked_sub(ios_offset.unsigned_abs() as u64)
+    }
+    .ok_or_else(|| Stop::Crash("basic_ostream virtual-base address overflow".into()))
+}
+
+/// `basic_ostream::_Osfx()` synchronizes only a good stream with `unitbuf` set.
+fn msvc_basic_ostream_char_osfx(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let ios = msvc_basic_ostream_ios(p, this)?;
+
+    let state = p.rd32(ios + 0x10)?;
+    let flags = p.rd32(ios + 0x18)?;
+    if state != 0 || flags & 0x2 == 0 {
+        return Ok(0);
+    }
+
+    let streambuf = p.rd64(ios + 0x48)?;
+    let vtable = p.rd64(streambuf)?;
+    let sync = p.rd64(vtable + 13 * 8)?;
+    if p.call_guest(sync, &[streambuf])? as i32 == -1 {
+        // `_Osfx()` is noexcept and catches failures from setting badbit.
+        p.wr32(ios + 0x10, (state | 0x4) & 0x17)?;
+    }
+    Ok(0)
+}
+
+fn msvc_ostream_sputn(p: &mut Process, streambuf: u64, bytes: &[u8]) -> R {
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let scratch = data_cell(p, "msvcp:ostream:format-scratch", 0x100);
+    p.write_bytes(scratch, bytes)?;
+    let vtable = p.rd64(streambuf)?;
+    let sputn = p.rd64(vtable + 9 * 8)?;
+    p.call_guest(sputn, &[streambuf, scratch, bytes.len() as u64])
+}
+
+fn msvc_ostream_write_padding(p: &mut Process, streambuf: u64, mut count: u64, fill: u8) -> R {
+    let chunk = [fill; 128];
+    while count > 0 {
+        let size = count.min(chunk.len() as u64) as usize;
+        if msvc_ostream_sputn(p, streambuf, &chunk[..size])? != size as u64 {
+            return Ok(0);
+        }
+        count -= size as u64;
+    }
+    Ok(1)
+}
+
+/// Insert an unsigned integer using the stream's base, adjustment, fill, and width fields.
+/// The target in this path uses the default C locale, whose integer punctuation is empty.
+fn msvc_ostream_insert_u32(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let value = p.arg(1) as u32 as u64;
+    let ios = msvc_basic_ostream_ios(p, this)?;
+    let streambuf = p.rd64(ios + 0x48)?;
+
+    if streambuf != 0 {
+        let vtable = p.rd64(streambuf)?;
+        let lock = p.rd64(vtable + 8)?;
+        p.call_guest(lock, &[streambuf])?;
+    }
+
+    let state = p.rd32(ios + 0x10)?;
+    if state != 0 || streambuf == 0 {
+        if streambuf != 0 {
+            let vtable = p.rd64(streambuf)?;
+            let unlock = p.rd64(vtable + 16)?;
+            p.call_guest(unlock, &[streambuf])?;
+        }
+        return Ok(this);
+    }
+
+    let flags = p.rd32(ios + 0x18)?;
+    let basefield = flags & 0x0e00;
+    let (base, uppercase) = match basefield {
+        0x0400 => (8, false),
+        0x0800 => (16, flags & 0x4 != 0),
+        _ => (10, false),
+    };
+    let mut digits = [0u8; 32];
+    let mut start = digits.len();
+    let alphabet = if uppercase {
+        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    } else {
+        b"0123456789abcdefghijklmnopqrstuvwxyz"
+    };
+    let mut remaining = value;
+    loop {
+        start -= 1;
+        digits[start] = alphabet[(remaining % base) as usize];
+        remaining /= base;
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    let mut prefix = [0u8; 2];
+    let mut prefix_len = 0;
+    if flags & 0x8 != 0 {
+        if base == 16 && value != 0 {
+            prefix[..2].copy_from_slice(if uppercase { b"0X" } else { b"0x" });
+            prefix_len = 2;
+        } else if base == 8 && digits[start] != b'0' {
+            prefix[0] = b'0';
+            prefix_len = 1;
+        }
+    }
+    let sign = if flags & 0x20 != 0 { Some(b'+') } else { None };
+    let mut body = [0u8; 35];
+    let mut body_len = 0;
+    if let Some(sign) = sign {
+        body[body_len] = sign;
+        body_len += 1;
+    }
+    body[body_len..body_len + prefix_len].copy_from_slice(&prefix[..prefix_len]);
+    body_len += prefix_len;
+    body[body_len..body_len + digits.len() - start].copy_from_slice(&digits[start..]);
+    body_len += digits.len() - start;
+
+    let width = p.rd64(ios + 0x28)? as i64;
+    p.wr64(ios + 0x28, 0)?;
+    let padding = (width - body_len as i64).max(0) as u64;
+    if padding > 1_048_576 {
+        return Err(Stop::Unimplemented {
+            dll: "msvcp".into(),
+            name: "basic_ostream integer width above 1048576".into(),
+        }
+        .record(p));
+    }
+    let fill = p.rd8(ios + 0x58)?;
+    let left = flags & 0x40 != 0;
+    let internal = !left && flags & 0x100 != 0;
+    let mut written = true;
+    if !left && !internal && padding != 0 {
+        written = msvc_ostream_write_padding(p, streambuf, padding, fill)? != 0;
+    }
+    if written && internal && padding != 0 {
+        let prefix_end = usize::from(sign.is_some()) + prefix_len;
+        written = msvc_ostream_sputn(p, streambuf, &body[..prefix_end])? == prefix_end as u64;
+        if written {
+            written = msvc_ostream_write_padding(p, streambuf, padding, fill)? != 0;
+        }
+        if written {
+            written = msvc_ostream_sputn(p, streambuf, &body[prefix_end..body_len])?
+                == (body_len - prefix_end) as u64;
+        }
+    } else if written {
+        written = msvc_ostream_sputn(p, streambuf, &body[..body_len])? == body_len as u64;
+    }
+    if written && left && padding != 0 {
+        written = msvc_ostream_write_padding(p, streambuf, padding, fill)? != 0;
+    }
+
+    if !written {
+        let state = (p.rd32(ios + 0x10)? | 0x4) & 0x17;
+        p.wr32(ios + 0x10, state)?;
+        if state & p.rd32(ios + 0x14)? != 0 {
+            let vtable = p.rd64(streambuf)?;
+            let unlock = p.rd64(vtable + 16)?;
+            p.call_guest(unlock, &[streambuf])?;
+            return Err(Stop::Unimplemented {
+                dll: "msvcp".into(),
+                name: "basic_ostream integer insertion throwing ios_base::failure".into(),
+            }
+            .record(p));
+        }
+    }
+
+    if p.rd32(ios + 0x10)? == 0 && p.rd32(ios + 0x18)? & 0x2 != 0 {
+        msvc_basic_ostream_char_osfx(p)?;
+    }
+    let vtable = p.rd64(streambuf)?;
+    let unlock = p.rd64(vtable + 16)?;
+    p.call_guest(unlock, &[streambuf])?;
+    Ok(this)
+}
+
+fn msvc_ostream_insert_ios_base_manipulator(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let manipulator = p.arg(1);
+    let ios = msvc_basic_ostream_ios(p, this)?;
+    p.call_guest(manipulator, &[ios])?;
+    Ok(this)
+}
+
+fn msvc_ostream_insert_float(p: &mut Process) -> R {
+    // `this` occupies RCX, so the float parameter in the second Win64 slot is XMM1.
+    let value = f32::from_bits(p.cpu.xmm[1] as u32) as f64;
+    msvc_ostream_insert_floating(p, value)
+}
+
+fn msvc_ostream_insert_double(p: &mut Process) -> R {
+    let value = f64::from_bits(p.cpu.xmm[1] as u64);
+    msvc_ostream_insert_floating(p, value)
+}
+
+fn msvc_ostream_insert_floating(p: &mut Process, value: f64) -> R {
+    let this = p.arg(0);
+    let ios = msvc_basic_ostream_ios(p, this)?;
+    let streambuf = p.rd64(ios + 0x48)?;
+
+    if streambuf != 0 {
+        let vtable = p.rd64(streambuf)?;
+        let lock = p.rd64(vtable + 8)?;
+        p.call_guest(lock, &[streambuf])?;
+    }
+
+    let state = p.rd32(ios + 0x10)?;
+    if state != 0 || streambuf == 0 {
+        if streambuf != 0 {
+            let vtable = p.rd64(streambuf)?;
+            let unlock = p.rd64(vtable + 16)?;
+            p.call_guest(unlock, &[streambuf])?;
+        }
+        return Ok(this);
+    }
+
+    let flags = p.rd32(ios + 0x18)?;
+    let precision = (p.rd64(ios + 0x20)? as i64).clamp(0, 128) as usize;
+    let output = printf::format_ostream_float(value, precision, flags);
+    let bytes = output.as_bytes();
+    let width = p.rd64(ios + 0x28)? as i64;
+    p.wr64(ios + 0x28, 0)?;
+    let padding = (width - bytes.len() as i64).max(0) as u64;
+    if padding > 1_048_576 {
+        let vtable = p.rd64(streambuf)?;
+        let unlock = p.rd64(vtable + 16)?;
+        p.call_guest(unlock, &[streambuf])?;
+        return Err(Stop::Unimplemented {
+            dll: "msvcp".into(),
+            name: "basic_ostream float width above 1048576".into(),
+        }
+        .record(p));
+    }
+
+    let fill = p.rd8(ios + 0x58)?;
+    let left = flags & 0x40 != 0;
+    let internal = !left && flags & 0x100 != 0;
+    let prefix_len = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let mut written = true;
+    if !left && !internal && padding != 0 {
+        written = msvc_ostream_write_padding(p, streambuf, padding, fill)? != 0;
+    }
+    if written && internal && padding != 0 {
+        written = msvc_ostream_sputn(p, streambuf, &bytes[..prefix_len])? == prefix_len as u64;
+        if written {
+            written = msvc_ostream_write_padding(p, streambuf, padding, fill)? != 0;
+        }
+        if written {
+            written = msvc_ostream_sputn(p, streambuf, &bytes[prefix_len..])?
+                == (bytes.len() - prefix_len) as u64;
+        }
+    } else if written {
+        written = msvc_ostream_sputn(p, streambuf, bytes)? == bytes.len() as u64;
+    }
+    if written && left && padding != 0 {
+        written = msvc_ostream_write_padding(p, streambuf, padding, fill)? != 0;
+    }
+
+    if !written {
+        let state = (p.rd32(ios + 0x10)? | 0x4) & 0x17;
+        p.wr32(ios + 0x10, state)?;
+        if state & p.rd32(ios + 0x14)? != 0 {
+            let vtable = p.rd64(streambuf)?;
+            let unlock = p.rd64(vtable + 16)?;
+            p.call_guest(unlock, &[streambuf])?;
+            return Err(Stop::Unimplemented {
+                dll: "msvcp".into(),
+                name: "basic_ostream float insertion throwing ios_base::failure".into(),
+            }
+            .record(p));
+        }
+    }
+
+    if p.rd32(ios + 0x10)? == 0 && p.rd32(ios + 0x18)? & 0x2 != 0 {
+        msvc_basic_ostream_char_osfx(p)?;
+    }
+    let vtable = p.rd64(streambuf)?;
+    let unlock = p.rd64(vtable + 16)?;
+    p.call_guest(unlock, &[streambuf])?;
+    Ok(this)
+}
+
+/// `ios_base::good()` is exactly a zero check of `_Mystate` in this MSVC layout.
+fn msvc_ios_base_good(p: &mut Process) -> R {
+    Ok(u64::from(p.rd32(p.arg(0) + 0x10)? == 0))
+}
+
+fn msvc_ios_base_set_precision(p: &mut Process) -> R {
+    p.wr64(p.arg(0) + 0x20, p.arg(1))?;
+    Ok(0)
+}
+
+fn msvc_setprecision(p: &mut Process) -> R {
+    let output = p.arg(0);
+    let precision_setter = p
+        .thunk_for("msvcp", "__anywasm_ios_base_set_precision", true)
+        .expect("creating the MSVC ios_base precision setter thunk");
+    p.wr64(output, precision_setter)?;
+    p.wr64(output + 8, p.arg(1))?;
+    Ok(output)
+}
+
+/// Return the one-pointer `std::locale` value through the MSVC x64 hidden
+/// structure-return pointer. Empty synthetic locales carry a null `_Locimp`;
+/// their destructor is consequently a no-op.
+fn msvc_ios_base_getloc(p: &mut Process) -> R {
+    // For this MSVC member function, RCX carries `this` and RDX carries the
+    // hidden return buffer for the non-trivial locale value.
+    let this = p.arg(0);
+    let output = p.arg(1);
+    let locale = p.rd64(this + 0x40)?;
+    let implementation = if locale == 0 { 0 } else { p.rd64(locale + 8)? };
+    if implementation != 0 {
+        let refs = p.rd32(implementation + 8)?;
+        p.wr32(implementation + 8, refs.saturating_add(1))?;
+    }
+    p.wr64(output, 0)?; // empty _Locbase<int> base
+    p.wr64(output + 8, implementation)?;
+    Ok(output)
+}
+
+fn msvc_ctype_wchar_getcat(p: &mut Process) -> R {
+    let facet_out = p.arg(0);
+    if facet_out != 0 {
+        if p.rd64(facet_out)? == 0 {
+            let facet = data_cell(p, "msvcp:ctype:wchar:facet", 0x40);
+            msvc_locale_facet_init(p, facet, 0)?;
+            p.wr64(facet_out, facet)?;
+        }
+    }
+    // MSVC's _X_CTYPE category mask.
+    Ok(1)
+}
+
+fn msvc_ctype_wchar_widen(p: &mut Process) -> R {
+    // The target path widens ASCII delimiters. The C locale maps these
+    // one-byte characters directly to their UTF-16 code units.
+    Ok((p.arg(1) as u8) as u64)
+}
+
+const MSVC_LOCKIT_KEY_BASE: u64 = 0x7fff_ff00_0000_0000;
+
+fn msvc_locale_facet_incref(p: &mut Process) -> R {
+    let facet = p.arg(0);
+    let refs = p.rd32(facet + 8)?;
+    p.wr32(facet + 8, refs.saturating_add(1))?;
+    Ok(0)
+}
+
+fn msvc_locale_facet_decref(p: &mut Process) -> R {
+    let facet = p.arg(0);
+    let refs = p.rd32(facet + 8)?;
+    let refs = refs.saturating_sub(1);
+    p.wr32(facet + 8, refs)?;
+    Ok(if refs == 0 { facet } else { 0 })
+}
+
+fn msvc_locale_facet_destructor(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_locale_facet_init(p: &mut Process, facet: u64, initial_refs: u32) -> Result<(), Stop> {
+    let vtable = data_cell(p, "msvcp:locale:facet:vtable", 0x40);
+    if p.rd64(vtable)? == 0 {
+        let unsupported = p
+            .thunk_for("msvcp", "__anywasm_unimplemented_std_locale_virtual", true)
+            .expect("creating an explicit locale virtual-call trap");
+        for offset in (0..0x40).step_by(8) {
+            p.wr64(vtable + offset, unsupported)?;
+        }
+        for (offset, name) in [
+            (0, "__anywasm_locale_facet_destructor"),
+            (8, "__anywasm_locale_facet_incref"),
+            (16, "__anywasm_locale_facet_decref"),
+        ] {
+            let target = p
+                .thunk_for("msvcp", name, true)
+                .expect("creating a locale facet thunk");
+            p.wr64(vtable + offset, target)?;
+        }
+    }
+    p.wr64(facet, vtable)?;
+    p.wr32(facet + 8, initial_refs)?;
+    Ok(())
+}
+
+/// A stable synthetic locale implementation with an empty facet vector.
+fn msvc_locale_value(p: &mut Process, key: &str) -> Result<u64, Stop> {
+    let implementation = data_cell(p, "msvcp:std::locale:implementation", 0x60);
+    if p.rd64(implementation)? == 0 {
+        msvc_locale_facet_init(p, implementation, 1)?;
+        p.wr64(implementation + 0x10, 0)?; // _Facetvec
+        p.wr64(implementation + 0x18, 0)?; // _Facetcount
+        p.wr32(implementation + 0x20, 0)?; // _Catmask
+        p.wr8(implementation + 0x24, 0)?; // _Xparent
+    }
+    let locale = data_cell(p, key, 16);
+    p.wr64(locale, 0)?; // empty _Locbase<int> base
+    p.wr64(locale + 8, implementation)?;
+    Ok(locale)
+}
+
+fn msvc_lock_acquire(p: &mut Process, address: u64) -> Result<(), Stop> {
+    let id = p.current_thread_id;
+    if p.try_acquire_critical(address, id) {
+        return Ok(());
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "msvcp".into(),
+            name: "contended CRT lock from a nested synchronous guest callback".into(),
+        });
+    }
+    let waiters = &mut p.critical_sections.entry(address).or_default().waiters;
+    if !waiters.contains(&id) {
+        waiters.push_back(id);
+    }
+    p.block_current_thread(ThreadWait::CriticalAcquire { address });
+    Ok(())
+}
+
+fn msvc_lockit_ctor(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let lock_no = p.arg(1) as i32;
+    p.wr32(this, lock_no as u32)?;
+    if lock_no >= 0 {
+        msvc_lock_acquire(p, MSVC_LOCKIT_KEY_BASE + lock_no as u64)?;
+    }
+    Ok(this)
+}
+
+fn msvc_lockit_dtor(p: &mut Process) -> R {
+    let lock_no = p.rd32(p.arg(0))? as i32;
+    if lock_no >= 0 {
+        p.release_critical(MSVC_LOCKIT_KEY_BASE + lock_no as u64, p.current_thread_id);
+    }
+    Ok(0)
+}
+
+fn msvc_mtx_lock(p: &mut Process) -> R {
+    msvc_lock_acquire(p, p.arg(0))?;
+    Ok(0)
+}
+
+fn msvc_mtx_unlock(p: &mut Process) -> R {
+    p.release_critical(p.arg(0), p.current_thread_id);
+    Ok(0)
+}
+
+fn msvc_cnd_init(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_cnd_destroy(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_cnd_signal(p: &mut Process) -> R {
+    p.wake_condition(p.arg(0), false);
+    Ok(0)
+}
+
+fn msvc_cnd_broadcast(p: &mut Process) -> R {
+    p.wake_condition(p.arg(0), true);
+    Ok(0)
+}
+
+fn msvc_cnd_wait(p: &mut Process) -> R {
+    let condition = p.arg(0);
+    let lock = p.arg(1);
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "msvcp".into(),
+            name: "blocking _Cnd_wait from a nested synchronous guest callback".into(),
+        });
+    }
+    let owned_once = p
+        .critical_sections
+        .get(&lock)
+        .is_some_and(|state| state.owner == Some(p.current_thread_id) && state.recursion == 1);
+    if !owned_once || !p.release_critical(lock, p.current_thread_id) {
+        return Ok(4); // _Thrd_error
+    }
+    p.block_current_thread(ThreadWait::Condition {
+        condition,
+        lock,
+        critical: true,
+        exclusive: true,
+        deadline: None,
+        outcome: None,
+    });
+    Ok(0) // _Thrd_success
+}
+
+/// Merge a new iostream state into `_Mystate`, preserving MSVC's `_Statmask`.
+/// Throwing `ios_base::failure` remains explicit until C++ exceptions are wired here.
+fn msvc_basic_ios_char_setstate(p: &mut Process) -> R {
+    let this = p.arg(0);
+    let state = (p.rd32(this + 0x10)? | p.arg(1) as u32) & 0x17;
+    p.wr32(this + 0x10, state)?;
+    if state & p.rd32(this + 0x14)? != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "msvcp".into(),
+            name: "basic_ios<char>::setstate throwing ios_base::failure".into(),
+        }
+        .record(p));
+    }
+    Ok(0)
+}
+
+fn msvc_uncaught_exception(p: &mut Process) -> R {
+    Ok(u64::from(
+        p.guest_exception_depths
+            .get(&p.current_thread_id)
+            .copied()
+            .unwrap_or(0)
+            != 0,
+    ))
+}
+
+/// Initialize the `basic_iostream` object layout observed from MSVCP140's
+/// narrow and wide constructors. Locale internals stay guest-owned opaque cells;
+/// virtual calls trap explicitly until their individual slots have implementations.
+fn msvc_basic_iostream_default(p: &mut Process, char_type: &str) -> R {
+    let this = p.arg(0);
+    let streambuf = p.arg(1);
+
+    // Base constructors can run inside a larger stream object. Keep its vbtable
+    // and use the encoded virtual-base displacement; standalone calls use +0x20.
+    let ios_offset = p
+        .rd64(this)
+        .ok()
+        .and_then(|table| p.rd32(table + 4).ok())
+        .map(|offset| offset as i32)
+        .and_then(|offset| {
+            let address = if offset >= 0 {
+                this.checked_add(offset as u64)?
+            } else {
+                this.checked_sub(offset.unsigned_abs() as u64)?
+            };
+            p.rd64(address).ok().map(|_| offset)
+        });
+    let ios_offset = if let Some(offset) = ios_offset {
+        offset
+    } else {
+        let vbtable_a = data_cell(
+            p,
+            &format!("msvcp:basic_iostream:{char_type}:vbtable-a"),
+            12,
+        );
+        p.wr32(vbtable_a, 0)?;
+        p.wr32(vbtable_a + 4, 32)?;
+        p.wr32(vbtable_a + 8, 0)?;
+        p.wr64(this, vbtable_a)?;
+
+        let vbtable_b = data_cell(
+            p,
+            &format!("msvcp:basic_iostream:{char_type}:vbtable-b"),
+            12,
+        );
+        p.wr32(vbtable_b, 0)?;
+        p.wr32(vbtable_b + 4, 16)?;
+        p.wr32(vbtable_b + 8, 0)?;
+        p.wr64(this + 0x10, vbtable_b)?;
+        32
+    };
+
+    p.wr64(this + 8, 0)?;
+    // The native constructor leaves this dword untouched.
+    p.wr32(this + 0x1c, 0)?;
+
+    let vtable = data_cell(p, &format!("msvcp:basic_iostream:{char_type}:vtable"), 0x80);
+    let unsupported = p
+        .thunk_for(
+            "msvcp",
+            &format!("__anywasm_unimplemented_basic_iostream_{char_type}_virtual"),
+            true,
+        )
+        .expect("creating an explicit MSVCP virtual-call trap");
+    for offset in (0..0x80).step_by(8) {
+        p.wr64(vtable + offset, unsupported)?;
+    }
+
+    let locale = msvc_locale_value(p, &format!("msvcp:basic_iostream:{char_type}:locale"))?;
+    let ios = (this as i64 + ios_offset as i64) as u64;
+    p.wr64(ios, vtable)?;
+    p.wr64(ios + 8, 0)?;
+    p.wr32(ios + 0x10, if streambuf == 0 { 4 } else { 0 })?;
+    p.wr32(ios + 0x14, 0)?;
+    p.wr32(ios + 0x18, 0x201)?;
+    p.wr64(ios + 0x20, 6)?;
+    for offset in [0x28, 0x30, 0x38] {
+        p.wr64(ios + offset, 0)?;
+    }
+    p.wr64(ios + 0x40, locale)?;
+    p.wr64(ios + 0x48, streambuf)?;
+    p.wr64(ios + 0x50, 0)?;
+    if char_type == "wchar" {
+        p.wr16(ios + 0x58, 0x20)?;
+    } else {
+        p.wr8(ios + 0x58, 0x20)?;
+    }
+
+    Ok(this)
+}
+
+fn msvc_basic_iostream_char_default(p: &mut Process) -> R {
+    msvc_basic_iostream_default(p, "char")
+}
+
+fn msvc_basic_iostream_wchar_default(p: &mut Process) -> R {
+    msvc_basic_iostream_default(p, "wchar")
+}
+
+/// Initialize the `basic_streambuf<char>` default layout observed from MSVCP140.
+/// The native locale pointer is replaced with guest-owned opaque storage.
+fn msvc_basic_streambuf_default(p: &mut Process, char_type: &str, xsputn_name: &str) -> R {
+    let this = p.arg(0);
+    let vtable = data_cell(
+        p,
+        &format!("msvcp:basic_streambuf:{char_type}:vtable"),
+        0x80,
+    );
+    let unsupported = p
+        .thunk_for(
+            "msvcp",
+            &format!("__anywasm_unimplemented_basic_streambuf_{char_type}_virtual"),
+            true,
+        )
+        .expect("creating an explicit MSVCP virtual-call trap");
+    for offset in (0..0x80).step_by(8) {
+        p.wr64(vtable + offset, unsupported)?;
+    }
+    let xsputn = p
+        .thunk_for("msvcp", xsputn_name, true)
+        .expect("creating the MSVCP basic_streambuf xsputn thunk");
+    p.wr64(vtable + 9 * 8, xsputn)?;
+    let sync = p
+        .thunk_for("msvcp", "__anywasm_basic_streambuf_char_sync", true)
+        .expect("creating the MSVCP basic_streambuf sync thunk");
+    p.wr64(vtable + 13 * 8, sync)?;
+    let lock_noop = p
+        .thunk_for("msvcp", "__anywasm_basic_streambuf_char_lock_noop", true)
+        .expect("creating the MSVCP basic_streambuf lock no-op thunk");
+    p.wr64(vtable + 8, lock_noop)?;
+    p.wr64(vtable + 16, lock_noop)?;
+
+    let locale = msvc_locale_value(p, &format!("msvcp:basic_streambuf:{char_type}:locale"))?;
+    p.wr64(this, vtable)?;
+    p.wr64(this + 0x08, 0)?;
+    p.wr64(this + 0x10, 0)?;
+    p.wr64(this + 0x18, this + 0x08)?;
+    p.wr64(this + 0x20, this + 0x10)?;
+    p.wr64(this + 0x28, 0)?;
+    p.wr64(this + 0x30, 0)?;
+    p.wr64(this + 0x38, this + 0x28)?;
+    p.wr64(this + 0x40, this + 0x30)?;
+    p.wr64(this + 0x48, 0)?;
+    p.wr64(this + 0x50, this + 0x48)?;
+    p.wr64(this + 0x58, this + 0x4c)?;
+    p.wr64(this + 0x60, locale)?;
+    Ok(this)
+}
+
+fn msvc_basic_streambuf_char_default(p: &mut Process) -> R {
+    msvc_basic_streambuf_default(p, "char", "__anywasm_basic_streambuf_char_xsputn")
+}
+
+fn msvc_basic_streambuf_wchar_default(p: &mut Process) -> R {
+    msvc_basic_streambuf_default(p, "wchar", "__anywasm_basic_streambuf_wchar_xsputn")
+}
+
 pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
+        "__anywasm_basic_streambuf_char_lock_noop"
+        | "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
+        | "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ" => {
+            msvc_basic_streambuf_char_lock_noop
+        }
+        "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z" => {
+            msvc_basic_streambuf_char_sputn
+        }
+        "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z" => {
+            msvc_basic_streambuf_char_sputc
+        }
+        "__anywasm_basic_streambuf_char_xsputn"
+        | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z" => {
+            msvc_basic_streambuf_char_xsputn
+        }
+        "__anywasm_basic_streambuf_wchar_xsputn"
+        | "?xsputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEB_W_J@Z" => {
+            msvc_basic_streambuf_wchar_xsputn
+        }
+        "__anywasm_basic_streambuf_char_sync" => msvc_basic_streambuf_char_sync,
+        "__anywasm_standard_streambuf_char_overflow" => msvc_standard_streambuf_char_overflow,
+        "__anywasm_standard_streambuf_xsputn" => msvc_standard_streambuf_xsputn,
+        "__anywasm_standard_streambuf_sync" => msvc_standard_streambuf_sync,
+        "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ" => {
+            msvc_basic_streambuf_char_destructor
+        }
+        "??1?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAA@XZ" => {
+            msvc_basic_streambuf_wchar_destructor
+        }
+        "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UEAA@XZ" => {
+            msvc_basic_iostream_char_destructor
+        }
+        "??1?$basic_iostream@_WU?$char_traits@_W@std@@@std@@UEAA@XZ" => {
+            msvc_basic_iostream_wchar_destructor
+        }
+        "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ" => {
+            msvc_basic_ios_char_destructor
+        }
+        "??1?$basic_ios@_WU?$char_traits@_W@std@@@std@@UEAA@XZ" => {
+            msvc_basic_ios_char_destructor
+        }
+        "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ" => {
+            msvc_basic_ostream_char_osfx
+        }
+        "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ" => {
+            msvc_standard_ostream_flush
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z" => {
+            msvc_ostream_insert_u32
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@M@Z" => {
+            msvc_ostream_insert_float
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@N@Z" => {
+            msvc_ostream_insert_double
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z" => {
+            msvc_ostream_insert_ios_base_manipulator
+        }
+        "?setprecision@std@@YA?AU?$_Smanip@_J@1@_J@Z" => msvc_setprecision,
+        "__anywasm_ios_base_set_precision" => msvc_ios_base_set_precision,
+        "?good@ios_base@std@@QEBA_NXZ" => msvc_ios_base_good,
+        "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ" => msvc_ios_base_getloc,
+        "__anywasm_locale_facet_incref" => msvc_locale_facet_incref,
+        "__anywasm_locale_facet_decref" => msvc_locale_facet_decref,
+        "__anywasm_locale_facet_destructor" => msvc_locale_facet_destructor,
+        "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z" => {
+            msvc_ctype_wchar_getcat
+        }
+        "?widen@?$ctype@_W@std@@QEBA_WD@Z" => msvc_ctype_wchar_widen,
+        "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z" => {
+            msvc_basic_ios_char_setstate
+        }
+        "?uncaught_exception@std@@YA_NXZ" => msvc_uncaught_exception,
+        "_Thrd_hardware_concurrency" => msvc_thrd_hardware_concurrency,
+        "??0_Lockit@std@@QEAA@H@Z" => msvc_lockit_ctor,
+        "??1_Lockit@std@@QEAA@XZ" => msvc_lockit_dtor,
+        "_Mtx_lock" => msvc_mtx_lock,
+        "_Mtx_unlock" => msvc_mtx_unlock,
+        "_Cnd_init" => msvc_cnd_init,
+        "_Cnd_destroy" => msvc_cnd_destroy,
+        "_Cnd_signal" => msvc_cnd_signal,
+        "_Cnd_broadcast" => msvc_cnd_broadcast,
+        "_Cnd_wait" => msvc_cnd_wait,
+        "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ" => {
+            msvc_basic_streambuf_char_default
+        }
+        "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z" => {
+            msvc_basic_iostream_char_default
+        }
+        "??0?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@IEAA@XZ" => {
+            msvc_basic_streambuf_wchar_default
+        }
+        "??0?$basic_iostream@_WU?$char_traits@_W@std@@@std@@QEAA@PEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@1@@Z" => {
+            msvc_basic_iostream_wchar_default
+        }
+        "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ" => |p| {
+            msvc_basic_ios_default(
+                p,
+                "msvcp:basic_ios:char:vtable",
+                "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+                false,
+            )
+        },
+        "??0?$basic_ios@GU?$char_traits@G@std@@@std@@IEAA@XZ" => |p| {
+            msvc_basic_ios_default(
+                p,
+                "msvcp:basic_ios:char16:vtable",
+                "??1?$basic_ios@GU?$char_traits@G@std@@@std@@UEAA@XZ",
+                true,
+            )
+        },
+        "??0?$basic_ios@_WU?$char_traits@_W@std@@@std@@IEAA@XZ" => |p| {
+            msvc_basic_ios_default(
+                p,
+                "msvcp:basic_ios:wchar:vtable",
+                "??1?$basic_ios@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+                true,
+            )
+        },
         // ── startup / process ──
         "__set_app_type" | "_set_app_type" | "_set_fmode" | "_setmode" | "_set_new_mode" | "_set_invalid_parameter_handler" | "_set_abort_behavior" | "_set_error_mode" | "__setusermatherr" | "_fpreset" | "_configthreadlocale" | "_set_purecall_handler"
         | "_crt_at_quick_exit" | "_initialize_narrow_environment" | "_initialize_wide_environment" | "__security_init_cookie" | "_seh_filter_exe" | "_controlfp_s" | "_clearfp" | "_statusfp" | "__lconv_init" | "_get_osfhandle"
@@ -393,6 +1726,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(p.extra.locale_cell)
         },
         "setlocale" => setlocale,
+        "_wsetlocale" => wsetlocale,
         "strerror" | "_strerror" => |p| {
             let e = p.arg(0) as i32;
             let msg = match e {
@@ -411,12 +1745,20 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "signal" => |_| Ok(0),
         "raise" => |p| Err(Stop::Crash(format!("raise({})", p.arg(0)))),
         "_XcptFilter" => |_| Ok(0),
-        "__C_specific_handler" | "__CxxFrameHandler3" | "__CxxFrameHandler4" | "_CxxThrowException" | "__std_terminate" => |p| {
-            Err(Stop::Unimplemented { dll: "crt".into(), name: "structured/C++ exception handling".into() }.record(p))
-        },
-        "_setjmp" | "_setjmpex" | "setjmp" => setjmp,
+        "__C_specific_handler" => crate::exception::c_specific_handler,
+        "__CxxFrameHandler3" => crate::msvc_eh::frame_handler3,
+        "__CxxFrameHandler4" => crate::msvc_eh::frame_handler4,
+        "_CxxThrowException" => crate::msvc_eh::cxx_throw_exception,
+        "__std_terminate" | "terminate" => crate::msvc_eh::std_terminate,
+        "_register_thread_local_exe_atexit_callback" => |_| Ok(0),
+        "__current_exception" => |p| crate::msvc_eh::current_cpp_exception_cell(p, false),
+        "__current_exception_context" => |p| crate::msvc_eh::current_cpp_exception_cell(p, true),
+        "_setjmp" | "_setjmpex" | "setjmp" | "__intrinsic_setjmp" => setjmp,
         "longjmp" => longjmp,
-        "_beginthreadex" | "_beginthread" => |p| Err(Stop::Unimplemented { dll: "crt".into(), name: "_beginthreadex (threads are not implemented yet)".into() }.record(p)),
+        "_Query_perf_counter" => msvc_query_perf_counter,
+        "_Query_perf_frequency" => |_| Ok(kernel32::QUERY_PERFORMANCE_FREQUENCY),
+        "_beginthreadex" => kernel32::create_thread,
+        "_beginthread" => |p| Err(Stop::Unimplemented { dll: "crt".into(), name: "_beginthread (cdecl thread wrapper is not implemented yet)".into() }.record(p)),
         // ── memory ──
         "malloc" => |p| {
             let n = p.arg(0);
@@ -967,7 +2309,9 @@ fn lock_locales(p: &mut Process) -> R {
 
 fn unlock_locales(p: &mut Process) -> R {
     if !p.release_critical(LOCALE_LOCK_ADDRESS, p.current_thread_id) {
-        return Err(Stop::Crash("_unlock_locales called without owning the locale lock".into()));
+        return Err(Stop::Crash(
+            "_unlock_locales called without owning the locale lock".into(),
+        ));
     }
     p.refresh_waiters();
     Ok(0)
@@ -987,13 +2331,18 @@ impl Rec for Stop {
 
 impl Process {
     pub fn read_cstr_raw(&self, a: u64) -> Result<Vec<u8>, Stop> {
-        self.mem.read_cstr(a, 1 << 24).map_err(|e| Stop::Crash(format!("read fault {a:#x}: {e:?}")))
+        self.mem
+            .read_cstr(a, 1 << 24)
+            .map_err(|e| Stop::Crash(format!("read fault {a:#x}: {e:?}")))
     }
     /// The `__stdio_common_vsnprintf_s` variant takes one more argument; detect it from the
     /// thunk currently executing.
     pub fn thunks_is_snprintf_s(&self) -> bool {
         let idx = ((self.cpu.rip.wrapping_sub(THUNK_BASE)) / 16) as usize;
-        self.thunks.get(idx).map(|t| t.name == "__stdio_common_vsnprintf_s").unwrap_or(false)
+        self.thunks
+            .get(idx)
+            .map(|t| t.name == "__stdio_common_vsnprintf_s")
+            .unwrap_or(false)
     }
 }
 
@@ -1063,7 +2412,17 @@ fn strcmp_family(p: &mut Process) -> R {
         p.thunks[idx].name.clone()
     };
     let (a, b) = (p.arg(0), p.arg(1));
-    let n = if name.contains('n') && name != "stricmp" && name != "_stricmp" && name != "strcmpi" && name != "_strcmpi" && name != "strcasecmp" { Some(p.arg(2) as usize) } else { None };
+    let n = if name.contains('n')
+        && name != "stricmp"
+        && name != "_stricmp"
+        && name != "strcmpi"
+        && name != "_strcmpi"
+        && name != "strcasecmp"
+    {
+        Some(p.arg(2) as usize)
+    } else {
+        None
+    };
     let ci = name.contains("icmp") || name.contains("case") || name.contains("cmpi");
     let mut x = p.read_cstr_raw(a)?;
     let mut y = p.read_cstr_raw(b)?;
@@ -1125,7 +2484,11 @@ fn parse_float(s: &str) -> (f64, usize) {
     }
     let lower = s[i..].to_ascii_lowercase();
     if lower.starts_with("inf") {
-        let v = if b[start] == b'-' { f64::NEG_INFINITY } else { f64::INFINITY };
+        let v = if b[start] == b'-' {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
         return (v, i + 3);
     }
     if lower.starts_with("nan") {
@@ -1170,7 +2533,11 @@ fn strtol_family(p: &mut Process) -> R {
         p.wr64(end, s + used as u64)?;
     }
     let long64 = name.contains("ll") || name.contains("64");
-    Ok(if long64 { v as u64 } else { v as i32 as u32 as u64 })
+    Ok(if long64 {
+        v as u64
+    } else {
+        v as i32 as u32 as u64
+    })
 }
 
 fn itoa_family(p: &mut Process) -> R {
@@ -1181,7 +2548,11 @@ fn itoa_family(p: &mut Process) -> R {
     // _itoa(value, buf, radix)  /  _itoa_s(value, buf, size, radix)
     let s_variant = name.ends_with("_s");
     let (value, dst) = (p.arg(0), p.arg(1));
-    let radix = if s_variant { p.arg(3) as u32 } else { p.arg(2) as u32 };
+    let radix = if s_variant {
+        p.arg(3) as u32
+    } else {
+        p.arg(2) as u32
+    };
     let unsigned = name.contains("ul") || name.contains("ui64");
     let wide64 = name.contains("64");
     let v: i128 = match (unsigned, wide64) {
@@ -1214,12 +2585,21 @@ fn itoa_family(p: &mut Process) -> R {
 
 fn qsort(p: &mut Process) -> R {
     let (base, n, sz, cmp) = (p.arg(0), p.arg(1) as usize, p.arg(2) as usize, p.arg(3));
-    let mut items: Vec<Vec<u8>> = (0..n).map(|i| p.read_bytes(base + (i * sz) as u64, sz)).collect::<Result<_, _>>()?;
+    let mut items: Vec<Vec<u8>> = (0..n)
+        .map(|i| p.read_bytes(base + (i * sz) as u64, sz))
+        .collect::<Result<_, _>>()?;
     // Insertion into a scratch area so the comparator can be a guest function taking pointers.
     let scratch = kernel32::alloc_block(p, (sz * 2) as u64, true);
     let mut err: Option<Stop> = None;
     // Merge sort with guest comparator calls.
-    fn msort(p: &mut Process, v: Vec<Vec<u8>>, scratch: u64, sz: usize, cmp: u64, err: &mut Option<Stop>) -> Vec<Vec<u8>> {
+    fn msort(
+        p: &mut Process,
+        v: Vec<Vec<u8>>,
+        scratch: u64,
+        sz: usize,
+        cmp: u64,
+        err: &mut Option<Stop>,
+    ) -> Vec<Vec<u8>> {
         if v.len() <= 1 || err.is_some() {
             return v;
         }
@@ -1420,9 +2800,25 @@ fn fopen_impl(p: &mut Process, name: &str, mode: &str) -> R {
             return Ok(0);
         }
     }
-    let pos = if mode.starts_with('a') { p.vfs.get(&path).map(|d| d.len()).unwrap_or(0) } else { 0 };
+    let pos = if mode.starts_with('a') {
+        p.vfs.get(&path).map(|d| d.len()).unwrap_or(0)
+    } else {
+        0
+    };
     let fp = kernel32::alloc_block(p, FILE_SIZE, true);
-    p.extra.files.insert(fp, CFile { kind: FileKind::Vfs { path: crate::vfs::norm(&path), pos, write }, eof: false, err: false, ungot: None });
+    p.extra.files.insert(
+        fp,
+        CFile {
+            kind: FileKind::Vfs {
+                path: crate::vfs::norm(&path),
+                pos,
+                write,
+            },
+            eof: false,
+            err: false,
+            ungot: None,
+        },
+    );
     Ok(fp)
 }
 
@@ -1466,14 +2862,24 @@ fn sscanf(p: &mut Process) -> R {
         let rest = String::from_utf8_lossy(&s[si.min(s.len())..]).into_owned();
         match conv {
             b'd' | b'i' | b'u' | b'x' | b'X' => {
-                let base = if conv == b'x' || conv == b'X' { 16 } else if conv == b'i' { 0 } else { 10 };
+                let base = if conv == b'x' || conv == b'X' {
+                    16
+                } else if conv == b'i' {
+                    0
+                } else {
+                    10
+                };
                 let (v, used) = parse_int(&rest, base);
                 if used == 0 {
                     break;
                 }
                 let dst = p.arg(slot);
                 slot += 1;
-                if long >= 1 { p.wr64(dst, v as u64)? } else { p.wr32(dst, v as u32)? }
+                if long >= 1 {
+                    p.wr64(dst, v as u64)?
+                } else {
+                    p.wr32(dst, v as u32)?
+                }
                 si += used;
                 count += 1;
             }
@@ -1484,12 +2890,20 @@ fn sscanf(p: &mut Process) -> R {
                 }
                 let dst = p.arg(slot);
                 slot += 1;
-                if long >= 1 { p.wr64(dst, v.to_bits())? } else { p.wr32(dst, (v as f32).to_bits())? }
+                if long >= 1 {
+                    p.wr64(dst, v.to_bits())?
+                } else {
+                    p.wr32(dst, (v as f32).to_bits())?
+                }
                 si += used;
                 count += 1;
             }
             b's' => {
-                let end = s[si..].iter().position(|b| b.is_ascii_whitespace()).map(|i| si + i).unwrap_or(s.len());
+                let end = s[si..]
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace())
+                    .map(|i| si + i)
+                    .unwrap_or(s.len());
                 if end == si {
                     break;
                 }
@@ -1540,13 +2954,26 @@ fn setjmp(p: &mut Process) -> R {
     let buf = p.arg(0);
     let sp = p.cpu.gpr[RSP];
     let ra = p.rd64(sp)?;
-    let regs = [p.cpu.gpr[RBX], p.cpu.gpr[RBP], p.cpu.gpr[RDI], p.cpu.gpr[RSI], p.cpu.gpr[12], p.cpu.gpr[13], p.cpu.gpr[14], p.cpu.gpr[15], sp + 8, ra];
+    let regs = [
+        p.cpu.gpr[RBX],
+        p.cpu.gpr[RBP],
+        p.cpu.gpr[RDI],
+        p.cpu.gpr[RSI],
+        p.cpu.gpr[12],
+        p.cpu.gpr[13],
+        p.cpu.gpr[14],
+        p.cpu.gpr[15],
+        sp + 8,
+        ra,
+    ];
     for (i, r) in regs.iter().enumerate() {
         p.wr64(buf + 8 * i as u64, *r)?;
     }
     for i in 0..10 {
         let x = p.cpu.xmm[6 + i];
-        p.mem.write_u128(buf + 0x50 + 16 * i as u64, x).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+        p.mem
+            .write_u128(buf + 0x50 + 16 * i as u64, x)
+            .map_err(|e| Stop::Crash(format!("{e:?}")))?;
     }
     Ok(0)
 }
@@ -1558,7 +2985,10 @@ fn longjmp(p: &mut Process) -> R {
         *r = p.rd64(buf + 8 * i as u64)?;
     }
     for i in 0..10 {
-        p.cpu.xmm[6 + i] = p.mem.read_u128(buf + 0x50 + 16 * i as u64).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+        p.cpu.xmm[6 + i] = p
+            .mem
+            .read_u128(buf + 0x50 + 16 * i as u64)
+            .map_err(|e| Stop::Crash(format!("{e:?}")))?;
     }
     p.cpu.gpr[RBX] = regs[0];
     p.cpu.gpr[RBP] = regs[1];

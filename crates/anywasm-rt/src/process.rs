@@ -6,7 +6,7 @@ use anywasm_cpu::cpu::*;
 use anywasm_cpu::mem::{PROT_R, PROT_RW, PROT_RWX, PROT_X};
 use anywasm_cpu::{BlockCache, Cpu, CpuMode, DecodeCache, Exit, Memory};
 use anywasm_pe::{canonical_dll, ImportName, Pe};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 pub const THUNK_BASE: u64 = 0x7100_0000;
 pub const THUNK_BYTES: u64 = 0x10_0000;
@@ -23,6 +23,7 @@ pub const PARAMS_ADDR: u64 = 0x7ffc_4000;
 pub const LDR_ADDR: u64 = 0x7ffd_0000;
 pub const STACK_TOP: u64 = 0x7f00_0000;
 pub const HLE_MODULE_BASE: u64 = 0x6000_0000;
+pub const THREAD_QUANTUM: u64 = 10_000;
 const CALLBACK_BUDGET_EXHAUSTED: &str =
     "synchronous guest callback exhausted the run budget; its continuation cannot be resumed";
 
@@ -53,8 +54,8 @@ fn trace_guest_instruction(cpu: &Cpu, mem: &Memory) -> String {
         )
     } else {
         let names = [
-            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10",
-            "r11", "r12", "r13", "r14", "r15",
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+            "r12", "r13", "r14", "r15",
         ];
         let regs = names
             .iter()
@@ -83,6 +84,16 @@ pub struct GuestUnwind {
     pub history_table: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuestCatch32 {
+    pub(crate) target_frame: u64,
+    pub(crate) target_ip: u64,
+    pub(crate) target_state: i32,
+    pub(crate) catch_state: i32,
+    pub(crate) try_index: usize,
+    pub(crate) handler_index: usize,
+}
+
 /// Why `Process::run` returned.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
@@ -102,6 +113,8 @@ pub enum Stop {
     ThreadExit(u32),
     /// Internal marker consumed by the active guest exception dispatcher.
     GuestUnwind(GuestUnwind),
+    /// Internal x86 C++ catch transfer consumed by the PE32 exception dispatcher.
+    GuestCatch32(GuestCatch32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +161,8 @@ pub struct GuestThread {
     pub cpu: Cpu,
     pub stack_base: u64,
     pub stack_limit: u64,
+    pub teb_base: u64,
+    pub exception_list: u64,
     pub teb_tls_vector: u64,
     pub last_error: u32,
     pub tls: HashMap<u32, u64>,
@@ -189,6 +204,8 @@ pub struct Module {
     pub size: u64,
     pub entry: u64,
     pub is_dll: bool,
+    /// Relocated PE TLS process-attach callback addresses, in image order.
+    pub tls_callbacks: Vec<u64>,
     pub exports: HashMap<String, u64>,
     pub ordinals: HashMap<u16, u64>,
     /// PE32+ exception directory and its validated, sorted `.pdata` entries.
@@ -200,10 +217,22 @@ pub struct Module {
     pub hle_group: Option<&'static str>,
 }
 
+/// Guest-registered x64 unwind table passed to `RtlAddFunctionTable`.
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicFunctionTable {
+    pub table: u64,
+    pub entry_count: u32,
+    pub base: u64,
+}
+
 pub struct Thunk {
     pub group: &'static str,
     pub name: String,
     pub func: Option<HleFn>,
+}
+
+struct SharedContextHandoff {
+    previous: Option<(u32, u64, bool)>,
 }
 
 /// Win32 handle table entries.
@@ -213,6 +242,7 @@ pub enum Handle {
         path: String,
         pos: usize,
         write: bool,
+        overlapped: bool,
     },
     Mapping {
         size: u64,
@@ -257,6 +287,14 @@ pub struct Process {
     pub mem: Memory,
     pub vfs: Vfs,
     pub modules: Vec<Module>,
+    pub dynamic_function_tables: Vec<DynamicFunctionTable>,
+    pub(crate) vectored_exception_handlers: Vec<(u64, u64)>,
+    pub(crate) vectored_continue_handlers: Vec<(u64, u64)>,
+    pub(crate) next_vectored_exception_handle: u64,
+    pub(crate) top_level_exception_filter: u64,
+    module_dependencies: HashMap<usize, Vec<usize>>,
+    initialized_dlls: HashSet<usize>,
+    initializing_dlls: HashSet<usize>,
     pub thunks: Vec<Thunk>,
     pub thunk_index: HashMap<(&'static str, String), u64>,
     pub unimplemented_log: Vec<(String, String)>,
@@ -281,6 +319,9 @@ pub struct Process {
     pub tls_slots: HashMap<u32, u64>,
     pub current_thread_id: u32,
     pub next_thread_id: u32,
+    current_teb_base: u64,
+    /// Active guest C++ exception unwind depth, kept per guest thread.
+    pub guest_exception_depths: HashMap<u32, u32>,
     pub current_thread_is_guest: bool,
     pub current_thread_state: ThreadState,
     pub current_wait_order: u64,
@@ -290,6 +331,8 @@ pub struct Process {
     pub schedule_requested: bool,
     pub wait_sequence: u64,
     pub quantum_used: u64,
+    shared_cpu_quantum_used: HashMap<u32, u64>,
+    shared_context_handoff: Option<SharedContextHandoff>,
     pub retired_instructions: u64,
     active_run_budget: Option<u64>,
     pub srw_locks: HashMap<u64, SrwLockState>,
@@ -301,7 +344,12 @@ pub struct Process {
     pub rng: u64,
     pub trace_imports: bool,
     pub trace_modules_only: bool,
+    pub trace_gta_eventvol: bool,
+    trace_particle_txd: bool,
+    trace_particle_texture_index: u32,
+    trace_gta_copy_watch: Option<u32>,
     trace_recent_guest: VecDeque<String>,
+    trace_recent_x86_ip: VecDeque<(u32, u32)>,
     pub nested: u32,
     /// Set by an HLE function that has rewritten RSP/RIP itself (longjmp): skip the normal return.
     pub skip_ret: bool,
@@ -319,6 +367,9 @@ fn align_up(v: u64, a: u64) -> u64 {
 /// Number of stack argument bytes removed by an x86 Win32 callee. CRT and Vorbis C APIs use
 /// caller cleanup. Keep this table explicit so an unknown signature cannot silently corrupt ESP.
 fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
+    if group == "crt" && name == "_CxxThrowException" {
+        return 8;
+    }
     if group == "com" {
         // COM methods use stdcall on x86, with `this` included in the callee-popped
         // argument list. Keep the shared IUnknown entries here; graphics and input
@@ -371,19 +422,9 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             | "GetForegroundWindow"
             | "GetDesktopWindow"
             | "GetActiveWindow" => Some(0),
-            "GetCursorPos"
-            | "GetSystemMetrics"
-            | "GetAsyncKeyState"
-            | "GetKeyboardType"
-            | "GetKeyboardLayout"
-            | "IsRectEmpty"
-            | "GetKeyState"
-            | "IsIconic"
-            | "IsZoomed"
-            | "ClipCursor"
-            | "DestroyWindow"
-            | "CharUpperA"
-            | "CharLowerA" => Some(1),
+            "GetCursorPos" | "GetSystemMetrics" | "GetAsyncKeyState" | "GetKeyboardType"
+            | "GetKeyboardLayout" | "IsRectEmpty" | "GetKeyState" | "IsIconic" | "IsZoomed"
+            | "ClipCursor" | "DestroyWindow" | "CharUpperA" | "CharLowerA" => Some(1),
             "GetWindowLongA"
             | "GetWindowThreadProcessId"
             | "GetWindowPlacement"
@@ -395,13 +436,8 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             | "SetWindowTextA"
             | "GetPropA"
             | "RemovePropA" => Some(2),
-            "SetWindowLongA"
-            | "SetPropA"
-            | "IntersectRect"
-            | "SubtractRect"
-            | "MapVirtualKeyExA"
-            | "GetKeyNameTextA"
-            | "GetKeyNameTextW" => Some(3),
+            "SetWindowLongA" | "SetPropA" | "IntersectRect" | "SubtractRect"
+            | "MapVirtualKeyExA" | "GetKeyNameTextA" | "GetKeyNameTextW" => Some(3),
             "SetWindowsHookExA"
             | "PostMessageA"
             | "PostMessageW"
@@ -430,13 +466,212 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
     }
     let signatures: &[(&[&str], u64)] = match group {
         "kernel32" => &[
-            (&["GetOEMCP", "GetACP", "GetTickCount", "GetLastError", "GetCurrentThread", "GetCurrentThreadId", "GetUserDefaultLCID", "GetCurrentProcessId", "GetSystemDefaultLCID", "GetEnvironmentStrings", "GetEnvironmentStringsW", "GetCurrentProcess", "GetProcessHeap", "GetConsoleCP", "GetConsoleOutputCP", "GetVersion", "TlsAlloc", "GetCommandLineA"], 0),
-            (&["IsValidCodePage", "GetModuleHandleA", "GetModuleHandleW", "LoadLibraryA", "LoadLibraryW", "CloseHandle", "LocalFree", "GetThreadPriority", "Sleep", "SetLastError", "DeleteFileA", "GetFileAttributesA", "FreeLibrary", "OutputDebugStringA", "GetLocalTime", "SetCurrentDirectoryA", "GetSystemTimeAsFileTime", "QueryPerformanceCounter", "QueryPerformanceFrequency", "EncodePointer", "DecodePointer", "EncodeSystemPointer", "DecodeSystemPointer", "GetFileType", "GetStdHandle", "SetHandleCount", "FlushFileBuffers", "SetUnhandledExceptionFilter", "TlsGetValue", "TlsFree", "FlsAlloc", "FlsFree", "FlsGetValue", "GetStartupInfoA", "GetStartupInfoW", "GetVersionExA", "GetVersionExW", "FindClose", "GetDriveTypeA", "LockResource", "UnmapViewOfFile", "GetSystemInfo", "IsProcessorFeaturePresent", "ReleaseMutex", "FreeEnvironmentStringsA", "FreeEnvironmentStringsW", "UnhandledExceptionFilter", "HeapDestroy", "ExitProcess", "GetTimeZoneInformation", "SetEndOfFile", "GlobalMemoryStatus", "DeleteCriticalSection", "SuspendThread", "ResumeThread", "LeaveCriticalSection", "EnterCriticalSection", "InitializeCriticalSection", "DisableThreadLibraryCalls", "lstrlenA", "lstrlenW", "InterlockedIncrement", "InterlockedDecrement"], 1),
-            (&["GetCPInfo", "GetFileSize", "GetProcAddress", "WaitForSingleObject", "SetStdHandle", "SetErrorMode", "GetSystemDirectoryA", "SetConsoleCtrlHandler", "SetEnvironmentVariableA", "lstrcatA", "LoadResource", "FatalAppExitA", "CreateDirectoryA", "GetLogicalDriveStringsA", "EnumSystemLocalesA", "GetCurrentDirectoryA", "lstrcpyA", "FindFirstFileA", "FindNextFileA", "SetCursorPos", "InitializeCriticalSectionAndSpinCount", "TlsSetValue", "FlsSetValue", "SetThreadPriority", "LocalAlloc", "GlobalAlloc", "GetConsoleMode", "TerminateProcess", "InterlockedExchange", "InterlockedExchange64", "InterlockedExchangeAdd", "InterlockedExchangeAdd64", "InterlockedExchangePointer", "FreeLibraryAndExitThread", "IsBadWritePtr", "IsBadReadPtr"], 2),
-            (&["VirtualQuery", "ReleaseSemaphore", "CreateMutexA", "GetModuleFileNameA", "GetModuleFileNameW", "VirtualFree", "HeapCreate", "HeapSize", "HeapFree", "SizeofResource", "HeapAlloc"], 3),
-            (&["VirtualProtect", "WaitForSingleObjectEx", "CreateSemaphoreA", "CreateEventA", "SetFilePointer", "GetLocaleInfoA", "GetLocaleInfoW", "GetEnvironmentVariableA", "GetEnvironmentVariableW", "VirtualAlloc", "HeapReAlloc", "GetFullPathNameA", "GetOverlappedResult", "GetPrivateProfileIntA", "GetPrivateProfileIntW", "RtlUnwind", "RaiseException"], 4),
-            (&["GetStringTypeA", "GetStringTypeW", "ReadFile", "WriteFile", "WriteConsoleW", "ReadConsoleW", "MapViewOfFile", "GetDiskFreeSpaceA", "ReadFileEx", "WriteFileEx"], 5),
-            (&["CreateThread", "MultiByteToWideChar", "LCMapStringA", "LCMapStringW", "CreateFileMappingA", "CompareStringA", "CompareStringW", "GetDateFormatA", "GetTimeFormatA"], 6),
+            (
+                &[
+                    "GetOEMCP",
+                    "GetACP",
+                    "GetTickCount",
+                    "GetLastError",
+                    "GetCurrentThread",
+                    "GetCurrentThreadId",
+                    "GetUserDefaultLCID",
+                    "GetCurrentProcessId",
+                    "GetSystemDefaultLCID",
+                    "GetEnvironmentStrings",
+                    "GetEnvironmentStringsW",
+                    "GetCurrentProcess",
+                    "GetProcessHeap",
+                    "GetConsoleCP",
+                    "GetConsoleOutputCP",
+                    "GetVersion",
+                    "TlsAlloc",
+                    "GetCommandLineA",
+                ],
+                0,
+            ),
+            (
+                &[
+                    "IsValidCodePage",
+                    "GetModuleHandleA",
+                    "GetModuleHandleW",
+                    "LoadLibraryA",
+                    "LoadLibraryW",
+                    "CloseHandle",
+                    "LocalFree",
+                    "GetThreadPriority",
+                    "Sleep",
+                    "SetLastError",
+                    "DeleteFileA",
+                    "GetFileAttributesA",
+                    "FreeLibrary",
+                    "OutputDebugStringA",
+                    "GetLocalTime",
+                    "SetErrorMode",
+                    "SetCurrentDirectoryA",
+                    "GetSystemTimeAsFileTime",
+                    "QueryPerformanceCounter",
+                    "QueryPerformanceFrequency",
+                    "EncodePointer",
+                    "DecodePointer",
+                    "EncodeSystemPointer",
+                    "DecodeSystemPointer",
+                    "GetFileType",
+                    "GetStdHandle",
+                    "SetHandleCount",
+                    "FlushFileBuffers",
+                    "SetUnhandledExceptionFilter",
+                    "TlsGetValue",
+                    "TlsFree",
+                    "FlsAlloc",
+                    "FlsFree",
+                    "FlsGetValue",
+                    "GetStartupInfoA",
+                    "GetStartupInfoW",
+                    "GetVersionExA",
+                    "GetVersionExW",
+                    "FindClose",
+                    "GetDriveTypeA",
+                    "LockResource",
+                    "UnmapViewOfFile",
+                    "GetSystemInfo",
+                    "IsProcessorFeaturePresent",
+                    "ReleaseMutex",
+                    "FreeEnvironmentStringsA",
+                    "FreeEnvironmentStringsW",
+                    "UnhandledExceptionFilter",
+                    "HeapDestroy",
+                    "ExitProcess",
+                    "GetTimeZoneInformation",
+                    "SetEndOfFile",
+                    "GlobalMemoryStatus",
+                    "DeleteCriticalSection",
+                    "SuspendThread",
+                    "ResumeThread",
+                    "LeaveCriticalSection",
+                    "EnterCriticalSection",
+                    "InitializeCriticalSection",
+                    "DisableThreadLibraryCalls",
+                    "lstrlenA",
+                    "lstrlenW",
+                    "InterlockedIncrement",
+                    "InterlockedDecrement",
+                    "RemoveVectoredExceptionHandler",
+                    "RemoveVectoredContinueHandler",
+                ],
+                1,
+            ),
+            (
+                &[
+                    "GetCPInfo",
+                    "GetFileSize",
+                    "GetProcAddress",
+                    "WaitForSingleObject",
+                    "SetStdHandle",
+                    "SetThreadErrorMode",
+                    "GetSystemDirectoryA",
+                    "SetConsoleCtrlHandler",
+                    "SetEnvironmentVariableA",
+                    "lstrcatA",
+                    "LoadResource",
+                    "FatalAppExitA",
+                    "CreateDirectoryA",
+                    "GetLogicalDriveStringsA",
+                    "EnumSystemLocalesA",
+                    "GetCurrentDirectoryA",
+                    "lstrcpyA",
+                    "FindFirstFileA",
+                    "FindNextFileA",
+                    "SetCursorPos",
+                    "InitializeCriticalSectionAndSpinCount",
+                    "TlsSetValue",
+                    "FlsSetValue",
+                    "SetThreadPriority",
+                    "LocalAlloc",
+                    "GlobalAlloc",
+                    "GetConsoleMode",
+                    "TerminateProcess",
+                    "InterlockedExchange",
+                    "InterlockedExchange64",
+                    "InterlockedExchangeAdd",
+                    "InterlockedExchangeAdd64",
+                    "InterlockedExchangePointer",
+                    "FreeLibraryAndExitThread",
+                    "IsBadWritePtr",
+                    "IsBadReadPtr",
+                ],
+                2,
+            ),
+            (
+                &["AddVectoredExceptionHandler", "AddVectoredContinueHandler"],
+                2,
+            ),
+            (
+                &[
+                    "VirtualQuery",
+                    "ReleaseSemaphore",
+                    "CreateMutexA",
+                    "GetModuleFileNameA",
+                    "GetModuleFileNameW",
+                    "VirtualFree",
+                    "HeapCreate",
+                    "HeapSize",
+                    "HeapFree",
+                    "SizeofResource",
+                    "HeapAlloc",
+                ],
+                3,
+            ),
+            (
+                &[
+                    "VirtualProtect",
+                    "WaitForSingleObjectEx",
+                    "CreateSemaphoreA",
+                    "CreateEventA",
+                    "SetFilePointer",
+                    "GetLocaleInfoA",
+                    "GetLocaleInfoW",
+                    "GetEnvironmentVariableA",
+                    "GetEnvironmentVariableW",
+                    "VirtualAlloc",
+                    "HeapReAlloc",
+                    "GetFullPathNameA",
+                    "GetOverlappedResult",
+                    "GetPrivateProfileIntA",
+                    "GetPrivateProfileIntW",
+                    "RtlUnwind",
+                    "RaiseException",
+                ],
+                4,
+            ),
+            (
+                &[
+                    "GetStringTypeA",
+                    "GetStringTypeW",
+                    "ReadFile",
+                    "WriteFile",
+                    "WriteConsoleW",
+                    "ReadConsoleW",
+                    "MapViewOfFile",
+                    "GetDiskFreeSpaceA",
+                    "ReadFileEx",
+                    "WriteFileEx",
+                ],
+                5,
+            ),
+            (
+                &[
+                    "CreateThread",
+                    "MultiByteToWideChar",
+                    "LCMapStringA",
+                    "LCMapStringW",
+                    "CreateFileMappingA",
+                    "CompareStringA",
+                    "CompareStringW",
+                    "GetDateFormatA",
+                    "GetTimeFormatA",
+                ],
+                6,
+            ),
             (&["CreateFileA", "CreateFileW"], 7),
             (&["WideCharToMultiByte", "GetVolumeInformationA"], 8),
         ],
@@ -448,41 +683,240 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             (&["RegCreateKeyExA"], 9),
         ],
         "user32" => &[
-            (&["ReleaseCapture", "PostQuitMessage", "SetCursor", "ShowCursor", "SetCapture", "UpdateWindow", "GetKeyState", "SetForegroundWindow", "DispatchMessageA", "TranslateMessage", "SetFocus", "GetMenu", "GetKeyboardLayout", "SetCursorPos", "UnhookWindowsHookEx", "RegisterWindowMessageA", "RegisterWindowMessageW", "RegisterClassA", "RegisterClassW", "RegisterClassExA", "RegisterClassExW"], 1),
-            (&["GetWindowLongA", "ShowWindow", "LoadIconA", "LoadCursorA", "GetWindowPlacement", "GetDlgItem", "GetWindowRect", "GetClientRect", "FindWindowA", "EndDialog", "MapVirtualKeyA", "ClientToScreen", "SetWindowTextA"], 2),
+            (
+                &[
+                    "ReleaseCapture",
+                    "PostQuitMessage",
+                    "SetCursor",
+                    "ShowCursor",
+                    "SetCapture",
+                    "UpdateWindow",
+                    "GetKeyState",
+                    "SetForegroundWindow",
+                    "DispatchMessageA",
+                    "TranslateMessage",
+                    "SetFocus",
+                    "GetMenu",
+                    "GetKeyboardLayout",
+                    "SetCursorPos",
+                    "UnhookWindowsHookEx",
+                    "RegisterWindowMessageA",
+                    "RegisterWindowMessageW",
+                    "RegisterClassA",
+                    "RegisterClassW",
+                    "RegisterClassExA",
+                    "RegisterClassExW",
+                ],
+                1,
+            ),
+            (
+                &[
+                    "GetWindowLongA",
+                    "ShowWindow",
+                    "LoadIconA",
+                    "LoadCursorA",
+                    "GetWindowPlacement",
+                    "GetDlgItem",
+                    "GetWindowRect",
+                    "GetClientRect",
+                    "FindWindowA",
+                    "EndDialog",
+                    "MapVirtualKeyA",
+                    "ClientToScreen",
+                    "SetWindowTextA",
+                ],
+                2,
+            ),
             (&["AdjustWindowRect"], 3),
-            (&["AdjustWindowRectEx", "SystemParametersInfoA", "SetTimer", "DefWindowProcA", "SendMessageA", "MessageBoxA", "SetWindowsHookExA", "SetWindowsHookExW", "CallNextHookEx"], 4),
+            (
+                &[
+                    "AdjustWindowRectEx",
+                    "SystemParametersInfoA",
+                    "SetTimer",
+                    "DefWindowProcA",
+                    "SendMessageA",
+                    "MessageBoxA",
+                    "SetWindowsHookExA",
+                    "SetWindowsHookExW",
+                    "CallNextHookEx",
+                ],
+                4,
+            ),
             (&["PeekMessageA", "DialogBoxParamA"], 5),
             (&["SetWindowLongA"], 3),
             (&["SetWindowPos"], 7),
             (&["CreateWindowExA"], 12),
         ],
-        "ole32" => &[( &["CoCreateInstance", "CoGetClassObject"], 5), (&["CoInitializeEx"], 2), (&["CoInitialize"], 1), (&["CoUninitialize"], 0)],
-        "d3d9" => &[( &["Direct3DCreate9"], 1)],
-        "dinput8" => &[( &["DirectInput8Create"], 5)],
-        "ddraw" => &[( &["DirectDrawCreateEx"], 4)],
-        "dsound" => &[( &["#11"], 3)],
-        "gdi32" => &[( &["DeleteObject"], 1)],
-        "winmm" => &[( &["timeBeginPeriod", "timeEndPeriod"], 1), (&["timeGetDevCaps"], 2)],
+        "ole32" => &[
+            (&["CoCreateInstance", "CoGetClassObject"], 5),
+            (&["CoInitializeEx"], 2),
+            (&["CoInitialize"], 1),
+            (&["CoUninitialize"], 0),
+        ],
+        "d3d9" => &[(&["Direct3DCreate9"], 1)],
+        "dinput8" => &[(&["DirectInput8Create"], 5)],
+        "ddraw" => &[(&["DirectDrawCreateEx"], 4)],
+        "dsound" => &[(&["#11"], 3)],
+        "gdi32" => &[(&["DeleteObject"], 1)],
+        "winmm" => &[
+            (&["timeBeginPeriod", "timeEndPeriod"], 1),
+            (&["timeGetDevCaps"], 2),
+        ],
         "com" => &[
-            (&["IDirectDraw7::QueryInterface", "IDirectSound8::QueryInterface", "IDirectSoundBuffer8::QueryInterface"], 3),
-            (&["IDirectDraw7::AddRef", "IDirectDraw7::Release", "IDirectDraw7::Compact", "IDirectDraw7::FlipToGDISurface", "IDirectDraw7::RestoreDisplayMode", "IDirectDraw7::RestoreAllSurfaces", "IDirectDraw7::TestCooperativeLevel"], 1),
-            (&["IDirectDraw7::GetDisplayMode", "IDirectDraw7::GetGDISurface", "IDirectDraw7::GetMonitorFrequency", "IDirectDraw7::GetScanLine", "IDirectDraw7::GetVerticalBlankStatus", "IDirectDraw7::Initialize"], 2),
-            (&["IDirectDraw7::GetFourCCCodes", "IDirectDraw7::SetCooperativeLevel", "IDirectDraw7::GetSurfaceFromDC", "IDirectDraw7::GetDeviceIdentifier", "IDirectDraw7::EvaluateMode", "IDirectDraw7::DuplicateSurface", "IDirectDraw7::GetCaps", "IDirectDraw7::WaitForVerticalBlank"], 3),
-            (&["IDirectDraw7::CreateClipper", "IDirectDraw7::CreateSurface", "IDirectDraw7::GetAvailableVidMem", "IDirectDraw7::StartModeTest"], 4),
-            (&["IDirectDraw7::EnumDisplayModes", "IDirectDraw7::EnumSurfaces", "IDirectDraw7::CreatePalette"], 5),
+            (
+                &[
+                    "IDirectDraw7::QueryInterface",
+                    "IDirectSound8::QueryInterface",
+                    "IDirectSoundBuffer8::QueryInterface",
+                    "IDirectSound3DListener::QueryInterface",
+                ],
+                3,
+            ),
+            (
+                &[
+                    "IDirectDraw7::AddRef",
+                    "IDirectDraw7::Release",
+                    "IDirectDraw7::Compact",
+                    "IDirectDraw7::FlipToGDISurface",
+                    "IDirectDraw7::RestoreDisplayMode",
+                    "IDirectDraw7::RestoreAllSurfaces",
+                    "IDirectDraw7::TestCooperativeLevel",
+                ],
+                1,
+            ),
+            (
+                &[
+                    "IDirectDraw7::GetDisplayMode",
+                    "IDirectDraw7::GetGDISurface",
+                    "IDirectDraw7::GetMonitorFrequency",
+                    "IDirectDraw7::GetScanLine",
+                    "IDirectDraw7::GetVerticalBlankStatus",
+                    "IDirectDraw7::Initialize",
+                ],
+                2,
+            ),
+            (
+                &[
+                    "IDirectDraw7::GetFourCCCodes",
+                    "IDirectDraw7::SetCooperativeLevel",
+                    "IDirectDraw7::GetSurfaceFromDC",
+                    "IDirectDraw7::GetDeviceIdentifier",
+                    "IDirectDraw7::EvaluateMode",
+                    "IDirectDraw7::DuplicateSurface",
+                    "IDirectDraw7::GetCaps",
+                    "IDirectDraw7::WaitForVerticalBlank",
+                ],
+                3,
+            ),
+            (
+                &[
+                    "IDirectDraw7::CreateClipper",
+                    "IDirectDraw7::CreateSurface",
+                    "IDirectDraw7::GetAvailableVidMem",
+                    "IDirectDraw7::StartModeTest",
+                ],
+                4,
+            ),
+            (
+                &[
+                    "IDirectDraw7::EnumDisplayModes",
+                    "IDirectDraw7::EnumSurfaces",
+                    "IDirectDraw7::CreatePalette",
+                ],
+                5,
+            ),
             (&["IDirectDraw7::SetDisplayMode"], 6),
-            (&["IDirectSound8::AddRef", "IDirectSound8::Release", "IDirectSound8::Compact"], 1),
-            (&["IDirectSoundBuffer8::AddRef", "IDirectSoundBuffer8::Release", "IDirectSoundBuffer8::Stop", "IDirectSoundBuffer8::Restore"], 1),
-            (&["IDirectSound8::GetCaps", "IDirectSound8::GetSpeakerConfig", "IDirectSound8::SetSpeakerConfig", "IDirectSound8::Initialize", "IDirectSound8::VerifyCertification"], 2),
-            (&["IDirectSound8::DuplicateSoundBuffer", "IDirectSound8::SetCooperativeLevel"], 3),
+            (
+                &[
+                    "IDirectSound8::AddRef",
+                    "IDirectSound8::Release",
+                    "IDirectSound8::Compact",
+                    "IDirectSound3DListener::AddRef",
+                    "IDirectSound3DListener::Release",
+                    "IDirectSound3DListener::CommitDeferredSettings",
+                ],
+                1,
+            ),
+            (
+                &[
+                    "IDirectSoundBuffer8::AddRef",
+                    "IDirectSoundBuffer8::Release",
+                    "IDirectSoundBuffer8::Stop",
+                    "IDirectSoundBuffer8::Restore",
+                ],
+                1,
+            ),
+            (
+                &[
+                    "IDirectSound8::GetCaps",
+                    "IDirectSound8::GetSpeakerConfig",
+                    "IDirectSound8::SetSpeakerConfig",
+                    "IDirectSound8::Initialize",
+                    "IDirectSound8::VerifyCertification",
+                    "IDirectSound3DListener::GetAllParameters",
+                    "IDirectSound3DListener::GetDistanceFactor",
+                    "IDirectSound3DListener::GetDopplerFactor",
+                    "IDirectSound3DListener::GetPosition",
+                    "IDirectSound3DListener::GetRolloffFactor",
+                    "IDirectSound3DListener::GetVelocity",
+                ],
+                2,
+            ),
+            (
+                &[
+                    "IDirectSound8::DuplicateSoundBuffer",
+                    "IDirectSound8::SetCooperativeLevel",
+                    "IDirectSound3DListener::GetOrientation",
+                    "IDirectSound3DListener::SetAllParameters",
+                    "IDirectSound3DListener::SetDistanceFactor",
+                    "IDirectSound3DListener::SetDopplerFactor",
+                    "IDirectSound3DListener::SetRolloffFactor",
+                ],
+                3,
+            ),
             (&["IDirectSound8::CreateSoundBuffer"], 4),
-            (&["IDirectSoundBuffer8::GetCaps", "IDirectSoundBuffer8::GetVolume", "IDirectSoundBuffer8::GetPan", "IDirectSoundBuffer8::GetFrequency", "IDirectSoundBuffer8::GetStatus", "IDirectSoundBuffer8::SetCurrentPosition", "IDirectSoundBuffer8::SetFormat", "IDirectSoundBuffer8::SetVolume", "IDirectSoundBuffer8::SetPan", "IDirectSoundBuffer8::SetFrequency"], 2),
-            (&["IDirectSoundBuffer8::GetCurrentPosition", "IDirectSoundBuffer8::Initialize"], 3),
-            (&["IDirectSoundBuffer8::GetFormat", "IDirectSoundBuffer8::Play", "IDirectSoundBuffer8::SetFX", "IDirectSoundBuffer8::AcquireResources"], 4),
+            (
+                &[
+                    "IDirectSoundBuffer8::GetCaps",
+                    "IDirectSoundBuffer8::GetVolume",
+                    "IDirectSoundBuffer8::GetPan",
+                    "IDirectSoundBuffer8::GetFrequency",
+                    "IDirectSoundBuffer8::GetStatus",
+                    "IDirectSoundBuffer8::SetCurrentPosition",
+                    "IDirectSoundBuffer8::SetFormat",
+                    "IDirectSoundBuffer8::SetVolume",
+                    "IDirectSoundBuffer8::SetPan",
+                    "IDirectSoundBuffer8::SetFrequency",
+                ],
+                2,
+            ),
+            (
+                &[
+                    "IDirectSoundBuffer8::GetCurrentPosition",
+                    "IDirectSoundBuffer8::Initialize",
+                ],
+                3,
+            ),
+            (
+                &[
+                    "IDirectSoundBuffer8::GetFormat",
+                    "IDirectSoundBuffer8::Play",
+                    "IDirectSoundBuffer8::SetFX",
+                    "IDirectSoundBuffer8::AcquireResources",
+                ],
+                4,
+            ),
             (&["IDirectSoundBuffer8::Unlock"], 5),
             (&["IDirectSoundBuffer8::Lock"], 8),
             (&["IDirectSoundBuffer8::GetObjectInPath"], 5),
+            (
+                &[
+                    "IDirectSound3DListener::SetPosition",
+                    "IDirectSound3DListener::SetVelocity",
+                ],
+                5,
+            ),
+            (&["IDirectSound3DListener::SetOrientation"], 8),
         ],
         _ => &[],
     };
@@ -505,6 +939,14 @@ impl Process {
             mem,
             vfs,
             modules: Vec::new(),
+            dynamic_function_tables: Vec::new(),
+            vectored_exception_handlers: Vec::new(),
+            vectored_continue_handlers: Vec::new(),
+            next_vectored_exception_handle: 0x7000_0000,
+            top_level_exception_filter: 0,
+            module_dependencies: HashMap::new(),
+            initialized_dlls: HashSet::new(),
+            initializing_dlls: HashSet::new(),
             thunks: Vec::new(),
             thunk_index: HashMap::new(),
             unimplemented_log: Vec::new(),
@@ -535,6 +977,8 @@ impl Process {
             tls_slots: HashMap::new(),
             current_thread_id: 0x1004,
             next_thread_id: 0x1008,
+            current_teb_base: TEB_ADDR,
+            guest_exception_depths: HashMap::new(),
             current_thread_is_guest: false,
             current_thread_state: ThreadState::Running,
             current_wait_order: 0,
@@ -544,6 +988,8 @@ impl Process {
             schedule_requested: false,
             wait_sequence: 0,
             quantum_used: 0,
+            shared_cpu_quantum_used: HashMap::new(),
+            shared_context_handoff: None,
             retired_instructions: 0,
             active_run_budget: None,
             srw_locks: HashMap::new(),
@@ -555,7 +1001,12 @@ impl Process {
             rng: 0x2545_F491_4F6C_DD1D,
             trace_imports: false,
             trace_modules_only: false,
+            trace_gta_eventvol: false,
+            trace_particle_txd: false,
+            trace_particle_texture_index: 0,
+            trace_gta_copy_watch: None,
             trace_recent_guest: VecDeque::with_capacity(128),
+            trace_recent_x86_ip: VecDeque::with_capacity(128),
             nested: 0,
             skip_ret: false,
             yield_request: None,
@@ -688,7 +1139,11 @@ impl Process {
     }
 
     pub fn set_last_error(&mut self, e: u32) {
-        let offset = if self.cpu.mode == CpuMode::X86_32 { 0x34 } else { 0x68 };
+        let offset = if self.cpu.mode == CpuMode::X86_32 {
+            0x34
+        } else {
+            0x68
+        };
         let _ = self.mem.write_u32(TEB_ADDR + offset, e);
     }
 
@@ -705,6 +1160,74 @@ impl Process {
             .saturating_add(ticks.saturating_mul(10));
     }
 
+    fn allocate_guest_thread_teb(
+        &mut self,
+        thread_id: u32,
+        stack_base: u64,
+        stack_limit: u64,
+        tls_vector: u64,
+    ) -> Result<u64, Stop> {
+        if self.cpu.mode == CpuMode::X86_32 {
+            return Ok(TEB_ADDR);
+        }
+        let page_size = 0x1000u64;
+        let mut bytes = self
+            .mem
+            .read_vec(TEB_ADDR, page_size as usize)
+            .map_err(|error| Stop::Crash(format!("read coordinator TEB: {error:?}")))?;
+        let teb_base = self
+            .try_alloc_virtual(page_size, PROT_RW)
+            .ok_or_else(|| Stop::Crash("guest allocation failed while allocating thread TEB".into()))?;
+        let process_id = self.rd64(TEB_ADDR + 0x40)?;
+        bytes[0x00..0x08].copy_from_slice(&u64::MAX.to_le_bytes());
+        bytes[0x08..0x10].copy_from_slice(&stack_base.to_le_bytes());
+        bytes[0x10..0x18].copy_from_slice(&stack_limit.to_le_bytes());
+        bytes[0x30..0x38].copy_from_slice(&teb_base.to_le_bytes());
+        bytes[0x40..0x48].copy_from_slice(&process_id.to_le_bytes());
+        bytes[0x48..0x50].copy_from_slice(&(thread_id as u64).to_le_bytes());
+        bytes[0x58..0x60].copy_from_slice(&tls_vector.to_le_bytes());
+        bytes[0x60..0x68].copy_from_slice(&PEB_ADDR.to_le_bytes());
+        bytes[0x68..0x6c].copy_from_slice(&0u32.to_le_bytes());
+
+        if let Err(error) = self.mem.write_force(teb_base, &bytes) {
+            self.mem.unmap(teb_base, page_size);
+            self.vmem.remove(&teb_base);
+            return Err(Stop::Crash(format!(
+                "initialize guest TEB page at {teb_base:#x}: {error:?}"
+            )));
+        }
+        Ok(teb_base)
+    }
+
+    fn copy_teb_page(&mut self, source: u64, destination: u64) -> Result<(), Stop> {
+        if source == destination {
+            return Ok(());
+        }
+        let bytes = self
+            .mem
+            .read_vec(source, 0x1000)
+            .map_err(|error| Stop::Crash(format!("read guest TEB at {source:#x}: {error:?}")))?;
+        self.mem
+            .write_force(destination, &bytes)
+            .map_err(|error| Stop::Crash(format!("write guest TEB at {destination:#x}: {error:?}")))
+    }
+
+    fn sync_current_teb_to_backing(&mut self) -> Result<(), Stop> {
+        self.copy_teb_page(TEB_ADDR, self.current_teb_base)?;
+        if self.current_teb_base != TEB_ADDR && self.cpu.mode == CpuMode::X86_64 {
+            self.wr64(self.current_teb_base + 0x30, self.current_teb_base)?;
+        }
+        Ok(())
+    }
+
+    fn load_teb_backing_into_alias(&mut self, teb_base: u64) -> Result<(), Stop> {
+        self.copy_teb_page(teb_base, TEB_ADDR)?;
+        if teb_base != TEB_ADDR && self.cpu.mode == CpuMode::X86_64 {
+            self.wr64(TEB_ADDR + 0x30, TEB_ADDR)?;
+        }
+        Ok(())
+    }
+
     pub fn create_guest_thread(
         &mut self,
         id: u32,
@@ -712,7 +1235,9 @@ impl Process {
         parameter: u64,
         suspended: bool,
     ) -> Result<(), Stop> {
-        let stack_limit = self.alloc_virtual(0x10000, PROT_RW);
+        let stack_limit = self
+            .try_alloc_virtual(0x10000, PROT_RW)
+            .ok_or_else(|| Stop::Crash("guest allocation failed while allocating thread stack".into()))?;
         let stack_base = stack_limit + 0x10000;
         let stack_pointer = stack_base - 8;
         self.wrptr(stack_pointer, THREAD_RETURN_MAGIC)?;
@@ -728,6 +1253,12 @@ impl Process {
             cpu.gs_base = TEB_ADDR;
         }
         let teb_tls_vector = self.build_static_tls_vector()?;
+        let teb_base = self.allocate_guest_thread_teb(
+            id,
+            stack_base,
+            stack_limit,
+            teb_tls_vector,
+        )?;
         let state = if suspended {
             ThreadState::Suspended
         } else {
@@ -739,6 +1270,8 @@ impl Process {
                 cpu,
                 stack_base,
                 stack_limit,
+                teb_base,
+                exception_list: u32::MAX as u64,
                 teb_tls_vector,
                 last_error: 0,
                 tls: HashMap::new(),
@@ -778,6 +1311,219 @@ impl Process {
         self.schedule_requested = true;
     }
 
+    /// Runnable contexts in coordinator scheduling order, with the active context first.
+    /// Blocked, suspended, exited, and stale ready-queue entries are omitted.
+    pub fn shared_cpu_runnable_context_ids(&self) -> Vec<u32> {
+        let active = (!self.current_thread_saved
+            && !self.schedule_requested
+            && self.current_thread_state == ThreadState::Running
+            && self.quantum_used < THREAD_QUANTUM)
+            .then_some(self.current_thread_id);
+        // PE32 threads still use the legacy fixed TEB alias. Keep their shared-worker execution
+        // serialized until each PE32 thread has independent segment-base storage.
+        if self.cpu.mode == CpuMode::X86_32 {
+            return active.into_iter().collect();
+        }
+        let mut ids = Vec::new();
+        if let Some(id) = active {
+            ids.push(id);
+        }
+
+        for id in &self.ready_threads {
+            if Some(*id) == active || ids.contains(id) {
+                continue;
+            }
+            if self.shared_cpu_context_quantum_remaining(*id) != 0 {
+                ids.push(*id);
+            }
+        }
+        ids
+    }
+
+    /// Remaining instructions in this context's current scheduler quantum.
+    pub fn shared_cpu_context_quantum_remaining(&self, thread_id: u32) -> u64 {
+        if !self.current_thread_saved
+            && !self.schedule_requested
+            && self.current_thread_id == thread_id
+            && self.current_thread_state == ThreadState::Running
+        {
+            return THREAD_QUANTUM.saturating_sub(self.quantum_used);
+        }
+        if self
+            .guest_threads
+            .get(&thread_id)
+            .is_some_and(|thread| thread.state == ThreadState::Ready)
+        {
+            return THREAD_QUANTUM.saturating_sub(
+                self.shared_cpu_quantum_used
+                    .get(&thread_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        }
+        0
+    }
+
+    /// Retired guest instructions for an active or saved context.
+    pub fn shared_cpu_context_instruction_count(&self, thread_id: u32) -> Option<u64> {
+        if !self.current_thread_saved && self.current_thread_id == thread_id {
+            Some(self.cpu.icount)
+        } else {
+            self.guest_threads
+                .get(&thread_id)
+                .map(|thread| thread.cpu.icount)
+        }
+    }
+
+    /// TEB backing used when exporting a context to a shared CPU worker.
+    pub fn shared_cpu_context_teb_base(&self, thread_id: u32) -> Option<u64> {
+        if !self.current_thread_saved && self.current_thread_id == thread_id {
+            Some(self.current_teb_base)
+        } else {
+            self.guest_threads
+                .get(&thread_id)
+                .map(|thread| thread.teb_base)
+        }
+    }
+
+    /// Publish coordinator-written TEB fields into the guest-visible per-thread page.
+    pub fn sync_shared_cpu_context_teb(&mut self, thread_id: u32) -> Result<bool, Stop> {
+        if !self.current_thread_saved && self.current_thread_id == thread_id {
+            self.sync_current_teb_to_backing()?;
+            Ok(true)
+        } else {
+            Ok(self.guest_threads.contains_key(&thread_id))
+        }
+    }
+
+    /// Load a worker-written active TEB page into the fixed coordinator HLE alias.
+    pub fn sync_shared_cpu_context_alias(&mut self, thread_id: u32) -> Result<bool, Stop> {
+        if !self.current_thread_saved && self.current_thread_id == thread_id {
+            self.load_teb_backing_into_alias(self.current_teb_base)?;
+            Ok(true)
+        } else {
+            Ok(self.guest_threads.contains_key(&thread_id))
+        }
+    }
+
+    /// Account a completed worker slice against the owning thread and process exactly once.
+    pub fn account_shared_cpu_context_retired(&mut self, thread_id: u32, retired: u64) {
+        self.retired_instructions = self.retired_instructions.saturating_add(retired);
+        if !self.current_thread_saved
+            && self.current_thread_id == thread_id
+            && self.current_thread_state == ThreadState::Running
+        {
+            self.quantum_used = self.quantum_used.saturating_add(retired);
+        } else if self
+            .guest_threads
+            .get(&thread_id)
+            .is_some_and(|thread| thread.state == ThreadState::Ready)
+        {
+            let used = self.shared_cpu_quantum_used.entry(thread_id).or_default();
+            *used = used.saturating_add(retired).min(THREAD_QUANTUM);
+        }
+    }
+
+    /// Temporarily make a completed saved context active for one coordinator-owned HLE/fault turn.
+    /// Returns `false` when the requested context is already active.
+    pub fn begin_shared_context_handoff(&mut self, thread_id: u32) -> Result<bool, Stop> {
+        if self.shared_context_handoff.is_some() {
+            return Err(Stop::Crash(
+                "shared CPU coordinator handoff is already active".into(),
+            ));
+        }
+        if !self.current_thread_saved
+            && self.current_thread_id == thread_id
+            && self.current_thread_state == ThreadState::Running
+        {
+            return Ok(false);
+        }
+        if !self
+            .guest_threads
+            .get(&thread_id)
+            .is_some_and(|thread| thread.state == ThreadState::Ready)
+        {
+            return Err(Stop::Crash(format!(
+                "shared CPU completion for non-runnable thread {thread_id}"
+            )));
+        }
+
+        let previous = if self.current_thread_saved {
+            None
+        } else {
+            let previous_id = self.current_thread_id;
+            let previous_quantum = self.quantum_used;
+            let resume_directly = self.current_thread_state == ThreadState::Running
+                && !self.schedule_requested
+                && previous_quantum < THREAD_QUANTUM;
+            if self.current_thread_state == ThreadState::Running {
+                self.current_thread_state = ThreadState::Ready;
+            }
+            let previous_was_exited = matches!(self.current_thread_state, ThreadState::Exited(_));
+            self.save_current_thread()?;
+            (!previous_was_exited).then_some((previous_id, previous_quantum, resume_directly))
+        };
+
+        let selected_quantum = self
+            .shared_cpu_quantum_used
+            .get(&thread_id)
+            .copied()
+            .unwrap_or(0);
+        self.ready_threads.retain(|id| *id != thread_id);
+        self.restore_thread(thread_id)?;
+        self.quantum_used = selected_quantum;
+        self.schedule_requested = false;
+        self.shared_context_handoff = Some(SharedContextHandoff { previous });
+        Ok(true)
+    }
+
+    /// Save the serviced context and restore the prior active context or resume scheduling.
+    pub fn finish_shared_context_handoff(&mut self) -> Result<(), Stop> {
+        let Some(handoff) = self.shared_context_handoff.take() else {
+            return Err(Stop::Crash(
+                "shared CPU coordinator handoff was not active".into(),
+            ));
+        };
+        if self.exit_code.is_some() {
+            return Ok(());
+        }
+
+        if !self.current_thread_saved {
+            let serviced_id = self.current_thread_id;
+            let serviced_quantum = self.quantum_used;
+            if self.current_thread_state == ThreadState::Running {
+                self.current_thread_state = ThreadState::Ready;
+            }
+            let serviced_ready = self.current_thread_state == ThreadState::Ready;
+            self.save_current_thread()?;
+            if serviced_ready {
+                self.shared_cpu_quantum_used.insert(
+                    serviced_id,
+                    serviced_quantum.min(THREAD_QUANTUM),
+                );
+            }
+        }
+
+        if let Some((previous_id, previous_quantum, resume_directly)) = handoff.previous {
+            if resume_directly
+                && self
+                    .guest_threads
+                    .get(&previous_id)
+                    .is_some_and(|thread| thread.state == ThreadState::Ready)
+            {
+                self.ready_threads.retain(|id| *id != previous_id);
+                self.restore_thread(previous_id)?;
+                self.quantum_used = previous_quantum;
+                self.schedule_requested = false;
+                return Ok(());
+            }
+        }
+
+        self.schedule_requested = true;
+        let _ = self.schedule_thread()?;
+        Ok(())
+    }
+
     fn save_current_thread(&mut self) -> Result<(), Stop> {
         if self.current_thread_saved {
             return Ok(());
@@ -788,6 +1534,7 @@ impl Process {
         if matches!(self.current_thread_state, ThreadState::Exited(_)) {
             return Ok(());
         }
+        self.sync_current_teb_to_backing()?;
         let (stack_base_offset, stack_limit_offset, tls_vector_offset, last_error_offset) =
             if self.cpu.mode == CpuMode::X86_32 {
                 (0x04, 0x08, 0x2c, 0x34)
@@ -798,6 +1545,8 @@ impl Process {
             cpu: self.cpu.clone(),
             stack_base: self.rdptr(TEB_ADDR + stack_base_offset)?,
             stack_limit: self.rdptr(TEB_ADDR + stack_limit_offset)?,
+            teb_base: self.current_teb_base,
+            exception_list: self.rdptr(TEB_ADDR)?,
             teb_tls_vector: self.rdptr(TEB_ADDR + tls_vector_offset)?,
             last_error: self.rd32(TEB_ADDR + last_error_offset)?,
             tls: std::mem::take(&mut self.tls_slots),
@@ -822,6 +1571,9 @@ impl Process {
                 "ready thread {id} has no saved context"
             )));
         };
+        self.shared_cpu_quantum_used.remove(&id);
+        self.current_teb_base = context.teb_base;
+        self.load_teb_backing_into_alias(context.teb_base)?;
         self.cpu = context.cpu;
         self.current_thread_id = id;
         self.current_thread_is_guest = context.is_guest;
@@ -831,6 +1583,7 @@ impl Process {
         self.tls_slots = context.tls;
         self.fls = context.fls;
         if self.cpu.mode == CpuMode::X86_32 {
+            self.wr32(TEB_ADDR, context.exception_list as u32)?;
             self.wr32(TEB_ADDR + 0x04, context.stack_base as u32)?;
             self.wr32(TEB_ADDR + 0x08, context.stack_limit as u32)?;
             self.wr32(TEB_ADDR + 0x2c, context.teb_tls_vector as u32)?;
@@ -839,11 +1592,8 @@ impl Process {
             self.cpu.fs_base = TEB_ADDR;
             self.cpu.gs_base = 0;
         } else {
-            self.wr64(TEB_ADDR + 0x08, context.stack_base)?;
-            self.wr64(TEB_ADDR + 0x10, context.stack_limit)?;
-            self.wr64(TEB_ADDR + 0x58, context.teb_tls_vector)?;
-            self.wr64(TEB_ADDR + 0x48, id as u64)?;
-            self.wr32(TEB_ADDR + 0x68, context.last_error)?;
+            // The x64 TEB page is already thread-owned. Preserve guest-written fields from it
+            // instead of overwriting them with the scheduler's older scalar snapshot.
             self.cpu.gs_base = TEB_ADDR;
             self.cpu.fs_base = 0;
         }
@@ -908,6 +1658,7 @@ impl Process {
 
     pub fn exit_current_guest_thread(&mut self, code: u32) {
         let id = self.current_thread_id;
+        self.shared_cpu_quantum_used.remove(&id);
         self.current_thread_state = ThreadState::Exited(code);
         for handle in self.handles.values_mut() {
             if let Handle::Thread {
@@ -1305,6 +2056,7 @@ impl Process {
             size: 0x10_0000,
             entry: 0,
             is_dll: true,
+            tls_callbacks: Vec::new(),
             exports: HashMap::new(),
             ordinals: HashMap::new(),
             exception_table_rva: 0,
@@ -1367,8 +2119,12 @@ impl Process {
             self.mem
                 .write_u32(self.cpu.gpr[RSP], EXIT_MAGIC as u32)
                 .unwrap();
-            self.mem.write_u32(TEB_ADDR + 0x04, STACK_TOP as u32).unwrap();
-            self.mem.write_u32(TEB_ADDR + 0x08, stack_base as u32).unwrap();
+            self.mem
+                .write_u32(TEB_ADDR + 0x04, STACK_TOP as u32)
+                .unwrap();
+            self.mem
+                .write_u32(TEB_ADDR + 0x08, stack_base as u32)
+                .unwrap();
             self.cpu.fs_base = TEB_ADDR;
             self.cpu.gs_base = 0;
         } else {
@@ -1381,8 +2137,16 @@ impl Process {
             self.cpu.fs_base = 0;
         }
         self.cpu.rip = m.entry;
-        self.cpu.gpr[RCX] = if self.cpu.mode == CpuMode::X86_64 { PEB_ADDR } else { 0 };
+        self.cpu.gpr[RCX] = if self.cpu.mode == CpuMode::X86_64 {
+            PEB_ADDR
+        } else {
+            0
+        };
         self.run_dll_inits(idx)?;
+        self.run_tls_process_attach_callbacks(idx)
+            .map_err(|error| {
+                format!("{}: TLS process-attach callback failed: {error:?}", m.name)
+            })?;
         self.cpu.rip = m.entry;
         Ok(())
     }
@@ -1399,9 +2163,11 @@ impl Process {
         let m = &mut self.mem;
         m.write_u8(PEB_ADDR + 0x02, 0).unwrap(); // BeingDebugged = 0
         if self.cpu.mode == CpuMode::X86_32 {
+            m.write_u32(TEB_ADDR, u32::MAX).unwrap(); // NT_TIB.ExceptionList
             m.write_u32(PEB_ADDR + 0x0c, LDR_ADDR as u32).unwrap();
             m.write_u32(PEB_ADDR + 0x10, PARAMS_ADDR as u32).unwrap();
-            m.write_u32(PEB_ADDR + 0x18, self.heap.process_heap as u32).unwrap();
+            m.write_u32(PEB_ADDR + 0x18, self.heap.process_heap as u32)
+                .unwrap();
             m.write_u32(PEB_ADDR + 0x64, 1).unwrap(); // NumberOfProcessors
             m.write_u32(PEB_ADDR + 0xa4, 10).unwrap(); // Windows 10.0.19045
             m.write_u32(PEB_ADDR + 0xa8, 0).unwrap();
@@ -1416,12 +2182,15 @@ impl Process {
             m.write_u32(LDR_ADDR, 0x30).unwrap();
             m.write_u8(LDR_ADDR + 4, 1).unwrap();
             for off in [0x0cu64, 0x14, 0x1c] {
-                m.write_u32(LDR_ADDR + off, (LDR_ADDR + off) as u32).unwrap();
-                m.write_u32(LDR_ADDR + off + 4, (LDR_ADDR + off) as u32).unwrap();
+                m.write_u32(LDR_ADDR + off, (LDR_ADDR + off) as u32)
+                    .unwrap();
+                m.write_u32(LDR_ADDR + off + 4, (LDR_ADDR + off) as u32)
+                    .unwrap();
             }
             m.write_u32(PARAMS_ADDR, 0x1000).unwrap();
             m.write_u32(PARAMS_ADDR + 4, 0x400).unwrap();
         } else {
+            m.write_u64(TEB_ADDR, u64::MAX).unwrap(); // NT_TIB.ExceptionList
             m.write_u64(PEB_ADDR + 0x18, LDR_ADDR).unwrap();
             m.write_u64(PEB_ADDR + 0x20, PARAMS_ADDR).unwrap();
             m.write_u32(PEB_ADDR + 0xb8, 1).unwrap(); // NumberOfProcessors
@@ -1441,7 +2210,8 @@ impl Process {
             }
             m.write_u32(PARAMS_ADDR, 0x1000).unwrap();
             m.write_u32(PARAMS_ADDR + 4, 0x400).unwrap();
-            m.write_u64(PEB_ADDR + 0x30, self.heap.process_heap).unwrap();
+            m.write_u64(PEB_ADDR + 0x30, self.heap.process_heap)
+                .unwrap();
         }
         self.finish_params();
     }
@@ -1450,9 +2220,15 @@ impl Process {
         let img = self.image_path.clone();
         let cmd = self.cmdline.clone();
         let (strs, handles): ([(u64, &str); 3], [u64; 3]) = if self.cpu.mode == CpuMode::X86_32 {
-            ([(0x38, &img), (0x40, &cmd), (0x28, "C:\\")], [0x18, 0x1c, 0x20])
+            (
+                [(0x38, &img), (0x40, &cmd), (0x28, "C:\\")],
+                [0x18, 0x1c, 0x20],
+            )
         } else {
-            ([(0x60, &img), (0x70, &cmd), (0x38, "C:\\")], [0x20, 0x28, 0x30])
+            (
+                [(0x60, &img), (0x70, &cmd), (0x38, "C:\\")],
+                [0x20, 0x28, 0x30],
+            )
         };
         for (i, (off, s)) in strs.iter().enumerate() {
             let buf = PARAMS_ADDR + 0x400 + (i as u64) * 0x400;
@@ -1503,6 +2279,9 @@ impl Process {
         let runtime_functions = pe
             .runtime_functions()
             .map_err(|error| format!("{path}: {error}"))?;
+        let tls_callback_vas = pe
+            .tls_callbacks()
+            .map_err(|error| format!("{path}: {error}"))?;
         let exception_table_rva = pe.dirs[anywasm_pe::DIR_EXCEPTION].rva;
         let resource_rva = pe.dirs[anywasm_pe::DIR_RESOURCE].rva;
         let resource_size = pe.dirs[anywasm_pe::DIR_RESOURCE].size;
@@ -1512,7 +2291,11 @@ impl Process {
         } else if pe.has_relocs() {
             self.mem
                 .find_free(
-                    if self.cpu.mode == CpuMode::X86_32 { 0x1000_0000 } else { 0x1_8000_0000 },
+                    if self.cpu.mode == CpuMode::X86_32 {
+                        0x1000_0000
+                    } else {
+                        0x1_8000_0000
+                    },
                     size + 0x1_0000,
                 )
                 .ok_or("no address space for image")?
@@ -1522,6 +2305,20 @@ impl Process {
                 pe.image_base
             ));
         };
+        let tls_callbacks = tls_callback_vas
+            .into_iter()
+            .map(|callback| {
+                let rva = callback.checked_sub(pe.image_base).ok_or_else(|| {
+                    format!("{path}: TLS callback address {callback:#x} is below image base")
+                })?;
+                if rva >= pe.size_of_image as u64 {
+                    return Err(format!(
+                        "{path}: TLS callback address {callback:#x} is outside the image"
+                    ));
+                }
+                Ok(base + rva)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         if !self.mem.map(base, size, PROT_RW) {
             return Err(format!("{path}: cannot map {size:#x} bytes at {base:#x}"));
         }
@@ -1600,6 +2397,7 @@ impl Process {
                 0
             },
             is_dll,
+            tls_callbacks,
             exports,
             ordinals,
             exception_table_rva,
@@ -1612,6 +2410,10 @@ impl Process {
         // imports
         for imp in pe.all_imports().map_err(|e| e.to_string())? {
             let provider = self.resolve_dll(&imp.dll)?;
+            let dependencies = self.module_dependencies.entry(idx).or_default();
+            if !dependencies.contains(&provider) {
+                dependencies.push(provider);
+            }
             for e in &imp.entries {
                 let addr = self.bind_import(provider, &imp.dll, &e.name)?;
                 let iat = base + e.iat_rva as u64;
@@ -1630,6 +2432,10 @@ impl Process {
         for (n, fw) in fwd {
             if let Some((dll, func)) = fw.split_once('.') {
                 if let Ok(p) = self.resolve_dll(dll) {
+                    let dependencies = self.module_dependencies.entry(idx).or_default();
+                    if !dependencies.contains(&p) {
+                        dependencies.push(p);
+                    }
                     if let Ok(a) = self.bind_import(
                         p,
                         dll,
@@ -1760,12 +2566,42 @@ impl Process {
                 .vfs
                 .file_len(&f)
                 .ok_or_else(|| format!("indexed DLL disappeared from VFS: {f}"))?;
-            let size = usize::try_from(size).map_err(|_| format!("DLL is too large to load: {f}"))?;
+            let size =
+                usize::try_from(size).map_err(|_| format!("DLL is too large to load: {f}"))?;
             let data = self
                 .vfs
                 .read_range(&f, 0, size)
                 .map_err(|error| format!("could not read DLL {f}: {error:?}"))?;
             return self.load_image(&data, &f, true);
+        }
+        // The Windows API-set CRT contracts are implemented by UCRT. When a package supplies
+        // the real ucrtbase.dll, resolve those contracts to that one module so its locale and
+        // other process-wide CRT state are shared across all API-set imports.
+        if canonical_dll(&base_name(dll)).starts_with("api-ms-win-crt-") {
+            if let Some(i) = self.module_by_name("ucrtbase.dll") {
+                return Ok(i);
+            }
+            let ucrt = crate::vfs::absolute("ucrtbase.dll", &self.current_directory);
+            let file = if self.vfs.exists(&ucrt) {
+                Some(crate::vfs::norm(&ucrt))
+            } else if self.vfs.exists("ucrtbase.dll") {
+                Some(crate::vfs::norm("ucrtbase.dll"))
+            } else {
+                self.vfs.find_by_name("ucrtbase.dll").cloned()
+            };
+            if let Some(f) = file {
+                let size = self
+                    .vfs
+                    .file_len(&f)
+                    .ok_or_else(|| format!("indexed DLL disappeared from VFS: {f}"))?;
+                let size =
+                    usize::try_from(size).map_err(|_| format!("DLL is too large to load: {f}"))?;
+                let data = self
+                    .vfs
+                    .read_range(&f, 0, size)
+                    .map_err(|error| format!("could not read DLL {f}: {error:?}"))?;
+                return self.load_image(&data, &f, true);
+            }
         }
         let group = hle::group_of(&canonical_dll(dll)).unwrap_or("unknown");
         Ok(self.register_hle_module(dll, group))
@@ -1794,7 +2630,8 @@ impl Process {
                 let g: &'static str = g;
                 let name = name.clone();
                 if let Some(size) = hle::data_symbol(g, &name) {
-                    return Ok(hle::crt::data_import(self, &name, size));
+                    return hle::crt::data_import(self, &name, size)
+                        .map_err(|error| format!("could not initialize {dll}!{name}: {error:?}"));
                 }
                 Ok(self.thunk_for(g, &name, true).unwrap())
             }
@@ -1831,14 +2668,34 @@ impl Process {
             Vec::new()
         };
         // ThreadLocalStoragePointer -> array of per-module blocks, index stored at AddressOfIndex.
-        let mut arr = self.mem.read_u64(TEB_ADDR + 0x58).unwrap_or(0);
+        let (tls_vector_offset, pointer_size) = if self.cpu.mode == CpuMode::X86_32 {
+            (0x2c, 4u64)
+        } else {
+            (0x58, 8u64)
+        };
+        let mut arr = if pointer_size == 4 {
+            self.mem.read_u32(TEB_ADDR + tls_vector_offset).unwrap_or(0) as u64
+        } else {
+            self.mem.read_u64(TEB_ADDR + tls_vector_offset).unwrap_or(0)
+        };
         if arr == 0 {
             arr = self.alloc_virtual(0x1000, PROT_RW);
-            self.mem.write_u64(TEB_ADDR + 0x58, arr).unwrap();
+            if pointer_size == 4 {
+                self.mem
+                    .write_u32(TEB_ADDR + tls_vector_offset, arr as u32)
+                    .unwrap();
+            } else {
+                self.mem
+                    .write_u64(TEB_ADDR + tls_vector_offset, arr)
+                    .unwrap();
+            }
         }
         let idx = self.static_tls_next;
-        if idx >= 0x1000 / 8 {
-            return Err("static TLS module index exceeds the supported 512-entry vector".into());
+        let max_entries = 0x1000 / pointer_size;
+        if idx as u64 >= max_entries {
+            return Err(format!(
+                "static TLS module index exceeds the supported {max_entries}-entry vector"
+            ));
         }
         self.static_tls_next += 1;
         let block = self.alloc_virtual(align_up(total.max(16), 0x1000), PROT_RW);
@@ -1847,8 +2704,13 @@ impl Process {
                 .write_force(block, &data)
                 .map_err(|e| format!("{e:?}"))?;
         }
+        let block_pointer = if pointer_size == 4 {
+            (block as u32).to_le_bytes().to_vec()
+        } else {
+            block.to_le_bytes().to_vec()
+        };
         self.mem
-            .write_force(arr + idx as u64 * 8, &block.to_le_bytes())
+            .write_force(arr + idx as u64 * pointer_size, &block_pointer)
             .map_err(|e| format!("{e:?}"))?;
         let idx_addr = tls
             .index_addr
@@ -1869,52 +2731,134 @@ impl Process {
         if self.static_tls_templates.is_empty() {
             return Ok(0);
         }
-        let vector = self.alloc_virtual(0x1000, PROT_RW);
+        let vector = self.try_alloc_virtual(0x1000, PROT_RW).ok_or_else(|| {
+            Stop::Crash("guest allocation failed while allocating per-thread TLS vector".into())
+        })?;
         for template in self.static_tls_templates.clone() {
-            let block = self.alloc_virtual(align_up(template.total_size.max(16), 0x1000), PROT_RW);
+            let block = self
+                .try_alloc_virtual(align_up(template.total_size.max(16), 0x1000), PROT_RW)
+                .ok_or_else(|| {
+                    Stop::Crash("guest allocation failed while allocating per-thread TLS block".into())
+                })?;
             if !template.data.is_empty() {
                 self.mem
                     .write_force(block, &template.data)
                     .map_err(|e| Stop::Crash(format!("static TLS template copy failed: {e:?}")))?;
             }
-            self.wr64(vector + template.index as u64 * 8, block)?;
+            self.wrptr(
+                vector
+                    + template.index as u64
+                        * if self.cpu.mode == CpuMode::X86_32 {
+                            4
+                        } else {
+                            8
+                        },
+                block,
+            )?;
         }
         Ok(vector)
     }
 
     /// Reserve and map `size` bytes of anonymous virtual memory (64 KiB granularity).
-    pub fn alloc_virtual(&mut self, size: u64, prot: u8) -> u64 {
+    pub fn try_alloc_virtual(&mut self, size: u64, prot: u8) -> Option<u64> {
         let size = align_up(size.max(1), 0x1000);
-        let addr = self
-            .mem
-            .find_free(self.vmem_next, size)
-            .expect("address space exhausted");
-        self.mem.map(addr, size, prot);
+        let addr = self.mem.find_free(self.vmem_next, size)?;
+        if !self.mem.map(addr, size, prot) {
+            return None;
+        }
         self.vmem.insert(addr, (size, prot));
         self.vmem_next = align_up(addr + size, 0x1_0000);
-        addr
+        Some(addr)
     }
 
-    /// Run DllMain(DLL_PROCESS_ATTACH) for bundled DLLs (dependencies first), then TLS callbacks.
+    /// Reserve and map `size` bytes of anonymous virtual memory (64 KiB granularity).
+    pub fn alloc_virtual(&mut self, size: u64, prot: u8) -> u64 {
+        self.try_alloc_virtual(size, prot)
+            .expect("address space exhausted")
+    }
+
+    /// Run DllMain(DLL_PROCESS_ATTACH) for bundled DLLs in dependency-first order.
     fn run_dll_inits(&mut self, exe_idx: usize) -> Result<(), String> {
-        let order: Vec<usize> = (0..self.modules.len())
-            .filter(|&i| {
-                i != exe_idx
-                    && self.modules[i].hle_group.is_none()
-                    && self.modules[i].entry != 0
-                    && self.modules[i].is_dll
-            })
-            .collect();
-        for i in order {
-            let (base, entry) = (self.modules[i].base, self.modules[i].entry);
-            let r = self.call_guest(entry, &[base, 1, 0]);
+        for i in self.dll_init_order(exe_idx) {
+            let name = self.modules[i].name.clone();
+            let r = self.run_dll_process_attach(i);
             match r {
-                Ok(0) => return Err(format!("{}: DllMain returned FALSE", self.modules[i].name)),
+                Ok(0) => return Err(format!("{name}: DllMain returned FALSE")),
                 Ok(_) => {}
-                Err(e) => return Err(format!("{}: DllMain failed: {e:?}", self.modules[i].name)),
+                Err(e) => return Err(format!("{name}: DllMain failed: {e:?}")),
             }
         }
         Ok(())
+    }
+
+    /// Run TLS callbacks for DLL_PROCESS_ATTACH in the order stored by the PE image.
+    fn run_tls_process_attach_callbacks(&mut self, index: usize) -> Result<(), Stop> {
+        let Some(module) = self.modules.get(index) else {
+            return Err(Stop::Crash(format!(
+                "invalid module index {index} for TLS callbacks"
+            )));
+        };
+        let (base, callbacks) = (module.base, module.tls_callbacks.clone());
+        for callback in callbacks {
+            let _ = self.call_guest(callback, &[base, 1, 0])?;
+        }
+        Ok(())
+    }
+
+    /// Return the not-yet-initialized bundled DLLs reachable from `root`, dependencies first.
+    pub(crate) fn dll_init_order(&self, root: usize) -> Vec<usize> {
+        fn visit(
+            process: &Process,
+            index: usize,
+            visited: &mut HashSet<usize>,
+            order: &mut Vec<usize>,
+        ) {
+            if !visited.insert(index) {
+                return;
+            }
+            if let Some(dependencies) = process.module_dependencies.get(&index) {
+                for &dependency in dependencies {
+                    visit(process, dependency, visited, order);
+                }
+            }
+            let Some(module) = process.modules.get(index) else {
+                return;
+            };
+            if module.is_dll
+                && (module.entry != 0 || !module.tls_callbacks.is_empty())
+                && module.hle_group.is_none()
+                && !process.initialized_dlls.contains(&index)
+                && !process.initializing_dlls.contains(&index)
+            {
+                order.push(index);
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut order = Vec::new();
+        visit(self, root, &mut visited, &mut order);
+        order
+    }
+
+    /// Invoke TLS callbacks and DllMain(DLL_PROCESS_ATTACH) once, preventing recursive re-entry.
+    pub(crate) fn run_dll_process_attach(&mut self, index: usize) -> Result<u64, Stop> {
+        let Some(module) = self.modules.get(index) else {
+            return Err(Stop::Crash(format!("invalid DLL module index {index}")));
+        };
+        let (base, entry) = (module.base, module.entry);
+        self.initializing_dlls.insert(index);
+        let result = self.run_tls_process_attach_callbacks(index).and_then(|()| {
+            if entry == 0 {
+                Ok(1)
+            } else {
+                self.call_guest(entry, &[base, 1, 0])
+            }
+        });
+        self.initializing_dlls.remove(&index);
+        if matches!(result, Ok(value) if value != 0) {
+            self.initialized_dlls.insert(index);
+        }
+        result
     }
 
     // ── execution ────────────────────────────────────────────────────────────
@@ -1993,7 +2937,9 @@ impl Process {
                     // next run slice. The import returns that slice's budget after rewind.
                     let next_budget = unsafe { yield_slice() };
                     if next_budget == 0 {
-                        return Err(Stop::Crash("callback resumed without a worker slice budget".into()));
+                        return Err(Stop::Crash(
+                            "callback resumed without a worker slice budget".into(),
+                        ));
                     }
                     self.active_run_budget = Some(next_budget);
                     continue;
@@ -2038,7 +2984,13 @@ impl Process {
                 self.charge_retired(1)?;
                 Ok(None)
             }
-            Err(e) => Err(self.describe_exit(e)),
+            Err(e) => {
+                if crate::exception::dispatch_cpu_exception(self, &e)? {
+                    Ok(None)
+                } else {
+                    Err(self.describe_exit(e))
+                }
+            }
         }
     }
 
@@ -2069,6 +3021,207 @@ impl Process {
             self.charge_retired(1)?;
             self.dispatch_thunk(rip)?;
             return Ok((1, self.yield_request.take()));
+        }
+        if self.trace_gta_eventvol && self.cpu.mode == CpuMode::X86_32 && rip as u32 == 0x0082_4733
+        {
+            let frame = self.cpu.gpr[RBP] as u32 as u64;
+            let locals = [-4i32, -20, -24, -28, -32, -112].map(|offset| {
+                self.mem
+                    .read_u32((frame as i64 + offset as i64) as u64)
+                    .unwrap_or(0)
+            });
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-startup-return] eax={:#x} ebx={:#x} ecx={:#x} edx={:#x} esi={:#x} edi={:#x} ebp={frame:#x} locals={locals:08x?}\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RBX] as u32,
+                    self.cpu.gpr[RCX] as u32,
+                    self.cpu.gpr[RDX] as u32,
+                    self.cpu.gpr[RSI] as u32,
+                    self.cpu.gpr[RDI] as u32,
+                )
+                .as_bytes(),
+            );
+        }
+        let gta_eventvol_trace = self.trace_gta_eventvol
+            && self.cpu.mode == CpuMode::X86_32
+            && ((0x4d9930..=0x4d9c0e).contains(&(rip as u32 as u64))
+                || (0x5b9c60..=0x5b9e40).contains(&(rip as u32 as u64))
+                || (0x5bfaf4..=0x5bfb04).contains(&(rip as u32 as u64))
+                || (0x507d93..=0x507da5).contains(&(rip as u32 as u64))
+                || (0x4f2fb0..=0x4f2fd0).contains(&(rip as u32 as u64))
+                || (0x502bf0..=0x502c10).contains(&(rip as u32 as u64))
+                || (0x4e7850..=0x4e7860).contains(&(rip as u32 as u64))
+                || (0x4dd5a3..=0x4dd5a7).contains(&(rip as u32 as u64))
+                || (0x5ba160..=0x5ba191).contains(&(rip as u32 as u64))
+                || (0x5d5ac0..=0x5d5acb).contains(&(rip as u32 as u64))
+                || (0x5da020..=0x5da05d).contains(&(rip as u32 as u64))
+                || (0x5d7ec0..=0x5d7ed5).contains(&(rip as u32 as u64)));
+        if gta_eventvol_trace {
+            let current = rip as u32 as u64;
+            if matches!(
+                current,
+                0x4d9950
+                    | 0x4d9955
+                    | 0x4d997a
+                    | 0x4d9980
+                    | 0x4d9985
+                    | 0x4d998c
+                    | 0x4d999a
+                    | 0x4d99a3
+                    | 0x4d99b3
+                    | 0x4d99b8
+                    | 0x4d99bc
+                    | 0x4d99c2
+                    | 0x4d99c7
+                    | 0x4d99c9
+                    | 0x4d99cb
+                    | 0x4d99df
+                    | 0x4d99e1
+                    | 0x4d99f0
+                    | 0x4d99f6
+                    | 0x4d99f8
+                    | 0x4d9a0f
+                    | 0x4d9a18
+                    | 0x4d9a22
+                    | 0x4d9a25
+                    | 0x4d9a32
+                    | 0x4d9a36
+                    | 0x4d9a39
+                    | 0x4d9a3b
+                    | 0x4d9a46
+                    | 0x4d9a4d
+                    | 0x4d9a4f
+                    | 0x4d9a51
+                    | 0x4d9a5e
+                    | 0x4d9a61
+                    | 0x4d9a6e
+                    | 0x4d9a74
+                    | 0x4d9a8e
+                    | 0x4d9a9a
+                    | 0x4d9aa5
+                    | 0x4d9ab4
+                    | 0x4d9ace
+                    | 0x4d9ae3
+                    | 0x4d9af1
+                    | 0x4d9b47
+                    | 0x4d9b51
+                    | 0x4d9b53
+                    | 0x4d9b66
+                    | 0x4d9b76
+                    | 0x4d9bb0
+                    | 0x4d9bbe
+                    | 0x4d9bc4
+                    | 0x4d9bd4
+                    | 0x4d9c01
+                    | 0x5bfaf9
+                    | 0x5bfafe
+                    | 0x5bfb00
+                    | 0x5b9c60
+                    | 0x5b9c72
+                    | 0x5b9cd2
+                    | 0x5b9d50
+                    | 0x5b9d55
+                    | 0x5b9d59
+                    | 0x5b9d63
+                    | 0x5b9d68
+                    | 0x5b9d72
+                    | 0x5b9d77
+                    | 0x5b9d7c
+                    | 0x5b9d80
+                    | 0x5b9d8d
+                    | 0x5b9d92
+                    | 0x5b9d95
+                    | 0x5b9d9a
+                    | 0x5b9da5
+                    | 0x5b9dab
+                    | 0x5b9db3
+                    | 0x5b9dd5
+                    | 0x507d93
+                    | 0x507d99
+                    | 0x507da1
+                    | 0x4dd5a3
+                    | 0x5ba160
+                    | 0x5ba171
+                    | 0x5ba175
+                    | 0x5ba17a
+                    | 0x5ba17e
+                    | 0x5ba183
+                    | 0x5ba185
+                    | 0x5ba187
+                    | 0x5ba18a
+                    | 0x5d5ac0
+                    | 0x5d5ac5
+                    | 0x5d5acb
+                    | 0x5da020
+                    | 0x5da03b
+                    | 0x5da044
+                    | 0x5da049
+                    | 0x5da04d
+                    | 0x5da05d
+                    | 0x5d7ec0
+                    | 0x5d7ec5
+                    | 0x5d7ec7
+                    | 0x5d7eca
+                    | 0x5d7ecf
+                    | 0x5d7ed5
+            ) || (0x4f2fb0..=0x4f2fd0).contains(&current)
+                || (0x502bf0..=0x502c10).contains(&current)
+                || (0x4e7850..=0x4e7860).contains(&current)
+            {
+                let buffer = self.mem.read_u32(0xbd00f8).unwrap_or(0);
+                let call_slot = match current {
+                    0x4d99e1 => 0x858350,
+                    0x4d99f0 => 0x85801c,
+                    _ => 0,
+                };
+                let call_target = if call_slot != 0 {
+                    self.mem.read_u32(call_slot).unwrap_or(0)
+                } else {
+                    0
+                };
+                let call_target_name = self
+                    .thunk_index
+                    .iter()
+                    .find_map(|((group, name), address)| {
+                        (*address == call_target as u64).then(|| format!("{group}!{name}"))
+                    })
+                    .unwrap_or_default();
+                let call_target_module = if call_target != 0 {
+                    self.module_for(call_target as u64).unwrap_or("?")
+                } else {
+                    "?"
+                };
+                let stack = (0..5)
+                    .map(|index| {
+                        self.mem
+                            .read_u32(self.cpu.gpr[RSP].wrapping_add(index * 4))
+                            .unwrap_or(0)
+                    })
+                    .collect::<Vec<_>>();
+                let ecx = self.cpu.gpr[RCX] as u32 as u64;
+                let ecx_words = [
+                    self.mem.read_u32(ecx).unwrap_or(0),
+                    self.mem.read_u32(ecx.wrapping_add(4)).unwrap_or(0),
+                ];
+                self.stderr.extend_from_slice(
+                    format!(
+                        "[gta-eventvol] retired={} rip={current:#x} eax={:#x} ebx={:#x} ecx={ecx:#x} edx={:#x} esi={:#x} edi={:#x} global[bd00f8]={buffer:#x} ecx_words={ecx_words:08x?} call_target={call_target:#x} module={call_target_module} {call_target_name} stack={stack:08x?}\n",
+                        self.retired_instructions,
+                        self.cpu.gpr[RAX] as u32,
+                        self.cpu.gpr[RBX] as u32,
+                        self.cpu.gpr[RDX] as u32,
+                        self.cpu.gpr[RSI] as u32,
+                        self.cpu.gpr[RDI] as u32,
+                    )
+                    .as_bytes(),
+                );
+            }
+            return match self.step_once() {
+                Ok(Some(stop)) => Ok((1, Some(stop))),
+                Ok(None) => Ok((1, None)),
+                Err(stop) => Err(stop),
+            };
         }
         let gta_format_trace = self.trace_modules_only
             && self.cpu.mode == CpuMode::X86_32
@@ -2114,10 +3267,7 @@ impl Process {
             && matches!(rip as u32 as u64, 0x7fb230 | 0x7fb261 | 0x7fb297)
         {
             let backend = self.mem.read_u32(0xc97b24).unwrap_or(0) as u64;
-            let callback = self
-                .mem
-                .read_u32(backend.wrapping_add(0x58))
-                .unwrap_or(0);
+            let callback = self.mem.read_u32(backend.wrapping_add(0x58)).unwrap_or(0);
             let object = self.cpu.gpr[RSI] as u32 as u64;
             let object4 = self.mem.read_u32(object.wrapping_add(4)).unwrap_or(0);
             self.stderr.extend_from_slice(
@@ -2137,8 +3287,20 @@ impl Process {
             && self.cpu.mode == CpuMode::X86_32
             && matches!(
                 rip as u32 as u64,
-                0x4cce60 | 0x4ccd70 | 0x4ccf21 | 0x4ccf39 | 0x4ccfc4 | 0x4cce48
-                    | 0x4cc5c0 | 0x4cc945 | 0x4cc79a | 0x4cc85c | 0x4cc88a | 0x4cc8b9 | 0x4cc91f | 0x4cc943
+                0x4cce60
+                    | 0x4ccd70
+                    | 0x4ccf21
+                    | 0x4ccf39
+                    | 0x4ccfc4
+                    | 0x4cce48
+                    | 0x4cc5c0
+                    | 0x4cc945
+                    | 0x4cc79a
+                    | 0x4cc85c
+                    | 0x4cc88a
+                    | 0x4cc8b9
+                    | 0x4cc91f
+                    | 0x4cc943
             )
         {
             let object = self.cpu.gpr[RDI] as u32 as u64;
@@ -2160,7 +3322,10 @@ impl Process {
         }
         if self.trace_modules_only
             && self.cpu.mode == CpuMode::X86_32
-            && matches!(rip as u32 as u64, 0x72f420 | 0x72f42a | 0x801cf8 | 0x801cfe | 0x7fb255)
+            && matches!(
+                rip as u32 as u64,
+                0x72f420 | 0x72f42a | 0x801cf8 | 0x801cfe | 0x7fb255
+            )
         {
             let backend = self.mem.read_u32(0xc97b24).unwrap_or(0);
             let size_or_arg = self.mem.read_u32(self.cpu.gpr[RSP] + 4).unwrap_or(0);
@@ -2196,16 +3361,25 @@ impl Process {
             && self.cpu.mode == CpuMode::X86_32
             && matches!(
                 rip as u32 as u64,
-                0x5bd600 | 0x5bd62b | 0x5bd656 | 0x5bd65c | 0x5bd661 | 0x5bd666
-                    | 0x5bd676 | 0x5bd681 | 0x5bd684 | 0x5bd68e
-                    | 0x5bd71c | 0x5bd721 | 0x5bd724 | 0x5bd726 | 0x5bd748
+                0x5bd600
+                    | 0x5bd62b
+                    | 0x5bd656
+                    | 0x5bd65c
+                    | 0x5bd661
+                    | 0x5bd666
+                    | 0x5bd676
+                    | 0x5bd681
+                    | 0x5bd684
+                    | 0x5bd68e
+                    | 0x5bd71c
+                    | 0x5bd721
+                    | 0x5bd724
+                    | 0x5bd726
+                    | 0x5bd748
             )
         {
             let backend = self.mem.read_u32(0xc97b24).unwrap_or(0) as u64;
-            let state = self
-                .mem
-                .read_u32(backend.wrapping_add(0x150))
-                .unwrap_or(0);
+            let state = self.mem.read_u32(backend.wrapping_add(0x150)).unwrap_or(0);
             let backend_factory = self.mem.read_u32(backend.wrapping_add(0x144)).unwrap_or(0);
             let backend_create = self.mem.read_u32(backend.wrapping_add(0x134)).unwrap_or(0);
             let backend_release = self.mem.read_u32(backend.wrapping_add(0x148)).unwrap_or(0);
@@ -2236,11 +3410,8 @@ impl Process {
                 &mut self.mem,
                 &mut self.trace_recent_guest,
             );
-            let (executed, result) = block_cache.execute_counted_with_hook(
-                cpu,
-                mem,
-                max_instructions,
-                |cpu, mem| {
+            let (executed, result) =
+                block_cache.execute_counted_with_hook(cpu, mem, max_instructions, |cpu, mem| {
                     // Limit this diagnostic to Tutorial01's failing object traversal at +0x30987.
                     if !(0x1_4003_0800..0x1_4003_0a20).contains(&cpu.rip) {
                         return;
@@ -2251,7 +3422,10 @@ impl Process {
                     let object = cpu.gpr[RDI];
                     let words = (0..8)
                         .map(|index| {
-                            format!("{:#x}", mem.read_u64(object.wrapping_add(index * 8)).unwrap_or(0))
+                            format!(
+                                "{:#x}",
+                                mem.read_u64(object.wrapping_add(index * 8)).unwrap_or(0)
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
@@ -2259,12 +3433,17 @@ impl Process {
                         "{} rdi_words=[{words}]",
                         trace_guest_instruction(cpu, mem)
                     ));
-                },
-            );
+                });
             self.charge_retired(executed)?;
             return match result {
                 Ok(()) => Ok((executed, None)),
                 Err(error) => {
+                    if crate::exception::dispatch_cpu_exception(self, &error)? {
+                        // The faulting instruction did not retire. Count exception dispatch as
+                        // slice progress for the caller's zero-progress guard; instruction and
+                        // callback budgets remain charged only by retired guest instructions.
+                        return Ok((executed.max(1), None));
+                    }
                     match self.describe_exit(error) {
                         Stop::Crash(message) => {
                             let trace = self
@@ -2338,13 +3517,230 @@ impl Process {
             }
             return Ok((executed, None));
         }
+        if self.trace_gta_eventvol && self.cpu.mode == CpuMode::X86_32 {
+            let thread_id = self.current_thread_id;
+            let mut gta_copy_trace = Vec::new();
+            let mut gta_txd_trace = Vec::new();
+            let mut trace_particle_txd = self.trace_particle_txd;
+            let mut particle_texture_index = self.trace_particle_texture_index;
+            let mut rep_before: Option<(u32, u32, u32)> = None;
+            let tracked_heap_sizes = [0x3100_5030u64, 0x31b0_6d40, 0x31b0_7318]
+                .map(|address| self.heap.size_of(address));
+            let (executed, result) = {
+                let (block_cache, cpu, mem, recent, watched_copy_word) = (
+                    &mut self.block_cache,
+                    &mut self.cpu,
+                    &mut self.mem,
+                    &mut self.trace_recent_x86_ip,
+                    &mut self.trace_gta_copy_watch,
+                );
+                block_cache.execute_counted_with_hook(
+                    cpu,
+                    mem,
+                    max_instructions,
+                    |cpu, mem| {
+                        let rip = cpu.rip as u32 as u64;
+                        let sp = cpu.gpr[RSP] as u32 as u64;
+                        if rip == 0x7320b0 {
+                            let slot = mem.read_u32(sp + 4).unwrap_or(0);
+                            let path_ptr = mem.read_u32(sp + 8).unwrap_or(0) as u64;
+                            let mut path = Vec::new();
+                            for offset in 0..96 {
+                                let Ok(byte) = mem.read_u8(path_ptr + offset) else { break };
+                                if byte == 0 { break; }
+                                path.push(byte.to_ascii_lowercase());
+                            }
+                            trace_particle_txd = path.ends_with(b"particle.txd");
+                            if trace_particle_txd {
+                                gta_txd_trace.push(format!(
+                                    "[gta-txd-trace] LoadTxd(file) entry slot={slot:#x} path={:?} thread={thread_id:#x}",
+                                    String::from_utf8_lossy(&path),
+                                ));
+                            }
+                        }
+                        if trace_particle_txd {
+                            if rip == 0x731dd0 || rip == 0x730fc0 {
+                                let arg0 = mem.read_u32(sp + 4).unwrap_or(0);
+                                let arg1 = mem.read_u32(sp + 8).unwrap_or(0);
+                                gta_txd_trace.push(format!(
+                                    "[gta-txd-trace] entry rip={rip:#x} arg0={arg0:#x} arg1={arg1:#x} eax={:#x} esi={:#x} edi={:#x}",
+                                    cpu.gpr[RAX] as u32, cpu.gpr[RSI] as u32, cpu.gpr[RDI] as u32,
+                                ));
+                            } else if rip == 0x730e60 {
+                                particle_texture_index += 1;
+                                let factory = mem.read_u32(0xc97b24).unwrap_or(0) as u64;
+                                let read_callback = mem.read_u32(factory + 0xb0).unwrap_or(0);
+                                gta_txd_trace.push(format!(
+                                    "[gta-txd-trace] native-texture #{particle_texture_index} stream={:#x} return={:#x} factory={factory:#x} readCallback={read_callback:#x}",
+                                    mem.read_u32(sp + 4).unwrap_or(0), mem.read_u32(sp).unwrap_or(0),
+                                ));
+                            } else if rip == 0x730ed6 || rip == 0x730f51 || rip == 0x73102e || rip == 0x73104c || rip == 0x731e11 || rip == 0x731e28 {
+                                let words = (0..4)
+                                    .map(|index| mem.read_u32(sp + index * 4).unwrap_or(0))
+                                    .map(|word| format!("{word:#x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                let factory = mem.read_u32(0xc97b24).unwrap_or(0) as u64;
+                                let read_callback = mem.read_u32(factory + 0xb0).unwrap_or(0);
+                                gta_txd_trace.push(format!(
+                                    "[gta-txd-trace] step rip={rip:#x} eax={:#x} ebx={:#x} esi={:#x} edi={:#x} stack=[{words}] remaining={:#x} readCallback={read_callback:#x}",
+                                    cpu.gpr[RAX] as u32, cpu.gpr[RBX] as u32, cpu.gpr[RSI] as u32, cpu.gpr[RDI] as u32,
+                                    mem.read_u16(sp + 8).unwrap_or(0),
+                                ));
+                            } else if rip == 0x732106 {
+                                gta_txd_trace.push(format!(
+                                    "[gta-txd-trace] LoadTxd(file) return eax={:#x} particleNativeTextures={particle_texture_index}",
+                                    cpu.gpr[RAX] as u32,
+                                ));
+                                trace_particle_txd = false;
+                            }
+                        }
+                        if rip == 0x4dffb4 {
+                            let esi = cpu.gpr[RSI] as u32;
+                            let edi = cpu.gpr[RDI] as u32;
+                            let count = cpu.gpr[RCX] as u32;
+                            let offset = 0x30c040a4u32.wrapping_sub(edi);
+                            let source_word = mem.read_u32(esi.wrapping_add(offset) as u64).unwrap_or(0);
+                            let destination_word = mem.read_u32(edi.wrapping_add(offset) as u64).unwrap_or(0);
+                            rep_before = Some((esi, edi, count));
+                            gta_copy_trace.push(format!(
+                                "[gta-copy-trace] rep-boundary before rip={rip:#x} esi={esi:#x} edi={edi:#x} ecx={count:#x} df={} watchOffset={offset:#x} sourceAtWatch={source_word:#x} destBefore={destination_word:#x}",
+                                cpu.flag(DF),
+                            ));
+                        } else if rip == 0x4dffb6 {
+                            if let Some((source_start, destination_start, count)) = rep_before.take() {
+                                let offset = 0x30c040a4u32.wrapping_sub(destination_start);
+                                let source_word = mem.read_u32(source_start.wrapping_add(offset) as u64).unwrap_or(0);
+                                let destination_word = mem.read_u32(0x30c040a4).unwrap_or(0);
+                                gta_copy_trace.push(format!(
+                                    "[gta-copy-trace] rep-boundary after rip={rip:#x} esi={:#x} edi={:#x} ecx={:#x} count={count:#x} watchOffset={offset:#x} sourceAtWatch={source_word:#x} destAfter={destination_word:#x}",
+                                    cpu.gpr[RSI] as u32,
+                                    cpu.gpr[RDI] as u32,
+                                    cpu.gpr[RCX] as u32,
+                                ));
+                            }
+                        }
+                        if let Ok(watched_value) = mem.read_u32(0x30c040a4) {
+                            if *watched_copy_word != Some(watched_value) {
+                                gta_copy_trace.push(format!(
+                                    "[gta-copy-watch] thread={thread_id:#x} rip={rip:#x} value={watched_copy_word:?}->{watched_value:#x} {}",
+                                    trace_guest_instruction(cpu, mem),
+                                ));
+                                *watched_copy_word = Some(watched_value);
+                            }
+                        }
+                        if (0x4d86b0..=0x4d8750).contains(&rip)
+                            || (0x4f07e0..=0x4f0800).contains(&rip)
+                            || (0x4e0280..=0x4e0372).contains(&rip)
+                            || matches!(rip, 0x4f0c40 | 0x4f0e67)
+                        {
+                            let stack = (0..8)
+                                .map(|index| {
+                                    mem.read_u32((cpu.gpr[RSP] as u32).wrapping_add(index * 4) as u64)
+                                        .unwrap_or(0)
+                                })
+                                .map(|word| format!("{word:#x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let memory = if rip == 0x4e0280 {
+                                let object = cpu.gpr[RCX] as u32 as u64;
+                                let words = [0, 4, 0x14, 0x1c, 0x66c]
+                                    .map(|offset| mem.read_u32(object.wrapping_add(offset)).unwrap_or(0));
+                                let table = words[0] as u64;
+                                let first = (0..8)
+                                    .map(|index| mem.read_u32(table.wrapping_add(0x60 + index * 4)).unwrap_or(0))
+                                    .collect::<Vec<_>>();
+                                format!(" object={object:#x} fields={words:08x?} record8={first:08x?}")
+                            } else if matches!(rip, 0x4e0357 | 0x4e035b | 0x4e035e | 0x4e0366) {
+                                let table = cpu.gpr[RDX] as u32 as u64;
+                                let offset = cpu.gpr[RSI] as u32 as u64;
+                                let element = table.wrapping_add(offset);
+                                let field = table
+                                    .wrapping_add(cpu.gpr[RDI] as u32 as u64)
+                                    .wrapping_add(0x14);
+                                let object = cpu.gpr[RCX] as u32 as u64;
+                                let base = mem.read_u32(object.wrapping_add(0x1c)).unwrap_or(0);
+                                format!(
+                                    " table={table:#x} element={element:#x} elementValue={:#x} field={field:#x} fieldValue={:#x} objectBase={base:#x}",
+                                    mem.read_u32(element).unwrap_or(0),
+                                    mem.read_u32(field).unwrap_or(0),
+                                )
+                            } else if rip == 0x4e0361 {
+                                format!(
+                                    " dataBaseHeapSize={:?} readBufferHeapSize={:?} readInteriorHeapSize={:?} dataBasePageProt={:?} faultPageProt={:?}",
+                                    tracked_heap_sizes[0],
+                                    tracked_heap_sizes[1],
+                                    tracked_heap_sizes[2],
+                                    mem.prot_of(0x3100_5000),
+                                    mem.prot_of(0x3f07_5000),
+                                )
+                            } else {
+                                String::new()
+                            };
+                            gta_copy_trace.push(format!(
+                                "[gta-copy-trace] thread={thread_id:#x} {} eax={:#x} ebx={:#x} ecx={:#x} edx={:#x} esi={:#x} edi={:#x} ebp={:#x} esp={:#x} flags={:#x} stack=[{stack}]{memory}",
+                                trace_guest_instruction(cpu, mem),
+                                cpu.gpr[RAX] as u32,
+                                cpu.gpr[RBX] as u32,
+                                cpu.gpr[RCX] as u32,
+                                cpu.gpr[RDX] as u32,
+                                cpu.gpr[RSI] as u32,
+                                cpu.gpr[RDI] as u32,
+                                cpu.gpr[RBP] as u32,
+                                cpu.gpr[RSP] as u32,
+                                cpu.rflags as u32,
+                            ));
+                        }
+                        if recent.len() == 128 {
+                            recent.pop_front();
+                        }
+                        recent.push_back((thread_id, cpu.rip as u32));
+                    },
+                )
+            };
+            self.trace_particle_txd = trace_particle_txd;
+            self.trace_particle_texture_index = particle_texture_index;
+            if !gta_txd_trace.is_empty() {
+                self.stderr
+                    .extend_from_slice(format!("{}\n", gta_txd_trace.join("\n")).as_bytes());
+            }
+            if !gta_copy_trace.is_empty() {
+                self.stderr
+                    .extend_from_slice(format!("{}\n", gta_copy_trace.join("\n")).as_bytes());
+            }
+            self.charge_retired(executed)?;
+            return match result {
+                Ok(()) => Ok((executed, None)),
+                Err(error) => match self.describe_exit(error) {
+                    Stop::Crash(message) => {
+                        let trace = self
+                            .trace_recent_x86_ip
+                            .iter()
+                            .map(|(thread_id, rip)| format!("{thread_id:#x}:{rip:#x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        Err(Stop::Crash(format!(
+                            "{message}\nrecent x86 instruction addresses (thread:rip):\n{trace}"
+                        )))
+                    }
+                    stop => Err(stop),
+                },
+            };
+        }
         let (executed, result) =
             self.block_cache
                 .execute_counted(&mut self.cpu, &mut self.mem, max_instructions);
         self.charge_retired(executed)?;
         match result {
             Ok(()) => Ok((executed, None)),
-            Err(e) => Err(self.describe_exit(e)),
+            Err(e) => {
+                if crate::exception::dispatch_cpu_exception(self, &e)? {
+                    // As above, this is scheduler progress, not a retired guest instruction.
+                    Ok((executed.max(1), None))
+                } else {
+                    Err(self.describe_exit(e))
+                }
+            }
         }
     }
 
@@ -2352,18 +3748,21 @@ impl Process {
         let c = &self.cpu;
         let stack = if c.mode == CpuMode::X86_32 {
             let words = (0..8)
-                .map(|index| self.rd32((c.gpr[RSP] as u32).wrapping_add(index * 4) as u64).unwrap_or(0))
+                .map(|index| {
+                    self.rd32((c.gpr[RSP] as u32).wrapping_add(index * 4) as u64)
+                        .unwrap_or(0)
+                })
                 .map(|word| format!("{word:#x}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(" stack32=[{words}]")
         } else if self.trace_imports {
-                let words = (0..8)
-                    .map(|index| self.rd64(c.gpr[RSP].saturating_add(index * 8)).unwrap_or(0))
-                    .map(|word| format!("{word:#x}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(" stack=[{words}]")
+            let words = (0..8)
+                .map(|index| self.rd64(c.gpr[RSP].saturating_add(index * 8)).unwrap_or(0))
+                .map(|word| format!("{word:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" stack=[{words}]")
         } else {
             String::new()
         };
@@ -2432,6 +3831,7 @@ impl Process {
                 ("kernel32", "TlsGetValue") => Some(1),
                 ("kernel32", "GetModuleHandleA") => Some(1),
                 ("kernel32", "GetProcAddress") => Some(2),
+                ("kernel32", "GetLogicalProcessorInformationEx") => Some(3),
                 _ => None,
             };
             let line = if let Some(arg_count) = traced_args {
@@ -2443,9 +3843,7 @@ impl Process {
                 let module = self
                     .modules
                     .iter()
-                    .find(|m| {
-                        m.hle_group.is_none() && caller >= m.base && caller < m.base + m.size
-                    })
+                    .find(|m| m.hle_group.is_none() && caller >= m.base && caller < m.base + m.size)
                     .map(|m| format!("{}+{:#x}", m.name, caller - m.base))
                     .unwrap_or_else(|| "?".to_string());
                 format!(
@@ -2471,7 +3869,10 @@ impl Process {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                format!(" decl={declaration:#x} known_com={} bytes=[{bytes}]", self.extra.com.objs.contains_key(&declaration))
+                format!(
+                    " decl={declaration:#x} known_com={} bytes=[{bytes}]",
+                    self.extra.com.objs.contains_key(&declaration)
+                )
             } else {
                 String::new()
             };
@@ -2480,6 +3881,19 @@ impl Process {
             );
         }
         let import_caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);
+        if self.trace_modules_only
+            && group == "kernel32"
+            && name == "GetLogicalProcessorInformationEx"
+        {
+            let args = (0..3)
+                .map(|index| format!("{:#x}", self.arg(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.stderr.extend_from_slice(
+                format!("[target-import] {group}!{name} args=[{args}] caller={import_caller:#x}\n")
+                    .as_bytes(),
+            );
+        }
         if self.trace_modules_only
             && ((0x746900..0x746a10).contains(&import_caller)
                 || (0x748700..0x748900).contains(&import_caller))
@@ -2547,7 +3961,9 @@ impl Process {
         let d3d9_output = if group == "com" {
             match name.as_str() {
                 "IDirect3D9::CreateDevice" => Some(self.arg(6)),
+                "IDirect3DDevice9::CreateTexture" => Some(self.arg(7)),
                 "IDirect3DDevice9::CreateDepthStencilSurface" => Some(self.arg(7)),
+                "IDirect3DTexture9::LockRect" | "IDirect3DSurface9::LockRect" => Some(self.arg(3)),
                 _ => None,
             }
         } else {
@@ -2608,9 +4024,8 @@ impl Process {
                     )
                 })
                 .unwrap_or_default();
-            self.stderr.extend_from_slice(
-                format!("[com-result] {name} hr={ret:#x}{output}\n").as_bytes(),
-            );
+            self.stderr
+                .extend_from_slice(format!("[com-result] {name} hr={ret:#x}{output}\n").as_bytes());
         }
         self.refresh_waiters();
         if self.skip_ret {
@@ -2635,13 +4050,49 @@ impl Process {
 
     /// Run atexit handlers, then record the exit code and stop.
     pub fn finish_exit(&mut self, code: u32) -> Result<(), Stop> {
+        if self.trace_gta_eventvol {
+            let sp = self.cpu.gpr[RSP];
+            let stack = (0..8)
+                .map(|index| self.mem.read_u32(sp.wrapping_add(index * 4)).unwrap_or(0))
+                .collect::<Vec<_>>();
+            let recent = self
+                .trace_recent_x86_ip
+                .iter()
+                .map(|(thread, rip)| format!("{thread:#x}:{rip:#x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut frame = self.cpu.gpr[RBP] as u32 as u64;
+            let mut frames = Vec::new();
+            for _ in 0..16 {
+                let previous = self.mem.read_u32(frame).unwrap_or(0) as u64;
+                let return_address = self.mem.read_u32(frame + 4).unwrap_or(0);
+                if frame < 0x1_0000 || return_address == 0 {
+                    break;
+                }
+                let args = (0..4)
+                    .map(|index| self.mem.read_u32(frame + 8 + index * 4).unwrap_or(0))
+                    .collect::<Vec<_>>();
+                frames.push(format!("{frame:#x}->{return_address:#x} args={args:08x?}"));
+                if previous <= frame {
+                    break;
+                }
+                frame = previous;
+            }
+            let frames = frames.join(" ");
+            self.stderr.extend_from_slice(
+                format!(
+                    "[process-exit] code={code:#x} rip={:#x} thread={} guest={} eax={:#x} frames={frames} recent={recent} stack={stack:08x?}\n",
+                    self.cpu.rip,
+                    self.current_thread_id,
+                    self.current_thread_is_guest,
+                    self.cpu.gpr[RAX],
+                )
+                .as_bytes(),
+            );
+        }
         if self.exit_code.is_none() {
             while let Some(f) = self.atexit.pop() {
-                if let Err(Stop::Crash(message)) = self.call_guest(f, &[]) {
-                    if message == CALLBACK_BUDGET_EXHAUSTED {
-                        return Err(Stop::Crash(message));
-                    }
-                }
+                self.call_guest(f, &[])?;
             }
             self.exit_code = Some(code);
         }
@@ -2663,7 +4114,6 @@ impl Process {
     }
 
     fn run_with_budget(&mut self) -> RunResult {
-        const THREAD_QUANTUM: u64 = 10_000;
         while self.active_run_budget.unwrap_or(0) != 0 {
             if let Some((kind, a, b, c)) = self.pending_input_events.pop_front() {
                 if let Err(stop) = hle::user32::input_event(self, kind, a, b, c) {
@@ -2712,6 +4162,11 @@ impl Process {
                 Err(Stop::GuestUnwind(_)) => {
                     return Stop::Crash(
                         "RtlUnwindEx transfer escaped its active guest exception dispatcher".into(),
+                    )
+                }
+                Err(Stop::GuestCatch32(_)) => {
+                    return Stop::Crash(
+                        "PE32 C++ catch transfer escaped its active guest exception dispatcher".into(),
                     )
                 }
                 Err(stop) => return stop,
@@ -2904,12 +4359,441 @@ mod deferred_context_tests {
 #[cfg(test)]
 mod scheduler_tests {
     use super::*;
+    use anywasm_cpu::mem::PAGE_SIZE;
 
     const CALLBACK_ADDR: u64 = 0x20_000;
+    const DLL_ORDER_COUNTER: u64 = 0x30_000;
+    const DLL_A_ORDER: u64 = DLL_ORDER_COUNTER + 4;
+    const DLL_B_ORDER: u64 = DLL_ORDER_COUNTER + 8;
+    const DLL_TLS_CALLBACK_ORDER: u64 = DLL_ORDER_COUNTER + 0x20;
+    const DLL_TLS_CALLBACK_ORDER_2: u64 = DLL_ORDER_COUNTER + 0x24;
+    const DLL_TLS_CALLBACK_BASE: u64 = DLL_ORDER_COUNTER + 0x28;
+    const DLL_TLS_CALLBACK_REASON: u64 = DLL_ORDER_COUNTER + 0x30;
+    const DLL_TLS_CALLBACK_RESERVED: u64 = DLL_ORDER_COUNTER + 0x38;
+
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn minimal_pe64(image_base: u64, is_dll: bool, code: &[u8], import: Option<&str>) -> Vec<u8> {
+        let mut pe = vec![0u8; 0x600];
+        pe[..2].copy_from_slice(b"MZ");
+        put_u32(&mut pe, 0x3c, 0x80);
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+
+        let coff = 0x84;
+        put_u16(&mut pe, coff, anywasm_pe::MACHINE_AMD64);
+        put_u16(&mut pe, coff + 2, 1);
+        put_u16(&mut pe, coff + 16, 240);
+        put_u16(&mut pe, coff + 18, 0x0022 | if is_dll { 0x2000 } else { 0 });
+
+        let optional = coff + 20;
+        put_u16(&mut pe, optional, 0x020b);
+        put_u32(&mut pe, optional + 16, 0x1000);
+        put_u64(&mut pe, optional + 24, image_base);
+        put_u32(&mut pe, optional + 32, 0x1000);
+        put_u32(&mut pe, optional + 36, 0x200);
+        put_u32(&mut pe, optional + 56, 0x2000);
+        put_u32(&mut pe, optional + 60, 0x200);
+        put_u16(&mut pe, optional + 68, 3);
+        put_u64(&mut pe, optional + 72, 0x100000);
+        put_u64(&mut pe, optional + 80, 0x1000);
+        put_u64(&mut pe, optional + 88, 0x100000);
+        put_u64(&mut pe, optional + 96, 0x1000);
+        put_u32(&mut pe, optional + 108, 16);
+        if import.is_some() {
+            put_u32(&mut pe, optional + 112 + 8, 0x1100);
+            put_u32(&mut pe, optional + 112 + 12, 40);
+        }
+
+        let section = optional + 240;
+        pe[section..section + 5].copy_from_slice(b".text");
+        put_u32(&mut pe, section + 8, 0x400);
+        put_u32(&mut pe, section + 12, 0x1000);
+        put_u32(&mut pe, section + 16, 0x400);
+        put_u32(&mut pe, section + 20, 0x200);
+        put_u32(&mut pe, section + 36, 0x60000020);
+        pe[0x200..0x200 + code.len()].copy_from_slice(code);
+
+        if let Some(name) = import {
+            // One import descriptor with an empty thunk list is sufficient to load the dependency.
+            put_u32(&mut pe, 0x300 + 12, 0x1130);
+            put_u32(&mut pe, 0x300 + 16, 0x1140);
+            pe[0x330..0x330 + name.len()].copy_from_slice(name.as_bytes());
+            pe[0x330 + name.len()] = 0;
+        }
+        pe
+    }
+
+    fn minimal_pe64_with_tls_callbacks(
+        image_base: u64,
+        is_dll: bool,
+        code: &[u8],
+        import: Option<&str>,
+        callback_codes: &[Vec<u8>],
+    ) -> Vec<u8> {
+        let mut pe = minimal_pe64(image_base, is_dll, code, import);
+        let optional = 0x98;
+        let tls_dir = 0x1180usize;
+        let tls_dir_file = 0x200 + (tls_dir - 0x1000);
+        put_u32(&mut pe, optional + 112 + 9 * 8, tls_dir as u32);
+        put_u32(&mut pe, optional + 112 + 9 * 8 + 4, 40);
+
+        // AddressOfIndex and AddressOfCallbacks are VAs in the TLS directory.
+        put_u64(&mut pe, tls_dir_file + 16, image_base + 0x11c0);
+        put_u64(&mut pe, tls_dir_file + 24, image_base + 0x11d0);
+        let callbacks_file = 0x200 + (0x11d0 - 0x1000);
+        assert!(callback_codes.len() <= 2);
+        for (index, callback_code) in callback_codes.iter().enumerate() {
+            assert!(callback_code.len() <= 0x80);
+            let callback_rva = 0x1200 + index as u32 * 0x80;
+            put_u64(
+                &mut pe,
+                callbacks_file + index * 8,
+                image_base + callback_rva as u64,
+            );
+            let callback_file = 0x200 + (callback_rva as usize - 0x1000);
+            pe[callback_file..callback_file + callback_code.len()].copy_from_slice(callback_code);
+        }
+        pe
+    }
+
+    fn tls_recording_callback_code(order_slot: u64) -> Vec<u8> {
+        let mut code = vec![0x48, 0xb8]; // mov rax, counter
+        code.extend_from_slice(&DLL_ORDER_COUNTER.to_le_bytes());
+        code.extend_from_slice(&[
+            0x44, 0x8b, 0x08, // mov r9d, [rax]
+            0x41, 0xff, 0xc1, // inc r9d
+            0x44, 0x89, 0x08, // mov [rax], r9d
+            0x48, 0xb8, // mov rax, callback order slot
+        ]);
+        code.extend_from_slice(&order_slot.to_le_bytes());
+        code.extend_from_slice(&[0x44, 0x89, 0x08, 0x48, 0xb8]); // mov [rax], r9d; mov rax, base slot
+        code.extend_from_slice(&DLL_TLS_CALLBACK_BASE.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x89, 0x08, 0x48, 0xb8]); // mov [rax], rcx; mov rax, reason slot
+        code.extend_from_slice(&DLL_TLS_CALLBACK_REASON.to_le_bytes());
+        code.extend_from_slice(&[0x89, 0x10, 0x48, 0xb8]); // mov [rax], edx; mov rax, reserved slot
+        code.extend_from_slice(&DLL_TLS_CALLBACK_RESERVED.to_le_bytes());
+        code.extend_from_slice(&[
+            0x4c, 0x89, 0x00, // mov [rax], r8
+            0xb8, 1, 0, 0, 0, // return TRUE
+            0xc3,
+        ]);
+        code
+    }
+
+    fn dll_order_code(result: u64) -> Vec<u8> {
+        let mut code = vec![0x48, 0xb8]; // mov rax, counter address
+        code.extend_from_slice(&DLL_ORDER_COUNTER.to_le_bytes());
+        code.extend_from_slice(&[
+            0x8b, 0x08, // mov ecx, [rax]
+            0xff, 0xc1, // inc ecx
+            0x89, 0x08, // mov [rax], ecx
+            0x48, 0xb8, // mov rax, result address
+        ]);
+        code.extend_from_slice(&result.to_le_bytes());
+        code.extend_from_slice(&[
+            0x89, 0x08, // mov [rax], ecx
+            0xb8, 1, 0, 0, 0, // return TRUE
+            0xc3,
+        ]);
+        code
+    }
+
+    fn dll_order_process(load_a_during_startup: bool) -> Process {
+        let mut vfs = Vfs::new();
+        let exe_import = load_a_during_startup.then_some("a.dll");
+        vfs.insert(
+            "order.exe",
+            minimal_pe64(0x1400_0000_0, false, &[0xc3], exe_import),
+        );
+        vfs.insert(
+            "a.dll",
+            minimal_pe64(
+                0x1800_0000_0,
+                true,
+                &dll_order_code(DLL_A_ORDER),
+                Some("b.dll"),
+            ),
+        );
+        vfs.insert(
+            "b.dll",
+            minimal_pe64(0x1900_0000_0, true, &dll_order_code(DLL_B_ORDER), None),
+        );
+        let mut process = Process::new(vfs);
+        assert!(process.mem.map(DLL_ORDER_COUNTER, 0x1000, PROT_RW));
+        process.load_exe("order.exe", None).unwrap();
+        process
+    }
+
+    fn assert_dependency_initialized_first(process: &Process) {
+        assert_eq!(process.mem.read_u32(DLL_ORDER_COUNTER).unwrap(), 2);
+        assert_eq!(process.mem.read_u32(DLL_B_ORDER).unwrap(), 1);
+        assert_eq!(process.mem.read_u32(DLL_A_ORDER).unwrap(), 2);
+    }
+
+    #[test]
+    fn x64_access_violation_enters_vectored_handler_and_resumes_edited_context() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const FAULT_ADDRESS: u64 = 0xdead_0000;
+        const MARKER: u64 = 0x30000;
+        const HANDLER_RVA: u64 = 0x1040;
+        const LANDING_RVA: u64 = 0x1080;
+
+        let mut code = vec![0x48, 0xb8]; // mov rax, FAULT_ADDRESS
+        code.extend_from_slice(&FAULT_ADDRESS.to_le_bytes());
+        code.extend_from_slice(&[
+            0x48, 0x8b, 0x18, // mov rbx, [rax] -- access violation
+            0xb8, 1, 0, 0, 0, // return 1 if the handler resumes at the landing pad
+            0xc3,
+        ]);
+        code.resize(HANDLER_RVA as usize - 0x1000, 0x90);
+
+        let mut handler = vec![
+            0x48, 0x8b, 0x01, // mov rax, [rcx] -- EXCEPTION_RECORD
+            0x48, 0x8b, 0x50, 0x28, // mov rdx, [rax + 40] -- fault address
+            0x48, 0xb8, // mov rax, MARKER
+        ];
+        handler.extend_from_slice(&MARKER.to_le_bytes());
+        handler.extend_from_slice(&[
+            0x48, 0x89, 0x10, // mov [rax], rdx
+            0x48, 0x8b, 0x41, 0x08, // mov rax, [rcx + 8] -- CONTEXT
+            0x48, 0xba, // mov rdx, LANDING
+        ]);
+        handler.extend_from_slice(&(IMAGE_BASE + LANDING_RVA).to_le_bytes());
+        handler.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // return EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+        code.extend_from_slice(&handler);
+        code.resize(LANDING_RVA as usize - 0x1000, 0x90);
+        code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]);
+
+        let mut vfs = Vfs::new();
+        vfs.insert("seh.exe", minimal_pe64(IMAGE_BASE, false, &code, None));
+        let mut process = Process::new(vfs);
+        process.load_exe("seh.exe", None).unwrap();
+        assert!(process.mem.map(MARKER, 0x1000, PROT_RW));
+        process
+            .vectored_exception_handlers
+            .push((0x7000_0000, IMAGE_BASE + HANDLER_RVA));
+
+        assert_eq!(process.run(200), Stop::Exit(1));
+        assert_eq!(process.mem.read_u64(MARKER).unwrap(), FAULT_ADDRESS);
+    }
+
+    #[test]
+    fn x64_cpu_instruction_exceptions_enter_vectored_handler_and_resume() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const MARKER: u64 = 0x30000;
+        const HANDLER_RVA: u64 = 0x1040;
+        const LANDING_RVA: u64 = 0x1080;
+
+        for (instruction, expected_code) in [
+            // UD2 and an undefined encoding -> STATUS_ILLEGAL_INSTRUCTION.
+            (&[0x0f, 0x0b][..], 0xc000_001du32),
+            (&[0x0f, 0x0c][..], 0xc000_001d),
+            // CLI and STI -> STATUS_PRIVILEGED_INSTRUCTION.
+            (&[0xfa][..], 0xc000_0096),
+            (&[0xfb][..], 0xc000_0096),
+            (&[0x31, 0xc0, 0xf7, 0xf0][..], 0xc000_0094), // DIV EAX by zero
+            (&[0xcc][..], 0x8000_0003),                   // INT3
+        ] {
+            let mut code = instruction.to_vec();
+            code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]);
+            code.resize((HANDLER_RVA - 0x1000) as usize, 0x90);
+
+            let mut handler = vec![
+                0x48, 0x8b, 0x01, // mov rax, [rcx] -- EXCEPTION_RECORD
+                0x8b, 0x00, // mov eax, [rax] -- ExceptionCode
+                0x48, 0xba, // mov rdx, MARKER
+            ];
+            handler.extend_from_slice(&MARKER.to_le_bytes());
+            handler.extend_from_slice(&[
+                0x89, 0x02, // mov [rdx], eax
+                0x48, 0x8b, 0x41, 0x08, // mov rax, [rcx + 8] -- CONTEXT
+                0x48, 0xba, // mov rdx, LANDING
+            ]);
+            handler.extend_from_slice(&(IMAGE_BASE + LANDING_RVA).to_le_bytes());
+            handler.extend_from_slice(&[
+                0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+                0xb8, 0xff, 0xff, 0xff, 0xff, // return EXCEPTION_CONTINUE_EXECUTION
+                0xc3,
+            ]);
+            code.extend_from_slice(&handler);
+            code.resize((LANDING_RVA - 0x1000) as usize, 0x90);
+            code.extend_from_slice(&[0xb8, 7, 0, 0, 0, 0xc3]);
+
+            let mut vfs = Vfs::new();
+            vfs.insert(
+                "instruction-seh.exe",
+                minimal_pe64(IMAGE_BASE, false, &code, None),
+            );
+            let mut process = Process::new(vfs);
+            process.load_exe("instruction-seh.exe", None).unwrap();
+            assert!(process.mem.map(MARKER, 0x1000, PROT_RW));
+            process
+                .vectored_exception_handlers
+                .push((0x7000_0000, IMAGE_BASE + HANDLER_RVA));
+
+            assert_eq!(process.run(200), Stop::Exit(7));
+            assert_eq!(process.mem.read_u32(MARKER).unwrap(), expected_code);
+        }
+    }
+
+    #[test]
+    fn startup_dll_initialization_runs_dependencies_before_importers() {
+        let process = dll_order_process(true);
+        assert_dependency_initialized_first(&process);
+    }
+
+    #[test]
+    fn tls_callbacks_run_before_dllmain_with_process_attach_arguments() {
+        let mut vfs = Vfs::new();
+        vfs.insert(
+            "tls-order.exe",
+            minimal_pe64(0x1400_0000_0, false, &[0xc3], Some("a.dll")),
+        );
+        vfs.insert(
+            "a.dll",
+            minimal_pe64(
+                0x1800_0000_0,
+                true,
+                &dll_order_code(DLL_A_ORDER),
+                Some("b.dll"),
+            ),
+        );
+        vfs.insert(
+            "b.dll",
+            minimal_pe64_with_tls_callbacks(
+                0x1900_0000_0,
+                true,
+                &dll_order_code(DLL_B_ORDER),
+                None,
+                &[
+                    tls_recording_callback_code(DLL_TLS_CALLBACK_ORDER),
+                    tls_recording_callback_code(DLL_TLS_CALLBACK_ORDER_2),
+                ],
+            ),
+        );
+        let mut process = Process::new(vfs);
+        assert!(process.mem.map(DLL_ORDER_COUNTER, 0x1000, PROT_RW));
+
+        process.load_exe("tls-order.exe", None).unwrap();
+
+        let module = process
+            .modules
+            .iter()
+            .find(|module| module.name == "b.dll")
+            .unwrap();
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_ORDER).unwrap(), 1);
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_ORDER_2).unwrap(), 2);
+        assert_eq!(
+            process.mem.read_u64(DLL_TLS_CALLBACK_BASE).unwrap(),
+            module.base
+        );
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_REASON).unwrap(), 1);
+        assert_eq!(process.mem.read_u64(DLL_TLS_CALLBACK_RESERVED).unwrap(), 0);
+        assert_eq!(process.mem.read_u32(DLL_B_ORDER).unwrap(), 3);
+        assert_eq!(process.mem.read_u32(DLL_A_ORDER).unwrap(), 4);
+    }
+
+    #[test]
+    fn executable_tls_callbacks_run_during_process_startup() {
+        let mut vfs = Vfs::new();
+        vfs.insert(
+            "tls-exe.exe",
+            minimal_pe64_with_tls_callbacks(
+                0x1400_0000_0,
+                false,
+                &[0xc3],
+                None,
+                &[tls_recording_callback_code(DLL_TLS_CALLBACK_ORDER)],
+            ),
+        );
+        let mut process = Process::new(vfs);
+        assert!(process.mem.map(DLL_ORDER_COUNTER, 0x1000, PROT_RW));
+
+        process.load_exe("tls-exe.exe", None).unwrap();
+
+        let module = &process.modules[0];
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_ORDER).unwrap(), 1);
+        assert_eq!(
+            process.mem.read_u64(DLL_TLS_CALLBACK_BASE).unwrap(),
+            module.base
+        );
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_REASON).unwrap(), 1);
+        assert_eq!(process.mem.read_u64(DLL_TLS_CALLBACK_RESERVED).unwrap(), 0);
+    }
+
+    #[test]
+    fn load_library_runs_tls_callbacks_for_a_dll_without_dllmain() {
+        let mut vfs = Vfs::new();
+        vfs.insert(
+            "tls-load.exe",
+            minimal_pe64(0x1400_0000_0, false, &[0xc3], None),
+        );
+        let mut dll = minimal_pe64_with_tls_callbacks(
+            0x1800_0000_0,
+            true,
+            &[0xc3],
+            None,
+            &[tls_recording_callback_code(DLL_TLS_CALLBACK_ORDER)],
+        );
+        put_u32(&mut dll, 0x98 + 16, 0); // TLS-only DLL with no DllMain entry point.
+        vfs.insert("tls-only.dll", dll);
+        let mut process = Process::new(vfs);
+        assert!(process.mem.map(DLL_ORDER_COUNTER, 0x1000, PROT_RW));
+        process.load_exe("tls-load.exe", None).unwrap();
+        let name = process.alloc_virtual(0x1000, PROT_RW);
+        process.write_cstr(name, "tls-only.dll").unwrap();
+        let load_library = process.thunk_for("kernel32", "LoadLibraryA", true).unwrap();
+
+        let loaded = process.call_guest(load_library, &[name]).unwrap();
+
+        assert_ne!(loaded, 0);
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_ORDER).unwrap(), 1);
+        assert_eq!(process.mem.read_u64(DLL_TLS_CALLBACK_BASE).unwrap(), loaded);
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_REASON).unwrap(), 1);
+        assert_eq!(process.mem.read_u64(DLL_TLS_CALLBACK_RESERVED).unwrap(), 0);
+    }
+
+    #[test]
+    fn load_library_initializes_new_dependencies_before_the_requested_dll() {
+        let mut process = dll_order_process(false);
+        let name = process.alloc_virtual(0x1000, PROT_RW);
+        process.write_cstr(name, "a.dll").unwrap();
+        let load_library = process.thunk_for("kernel32", "LoadLibraryA", true).unwrap();
+
+        let loaded = process.call_guest(load_library, &[name]).unwrap();
+
+        assert_ne!(loaded, 0);
+        assert_dependency_initialized_first(&process);
+    }
 
     #[test]
     fn x86_stdcall_signatures_remove_argument_bytes_for_spin_count_and_tls_set() {
-        assert_eq!(stdcall_stack_bytes("kernel32", "InitializeCriticalSectionAndSpinCount"), 8);
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "InitializeCriticalSectionAndSpinCount"),
+            8
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "AddVectoredExceptionHandler"),
+            8
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "RemoveVectoredExceptionHandler"),
+            4
+        );
         assert_eq!(stdcall_stack_bytes("kernel32", "TlsSetValue"), 8);
         assert_eq!(stdcall_stack_bytes("kernel32", "GetCurrentThreadId"), 0);
         assert_eq!(stdcall_stack_bytes("kernel32", "GetVersionExA"), 4);
@@ -3040,6 +4924,28 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn faulting_atexit_callback_propagates_its_crash() {
+        let mut process = process_with_teb();
+        let stack = 0x10_000;
+        assert!(process.mem.map(stack, 0x1000, PROT_RW));
+        assert!(process.mem.map(CALLBACK_ADDR, 0x1000, PROT_RWX));
+        process.mem.write_u8(CALLBACK_ADDR, 0xcc).unwrap(); // int3
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.cpu.gpr[RAX] = 0;
+        process.cpu.rip = EXIT_MAGIC;
+        process.atexit.push(CALLBACK_ADDR);
+
+        let stop = process.run(10);
+
+        assert!(
+            matches!(stop, Stop::Crash(ref message) if message.contains("Breakpoint")),
+            "unexpected exit result: {stop:?}"
+        );
+        assert_eq!(process.exit_code, None);
+        assert!(process.atexit.is_empty());
+    }
+
+    #[test]
     fn run_preserves_retirement_count_before_a_later_block_fault() {
         let mut process = process_with_teb();
         let code = 0x20_000;
@@ -3069,6 +4975,7 @@ mod scheduler_tests {
             size: 0x10000,
             entry: 0,
             is_dll: true,
+            tls_callbacks: Vec::new(),
             exports: HashMap::new(),
             ordinals: HashMap::new(),
             exception_table_rva: 0,
@@ -3171,6 +5078,40 @@ mod scheduler_tests {
             .and_then(|vector| process.rd64(vector))
             .unwrap();
         assert_eq!(process.rd32(restored_guest_block).unwrap(), 0x2222);
+    }
+
+    #[test]
+    fn pe32_exception_registration_head_is_saved_per_thread() {
+        let mut process = Process::new(Vfs::new());
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.fs_base = TEB_ADDR;
+        process.vmem_next = 0x2000_0000;
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(0x60000, 0x10000, PROT_RW));
+        process.wr32(TEB_ADDR, 0x61000).unwrap();
+        process.wr32(TEB_ADDR + 4, 0x70000).unwrap();
+        process.wr32(TEB_ADDR + 8, 0x60000).unwrap();
+        process.wr32(TEB_ADDR + 0x2c, 0).unwrap();
+        process.wr32(TEB_ADDR + 0x34, 0).unwrap();
+
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), u32::MAX);
+
+        process.wr32(TEB_ADDR, 0x6f000).unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1004);
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), 0x61000);
+
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, 0x1008);
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), 0x6f000);
     }
 
     #[test]

@@ -4,6 +4,10 @@ use anywasm_cpu::mem::{PAGE_SIZE, PROT_RWX};
 use anywasm_rt::process::{EXIT_MAGIC, TEB_ADDR};
 use anywasm_rt::{Process, Stop, Vfs};
 
+const PE32_TLS_CALLBACK_BASE: u32 = 0x30_000;
+const PE32_TLS_CALLBACK_REASON: u32 = PE32_TLS_CALLBACK_BASE + 4;
+const PE32_TLS_CALLBACK_RESERVED: u32 = PE32_TLS_CALLBACK_BASE + 8;
+
 fn minimal_pe32(code: &[u8]) -> Vec<u8> {
     assert!(code.len() <= 0x200);
     let mut pe = vec![0u8; 0x400];
@@ -39,6 +43,34 @@ fn minimal_pe32(code: &[u8]) -> Vec<u8> {
     put32(&mut pe, sec + 20, 0x200);
     put32(&mut pe, sec + 36, 0x60000020);
     pe[0x200..0x200 + code.len()].copy_from_slice(code);
+    pe
+}
+
+fn pe32_with_static_tls(code: &[u8]) -> Vec<u8> {
+    let mut pe = minimal_pe32(code);
+    let put32 = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let opt = 0x84 + 20;
+    const IMAGE_BASE: u32 = 0x0040_0000;
+    const TLS_DIR_RVA: u32 = 0x1100;
+
+    // IMAGE_DIRECTORY_ENTRY_TLS points to an IMAGE_TLS_DIRECTORY32.
+    put32(&mut pe, opt + 96 + 9 * 8, TLS_DIR_RVA);
+    put32(&mut pe, opt + 96 + 9 * 8 + 4, 24);
+    put32(&mut pe, 0x300, IMAGE_BASE + 0x1180); // StartAddressOfRawData
+    put32(&mut pe, 0x304, IMAGE_BASE + 0x1184); // EndAddressOfRawData
+    put32(&mut pe, 0x308, IMAGE_BASE + 0x1190); // AddressOfIndex
+    put32(&mut pe, 0x30c, IMAGE_BASE + 0x1120); // AddressOfCallbacks
+    put32(&mut pe, 0x310, 4); // SizeOfZeroFill
+    put32(&mut pe, 0x320, IMAGE_BASE + 0x1140);
+    let mut callback = vec![0x8b, 0x44, 0x24, 0x04, 0xa3]; // mov eax,[esp+4]; mov [abs],eax
+    callback.extend_from_slice(&PE32_TLS_CALLBACK_BASE.to_le_bytes());
+    callback.extend_from_slice(&[0x8b, 0x44, 0x24, 0x08, 0xa3]); // process-attach reason
+    callback.extend_from_slice(&PE32_TLS_CALLBACK_REASON.to_le_bytes());
+    callback.extend_from_slice(&[0x8b, 0x44, 0x24, 0x0c, 0xa3]); // reserved argument
+    callback.extend_from_slice(&PE32_TLS_CALLBACK_RESERVED.to_le_bytes());
+    callback.extend_from_slice(&[0xc2, 0x0c, 0x00]); // stdcall: pop three DWORD arguments
+    pe[0x340..0x340 + callback.len()].copy_from_slice(&callback);
+    put32(&mut pe, 0x380, 0x1122_3344);
     pe
 }
 
@@ -205,6 +237,75 @@ fn static_tls_is_initialized_and_isolated_per_guest_thread() {
         p.unimplemented_log
     );
     assert!(out.is_empty());
+}
+
+#[test]
+fn pe32_static_tls_uses_32_bit_teb_vector_and_thread_private_blocks() {
+    let mut vfs = Vfs::new();
+    vfs.insert("x86_static_tls.exe", pe32_with_static_tls(&[0xc3]));
+    let mut process = Process::new(vfs);
+    process.mem.map(
+        PE32_TLS_CALLBACK_BASE as u64,
+        PAGE_SIZE,
+        anywasm_cpu::mem::PROT_RW,
+    );
+    process.load_exe("x86_static_tls.exe", None).unwrap();
+    assert_eq!(process.cpu.mode, CpuMode::X86_32);
+
+    let main_vector = process.mem.read_u32(TEB_ADDR + 0x2c).unwrap() as u64;
+    assert_ne!(main_vector, 0);
+    let main_block = process.mem.read_u32(main_vector).unwrap() as u64;
+    assert_eq!(process.mem.read_u32(main_block).unwrap(), 0x1122_3344);
+    assert_eq!(process.mem.read_u32(main_block + 4).unwrap(), 0);
+    assert_eq!(process.mem.read_u32(TEB_ADDR + 0x58).unwrap(), 0);
+    assert_eq!(
+        process.mem.read_u32(PE32_TLS_CALLBACK_BASE as u64).unwrap(),
+        0x0040_0000
+    );
+    assert_eq!(
+        process
+            .mem
+            .read_u32(PE32_TLS_CALLBACK_REASON as u64)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        process
+            .mem
+            .read_u32(PE32_TLS_CALLBACK_RESERVED as u64)
+            .unwrap(),
+        0
+    );
+
+    process
+        .create_guest_thread(0x2000, process.modules[0].entry, 0, false)
+        .unwrap();
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, 0x2000);
+    let guest_vector = process.mem.read_u32(TEB_ADDR + 0x2c).unwrap() as u64;
+    assert_ne!(guest_vector, main_vector);
+    let guest_block = process.mem.read_u32(guest_vector).unwrap() as u64;
+    assert_ne!(guest_block, main_block);
+    assert_eq!(process.mem.read_u32(guest_block).unwrap(), 0x1122_3344);
+    process.mem.write_u32(guest_block, 0xaabb_ccdd).unwrap();
+
+    process.request_thread_yield();
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, 0x1004);
+    assert_eq!(
+        process.mem.read_u32(TEB_ADDR + 0x2c).unwrap() as u64,
+        main_vector
+    );
+    assert_eq!(process.mem.read_u32(main_block).unwrap(), 0x1122_3344);
+
+    process.request_thread_yield();
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, 0x2000);
+    assert_eq!(
+        process.mem.read_u32(TEB_ADDR + 0x2c).unwrap() as u64,
+        guest_vector
+    );
+    assert_eq!(process.mem.read_u32(guest_block).unwrap(), 0xaabb_ccdd);
 }
 
 #[test]

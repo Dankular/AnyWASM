@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples Tutorial01_HelloTriangle",
+  "bundleSha256": "c027ddc6dea26ed77c0e7a01d7f9164e7d899ffa4edd4791b792fb03c32c39a6",
+  "workerModule": "target/wasm32-unknown-unknown/release/anywasm_cpu_worker.wasm",
+  "workerModuleDelivery": "supplied from local build output by the Playwright route",
+  "browser": "Playwright Chromium revision 1234",
+  "sharedCpuWorkers": true,
+  "crossOriginIsolated": true,
+  "sharedArrayBuffer": true,
+  "durationSeconds": 30,
+  "status": "Starting after 30 seconds; process remained active",
+  "gpuStats": {
+    "draws": 719,
+    "dispatches": 0,
+    "presents": 360,
+    "passes": 1439,
+    "pipelines": 2,
+    "errors": [],
+    "asyncifyYields": 7543,
+    "asyncifyResumes": 7543
+  },
+  "canvas": {
+    "width": 1280,
+    "height": 1024
+  },
+  "dispatches": {
+    "first": [
+      { "number": 1, "budget": 10000, "state": "HLE", "retired": 13 },
+      { "number": 2, "budget": 9986, "state": "HLE", "retired": 3 },
+      { "number": 3, "budget": 9982, "state": "HLE", "retired": 3 }
+    ],
+    "hundredth": {
+      "number": 100,
+      "budget": 4918,
+      "state": "HLE",
+      "retired": 46
+    }
+  },
+  "diagnosis": "Dirty-page import/export now avoids full frame copies while mappings are stable. A separate scheduler fallback bug caused the coordinator to run one guest instruction per turn after a worker quantum expired. Running a normal 250000-instruction coordinator slice restored forward progress and rendering.",
+  "schedulerEvidence": {
+    "beforeFix": "The no-active-thread branch made about 300000 one-instruction coordinator turns in 30 seconds after the first 10000-instruction worker quantum.",
+    "afterFix": "Tutorial01 produced 719 draws and 360 presents during the 30-second capture."
+  },
+  "limitations": [
+    "The process remained active with the UI status at Starting after 30 seconds; no terminal completion was observed.",
+    "The 1280x1024 canvas screenshot call timed out, so no new screenshot was verified.",
+    "One generic resource 404 appeared in the browser console; the report observed no failed HTTP response, so its resource is unidentified.",
+    "The probe used a local Playwright route for the worker Wasm artifact; the normal web/ path did not contain that built artifact.",
+    "This exercises one active guest context, not concurrent guest-thread execution."
+  ]
+}

@@ -3,9 +3,9 @@
 use super::*;
 use crate::process::*;
 use crate::vfs::{absolute, norm, AssetReadError, CreateDirError};
-use anywasm_cpu::CpuMode;
 use anywasm_cpu::cpu::RSP;
-use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_W, PROT_RW, PROT_RWX, PROT_X};
+use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_W, PROT_X};
+use anywasm_cpu::CpuMode;
 
 const INVALID_HANDLE: u64 = u64::MAX;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -24,6 +24,7 @@ const ERROR_OLD_WIN_VERSION: u32 = 1150;
 const WAIT_OBJECT_0: u64 = 0;
 const WAIT_TIMEOUT: u64 = 0x102;
 const WAIT_FAILED: u64 = u32::MAX as u64;
+pub const QUERY_PERFORMANCE_FREQUENCY: u64 = 10_000_000;
 
 pub const STD_IN: u64 = 0x10;
 pub const STD_OUT: u64 = 0x14;
@@ -70,7 +71,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(0)
         },
         "GetLastError" => |p| {
-            let offset = if p.cpu.mode == CpuMode::X86_32 { 0x34 } else { 0x68 };
+            let offset = if p.cpu.mode == CpuMode::X86_32 {
+                0x34
+            } else {
+                0x68
+            };
             Ok(p.rd32(TEB_ADDR + offset)? as u64)
         },
         "GetPrivateProfileIntA" => get_private_profile_int_a,
@@ -80,6 +85,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.set_last_error(v);
             Ok(0)
         },
+        "AddVectoredExceptionHandler" => add_vectored_exception_handler,
+        "RemoveVectoredExceptionHandler" => remove_vectored_exception_handler,
+        "AddVectoredContinueHandler" => add_vectored_continue_handler,
+        "RemoveVectoredContinueHandler" => remove_vectored_continue_handler,
         "IsDebuggerPresent" => |_| Ok(0),
         "CheckRemoteDebuggerPresent" => |p| {
             let a = p.arg(1);
@@ -99,8 +108,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.stderr.extend_from_slice(s.as_bytes());
             Ok(0)
         },
-        "SetUnhandledExceptionFilter" => |_| Ok(0),
-        "UnhandledExceptionFilter" => |_| Ok(0),
+        "SetUnhandledExceptionFilter" => set_unhandled_exception_filter,
+        "UnhandledExceptionFilter" => crate::exception::unhandled_exception_filter,
         "SetErrorMode" | "SetThreadErrorMode" => |_| Ok(0),
         "RaiseException" => raise_exception,
         "RtlCaptureContext" => ntdll::rtl_capture_context,
@@ -223,7 +232,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "GetFileSize" => |p| {
             let h = p.arg(0);
-            match file_len(p, h) {
+            let length = file_len(p, h);
+            trace_file_size(p, h, length, "GetFileSize");
+            match length {
                 Some(n) => {
                     let hi = p.arg(1);
                     if hi != 0 {
@@ -234,13 +245,18 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                 None => Ok(0xffff_ffff),
             }
         },
-        "GetFileSizeEx" => |p| match file_len(p, p.arg(0)) {
-            Some(n) => {
-                let o = p.arg(1);
-                p.wr64(o, n)?;
-                Ok(1)
+        "GetFileSizeEx" => |p| {
+            let h = p.arg(0);
+            let length = file_len(p, h);
+            trace_file_size(p, h, length, "GetFileSizeEx");
+            match length {
+                Some(n) => {
+                    let o = p.arg(1);
+                    p.wr64(o, n)?;
+                    Ok(1)
+                }
+                None => Ok(0),
             }
-            None => Ok(0),
         },
         "SetFilePointer" => set_file_pointer,
         "SetFilePointerEx" => set_file_pointer_ex,
@@ -330,7 +346,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetCommandLineW" => get_command_line_w,
         "GetStartupInfoA" | "GetStartupInfoW" => |p| {
             let a = p.arg(0);
-            let size = if p.cpu.mode == CpuMode::X86_32 { 68 } else { 104 };
+            let size = if p.cpu.mode == CpuMode::X86_32 {
+                68
+            } else {
+                104
+            };
             p.write_bytes(a, &vec![0u8; size])?;
             p.wr32(a, size as u32)?;
             Ok(0)
@@ -405,13 +425,13 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         // time
         "QueryPerformanceCounter" => |p| {
             let a = p.arg(0);
-            let t = ticks(p) / 10;
+            let t = query_performance_counter_value(p);
             p.wr64(a, t)?;
             Ok(1)
         },
         "QueryPerformanceFrequency" => |p| {
             let a = p.arg(0);
-            p.wr64(a, 10_000_000)?;
+            p.wr64(a, QUERY_PERFORMANCE_FREQUENCY)?;
             Ok(1)
         },
         "GetTickCount" => |p| Ok((ticks(p) / 100_000) & 0xffff_ffff),
@@ -630,6 +650,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "WideCharToMultiByte" => wide_char_to_multi_byte,
         "lstrlenA" => |p| Ok(p.read_cstr(p.arg(0))?.len() as u64),
         "lstrlenW" => |p| Ok(p.read_wstr(p.arg(0))?.encode_utf16().count() as u64),
+        "lstrcatA" => lstrcat_a,
         "lstrcpyA" => |p| {
             let (d, s) = (p.arg(0), p.read_cstr(p.arg(1))?);
             p.write_cstr(d, &s)?;
@@ -689,6 +710,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(0)
         },
+        "GetLogicalProcessorInformationEx" => get_logical_processor_information_ex,
         "GetProcessTimes" | "GetThreadTimes" => |p| {
             let a = p.arg(1);
             p.write_bytes(a, &[0u8; 32])?;
@@ -708,16 +730,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "EncodePointer" | "DecodePointer" | "EncodeSystemPointer" | "DecodeSystemPointer" => {
             |p| Ok(p.arg(0))
         }
-        "RtlLookupFunctionEntry" => |_| Ok(0),
         "IsWow64Process" => |p| {
             let a = p.arg(1);
             p.wr32(a, 0)?;
             Ok(1)
         },
         "GetSystemFirmwareTable" => |_| Ok(0),
-        "RtlAddFunctionTable" | "RtlDeleteFunctionTable" => |_| Ok(1),
-        "AddVectoredExceptionHandler" => |_| Ok(0x7000),
-        "RemoveVectoredExceptionHandler" => |_| Ok(1),
         "GetUserDefaultUILanguage" => |_| Ok(0x409),
         "SetThreadStackGuarantee" => |_| Ok(1),
         _ => return None,
@@ -726,8 +744,35 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+fn lstrcat_a(p: &mut Process) -> Result<u64, Stop> {
+    let destination = p.arg(0);
+    let source = p.arg(1);
+    let destination_bytes = p
+        .mem
+        .read_cstr(destination, 1 << 20)
+        .map_err(|e| Stop::Crash(format!("read fault {destination:#x}: {e:?}")))?;
+    let mut source_bytes = p
+        .mem
+        .read_cstr(source, 1 << 20)
+        .map_err(|e| Stop::Crash(format!("read fault {source:#x}: {e:?}")))?;
+    source_bytes.push(0);
+    let append_at = destination
+        .checked_add(destination_bytes.len() as u64)
+        .ok_or_else(|| {
+            Stop::Crash(format!(
+                "lstrcatA destination address overflow: {destination:#x}"
+            ))
+        })?;
+    p.write_bytes(append_at, &source_bytes)?;
+    Ok(destination)
+}
+
 fn ticks(p: &Process) -> u64 {
     p.now_ticks()
+}
+
+pub fn query_performance_counter_value(p: &Process) -> u64 {
+    ticks(p) / 10
 }
 
 fn file_time(p: &Process) -> u64 {
@@ -757,14 +802,11 @@ fn raise_exception(p: &mut Process) -> R {
         (p.arg(2) as u32).min(15),
         p.arg(3),
     );
+    let pointer_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
     let arg_values = (0..arg_count)
-        .map(|index| {
-            p.mem
-                .read_u64(args_pointer.wrapping_add(index as u64 * 8))
-                .unwrap_or(0)
-        })
-        .collect::<Vec<_>>();
-    let caller = p.mem.read_u64(p.cpu.gpr[RSP]).unwrap_or(0);
+        .map(|index| p.rdptr(args_pointer.wrapping_add(index as u64 * pointer_size)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let caller = p.rdptr(p.cpu.gpr[RSP])?;
     if p.trace_imports {
         let args = arg_values
             .iter()
@@ -773,8 +815,8 @@ fn raise_exception(p: &mut Process) -> R {
             .join(", ");
         let stack = (0..72)
             .map(|index| {
-                let offset = index * 8;
-                let value = p.rd64(p.cpu.gpr[RSP].wrapping_add(offset)).unwrap_or(0);
+                let offset = index * pointer_size;
+                let value = p.rdptr(p.cpu.gpr[RSP].wrapping_add(offset)).unwrap_or(0);
                 format!("+{offset:#04x}:{value:#x}")
             })
             .collect::<Vec<_>>()
@@ -790,6 +832,76 @@ fn raise_exception(p: &mut Process) -> R {
         );
     }
     crate::exception::dispatch_raised_exception(p, code, flags, &arg_values, caller)
+}
+
+fn add_vectored_exception_handler(p: &mut Process) -> R {
+    add_vectored_handler(p, false)
+}
+
+fn add_vectored_continue_handler(p: &mut Process) -> R {
+    add_vectored_handler(p, true)
+}
+
+fn add_vectored_handler(p: &mut Process, is_continue: bool) -> R {
+    let first = p.arg(0) != 0;
+    let callback = p.arg(1);
+    if callback == 0 {
+        return Ok(0);
+    }
+    let mut handle = p.next_vectored_exception_handle;
+    while handle == 0
+        || p.vectored_exception_handlers
+            .iter()
+            .any(|(existing, _)| *existing == handle)
+        || p.vectored_continue_handlers
+            .iter()
+            .any(|(existing, _)| *existing == handle)
+    {
+        handle = handle.wrapping_add(1).max(0x7000_0000);
+    }
+    p.next_vectored_exception_handle = handle.wrapping_add(1).max(0x7000_0000);
+    let handlers = if is_continue {
+        &mut p.vectored_continue_handlers
+    } else {
+        &mut p.vectored_exception_handlers
+    };
+    if first {
+        handlers.insert(0, (handle, callback));
+    } else {
+        handlers.push((handle, callback));
+    }
+    Ok(handle)
+}
+
+fn remove_vectored_exception_handler(p: &mut Process) -> R {
+    remove_vectored_handler(p, false)
+}
+
+fn remove_vectored_continue_handler(p: &mut Process) -> R {
+    remove_vectored_handler(p, true)
+}
+
+fn remove_vectored_handler(p: &mut Process, is_continue: bool) -> R {
+    let handle = p.arg(0);
+    let handlers = if is_continue {
+        &mut p.vectored_continue_handlers
+    } else {
+        &mut p.vectored_exception_handlers
+    };
+    let Some(index) = handlers
+        .iter()
+        .position(|(registered, _)| *registered == handle)
+    else {
+        return Ok(0);
+    };
+    handlers.remove(index);
+    Ok(1)
+}
+
+fn set_unhandled_exception_filter(p: &mut Process) -> R {
+    let previous = p.top_level_exception_filter;
+    p.top_level_exception_filter = p.arg(0);
+    Ok(previous)
 }
 
 fn terminate_process(p: &mut Process) -> R {
@@ -809,7 +921,7 @@ fn exit_thread(p: &mut Process) -> R {
     }
 }
 
-fn create_thread(p: &mut Process) -> R {
+pub fn create_thread(p: &mut Process) -> R {
     let (start, parameter, flags, thread_id_ptr) = (p.arg(2), p.arg(3), p.arg(4) as u32, p.arg(5));
     if start == 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
@@ -823,11 +935,23 @@ fn create_thread(p: &mut Process) -> R {
         });
     }
     let id = p.next_thread_id;
+    if thread_id_ptr != 0 {
+        let current = p.rd32(thread_id_ptr)?;
+        p.wr32(thread_id_ptr, current)?;
+    }
+    let suspended = flags & 4 != 0;
+    match p.create_guest_thread(id, start, parameter, suspended) {
+        Ok(()) => {}
+        Err(Stop::Crash(message)) if message.starts_with("guest allocation failed") => {
+            p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return Ok(0);
+        }
+        Err(stop) => return Err(stop),
+    }
     p.next_thread_id = p.next_thread_id.wrapping_add(4).max(0x1008);
     if thread_id_ptr != 0 {
         p.wr32(thread_id_ptr, id)?;
     }
-    let suspended = flags & 4 != 0;
     let handle = p.new_handle(Handle::Thread {
         id,
         start,
@@ -835,7 +959,6 @@ fn create_thread(p: &mut Process) -> R {
         exit_code: None,
         suspended,
     });
-    p.create_guest_thread(id, start, parameter, suspended)?;
     if !suspended {
         p.request_thread_yield();
     }
@@ -1209,6 +1332,47 @@ fn get_system_info(p: &mut Process) -> R {
     Ok(0)
 }
 
+fn get_logical_processor_information_ex(p: &mut Process) -> R {
+    const RELATION_PROCESSOR_PACKAGE: u32 = 3;
+    const RECORD_SIZE: u32 = 48;
+
+    let relationship = p.arg(0) as u32;
+    let buffer = p.arg(1);
+    let returned_length = p.arg(2);
+    if returned_length == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if relationship != RELATION_PROCESSOR_PACKAGE {
+        if matches!(relationship, 0..=8 | 0xffff) {
+            return Err(Stop::Unimplemented {
+                dll: "kernel32".into(),
+                name: "GetLogicalProcessorInformationEx (relationship)".into(),
+            });
+        }
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+
+    if buffer == 0 || p.rd32(returned_length)? < RECORD_SIZE {
+        p.wr32(returned_length, RECORD_SIZE)?;
+        p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return Ok(0);
+    }
+
+    // One virtual package, one group, and one logical processor, consistent with GetSystemInfo.
+    // SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX header (8 bytes), followed by a
+    // PROCESSOR_RELATIONSHIP with GroupCount=1 and GROUP_AFFINITY mask bit 0 set.
+    let mut record = [0u8; RECORD_SIZE as usize];
+    record[0..4].copy_from_slice(&RELATION_PROCESSOR_PACKAGE.to_le_bytes());
+    record[4..8].copy_from_slice(&RECORD_SIZE.to_le_bytes());
+    record[30..32].copy_from_slice(&1u16.to_le_bytes()); // GroupCount
+    record[32..40].copy_from_slice(&1u64.to_le_bytes()); // GroupMask[0].Mask
+    p.write_bytes(buffer, &record)?;
+    p.wr32(returned_length, RECORD_SIZE)?;
+    Ok(1)
+}
+
 fn global_memory_status(p: &mut Process) -> R {
     let a = p.arg(0);
     if p.cpu.mode == CpuMode::X86_32 {
@@ -1234,9 +1398,16 @@ fn global_memory_status(p: &mut Process) -> R {
         b[0..4].copy_from_slice(&64u32.to_le_bytes());
         b[4..8].copy_from_slice(&50u32.to_le_bytes());
         let total = 8u64 << 30;
-        for (i, value) in [total, total / 2, total * 2, total, 1u64 << 47, (1u64 << 47) - (1 << 30)]
-            .iter()
-            .enumerate()
+        for (i, value) in [
+            total,
+            total / 2,
+            total * 2,
+            total,
+            1u64 << 47,
+            (1u64 << 47) - (1 << 30),
+        ]
+        .iter()
+        .enumerate()
         {
             b[8 + 8 * i..16 + 8 * i].copy_from_slice(&value.to_le_bytes());
         }
@@ -1550,8 +1721,11 @@ fn resource_module(p: &Process, hmodule: u64) -> Option<(u64, u32, u32)> {
     } else {
         p.modules.iter().find(|module| module.base == hmodule)
     }?;
-    (module.resource_rva != 0 && module.resource_size >= 16)
-        .then_some((module.base, module.resource_rva, module.resource_size))
+    (module.resource_rva != 0 && module.resource_size >= 16).then_some((
+        module.base,
+        module.resource_rva,
+        module.resource_size,
+    ))
 }
 
 fn resource_key_a(p: &Process, value: u64) -> Result<ResourceKey, Stop> {
@@ -1601,13 +1775,10 @@ fn resource_child(
         let matches = match key {
             None => true,
             Some(ResourceKey::Id(id)) => raw_name & 0x8000_0000 == 0 && raw_name as u16 == *id,
-            Some(ResourceKey::Name(name)) if raw_name & 0x8000_0000 != 0 => resource_name(
-                p,
-                root,
-                size,
-                raw_name & 0x7fff_ffff,
-            )?
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name)),
+            Some(ResourceKey::Name(name)) if raw_name & 0x8000_0000 != 0 => {
+                resource_name(p, root, size, raw_name & 0x7fff_ffff)?
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+            }
             Some(ResourceKey::Name(_)) => false,
         };
         if matches {
@@ -1630,25 +1801,17 @@ fn find_resource_a(p: &mut Process) -> R {
     let root = base + resource_rva as u64;
     let resource_type = resource_key_a(p, p.arg(2))?;
     let resource_name = resource_key_a(p, p.arg(1))?;
-    let Some((type_offset, type_is_dir)) = resource_child(
-        p,
-        root,
-        resource_size,
-        0,
-        Some(&resource_type),
-    )? else {
+    let Some((type_offset, type_is_dir)) =
+        resource_child(p, root, resource_size, 0, Some(&resource_type))?
+    else {
         return Ok(0);
     };
     if !type_is_dir {
         return Ok(0);
     }
-    let Some((mut data_offset, mut is_dir)) = resource_child(
-        p,
-        root,
-        resource_size,
-        type_offset,
-        Some(&resource_name),
-    )? else {
+    let Some((mut data_offset, mut is_dir)) =
+        resource_child(p, root, resource_size, type_offset, Some(&resource_name))?
+    else {
         return Ok(0);
     };
     // A named resource normally has one more directory level for language selection.
@@ -1726,6 +1889,7 @@ fn emit(p: &mut Process, handle: u64, data: &[u8]) -> Option<usize> {
                 path,
                 pos,
                 write: true,
+                ..
             }) => {
                 let path = path.clone();
                 let at = *pos;
@@ -1761,12 +1925,63 @@ fn write_file(p: &mut Process) -> R {
 
 fn read_file(p: &mut Process) -> R {
     let (h, buf, n, read) = (p.arg(0), p.arg(1), p.arg(2) as usize, p.arg(3));
+    let overlapped = p.arg(4);
     let data: Vec<u8> = if h == STD_IN {
         let k = n.min(p.stdin.len());
         p.stdin.drain(..k).collect()
-    } else if let Some(Handle::File { path, pos, .. }) = p.handles.get(&h) {
-        let (path, at) = (path.clone(), *pos);
-        let d = match p.vfs.read_range(&path, at as u64, n) {
+    } else if let Some(Handle::File {
+        path,
+        pos,
+        overlapped: handle_overlapped,
+        ..
+    }) = p.handles.get(&h)
+    {
+        let path = path.clone();
+        let handle_overlapped = *handle_overlapped;
+        if handle_overlapped && overlapped == 0 {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            if read != 0 {
+                p.wr32(read, 0)?;
+            }
+            return Ok(0);
+        }
+        let at = if overlapped != 0 {
+            let (offset_at, offset_high_at) = if p.cpu.mode == CpuMode::X86_32 {
+                (overlapped + 8, overlapped + 12)
+            } else {
+                (overlapped + 16, overlapped + 20)
+            };
+            ((p.rd32(offset_high_at)? as u64) << 32) | p.rd32(offset_at)? as u64
+        } else {
+            *pos as u64
+        };
+        let read_end = buf.saturating_add(n as u64);
+        if p.trace_gta_eventvol
+            && ((buf <= 0x31b0_85dc && read_end > 0x31b0_7318)
+                || path.ends_with("models\\particle.txd"))
+        {
+            let overlapped_offset = (overlapped != 0).then(|| {
+                let (offset_at, high_at) = if p.cpu.mode == CpuMode::X86_32 {
+                    (overlapped + 8, overlapped + 12)
+                } else {
+                    (overlapped + 16, overlapped + 20)
+                };
+                ((p.mem.read_u32(high_at).unwrap_or(0) as u64) << 32)
+                    | p.mem.read_u32(offset_at).unwrap_or(0) as u64
+            });
+            let overlapped_words = (0..if p.cpu.mode == CpuMode::X86_32 { 5 } else { 7 })
+                .map(|i| p.mem.read_u32(overlapped + i * 4).unwrap_or(0))
+                .map(|word| format!("{word:#x}"))
+                .collect::<Vec<_>>();
+            let caller = p.mem.read_u32(p.cpu.gpr[RSP]).unwrap_or(0);
+            p.stderr.extend_from_slice(
+                format!(
+                    "[gta-file-read] path={path:?} currentOffset={at:#x} requested={n:#x} guestBuffer={buf:#x} overlapped={overlapped:#x} overlappedWords={overlapped_words:?} overlappedOffset={overlapped_offset:?} caller={caller:#x}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        let d = match p.vfs.read_range(&path, at, n) {
             Ok(data) => data,
             // Preserve the existing behavior if a file is removed after it was opened.
             Err(AssetReadError::NotFound) => Vec::new(),
@@ -1785,8 +2000,50 @@ fn read_file(p: &mut Process) -> R {
                 return Ok(0);
             }
         };
-        if let Some(Handle::File { pos, .. }) = p.handles.get_mut(&h) {
-            *pos = at.saturating_add(d.len());
+        if p.trace_gta_eventvol && path.ends_with("models\\particle.txd") {
+            let caller = p.mem.read_u32(p.cpu.gpr[RSP]).unwrap_or(0);
+            p.stderr.extend_from_slice(
+                format!(
+                    "[gta-file-read-result] path={path:?} offset={at:#x} requested={n:#x} returned={:#x} fileSize={:?} caller={caller:#x}\n",
+                    d.len(),
+                    p.vfs.file_len(&path)
+                )
+                .as_bytes(),
+            );
+        }
+        let next = at.saturating_add(d.len() as u64);
+        if overlapped != 0 {
+            if handle_overlapped {
+                if p.cpu.mode == CpuMode::X86_32 {
+                    p.wr32(overlapped, 0)?;
+                    p.wr32(overlapped + 4, d.len() as u32)?;
+                } else {
+                    p.wr64(overlapped, 0)?;
+                    p.wr64(overlapped + 8, d.len() as u64)?;
+                }
+                let event_at = if p.cpu.mode == CpuMode::X86_32 {
+                    overlapped + 16
+                } else {
+                    overlapped + 24
+                };
+                let event = p.rdptr(event_at)?;
+                if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&event) {
+                    *signaled = true;
+                }
+            } else {
+                let (offset_at, offset_high_at) = if p.cpu.mode == CpuMode::X86_32 {
+                    (overlapped + 8, overlapped + 12)
+                } else {
+                    (overlapped + 16, overlapped + 20)
+                };
+                p.wr32(offset_at, next as u32)?;
+                p.wr32(offset_high_at, (next >> 32) as u32)?;
+                if let Some(Handle::File { pos, .. }) = p.handles.get_mut(&h) {
+                    *pos = next.min(usize::MAX as u64) as usize;
+                }
+            }
+        } else if let Some(Handle::File { pos, .. }) = p.handles.get_mut(&h) {
+            *pos = next.min(usize::MAX as u64) as usize;
         }
         d
     } else {
@@ -1883,6 +2140,23 @@ fn create_file(p: &mut Process, wide: bool) -> R {
         return Ok(STD_IN);
     }
     let path = absolute(&raw_path, &p.current_directory);
+    let normalized_path = norm(&path);
+    if p.trace_gta_eventvol
+        && matches!(
+            normalized_path.as_str(),
+            "audio\\sfx\\genrl" | "models\\particle.txd"
+        )
+    {
+        let flags = p.arg(5) as u32;
+        let caller = p.mem.read_u32(p.cpu.gpr[RSP]).unwrap_or(0);
+        p.stderr.extend_from_slice(
+            format!(
+                "[gta-file-open] path={normalized_path:?} flags={flags:#x} overlapped={} caller={caller:#x}\n",
+                flags & 0x4000_0000 != 0
+            )
+            .as_bytes(),
+        );
+    }
     let write = access & 0x4000_0000 != 0 || access & 0x1_0000 != 0 || access & 2 != 0;
     let exists = p.vfs.exists(&path);
     match disp {
@@ -1903,9 +2177,10 @@ fn create_file(p: &mut Process, wide: bool) -> R {
     }
     p.set_last_error(0);
     Ok(p.new_handle(Handle::File {
-        path: norm(&path),
+        path: normalized_path,
         pos: 0,
         write,
+        overlapped: p.arg(5) as u32 & 0x4000_0000 != 0,
     }))
 }
 
@@ -1987,6 +2262,15 @@ fn map_view_of_file(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
+    if p.trace_gta_eventvol {
+        let path = file_path.as_deref().unwrap_or("<pagefile>");
+        p.stderr.extend_from_slice(
+            format!(
+                "[gta-map-view] path={path:?} fileSize={size:#x} offset={offset:#x} len={len:#x}\n"
+            )
+            .as_bytes(),
+        );
+    }
     let guest_protection = if access & 0x2 != 0 || access & 0x1 != 0 {
         PROT_RW
     } else if access & 0x20 != 0 {
@@ -1994,8 +2278,8 @@ fn map_view_of_file(p: &mut Process) -> R {
     } else {
         PROT_R
     };
-    let contents = if let Some(path) = file_path {
-        match p.vfs.read_range(&path, offset, len as usize) {
+    let contents = if let Some(path) = file_path.as_deref() {
+        match p.vfs.read_range(path, offset, len as usize) {
             Ok(data) => Some(data),
             Err(AssetReadError::NotFound) => None,
             Err(AssetReadError::TooLarge) => {
@@ -2011,6 +2295,11 @@ fn map_view_of_file(p: &mut Process) -> R {
         None
     };
     let address = p.alloc_virtual(len, guest_protection);
+    if p.trace_gta_eventvol {
+        p.stderr.extend_from_slice(
+            format!("[gta-map-view] mapped address={address:#x} len={len:#x}\n").as_bytes(),
+        );
+    }
     if let Some(contents) = contents {
         p.mem
             .write_force(address, &contents)
@@ -2060,6 +2349,21 @@ fn file_len(p: &Process, h: u64) -> Option<u64> {
         Some(Handle::File { path, .. }) => p.vfs.file_len(path),
         _ => None,
     }
+}
+
+fn trace_file_size(p: &mut Process, h: u64, length: Option<u64>, api: &str) {
+    let Some(Handle::File { path, pos, .. }) = p.handles.get(&h) else {
+        return;
+    };
+    if !p.trace_gta_eventvol || !path.ends_with("models\\particle.txd") {
+        return;
+    }
+    let (path, pos) = (path.clone(), *pos);
+    let caller = p.mem.read_u32(p.cpu.gpr[RSP]).unwrap_or(0);
+    p.stderr.extend_from_slice(
+        format!("[gta-file-size] api={api} path={path:?} size={length:?} position={pos:#x} caller={caller:#x}\n")
+            .as_bytes(),
+    );
 }
 
 fn wildcard_matches(pattern: &str, name: &str) -> bool {
@@ -2113,7 +2417,11 @@ fn find_first_file(p: &mut Process, wide: bool) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(INVALID_HANDLE);
     }
-    let raw = if wide { p.read_wstr(pattern)? } else { p.read_cstr(pattern)? };
+    let raw = if wide {
+        p.read_wstr(pattern)?
+    } else {
+        p.read_cstr(pattern)?
+    };
     let pattern = norm(&absolute(&raw, &p.current_directory));
     let (directory, leaf) = pattern.rsplit_once('\\').unwrap_or(("", pattern.as_str()));
     let mut entries: Vec<FindEntry> = p
@@ -2218,7 +2526,10 @@ fn profile_int(p: &mut Process, section: &str, key: &str, default: u32, path: &s
             continue;
         }
         let value = value.trim();
-        let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        let parsed = if let Some(hex) = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+        {
             i64::from_str_radix(hex, 16).ok()
         } else {
             value.parse::<i64>().ok()
@@ -2319,7 +2630,24 @@ fn set_file_pointer(p: &mut Process) -> R {
     } else {
         lo
     };
+    let trace = p.handles.get(&h).and_then(|handle| match handle {
+        Handle::File { path, pos, .. }
+            if p.trace_gta_eventvol && path.ends_with("models\\particle.txd") =>
+        {
+            Some((path.clone(), *pos))
+        }
+        _ => None,
+    });
     let new = seek(p, h, off, method)?;
+    if let Some((path, before)) = trace {
+        let caller = p.mem.read_u32(p.cpu.gpr[RSP]).unwrap_or(0);
+        p.stderr.extend_from_slice(
+            format!(
+                "[gta-file-seek] path={path:?} before={before:#x} offset={off:#x} method={method} result={new:?} caller={caller:#x}\n"
+            )
+            .as_bytes(),
+        );
+    }
     match new {
         Some(n) => {
             if hi_ptr != 0 {
@@ -2332,7 +2660,25 @@ fn set_file_pointer(p: &mut Process) -> R {
 }
 fn set_file_pointer_ex(p: &mut Process) -> R {
     let (h, off, out, method) = (p.arg(0), p.arg(1) as i64, p.arg(2), p.arg(3));
-    match seek(p, h, off, method)? {
+    let trace = p.handles.get(&h).and_then(|handle| match handle {
+        Handle::File { path, pos, .. }
+            if p.trace_gta_eventvol && path.ends_with("models\\particle.txd") =>
+        {
+            Some((path.clone(), *pos))
+        }
+        _ => None,
+    });
+    let result = seek(p, h, off, method)?;
+    if let Some((path, before)) = trace {
+        let caller = p.mem.read_u32(p.cpu.gpr[RSP]).unwrap_or(0);
+        p.stderr.extend_from_slice(
+            format!(
+                "[gta-file-seek] api=SetFilePointerEx path={path:?} before={before:#x} offset={off:#x} method={method} result={result:?} caller={caller:#x}\n"
+            )
+            .as_bytes(),
+        );
+    }
+    match result {
         Some(n) => {
             if out != 0 {
                 p.wr64(out, n)?;
@@ -2556,19 +2902,12 @@ fn load_library(p: &mut Process, name: &str) -> R {
     };
     if let Some(f) = file {
         let data = p.vfs.get(&f).unwrap().clone();
-        let before = p.modules.len();
         return match p.load_image(&data, &f, true) {
             Ok(i) => {
-                // Run DllMain for the new module and any dependencies it pulled in.
-                for k in before..p.modules.len() {
-                    let (base, entry, hle) = (
-                        p.modules[k].base,
-                        p.modules[k].entry,
-                        p.modules[k].hle_group.is_some(),
-                    );
-                    if !hle && entry != 0 {
-                        p.call_guest(entry, &[base, 1, 0])?;
-                    }
+                // Initialize the new dependency graph in Windows load order. Existing modules
+                // are already marked initialized and are skipped by dll_init_order.
+                for module in p.dll_init_order(i) {
+                    p.run_dll_process_attach(module)?;
                 }
                 Ok(p.modules[i].base)
             }
@@ -2922,6 +3261,26 @@ mod lc_map_string_tests {
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
     #[test]
+    fn lstrcat_a_appends_ansi_bytes_and_returns_the_original_destination() {
+        const BASE: u64 = 0x80000;
+        const DEST: u64 = BASE + 0x100;
+        const SOURCE: u64 = BASE + 0x200;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        p.write_bytes(DEST, b"old\0\0").unwrap();
+        p.write_bytes(SOURCE, &[0xe9, b'!', 0]).unwrap();
+        p.cpu.gpr[RCX] = DEST;
+        p.cpu.gpr[RDX] = SOURCE;
+
+        let lstrcat_a = lookup("lstrcatA").expect("kernel32!lstrcatA should resolve");
+        assert_eq!(lstrcat_a(&mut p), Ok(DEST));
+        assert_eq!(
+            p.read_bytes(DEST, 6).unwrap(),
+            [b'o', b'l', b'd', 0xe9, b'!', 0]
+        );
+    }
+
+    #[test]
     fn static_tls_tlsalloc_and_flsalloc_use_separate_index_spaces() {
         let mut p = Process::new(crate::vfs::Vfs::new());
         let tls_alloc = lookup("TlsAlloc").unwrap();
@@ -2930,6 +3289,79 @@ mod lc_map_string_tests {
         assert_eq!(fls_alloc(&mut p), Ok(0));
         assert_eq!(tls_alloc(&mut p), Ok(1));
         assert_eq!(fls_alloc(&mut p), Ok(1));
+    }
+
+    #[test]
+    fn vectored_exception_handlers_follow_first_last_order_and_remove_by_token() {
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        let add = lookup("AddVectoredExceptionHandler")
+            .expect("AddVectoredExceptionHandler should resolve");
+        let remove = lookup("RemoveVectoredExceptionHandler")
+            .expect("RemoveVectoredExceptionHandler should resolve");
+
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0x1400_01000;
+        let last = add(&mut p).unwrap();
+        p.cpu.gpr[RCX] = 1;
+        p.cpu.gpr[RDX] = 0x1400_02000;
+        let first = add(&mut p).unwrap();
+
+        assert_ne!(last, 0);
+        assert_ne!(first, 0);
+        assert_ne!(last, first);
+        assert_eq!(
+            p.vectored_exception_handlers,
+            vec![(first, 0x1400_02000), (last, 0x1400_01000)]
+        );
+        p.cpu.gpr[RCX] = last;
+        assert_eq!(remove(&mut p), Ok(1));
+        assert_eq!(p.vectored_exception_handlers, vec![(first, 0x1400_02000)]);
+        p.cpu.gpr[RCX] = last;
+        assert_eq!(remove(&mut p), Ok(0));
+    }
+
+    #[test]
+    fn vectored_continue_handlers_use_a_separate_ordered_registry() {
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        let add_veh = lookup("AddVectoredExceptionHandler").unwrap();
+        let add_vch = lookup("AddVectoredContinueHandler").unwrap();
+        let remove_vch = lookup("RemoveVectoredContinueHandler").unwrap();
+
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0x1400_01000;
+        let veh = add_veh(&mut p).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0x1400_02000;
+        let last = add_vch(&mut p).unwrap();
+        p.cpu.gpr[RCX] = 1;
+        p.cpu.gpr[RDX] = 0x1400_03000;
+        let first = add_vch(&mut p).unwrap();
+
+        assert_ne!(veh, last);
+        assert_ne!(last, first);
+        assert_eq!(p.vectored_exception_handlers, vec![(veh, 0x1400_01000)]);
+        assert_eq!(
+            p.vectored_continue_handlers,
+            vec![(first, 0x1400_03000), (last, 0x1400_02000)]
+        );
+        p.cpu.gpr[RCX] = last;
+        assert_eq!(remove_vch(&mut p), Ok(1));
+        assert_eq!(p.vectored_continue_handlers, vec![(first, 0x1400_03000)]);
+        p.cpu.gpr[RCX] = veh;
+        assert_eq!(remove_vch(&mut p), Ok(0));
+    }
+
+    #[test]
+    fn set_unhandled_exception_filter_returns_and_replaces_the_previous_filter() {
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        let set_filter = lookup("SetUnhandledExceptionFilter").unwrap();
+
+        p.cpu.gpr[RCX] = 0x1400_01000;
+        assert_eq!(set_filter(&mut p), Ok(0));
+        p.cpu.gpr[RCX] = 0x1400_02000;
+        assert_eq!(set_filter(&mut p), Ok(0x1400_01000));
+        p.cpu.gpr[RCX] = 0;
+        assert_eq!(set_filter(&mut p), Ok(0x1400_02000));
     }
 
     #[test]

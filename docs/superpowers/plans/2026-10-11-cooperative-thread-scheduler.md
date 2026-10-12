@@ -94,6 +94,7 @@ return boundary; timer deadlines use a process-wide virtual clock.
 The planned scheduler behaviors are implemented and covered by `cargo test --workspace` and
 `node test/wasm_smoke.mjs` on this revision. The bounded selected-target trace reaches the D3D11
 compute/draw/present path. Remaining limits are nested synchronous callback scheduling, alertable
-waits, static TLS images loaded after guest-thread creation, and suspension/resumption of a
-synchronous callback across the normal browser worker slice. No host-renderer or gameplay acceptance
-is claimed.
+waits, static TLS images loaded after guest-thread creation, and native CLI continuation when a
+synchronous callback exhausts its configured slice. The WASM/browser Asyncify path has since passed
+a 250,000-instruction normal-worker-slice callback-resumption replay, but that replay did not finish
+its route or reach a terminal process status. No full gameplay acceptance is claimed.

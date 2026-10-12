@@ -108,11 +108,44 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirectInput8A" | "IDirectInput8W", "EnumDevicesBySemantics") => 6,
         ("IDirectInput8A" | "IDirectInput8W", "ConfigureDevices") => 5,
         ("IDirectInputDevice8A" | "IDirectInputDevice8W", "QueryInterface") => 3,
-        ("IDirectInputDevice8A" | "IDirectInputDevice8W", "AddRef" | "Release" | "Acquire" | "Unacquire" | "Poll") => 1,
-        ("IDirectInputDevice8A" | "IDirectInputDevice8W", "GetCapabilities" | "SetDataFormat" | "SetEventNotification" | "GetDeviceInfo" | "GetForceFeedbackState" | "SendForceFeedbackCommand" | "Escape" | "GetImageInfo") => 2,
-        ("IDirectInputDevice8A" | "IDirectInputDevice8W", "GetProperty" | "SetProperty" | "GetDeviceState" | "SetCooperativeLevel" | "RunControlPanel" | "GetEffectInfo") => 3,
-        ("IDirectInputDevice8A" | "IDirectInputDevice8W", "EnumObjects" | "GetObjectInfo" | "EnumEffects" | "EnumCreatedEffectObjects" | "WriteEffectToFile" | "BuildActionMap" | "SetActionMap") => 4,
-        ("IDirectInputDevice8A" | "IDirectInputDevice8W", "GetDeviceData" | "CreateEffect" | "SendDeviceData" | "EnumEffectsInFile") => 5,
+        (
+            "IDirectInputDevice8A" | "IDirectInputDevice8W",
+            "AddRef" | "Release" | "Acquire" | "Unacquire" | "Poll",
+        ) => 1,
+        (
+            "IDirectInputDevice8A" | "IDirectInputDevice8W",
+            "GetCapabilities"
+            | "SetDataFormat"
+            | "SetEventNotification"
+            | "GetDeviceInfo"
+            | "GetForceFeedbackState"
+            | "SendForceFeedbackCommand"
+            | "Escape"
+            | "GetImageInfo",
+        ) => 2,
+        (
+            "IDirectInputDevice8A" | "IDirectInputDevice8W",
+            "GetProperty"
+            | "SetProperty"
+            | "GetDeviceState"
+            | "SetCooperativeLevel"
+            | "RunControlPanel"
+            | "GetEffectInfo",
+        ) => 3,
+        (
+            "IDirectInputDevice8A" | "IDirectInputDevice8W",
+            "EnumObjects"
+            | "GetObjectInfo"
+            | "EnumEffects"
+            | "EnumCreatedEffectObjects"
+            | "WriteEffectToFile"
+            | "BuildActionMap"
+            | "SetActionMap",
+        ) => 4,
+        (
+            "IDirectInputDevice8A" | "IDirectInputDevice8W",
+            "GetDeviceData" | "CreateEffect" | "SendDeviceData" | "EnumEffectsInFile",
+        ) => 5,
         ("IDirectInputDevice8A" | "IDirectInputDevice8W", "Initialize") => 4,
         _ => return None,
     };
@@ -148,10 +181,14 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         "SendForceFeedbackCommand" if device_iface => |_| Ok(S_OK),
         "Poll" if device_iface => poll,
         "SendDeviceData" if device_iface => send_device_data,
-        "EnumEffects" | "EnumCreatedEffectObjects" | "EnumEffectsInFile" if device_iface => |_| Ok(S_OK),
+        "EnumEffects" | "EnumCreatedEffectObjects" | "EnumEffectsInFile" if device_iface => {
+            |_| Ok(S_OK)
+        }
         "BuildActionMap" | "SetActionMap" if device_iface => |_| Ok(S_OK),
         "GetImageInfo" if device_iface => |_| Ok(S_FALSE),
-        "CreateEffect" | "GetEffectInfo" | "Escape" | "WriteEffectToFile" if device_iface => |_| Ok(E_NOTIMPL),
+        "CreateEffect" | "GetEffectInfo" | "Escape" | "WriteEffectToFile" if device_iface => {
+            |_| Ok(E_NOTIMPL)
+        }
         _ => return None,
     })
 }
@@ -163,7 +200,14 @@ fn guid(p: &Process, address: u64) -> Result<String, Stop> {
         u32::from_le_bytes(b[0..4].try_into().unwrap()),
         u16::from_le_bytes(b[4..6].try_into().unwrap()),
         u16::from_le_bytes(b[6..8].try_into().unwrap()),
-        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     ))
 }
 
@@ -189,7 +233,8 @@ fn direct_input8_create(p: &mut Process) -> R {
     p.wrptr(out, object)?;
     if p.trace_imports {
         p.stderr.extend_from_slice(
-            format!("[dinput8] DirectInput8Create version={version:#x} iid={iid} -> {object:#x}\n").as_bytes(),
+            format!("[dinput8] DirectInput8Create version={version:#x} iid={iid} -> {object:#x}\n")
+                .as_bytes(),
         );
     }
     Ok(S_OK)
@@ -227,7 +272,11 @@ fn create_device(p: &mut Process) -> R {
         com::Kind::DirectInputDevice {
             device_type,
             acquired: false,
-            data_size: if device_type == DEVTYPE_MOUSE { 16 } else { 256 },
+            data_size: if device_type == DEVTYPE_MOUSE {
+                16
+            } else {
+                256
+            },
         },
     );
     p.wrptr(out, object)?;
@@ -240,8 +289,7 @@ fn create_device(p: &mut Process) -> R {
 }
 
 fn enum_devices(p: &mut Process) -> R {
-    let (device_class, callback, context) =
-        (p.arg(1) as u32, p.arg(2), p.arg(3));
+    let (device_class, callback, context) = (p.arg(1) as u32, p.arg(2), p.arg(3));
     if callback == 0 {
         return Ok(E_INVALIDARG);
     }
@@ -274,7 +322,11 @@ fn get_device_status(p: &mut Process) -> R {
 
 fn initialize(p: &mut Process) -> R {
     let version = p.arg(2) as u32;
-    Ok(if version >= 0x0800 { S_OK } else { DIERR_BETADIRECTINPUTVERSION })
+    Ok(if version >= 0x0800 {
+        S_OK
+    } else {
+        DIERR_BETADIRECTINPUTVERSION
+    })
 }
 
 fn find_device(p: &mut Process) -> R {
@@ -296,9 +348,11 @@ fn find_device(p: &mut Process) -> R {
 fn device_properties(p: &Process, this: u64) -> Option<(u32, bool, u32)> {
     let o = p.extra.com.objs.get(&this)?;
     match &o.kind {
-        com::Kind::DirectInputDevice { device_type, acquired, data_size } => {
-            Some((*device_type, *acquired, *data_size))
-        }
+        com::Kind::DirectInputDevice {
+            device_type,
+            acquired,
+            data_size,
+        } => Some((*device_type, *acquired, *data_size)),
         _ => None,
     }
 }
@@ -316,7 +370,11 @@ fn get_capabilities(p: &mut Process) -> R {
     caps[0..4].copy_from_slice(&44u32.to_le_bytes());
     caps[4..8].copy_from_slice(&1u32.to_le_bytes()); // attached
     caps[8..12].copy_from_slice(&device_type.to_le_bytes());
-    let (axes, buttons) = if device_type == DEVTYPE_MOUSE { (3u32, 8u32) } else { (0, 256) };
+    let (axes, buttons) = if device_type == DEVTYPE_MOUSE {
+        (3u32, 8u32)
+    } else {
+        (0, 256)
+    };
     caps[12..16].copy_from_slice(&axes.to_le_bytes());
     caps[16..20].copy_from_slice(&buttons.to_le_bytes());
     p.write_bytes(out, &caps)?;
@@ -325,7 +383,11 @@ fn get_capabilities(p: &mut Process) -> R {
 
 fn set_property(p: &mut Process) -> R {
     let this = p.arg(0);
-    Ok(if device_properties(p, this).is_some() { S_OK } else { E_NOINTERFACE })
+    Ok(if device_properties(p, this).is_some() {
+        S_OK
+    } else {
+        E_NOINTERFACE
+    })
 }
 
 fn get_property(p: &mut Process) -> R {
@@ -393,7 +455,9 @@ fn set_data_format(p: &mut Process) -> R {
         return Ok(E_NOINTERFACE);
     };
     match &mut object.kind {
-        com::Kind::DirectInputDevice { data_size: current, .. } => {
+        com::Kind::DirectInputDevice {
+            data_size: current, ..
+        } => {
             *current = data_size;
             Ok(S_OK)
         }
@@ -468,7 +532,11 @@ fn get_device_data(p: &mut Process) -> R {
 
 fn set_cooperative_level(p: &mut Process) -> R {
     let this = p.arg(0);
-    Ok(if device_properties(p, this).is_some() { S_OK } else { E_NOINTERFACE })
+    Ok(if device_properties(p, this).is_some() {
+        S_OK
+    } else {
+        E_NOINTERFACE
+    })
 }
 
 fn get_device_info(p: &mut Process) -> R {
@@ -493,7 +561,11 @@ fn get_force_feedback_state(p: &mut Process) -> R {
 }
 
 fn poll(p: &mut Process) -> R {
-    Ok(if device_properties(p, p.arg(0)).is_some() { S_OK } else { E_NOINTERFACE })
+    Ok(if device_properties(p, p.arg(0)).is_some() {
+        S_OK
+    } else {
+        E_NOINTERFACE
+    })
 }
 
 fn send_device_data(p: &mut Process) -> R {
@@ -504,19 +576,34 @@ fn send_device_data(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
-fn write_device_instance(p: &mut Process, address: u64, device_type: u32, wide: bool) -> Result<(), Stop> {
+fn write_device_instance(
+    p: &mut Process,
+    address: u64,
+    device_type: u32,
+    wide: bool,
+) -> Result<(), Stop> {
     let size = if wide { 1100u32 } else { 580u32 };
     let mut data = vec![0u8; size as usize];
     data[0..4].copy_from_slice(&size.to_le_bytes());
     let guid_bytes = if device_type == DEVTYPE_MOUSE {
-        [0x60,0x2b,0x1d,0x6f,0xa0,0xd5,0xcf,0x11,0xbf,0xc7,0x44,0x45,0x53,0x54,0,0]
+        [
+            0x60, 0x2b, 0x1d, 0x6f, 0xa0, 0xd5, 0xcf, 0x11, 0xbf, 0xc7, 0x44, 0x45, 0x53, 0x54, 0,
+            0,
+        ]
     } else {
-        [0x61,0x2b,0x1d,0x6f,0xa0,0xd5,0xcf,0x11,0xbf,0xc7,0x44,0x45,0x53,0x54,0,0]
+        [
+            0x61, 0x2b, 0x1d, 0x6f, 0xa0, 0xd5, 0xcf, 0x11, 0xbf, 0xc7, 0x44, 0x45, 0x53, 0x54, 0,
+            0,
+        ]
     };
     data[4..20].copy_from_slice(&guid_bytes);
     data[20..36].copy_from_slice(&guid_bytes);
     data[36..40].copy_from_slice(&device_type.to_le_bytes());
-    let name = if device_type == DEVTYPE_MOUSE { "AnyWASM Browser Mouse" } else { "AnyWASM Browser Keyboard" };
+    let name = if device_type == DEVTYPE_MOUSE {
+        "AnyWASM Browser Mouse"
+    } else {
+        "AnyWASM Browser Keyboard"
+    };
     if wide {
         for (index, ch) in name.encode_utf16().enumerate() {
             let at = 40 + index * 2;
@@ -532,21 +619,45 @@ fn write_device_instance(p: &mut Process, address: u64, device_type: u32, wide: 
 
 fn directinput_scan_code(vk: usize) -> Option<u8> {
     let code = match vk {
-        0x08 => 0x0e, 0x09 => 0x0f, 0x0d => 0x1c, 0x10 => 0x2a, 0x11 => 0x1d,
-        0x12 => 0x38, 0x1b => 0x01, 0x20 => 0x39, 0x21 => 0xc9, 0x22 => 0xd1,
-        0x23 => 0xcf, 0x24 => 0xcb, 0x25 => 0xcb, 0x26 => 0xc8, 0x27 => 0xcd,
-        0x28 => 0xd0, 0x2d => 0xd2, 0x2e => 0xd3,
-        0x30 => 0x0b, 0x31 => 0x02, 0x32 => 0x03, 0x33 => 0x04, 0x34 => 0x05,
-        0x35 => 0x06, 0x36 => 0x07, 0x37 => 0x08, 0x38 => 0x09, 0x39 => 0x0a,
+        0x08 => 0x0e,
+        0x09 => 0x0f,
+        0x0d => 0x1c,
+        0x10 => 0x2a,
+        0x11 => 0x1d,
+        0x12 => 0x38,
+        0x1b => 0x01,
+        0x20 => 0x39,
+        0x21 => 0xc9,
+        0x22 => 0xd1,
+        0x23 => 0xcf,
+        0x24 => 0xcb,
+        0x25 => 0xcb,
+        0x26 => 0xc8,
+        0x27 => 0xcd,
+        0x28 => 0xd0,
+        0x2d => 0xd2,
+        0x2e => 0xd3,
+        0x30 => 0x0b,
+        0x31 => 0x02,
+        0x32 => 0x03,
+        0x33 => 0x04,
+        0x34 => 0x05,
+        0x35 => 0x06,
+        0x36 => 0x07,
+        0x37 => 0x08,
+        0x38 => 0x09,
+        0x39 => 0x0a,
         0x41..=0x5a => {
             const LETTERS: [u8; 26] = [
-                0x1e,0x30,0x2e,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,
-                0x31,0x18,0x19,0x10,0x13,0x1f,0x14,0x16,0x2f,0x11,0x2d,0x15,0x2c,
+                0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31,
+                0x18, 0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c,
             ];
             LETTERS[vk - 0x41]
         }
-        0x60..=0x69 => [0x52,0x4f,0x50,0x51,0x4b,0x4c,0x4d,0x47,0x48,0x49][vk - 0x60],
-        0x70..=0x7b => [0x3b,0x3c,0x3d,0x3e,0x3f,0x40,0x41,0x42,0x43,0x44,0x57,0x58][vk - 0x70],
+        0x60..=0x69 => [0x52, 0x4f, 0x50, 0x51, 0x4b, 0x4c, 0x4d, 0x47, 0x48, 0x49][vk - 0x60],
+        0x70..=0x7b => [
+            0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x57, 0x58,
+        ][vk - 0x70],
         _ => return None,
     };
     Some(code)
@@ -564,4 +675,3 @@ mod tests {
         assert_eq!(set_property(&mut process).unwrap(), E_NOINTERFACE);
     }
 }
-

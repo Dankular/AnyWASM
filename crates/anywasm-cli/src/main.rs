@@ -364,7 +364,11 @@ fn load_dir(vfs: &mut Vfs, dir: &Path, excludes: &[String]) -> std::io::Result<(
     }
     let excludes = excludes
         .iter()
-        .map(|path| path.replace('/', "\\").trim_matches('\\').to_ascii_lowercase())
+        .map(|path| {
+            path.replace('/', "\\")
+                .trim_matches('\\')
+                .to_ascii_lowercase()
+        })
         .filter(|path| !path.is_empty())
         .collect::<Vec<_>>();
     walk(vfs, dir, dir, &excludes)
@@ -403,7 +407,9 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dir" => o.dir = Some(it.next().ok_or("--dir needs a value")?.into()),
-            "--exclude" => o.excludes.push(it.next().ok_or("--exclude needs a relative path")?.clone()),
+            "--exclude" => o
+                .excludes
+                .push(it.next().ok_or("--exclude needs a relative path")?.clone()),
             "-o" | "--out" => o.out = Some(it.next().ok_or("-o needs a value")?.into()),
             "--trace-imports" => o.trace = true,
             "--trace-modules" => o.trace_modules = true,
@@ -492,6 +498,7 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
     p.current_directory = cwd;
     p.trace_imports = o.trace;
     p.trace_modules_only = o.trace_modules;
+    p.trace_gta_eventvol = std::env::var_os("ANYWASM_TRACE_GTA_EVENTVOL").is_some();
     if let Err(error) = p.load_exe(&name, Some(&cmd)) {
         if o.trace || o.trace_modules {
             std::io::stderr().write_all(&p.take_stderr()).ok();
@@ -515,6 +522,8 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         eprintln!("[gta-startup-probe] patched event 0x15 rejection branch in guest memory");
     }
     let mut left = o.max_steps;
+    let inject_enter_on_idle = std::env::var_os("ANYWASM_GTA_PROBE_ENTER_ON_IDLE").is_some();
+    let mut input_injected = false;
     let stop = loop {
         if left == 0 {
             break Stop::StepLimit;
@@ -530,9 +539,18 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             // No display attached: a presented frame needs no host work, keep going.
             Stop::Frame => {
                 p.extra.gpu.buf.clear();
+                p.advance_time_100ns(166_667);
                 if left == 0 {
                     break Stop::StepLimit;
                 }
+            }
+            Stop::Idle if inject_enter_on_idle && !input_injected => {
+                p.queue_input_event(4, 0, 320, 240);
+                p.queue_input_event(5, 0, 320, 240);
+                p.queue_input_event(0, 13, 0, 0);
+                p.queue_input_event(1, 13, 0, 0);
+                input_injected = true;
+                eprintln!("[gta-probe] injected left click and Enter at first idle");
             }
             other => break other,
         }
@@ -577,6 +595,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         }
         Stop::GuestUnwind(_) => {
             eprintln!("\nanywasm: internal guest unwind escaped its exception dispatcher");
+            Ok(ExitCode::from(1))
+        }
+        Stop::GuestCatch32(_) => {
+            eprintln!("\nanywasm: internal PE32 C++ catch transfer escaped its exception dispatcher");
             Ok(ExitCode::from(1))
         }
     }

@@ -40,7 +40,10 @@ pub enum CreateDirError {
 fn without_device_prefix(path: &str) -> String {
     let mut path = path.replace('/', "\\");
     for prefix in [r"\\?\UNC\", r"\??\UNC\"] {
-        if path.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix)) {
+        if path
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
             return format!("\\\\{}", &path[prefix.len()..]);
         }
     }
@@ -53,12 +56,21 @@ fn without_device_prefix(path: &str) -> String {
     path
 }
 
+fn trim_win32_component(component: &str) -> &str {
+    let without_spaces = component.trim_end_matches(' ');
+    match without_spaces {
+        "." | ".." => without_spaces,
+        _ => without_spaces.trim_end_matches('.'),
+    }
+}
+
 /// Resolve a Windows path against an absolute current directory and return an absolute path.
 pub fn absolute(path: &str, current_directory: &str) -> String {
     let path = without_device_prefix(path);
     if let Some(unc_path) = path.strip_prefix("\\\\") {
         let mut components = Vec::new();
         for component in unc_path.split('\\') {
+            let component = trim_win32_component(component);
             match component {
                 "" | "." => {}
                 ".." if components.len() > 2 => {
@@ -71,7 +83,8 @@ pub fn absolute(path: &str, current_directory: &str) -> String {
         return format!("\\\\{}", components.join("\\"));
     }
     let current_directory = without_device_prefix(current_directory);
-    let (cwd_root, cwd_tail, cwd_drive) = if let Some(unc) = current_directory.strip_prefix("\\\\") {
+    let (cwd_root, cwd_tail, cwd_drive) = if let Some(unc) = current_directory.strip_prefix("\\\\")
+    {
         let parts: Vec<&str> = unc.split('\\').filter(|part| !part.is_empty()).collect();
         let root_parts = parts.len().min(2);
         let root = format!("\\\\{}", parts[..root_parts].join("\\"));
@@ -110,6 +123,7 @@ pub fn absolute(path: &str, current_directory: &str) -> String {
 
     let mut components = Vec::new();
     for component in tail.split('\\') {
+        let component = trim_win32_component(component);
         match component {
             "" | "." => {}
             ".." => {
@@ -132,7 +146,10 @@ fn join_path(base: &str, path: &str) -> String {
 /// Resolve a Windows path to a root-relative VFS key.
 pub fn resolve(path: &str, current_directory: &str) -> String {
     let absolute = absolute(path, current_directory);
-    if let Some(relative) = absolute.strip_prefix("C:\\").or_else(|| absolute.strip_prefix("c:\\")) {
+    if let Some(relative) = absolute
+        .strip_prefix("C:\\")
+        .or_else(|| absolute.strip_prefix("c:\\"))
+    {
         relative.to_ascii_lowercase()
     } else {
         absolute.to_ascii_lowercase()
@@ -203,7 +220,12 @@ impl Vfs {
             cursor += 2;
             let raw_name = std::str::from_utf8(
                 bytes
-                    .get(cursor..cursor.checked_add(name_len).ok_or_else(|| bad("path length overflow"))?)
+                    .get(
+                        cursor
+                            ..cursor
+                                .checked_add(name_len)
+                                .ok_or_else(|| bad("path length overflow"))?,
+                    )
                     .ok_or_else(|| bad("truncated path"))?,
             )
             .map_err(|_| bad("path is not UTF-8"))?;
@@ -243,7 +265,13 @@ impl Vfs {
             if package_offset < index_end as u64 || end > package_len {
                 return Err(bad("file range is outside the package data region"));
             }
-            parsed.insert(path, AssetFile { package_offset, len });
+            parsed.insert(
+                path,
+                AssetFile {
+                    package_offset,
+                    len,
+                },
+            );
         }
         if cursor != index_end {
             return Err(bad("entry count does not match index length"));
@@ -356,9 +384,11 @@ impl Vfs {
         local || asset
     }
     pub fn paths(&self) -> impl Iterator<Item = &String> {
-        self.files
-            .keys()
-            .chain(self.assets.keys().filter(|path| !self.files.contains_key(*path)))
+        self.files.keys().chain(
+            self.assets
+                .keys()
+                .filter(|path| !self.files.contains_key(*path)),
+        )
     }
     /// Find a file by bare file name anywhere in the VFS (DLL search fallback).
     pub fn find_by_name(&self, name: &str) -> Option<&String> {
@@ -396,16 +426,40 @@ mod tests {
 
     #[test]
     fn resolves_windows_paths_against_a_current_directory() {
-        assert_eq!(absolute("config.ini", "C:\\games\\demo"), "C:\\games\\demo\\config.ini");
-        assert_eq!(absolute("..\\shared\\save.dat", "C:\\games\\demo"), "C:\\games\\shared\\save.dat");
-        assert_eq!(absolute("\\Windows\\win.ini", "C:\\games"), "C:\\Windows\\win.ini");
-        assert_eq!(resolve("C:\\games\\demo\\..\\save.dat", "C:\\"), "games\\save.dat");
+        assert_eq!(
+            absolute("config.ini", "C:\\games\\demo"),
+            "C:\\games\\demo\\config.ini"
+        );
+        assert_eq!(
+            absolute("..\\shared\\save.dat", "C:\\games\\demo"),
+            "C:\\games\\shared\\save.dat"
+        );
+        assert_eq!(
+            absolute("\\Windows\\win.ini", "C:\\games"),
+            "C:\\Windows\\win.ini"
+        );
+        assert_eq!(
+            resolve("C:\\games\\demo\\..\\save.dat", "C:\\"),
+            "games\\save.dat"
+        );
         assert_eq!(norm("C:\\games\\save.dat"), "games\\save.dat");
         assert_eq!(norm("\\\\?\\C:\\games\\save.dat"), "games\\save.dat");
-        assert_eq!(absolute("\\\\server\\share\\folder\\..\\save.dat", "C:\\"), "\\\\server\\share\\save.dat");
-        assert_eq!(norm("\\\\?\\UNC\\server\\share\\save.dat"), "\\\\server\\share\\save.dat");
-        assert_eq!(absolute("save.dat", "\\\\server\\share\\game"), "\\\\server\\share\\game\\save.dat");
-        assert_eq!(absolute("\\save.dat", "\\\\server\\share\\game"), "\\\\server\\share\\save.dat");
+        assert_eq!(
+            absolute("\\\\server\\share\\folder\\..\\save.dat", "C:\\"),
+            "\\\\server\\share\\save.dat"
+        );
+        assert_eq!(
+            norm("\\\\?\\UNC\\server\\share\\save.dat"),
+            "\\\\server\\share\\save.dat"
+        );
+        assert_eq!(
+            absolute("save.dat", "\\\\server\\share\\game"),
+            "\\\\server\\share\\game\\save.dat"
+        );
+        assert_eq!(
+            absolute("\\save.dat", "\\\\server\\share\\game"),
+            "\\\\server\\share\\save.dat"
+        );
     }
 
     #[test]
@@ -436,15 +490,15 @@ mod tests {
             vfs.create_dir("games\\data\\level.bin\\child"),
             Err(super::CreateDirError::PathNotFound)
         );
-        assert_eq!(
-            vfs.create_dir(""),
-            Err(super::CreateDirError::PathNotFound)
-        );
+        assert_eq!(vfs.create_dir(""), Err(super::CreateDirError::PathNotFound));
     }
 
     #[test]
     fn indexed_assets_expose_paths_and_lengths_without_loading_payload() {
-        let package = asset_package(&[("data\\handling.cfg", &[4, 5]), ("models\\gta3.img", &[1, 2, 3])]);
+        let package = asset_package(&[
+            ("data\\handling.cfg", &[4, 5]),
+            ("models\\gta3.img", &[1, 2, 3]),
+        ]);
         let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
         let mut vfs = Vfs::new();
         vfs.register_asset_index(&package[..index_end]).unwrap();
@@ -456,7 +510,10 @@ mod tests {
         assert!(vfs.get("models\\gta3.img").is_none());
         assert_eq!(vfs.paths().count(), 2);
         let data_start = index_end as u64;
-        assert_eq!(vfs.asset_location("models/gta3.img", 1, 10), Some((data_start + 3, 2)));
+        assert_eq!(
+            vfs.asset_location("models/gta3.img", 1, 10),
+            Some((data_start + 3, 2))
+        );
     }
 
     #[test]
@@ -468,7 +525,10 @@ mod tests {
         vfs.insert("data/handling.cfg", vec![9, 8, 7]);
 
         assert_eq!(vfs.file_len("data\\handling.cfg"), Some(3));
-        assert_eq!(vfs.read_range("data/handling.cfg", 1, 8).unwrap(), vec![8, 7]);
+        assert_eq!(
+            vfs.read_range("data/handling.cfg", 1, 8).unwrap(),
+            vec![8, 7]
+        );
         assert_eq!(vfs.paths().count(), 1);
     }
 
@@ -476,7 +536,9 @@ mod tests {
     fn rejects_duplicate_normalized_asset_paths() {
         let package = asset_package(&[("Data\\Handling.cfg", &[1]), ("data/handling.cfg", &[2])]);
         let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
-        assert!(Vfs::new().register_asset_index(&package[..index_end]).is_err());
+        assert!(Vfs::new()
+            .register_asset_index(&package[..index_end])
+            .is_err());
     }
 
     #[test]
@@ -485,12 +547,16 @@ mod tests {
         let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
         let record_offset = 24 + 2 + "data\\file.bin".len();
         package[record_offset..record_offset + 8].copy_from_slice(&0u64.to_le_bytes());
-        assert!(Vfs::new().register_asset_index(&package[..index_end]).is_err());
+        assert!(Vfs::new()
+            .register_asset_index(&package[..index_end])
+            .is_err());
 
         let mut package = asset_package(&[("data\\file.bin", &[1, 2, 3])]);
         let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
         let package_len = u64::from_le_bytes(package[16..24].try_into().unwrap());
         package[16..24].copy_from_slice(&(package_len - 1).to_le_bytes());
-        assert!(Vfs::new().register_asset_index(&package[..index_end]).is_err());
+        assert!(Vfs::new()
+            .register_asset_index(&package[..index_end])
+            .is_err());
     }
 }

@@ -27,7 +27,11 @@ fn vex_vcvtsi2sd_converts_signed_i64_and_merges_from_vvvv() {
     let flags = cpu.rflags;
 
     let result = step(&mut cpu, &mut mem);
-    assert!(result.is_ok(), "step failed at rip {:#x}: {result:?}", cpu.rip);
+    assert!(
+        result.is_ok(),
+        "step failed at rip {:#x}: {result:?}",
+        cpu.rip
+    );
     assert_eq!(cpu.xmm[0] as u64, (-9.0f64).to_bits());
     assert_eq!((cpu.xmm[0] >> 64) as u64, MERGE_SOURCE_HIGH);
     assert_eq!(cpu.ymm_hi[0], 0);

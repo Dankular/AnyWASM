@@ -14,7 +14,8 @@ fn vex_vpbroadcastd_xmm_register_and_memory_forms_clear_upper_ymm() {
     assert!(mem.map(DATA, PAGE_SIZE, PROT_RW));
     mem.write_force(CODE, &register_form).unwrap();
     mem.write_force(CODE + 5, &memory_form).unwrap();
-    mem.write_force(DATA, &0xfedc_ba98u32.to_le_bytes()).unwrap();
+    mem.write_force(DATA, &0xfedc_ba98u32.to_le_bytes())
+        .unwrap();
 
     let mut cpu = Cpu::new();
     cpu.rip = CODE;
@@ -29,10 +30,8 @@ fn vex_vpbroadcastd_xmm_register_and_memory_forms_clear_upper_ymm() {
 
     let register_lane = 0x89ab_cdefu128;
     let memory_lane = 0xfedc_ba98u128;
-    let register_value = register_lane
-        | (register_lane << 32)
-        | (register_lane << 64)
-        | (register_lane << 96);
+    let register_value =
+        register_lane | (register_lane << 32) | (register_lane << 64) | (register_lane << 96);
     let memory_value =
         memory_lane | (memory_lane << 32) | (memory_lane << 64) | (memory_lane << 96);
     assert_eq!(cpu.xmm[0], register_value);

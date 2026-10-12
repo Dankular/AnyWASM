@@ -12,7 +12,7 @@ function capabilities() {
     ['Module workers', typeof Worker !== 'undefined', 'required'],
     ['WebGPU', !!navigator.gpu, 'needed for graphics programs'],
     ['OffscreenCanvas transfer', typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function', 'needed for worker rendering'],
-    ['SharedArrayBuffer', typeof SharedArrayBuffer !== 'undefined', 'needed for threads (not used yet)'],
+    ['SharedArrayBuffer workers', typeof SharedArrayBuffer !== 'undefined' && globalThis.crossOriginIsolated === true, 'optional parallel guest CPU execution'],
   ];
   $('caps').innerHTML = caps
     .map(([n, ok, why]) => `<div class="cap"><b>${n}</b><span class="${ok ? 'ok' : 'bad'}">${ok ? 'available' : 'missing'}</span> <span class="dim">· ${why}</span></div>`)
@@ -87,7 +87,11 @@ async function run(bundleBytes, label, assetUrl = null) {
   worker.onmessage = (ev) => {
     const m = ev.data;
     if (m.type === 'ready') clearLoading();
-    else if (m.type === 'load-progress') showLoading(m.message);
+    else if (m.type === 'load-progress') {
+      if (m.trace) window.__workerDiag = m.trace;
+      showLoading(m.message);
+    }
+    else if (m.type === 'trace-progress') window.__workerDiag = m.trace;
     else if (m.type === 'asset-progress') {
       const fetched = (m.fetchedBytes / (1024 * 1024)).toFixed(1);
       const total = (Number(m.packageLength) / (1024 * 1024)).toFixed(1);
@@ -96,6 +100,7 @@ async function run(bundleBytes, label, assetUrl = null) {
     else if (m.type === 'out') print(m.text, m.stream === 'stderr' ? 'err' : '');
     else if (m.type === 'window') {
       canvas.hidden = false;
+      canvas.focus({ preventScroll: true });
       canvas.style.aspectRatio = `${m.width} / ${m.height}`;
       setInputSize(m.width, m.height);
       if (m.title) document.title = `${m.title} - AnyWASM`;
@@ -108,10 +113,21 @@ async function run(bundleBytes, label, assetUrl = null) {
     } else if (m.type === 'texture-readback') {
       window.__textureReadback = m;
     } else if (m.type === 'status') {
+      if (m.trace) window.__workerDiag = m.trace;
+      if (m.jitStats) window.__jitStats = m.jitStats;
       clearLoading();
       const names = { 0: 'stopped', 1: 'exited', 2: 'stopped at an unimplemented import', 3: 'crashed' };
       const detail = m.status === 1 ? `exit code ${m.exitCode}` : m.status === 2 ? '' : m.message;
-      stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s${m.frames ? ' · ' + m.frames + ' frames' : ''}`;
+      const executionMode = m.executionMode === 'shared-cpu-workers'
+        ? `${m.executionWorkerCount} shared CPU workers`
+        : 'cooperative CPU';
+      const executionReason = m.executionModeReason ? ` (${m.executionModeReason})` : '';
+      window.__executionMode = {
+        mode: m.executionMode || 'cooperative',
+        workerCount: m.executionWorkerCount || 0,
+        reason: m.executionModeReason || '',
+      };
+      stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s · ${executionMode}${executionReason}${m.frames ? ' · ' + m.frames + ' frames' : ''}`;
       if (m.status === 2) {
         const title = document.createElement('strong');
         title.textContent = 'Stopped at an unimplemented import';
@@ -133,8 +149,12 @@ async function run(bundleBytes, label, assetUrl = null) {
     failLoading(label, `worker failed to start (${e.message || 'unknown error'})`);
   };
   const testMode = new URLSearchParams(location.search).has('test');
+  const traceGtaEventvol = new URLSearchParams(location.search).has('traceGtaEventvol');
+  const diagProgress = new URLSearchParams(location.search).has('diagProgress');
+  const jitMinPrefixValue = new URLSearchParams(location.search).get('jitMinPrefix');
   showLoading('Starting guest program…');
-  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, testMode };
+  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, testMode, traceGtaEventvol, diagProgress };
+  if (jitMinPrefixValue !== null) message.jitMinPrefix = Number(jitMinPrefixValue);
   const transfer = [wasm, bundleBytes.buffer];
   if (off) {
     message.canvas = off;
@@ -173,18 +193,23 @@ function attachInput(canvas) {
 }
 
 async function demo(name) {
-  showLoading(`Loading demo bundle ${name}.awb…`);
+  const requestedExe = name === 'gta_sa' && new URLSearchParams(location.search).get('exe') === 'gta_sa.exe'
+    ? 'gta_sa.exe'
+    : null;
+  const bundleName = requestedExe ? 'gta_sa_regular' : name;
+  showLoading(`Loading demo bundle ${bundleName}.awb…`);
   try {
-    const res = await fetch(new URL(`./demo/${name}.awb`, import.meta.url));
+    const res = await fetch(new URL(`./demo/${bundleName}.awb`, import.meta.url));
     if (!res.ok) {
       clearLoading();
-      stat.textContent = `demo ${name}.awb not found - build it with: anywasm pack`;
+      stat.textContent = `demo ${bundleName}.awb not found - build it with: anywasm pack`;
       return;
     }
     const assetUrl = name === 'gta_sa' ? new URL('./demo/gta_sa.agp', import.meta.url).href : null;
-    await run(new Uint8Array(await res.arrayBuffer()), `${name}.exe`, assetUrl);
+    const entryName = requestedExe || (name === 'gta_sa' ? 'gta_sa_compact1.0.exe' : `${name}.exe`);
+    await run(new Uint8Array(await res.arrayBuffer()), entryName, assetUrl);
   } catch (e) {
-    failLoading(`${name}.awb`, `could not load bundle (${e.message})`);
+    failLoading(`${bundleName}.awb`, `could not load bundle (${e.message})`);
   }
 }
 

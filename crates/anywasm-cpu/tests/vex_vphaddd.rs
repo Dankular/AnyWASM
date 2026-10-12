@@ -41,14 +41,23 @@ fn vex_vphaddd_obeys_128_bit_lane_boundaries_for_xmm_ymm_and_memory() {
 
     step(&mut cpu, &mut mem).unwrap();
     assert_eq!(cpu.xmm[1], 7u128 << 96 | 3u128 << 64 | 7u128 << 32 | 3);
-    assert_eq!(cpu.ymm_hi[1], 15u128 << 96 | 11u128 << 64 | 15u128 << 32 | 11);
+    assert_eq!(
+        cpu.ymm_hi[1],
+        15u128 << 96 | 11u128 << 64 | 15u128 << 32 | 11
+    );
 
     step(&mut cpu, &mut mem).unwrap();
     assert_eq!(cpu.xmm[1], 7u128 << 96 | 3u128 << 64 | 23u128 << 32 | 19);
     assert_eq!(cpu.ymm_hi[1], 0);
 
     step(&mut cpu, &mut mem).unwrap();
-    assert_eq!(cpu.xmm[1], 700u128 << 96 | 300u128 << 64 | 23u128 << 32 | 19);
-    assert_eq!(cpu.ymm_hi[1], 1500u128 << 96 | 1100u128 << 64 | 31u128 << 32 | 27);
+    assert_eq!(
+        cpu.xmm[1],
+        700u128 << 96 | 300u128 << 64 | 23u128 << 32 | 19
+    );
+    assert_eq!(
+        cpu.ymm_hi[1],
+        1500u128 << 96 | 1100u128 << 64 | 31u128 << 32 | 27
+    );
     assert_eq!(cpu.rflags, flags);
 }

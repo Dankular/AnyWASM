@@ -2,9 +2,41 @@ export const ASSET_CHUNK_SIZE = 256 * 1024;
 export const ASSET_CACHE_LIMIT = 64 * 1024 * 1024;
 const ASSET_HEADER_SIZE = 24;
 const MAX_ASSET_INDEX_SIZE = 64 * 1024 * 1024;
+const ASSET_READ_AHEAD_BYTES = ASSET_CHUNK_SIZE / 2;
+
+function parseAssetFileRanges(bytes, packageLength) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entryCount = view.getUint32(4, true);
+  const indexEnd = BigInt(bytes.byteLength);
+  if (entryCount > Math.floor((bytes.byteLength - ASSET_HEADER_SIZE) / 18)) {
+    throw new Error('asset index entry count cannot fit in the index');
+  }
+
+  const ranges = [];
+  let cursor = ASSET_HEADER_SIZE;
+  for (let i = 0; i < entryCount; i++) {
+    const pathLength = view.getUint16(cursor, true);
+    cursor += 2 + pathLength;
+    if (cursor + 16 > bytes.byteLength) throw new Error('asset index record is truncated');
+    const start = view.getBigUint64(cursor, true);
+    const length = view.getBigUint64(cursor + 8, true);
+    const end = start + length;
+    if (start < indexEnd || end > packageLength) throw new Error('asset index range is outside the package');
+    if (length > 0n) ranges.push({ start, end });
+    cursor += 16;
+  }
+  if (cursor !== bytes.byteLength) throw new Error('asset index entry count does not match its length');
+  ranges.sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : 0);
+  return ranges;
+}
 
 async function fetchRange(url, start, end, expectedTotal, fetcher) {
-  const response = await fetcher(url, { headers: { Range: `bytes=${start}-${end}` } });
+  let response;
+  try {
+    response = await fetcher(url, { headers: { Range: `bytes=${start}-${end}` } });
+  } catch (error) {
+    throw error;
+  }
   if (response.status !== 206) {
     throw new Error(`asset server ignored byte range ${start}-${end} (HTTP ${response.status}; expected 206)`);
   }
@@ -52,11 +84,16 @@ export async function fetchAssetIndex(url, fetcher = fetch) {
   const bytes = new Uint8Array(Number(indexEnd));
   bytes.set(header, 0);
   bytes.set(indexBytes, ASSET_HEADER_SIZE);
-  return { bytes, packageLength };
+  return { bytes, packageLength, fileRanges: parseAssetFileRanges(bytes, packageLength) };
 }
 
 export class AssetRangeCache {
-  constructor(url, packageLength, { maxBytes = ASSET_CACHE_LIMIT, fetcher = fetch, onProgress = () => {} } = {}) {
+  constructor(url, packageLength, {
+    maxBytes = ASSET_CACHE_LIMIT,
+    fetcher = fetch,
+    onProgress = () => {},
+    fileRanges = [],
+  } = {}) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < ASSET_CHUNK_SIZE) {
       throw new RangeError(`asset cache limit must be at least ${ASSET_CHUNK_SIZE} bytes`);
     }
@@ -65,10 +102,12 @@ export class AssetRangeCache {
     this.maxBytes = maxBytes;
     this.fetcher = fetcher;
     this.onProgress = onProgress;
+    this.fileRanges = fileRanges;
     this.cache = new Map();
     this.inflight = new Map();
     this.cacheBytes = 0;
     this.fetchedBytes = 0;
+    this.lastRead = null;
   }
 
   async ensureRange(offset, length) {
@@ -88,6 +127,14 @@ export class AssetRangeCache {
       else waits.push(this.#loadChunk(chunk));
     }
     await Promise.all(waits);
+
+    const fileRange = this.#findFileRange(start);
+    if (this.lastRead && this.lastRead.end === start &&
+        this.lastRead.fileRange?.start === fileRange?.start &&
+        this.lastRead.fileRange?.end === fileRange?.end) {
+      this.#prefetchNext(end, fileRange);
+    }
+    this.lastRead = { end, fileRange };
   }
 
   copyRange(offset, length, destination) {
@@ -125,7 +172,29 @@ export class AssetRangeCache {
     return bytes;
   }
 
+  #findFileRange(offset) {
+    let low = 0;
+    let high = this.fileRanges.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (this.fileRanges[middle].start <= offset) low = middle + 1;
+      else high = middle;
+    }
+    const range = this.fileRanges[low - 1];
+    return range && offset < range.end ? range : null;
+  }
+
+  #prefetchNext(end, fileRange) {
+    if (!fileRange || this.maxBytes < ASSET_CHUNK_SIZE * 2) return;
+    const chunkSize = BigInt(ASSET_CHUNK_SIZE);
+    const nextChunk = (end - 1n) / chunkSize + 1n;
+    const nextStart = nextChunk * chunkSize;
+    if (nextStart >= fileRange.end || nextStart - end > BigInt(ASSET_READ_AHEAD_BYTES)) return;
+    void this.#loadChunk(nextChunk).catch(() => {});
+  }
+
   #loadChunk(chunk) {
+    if (this.cache.has(chunk)) return Promise.resolve(this.#touch(chunk));
     if (this.inflight.has(chunk)) return this.inflight.get(chunk);
     const start = chunk * BigInt(ASSET_CHUNK_SIZE);
     const end = [start + BigInt(ASSET_CHUNK_SIZE), this.packageLength].reduce((a, b) => a < b ? a : b) - 1n;

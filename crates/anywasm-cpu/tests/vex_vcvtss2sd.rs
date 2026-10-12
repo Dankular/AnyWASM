@@ -8,8 +8,7 @@ fn vex_vcvtss2sd_converts_low_f32_and_merges_high_xmm_lane() {
     const MERGE_HIGH: u64 = 0x0123_4567_89ab_cdef;
     let mut mem = Memory::new();
     assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
-    mem.write_force(CODE, &[0xc5, 0xfa, 0x5a, 0xc0])
-        .unwrap(); // vcvtss2sd xmm0, xmm0, xmm0
+    mem.write_force(CODE, &[0xc5, 0xfa, 0x5a, 0xc0]).unwrap(); // vcvtss2sd xmm0, xmm0, xmm0
 
     let mut cpu = Cpu::new();
     cpu.rip = CODE;
@@ -19,7 +18,11 @@ fn vex_vcvtss2sd_converts_low_f32_and_merges_high_xmm_lane() {
     let flags = cpu.rflags;
 
     let result = step(&mut cpu, &mut mem);
-    assert!(result.is_ok(), "step failed at rip {:#x}: {result:?}", cpu.rip);
+    assert!(
+        result.is_ok(),
+        "step failed at rip {:#x}: {result:?}",
+        cpu.rip
+    );
     assert_eq!(cpu.xmm[0] as u64, 1.5f64.to_bits());
     assert_eq!((cpu.xmm[0] >> 64) as u64, MERGE_HIGH);
     assert_eq!(cpu.ymm_hi[0], 0);

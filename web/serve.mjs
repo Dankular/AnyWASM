@@ -11,8 +11,9 @@ const port = Number(process.argv[2] || 8080);
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
-  let p = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '');
-  if (p.endsWith('/')) p += 'index.html';
+  let p = decodeURIComponent(url.pathname).replace(/^[/\\]+/, '');
+  if (!p || p.endsWith('/') || p.endsWith('\\')) p = join(p, 'index.html');
+  p = normalize(p).replace(/^(\.\.[/\\])+/, '');
   try {
     const path = join(root, p);
     const file = await stat(path);
@@ -21,6 +22,7 @@ const server = createServer(async (req, res) => {
       'content-type': types[extname(p)] || 'application/octet-stream',
       'accept-ranges': 'bytes',
       'content-length': file.size,
+      'cache-control': 'no-store',
       // Cross-origin isolation enables SharedArrayBuffer for the future threaded build.
       'cross-origin-opener-policy': 'same-origin',
       'cross-origin-embedder-policy': 'require-corp',

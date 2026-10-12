@@ -20,7 +20,8 @@ fn vxorpd_clears_the_vector_and_preserves_flags() {
     const CODE: u64 = 0x1000;
     let mut mem = Memory::new();
     assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
-    mem.write_force(CODE, &[0xc4, 0x41, 0x29, 0x57, 0xd2]).unwrap();
+    mem.write_force(CODE, &[0xc4, 0x41, 0x29, 0x57, 0xd2])
+        .unwrap();
 
     let mut cpu = Cpu::new();
     cpu.rip = CODE;

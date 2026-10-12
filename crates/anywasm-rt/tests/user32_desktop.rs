@@ -7,9 +7,10 @@ fn call(name: &str, process: &mut Process, args: &[u64]) -> u64 {
     for (index, &value) in args.iter().take(registers.len()).enumerate() {
         process.cpu.gpr[registers[index]] = value;
     }
-    hle::lookup("user32", name)
-        .unwrap_or_else(|| panic!("user32!{name} should be implemented"))(process)
-        .unwrap_or_else(|stop| panic!("user32!{name} stopped: {stop:?}"))
+    hle::lookup("user32", name).unwrap_or_else(|| panic!("user32!{name} should be implemented"))(
+        process,
+    )
+    .unwrap_or_else(|stop| panic!("user32!{name} stopped: {stop:?}"))
 }
 
 #[test]

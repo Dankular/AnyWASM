@@ -20,7 +20,8 @@ fn vex_vrsqrtss_uses_scalar_source_and_preserves_merge_lanes() {
     assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
     assert!(mem.map(DATA, PAGE_SIZE, PROT_RW));
     mem.write_force(CODE, &register).unwrap();
-    mem.write_force(CODE + register.len() as u64, &memory).unwrap();
+    mem.write_force(CODE + register.len() as u64, &memory)
+        .unwrap();
     mem.write_u32(DATA, 9.0f32.to_bits()).unwrap();
 
     let merge = 0x1122_3344_5566_7788_99aa_bbcc_0000_0000u128 | 0x3f80_0000;

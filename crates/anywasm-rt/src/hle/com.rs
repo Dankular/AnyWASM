@@ -128,7 +128,11 @@ pub enum Kind {
     },
     DirectDraw,
     DirectSound,
-    SoundBuffer { memory: u64, size: u32 },
+    SoundBuffer {
+        memory: u64,
+        size: u32,
+        caps: u32,
+    },
 }
 
 impl Kind {
@@ -284,6 +288,7 @@ fn vtable_for(p: &mut Process, iface: &'static str) -> u64 {
         return v;
     }
     let methods = vtables::methods(iface)
+        .or_else(|| dsound::methods(iface))
         .or_else(|| directinput8::methods(iface))
         .or_else(|| d3d9::methods(iface))
         .unwrap_or(&["QueryInterface", "AddRef", "Release"]);
@@ -339,12 +344,8 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Direct3D9 => &["IDirect3D9"],
         Kind::Direct3DDevice9 { .. } => &["IDirect3DDevice9"],
         Kind::Direct3DSurface9 { .. } => &["IDirect3DSurface9"],
-        Kind::Direct3DVertexBuffer9 { .. } => {
-            &["IDirect3DVertexBuffer9", "IDirect3DResource9"]
-        }
-        Kind::Direct3DIndexBuffer9 { .. } => {
-            &["IDirect3DIndexBuffer9", "IDirect3DResource9"]
-        }
+        Kind::Direct3DVertexBuffer9 { .. } => &["IDirect3DVertexBuffer9", "IDirect3DResource9"],
+        Kind::Direct3DIndexBuffer9 { .. } => &["IDirect3DIndexBuffer9", "IDirect3DResource9"],
         Kind::Direct3DTexture9 { .. } => &[
             "IDirect3DTexture9",
             "IDirect3DBaseTexture9",
@@ -407,7 +408,15 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Query { .. } => &["ID3D11Query", "ID3D11DeviceChild"],
         Kind::DirectDraw => &["IDirectDraw7"],
         Kind::DirectSound => &["IDirectSound8"],
-        Kind::SoundBuffer { .. } => &["IDirectSoundBuffer8"],
+        Kind::SoundBuffer { caps, .. } => {
+            if caps & (dsound::DSBCAPS_PRIMARYBUFFER | dsound::DSBCAPS_CTRL3D)
+                == (dsound::DSBCAPS_PRIMARYBUFFER | dsound::DSBCAPS_CTRL3D)
+            {
+                &["IDirectSoundBuffer8", "IDirectSound3DListener"]
+            } else {
+                &["IDirectSoundBuffer8"]
+            }
+        }
     };
     fam.iter().any(|f| *f == w)
 }
@@ -417,6 +426,7 @@ fn static_iface(name: &str) -> Option<&'static str> {
     if vtables::methods(name).is_none()
         && directinput8::methods(name).is_none()
         && d3d9::methods(name).is_none()
+        && dsound::methods(name).is_none()
     {
         return None;
     }
@@ -498,6 +508,7 @@ const ALL_NAMES: &[&str] = &[
     "IDirectDraw7",
     "IDirectSound8",
     "IDirectSoundBuffer8",
+    "IDirectSound3DListener",
 ];
 
 pub fn query_interface(p: &mut Process) -> R {
@@ -510,6 +521,7 @@ pub fn query_interface(p: &mut Process) -> R {
     let Some(name) = vtables::iid_name(&iid)
         .or_else(|| directinput8::iid_name(&iid))
         .or_else(|| d3d9::iid_name(&iid))
+        .or_else(|| dsound::iid_name(&iid))
     else {
         if p.trace_imports {
             p.stderr.extend_from_slice(
@@ -624,28 +636,43 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
         let o = p.extra.com.objs.remove(&this).unwrap();
         p.extra.com.deferred_contexts.remove(&this);
         if matches!(&o.kind, Kind::Direct3DDevice9 { .. }) {
-            let bound = p.extra.com.d3d9_bound_textures
+            let bound = p
+                .extra
+                .com
+                .d3d9_bound_textures
                 .iter()
-                .filter_map(|(&(device, stage), &texture)| (device == this).then_some((stage, texture)))
+                .filter_map(|(&(device, stage), &texture)| {
+                    (device == this).then_some((stage, texture))
+                })
                 .collect::<Vec<_>>();
             for (stage, texture) in bound {
                 p.extra.com.d3d9_bound_textures.remove(&(this, stage));
-                p.extra.gpu.emit(
-                    op::SET_SRVS,
-                    Pk::new().u32(1).u32(stage).u32(1).u32(0),
-                );
+                p.extra
+                    .gpu
+                    .emit(op::SET_SRVS, Pk::new().u32(1).u32(stage).u32(1).u32(0));
                 release_obj(p, texture);
             }
-            let samplers = p.extra.com.d3d9_sampler_objects
+            let samplers = p
+                .extra
+                .com
+                .d3d9_sampler_objects
                 .iter()
-                .filter_map(|(&(device, stage), &sampler)| (device == this).then_some((stage, sampler)))
+                .filter_map(|(&(device, stage), &sampler)| {
+                    (device == this).then_some((stage, sampler))
+                })
                 .collect::<Vec<_>>();
             for (stage, sampler) in samplers {
                 p.extra.com.d3d9_sampler_objects.remove(&(this, stage));
                 p.extra.gpu.emit(op::RELEASE, Pk::new().u32(sampler));
             }
-            p.extra.com.d3d9_sampler_states.retain(|(device, _, _), _| *device != this);
-            p.extra.com.d3d9_texture_stage_states.retain(|(device, _, _), _| *device != this);
+            p.extra
+                .com
+                .d3d9_sampler_states
+                .retain(|(device, _, _), _| *device != this);
+            p.extra
+                .com
+                .d3d9_texture_stage_states
+                .retain(|(device, _, _), _| *device != this);
         }
         if let Some(id) = o.kind.host_id() {
             let left = p.extra.com.id_refs.get_mut(&id).map(|c| {
@@ -664,7 +691,12 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
             }
         }
         if let Kind::SoundBuffer { memory, .. } = o.kind {
-            kernel32::free_block(p, memory);
+            let shared = p.extra.com.objs.values().any(|other| {
+                matches!(other.kind, Kind::SoundBuffer { memory: other_memory, .. } if other_memory == memory)
+            });
+            if !shared {
+                kernel32::free_block(p, memory);
+            }
         }
         kernel32::free_block(p, o.block);
     }
@@ -687,7 +719,20 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "QueryInterface" => query_interface,
         "AddRef" => add_ref,
         "Release" => release,
-        "GetDevice" if matches!(iface, "IDirect3DSurface9" | "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" | "IDirect3DBaseTexture9" | "IDirect3DTexture9" | "IDirect3DVertexDeclaration9" | "IDirect3DVertexShader9" | "IDirect3DPixelShader9") => {
+        "GetDevice"
+            if matches!(
+                iface,
+                "IDirect3DSurface9"
+                    | "IDirect3DResource9"
+                    | "IDirect3DVertexBuffer9"
+                    | "IDirect3DIndexBuffer9"
+                    | "IDirect3DBaseTexture9"
+                    | "IDirect3DTexture9"
+                    | "IDirect3DVertexDeclaration9"
+                    | "IDirect3DVertexShader9"
+                    | "IDirect3DPixelShader9"
+            ) =>
+        {
             return d3d9::method(iface, m)
         }
         "GetDevice" => get_device,

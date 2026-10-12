@@ -1,7 +1,7 @@
 // AnyWASM runtime glue: loads the WASM module and drives a Windows x64 process inside it.
 // Works unchanged in browsers (main thread or worker) and Node >= 18.
 import { fillCryptoRandom } from './entropy.js';
-import { AssetRangeCache, fetchAssetIndex } from './assets.mjs';
+import { AssetRangeCache, fetchAssetIndex } from './assets.js';
 
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
@@ -226,7 +226,9 @@ export class AnyWasm {
     let instance;
     let asyncifyData = 0;
     const asyncifyControl = { resumeSliceSteps: 0n, yields: 0, resumes: 0 };
-    const hostIo = { assetCache: null, pending: null, assetUrl: null };
+    const hostIo = {
+      assetCache: null, pending: null, pendingRange: null, assetUrl: null,
+    };
     const modules = new Map();
     const modulesByStart = new Map();
     let activeCodeEpoch;
@@ -420,6 +422,7 @@ export class AnyWasm {
           }
           if (state !== 0) throw new Error(`cannot suspend asset read from Asyncify state ${state}`);
           if (!hostIo.pending) {
+            hostIo.pendingRange = { offset: String(packageOffset), length: n };
             hostIo.pending = hostIo.assetCache.ensureRange(packageOffset, n);
             exports.asyncify_start_unwind(asyncifyData);
             asyncifyControl.yields++;
@@ -462,6 +465,15 @@ export class AnyWasm {
     return count;
   }
 
+  sharedSnapshotMappingGeneration() {
+    if (typeof this.x.aw_shared_snapshot_mapping_generation !== 'function') {
+      throw new Error('WASM runtime is missing the shared snapshot generation ABI; rebuild the runtime');
+    }
+    const generation = this.x.aw_shared_snapshot_mapping_generation() >>> 0;
+    if (generation === 0xffff_ffff) throw new Error('no process is loaded');
+    return generation;
+  }
+
   /**
    * Copy the process page map and packed guest frames into host-owned byte arrays. Call only
    * between guest run slices. `frameBase` is the aligned offset where the caller will publish the
@@ -493,12 +505,81 @@ export class AnyWasm {
       return {
         frameBase: frameBase >>> 0,
         pageCount,
+        mappingGeneration: this.sharedSnapshotMappingGeneration(),
         mappings: new Uint8Array(memory, ptr, mappingBytes).slice(),
         frames: new Uint8Array(memory, (ptr + mappingBytes) >>> 0, frameBytes).slice(),
       };
     } finally {
       this.x.aw_free(ptr, totalBytes);
     }
+  }
+
+  /** Export only coordinator-dirty frames and their mapping-row indices. */
+  exportSharedDelta(frameBase) {
+    if (!Number.isInteger(frameBase) || frameBase < 0 || frameBase > 0xffff_ffff || frameBase % 4096 !== 0) {
+      throw new RangeError('frameBase must be a 4096-byte-aligned u32');
+    }
+    if (typeof this.x.aw_shared_snapshot_export_delta !== 'function') {
+      throw new Error('WASM runtime is missing the dirty-page snapshot ABI; rebuild the runtime');
+    }
+    const pageCount = Number(this.sharedSnapshotPageCount());
+    const indexBytes = pageCount * 4;
+    const frameCapacity = pageCount * 4096;
+    const indexOffset = 8;
+    const framesOffset = indexOffset + indexBytes;
+    const totalBytes = framesOffset + frameCapacity;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > 0x7fff_ffff) {
+      throw new RangeError('shared snapshot delta is too large for the Wasm32 bridge');
+    }
+    const ptr = this.x.aw_alloc(Math.max(totalBytes, 8)) >>> 0;
+    try {
+      const rc = this.x.aw_shared_snapshot_export_delta(
+        frameBase >>> 0,
+        (ptr + indexOffset) >>> 0,
+        indexBytes,
+        (ptr + framesOffset) >>> 0,
+        frameCapacity,
+        ptr,
+      );
+      if (rc !== 0) throw new Error(this.message() || `shared snapshot delta export failed (${rc})`);
+      const memory = this.x.memory.buffer;
+      const dirtyCount = new DataView(memory, ptr, 4).getUint32(0, true);
+      if (dirtyCount > pageCount) throw new Error('WASM returned an invalid dirty-page count');
+      return {
+        frameBase: frameBase >>> 0,
+        pageCount,
+        mappingGeneration: this.sharedSnapshotMappingGeneration(),
+        dirtyPages: new Uint32Array(memory, (ptr + indexOffset) >>> 0, dirtyCount).slice(),
+        frames: new Uint8Array(memory, (ptr + framesOffset) >>> 0, dirtyCount * 4096).slice(),
+      };
+    } finally {
+      this.x.aw_free(ptr, Math.max(totalBytes, 8));
+    }
+  }
+
+  clearSharedSnapshotDirtyPages(dirtyPages) {
+    if (!(dirtyPages instanceof Uint32Array)) throw new TypeError('dirtyPages must be a Uint32Array');
+    if (dirtyPages.length === 0) return;
+    if (typeof this.x.aw_shared_snapshot_clear_dirty_pages !== 'function') {
+      throw new Error('WASM runtime is missing the dirty-page acknowledgement ABI; rebuild the runtime');
+    }
+    const byteLength = dirtyPages.length * 4;
+    const ptr = this.x.aw_alloc(byteLength) >>> 0;
+    try {
+      new Uint32Array(this.x.memory.buffer, ptr, dirtyPages.length).set(dirtyPages);
+      const rc = this.x.aw_shared_snapshot_clear_dirty_pages(ptr, dirtyPages.length);
+      if (rc !== 0) throw new Error(this.message() || `shared dirty-page acknowledgement failed (${rc})`);
+    } finally {
+      this.x.aw_free(ptr, byteLength);
+    }
+  }
+
+  clearAllSharedSnapshotDirty() {
+    if (typeof this.x.aw_shared_snapshot_clear_all_dirty !== 'function') {
+      throw new Error('WASM runtime is missing the dirty-page acknowledgement ABI; rebuild the runtime');
+    }
+    const rc = this.x.aw_shared_snapshot_clear_all_dirty();
+    if (rc !== 0) throw new Error(this.message() || `shared dirty-page acknowledgement failed (${rc})`);
   }
 
   /**
@@ -542,6 +623,51 @@ export class AnyWasm {
     }
   }
 
+  /** Import only worker-dirty frames after all shared CPU slices have completed. */
+  importSharedDirtySnapshot(snapshot) {
+    if (!snapshot || !Number.isInteger(snapshot.frameBase) || snapshot.frameBase < 0 ||
+        snapshot.frameBase > 0xffff_ffff || snapshot.frameBase % 4096 !== 0 ||
+        !Number.isInteger(snapshot.mappingGeneration) || snapshot.mappingGeneration < 0 ||
+        snapshot.mappingGeneration > 0xffff_ffff || !(snapshot.dirtyPages instanceof Uint32Array) ||
+        !(snapshot.frames instanceof Uint8Array)) {
+      throw new TypeError('invalid dirty shared snapshot');
+    }
+    if (snapshot.dirtyPages.length === 0) return;
+    if (typeof this.x.aw_shared_snapshot_import_dirty !== 'function') {
+      throw new Error('WASM runtime is missing the dirty-page import ABI; rebuild the runtime');
+    }
+    const pageCount = Number(this.sharedSnapshotPageCount());
+    const indexBytes = snapshot.dirtyPages.length * 4;
+    const frameBytes = snapshot.dirtyPages.length * 4096;
+    if (snapshot.pageCount !== pageCount ||
+        snapshot.mappingGeneration !== this.sharedSnapshotMappingGeneration() ||
+        snapshot.frames.byteLength !== frameBytes || snapshot.dirtyPages.length > pageCount) {
+      throw new RangeError('dirty shared snapshot buffers do not match the current process mapping');
+    }
+    const totalBytes = indexBytes + frameBytes;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > 0x7fff_ffff) {
+      throw new RangeError('dirty shared snapshot is too large for the Wasm32 bridge');
+    }
+    const ptr = this.x.aw_alloc(Math.max(totalBytes, 1)) >>> 0;
+    try {
+      const indexPtr = ptr;
+      const framePtr = (indexPtr + indexBytes) >>> 0;
+      new Uint32Array(this.x.memory.buffer, indexPtr, snapshot.dirtyPages.length).set(snapshot.dirtyPages);
+      new Uint8Array(this.x.memory.buffer, framePtr, frameBytes).set(snapshot.frames);
+      const rc = this.x.aw_shared_snapshot_import_dirty(
+        snapshot.mappingGeneration >>> 0,
+        snapshot.frameBase >>> 0,
+        indexPtr,
+        snapshot.dirtyPages.length,
+        framePtr,
+        frameBytes,
+      );
+      if (rc !== 0) throw new Error(this.message() || `dirty shared snapshot import failed (${rc})`);
+    } finally {
+      this.x.aw_free(ptr, Math.max(totalBytes, 1));
+    }
+  }
+
   /** Stable thread IDs for every active or saved CPU context in the loaded process. */
   sharedCpuContextThreadIds() {
     if (typeof this.x.aw_shared_context_count !== 'function' ||
@@ -550,6 +676,72 @@ export class AnyWasm {
     }
     const count = this.x.aw_shared_context_count() >>> 0;
     return Array.from({ length: count }, (_, index) => this.x.aw_shared_context_thread_id(index) >>> 0);
+  }
+
+  /** Runnable contexts in coordinator order; blocked and exited threads are omitted. */
+  sharedCpuRunnableThreadIds() {
+    if (typeof this.x.aw_shared_runnable_context_count !== 'function' ||
+        typeof this.x.aw_shared_runnable_context_thread_id !== 'function') {
+      throw new Error('WASM runtime is missing runnable shared CPU contexts; rebuild the runtime');
+    }
+    const count = this.x.aw_shared_runnable_context_count() >>> 0;
+    const threadIds = Array.from(
+      { length: count },
+      (_, index) => this.x.aw_shared_runnable_context_thread_id(index) >>> 0,
+    );
+    if (threadIds.some((threadId) => threadId === 0) || new Set(threadIds).size !== threadIds.length) {
+      throw new Error('WASM returned an invalid shared CPU runnable-context list');
+    }
+    return threadIds;
+  }
+
+  /** Remaining worker quantum for a runnable thread, or zero when it is ineligible. */
+  sharedCpuThreadQuantumRemaining(threadId) {
+    if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
+      throw new RangeError('threadId must be a u32');
+    }
+    if (typeof this.x.aw_shared_context_quantum_remaining_for !== 'function') {
+      throw new Error('WASM runtime is missing per-thread shared CPU quantum state; rebuild the runtime');
+    }
+    return this.x.aw_shared_context_quantum_remaining_for(threadId >>> 0) >>> 0;
+  }
+
+  /** Cumulative retired instruction count for an active or saved thread. */
+  sharedCpuThreadInstructionCount(threadId) {
+    if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
+      throw new RangeError('threadId must be a u32');
+    }
+    if (typeof this.x.aw_shared_context_instruction_count !== 'function') {
+      throw new Error('WASM runtime is missing per-thread shared CPU accounting; rebuild the runtime');
+    }
+    const count = this.x.aw_shared_context_instruction_count(threadId >>> 0);
+    if (typeof count !== 'bigint') {
+      throw new Error('WASM runtime returned an invalid per-thread instruction count');
+    }
+    return count;
+  }
+
+  /** Activate a completed saved context for serialized coordinator work. */
+  beginSharedCpuCoordinatorTurn(threadId) {
+    if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
+      throw new RangeError('threadId must be a u32');
+    }
+    if (typeof this.x.aw_shared_context_begin_handoff !== 'function') {
+      throw new Error('WASM runtime is missing shared CPU coordinator handoff; rebuild the runtime');
+    }
+    const rc = this.x.aw_shared_context_begin_handoff(threadId >>> 0);
+    if (rc === 0) return true;
+    if (rc === 1) return false;
+    throw new Error(this.message() || `shared CPU coordinator handoff failed (${rc})`);
+  }
+
+  /** Restore the previously active context after coordinator work on a saved context. */
+  finishSharedCpuCoordinatorTurn() {
+    if (typeof this.x.aw_shared_context_finish_handoff !== 'function') {
+      throw new Error('WASM runtime is missing shared CPU coordinator handoff; rebuild the runtime');
+    }
+    const rc = this.x.aw_shared_context_finish_handoff();
+    if (rc !== 0) throw new Error(this.message() || `shared CPU coordinator handoff restore failed (${rc})`);
   }
 
   /** Active context eligible for dispatch, or zero when the coordinator must schedule first. */
@@ -603,7 +795,7 @@ export class AnyWasm {
   }
 
   /** Import a worker-completed CPU context after that thread has reached a safe point. */
-  importSharedCpuContext(threadId, context) {
+  importSharedCpuContext(threadId, context, { syncTebAlias = false } = {}) {
     if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
       throw new RangeError('threadId must be a u32');
     }
@@ -618,7 +810,12 @@ export class AnyWasm {
     const ptr = ((allocation + SHARED_CPU_CONTEXT_ALIGN - 1) & ~(SHARED_CPU_CONTEXT_ALIGN - 1)) >>> 0;
     try {
       new Uint8Array(this.x.memory.buffer, ptr, SHARED_CPU_CONTEXT_BYTES).set(context);
-      const rc = this.x.aw_shared_context_import(threadId >>> 0, ptr, SHARED_CPU_CONTEXT_BYTES);
+      const rc = this.x.aw_shared_context_import(
+        threadId >>> 0,
+        ptr,
+        SHARED_CPU_CONTEXT_BYTES,
+        syncTebAlias ? 1 : 0,
+      );
       if (rc !== 0) throw new Error(this.message() || `shared CPU context import failed (${rc})`);
     } finally {
       this.x.aw_free(allocation, allocationBytes);
@@ -639,7 +836,10 @@ export class AnyWasm {
       this.x.aw_free(ptr, index.bytes.byteLength);
     }
     this.hostIo.assetUrl = url;
-    this.hostIo.assetCache = new AssetRangeCache(url, index.packageLength, { onProgress });
+    this.hostIo.assetCache = new AssetRangeCache(url, index.packageLength, {
+      onProgress,
+      fileRanges: index.fileRanges,
+    });
     return { packageLength: index.packageLength, indexBytes: index.bytes.byteLength };
   }
 
@@ -651,7 +851,10 @@ export class AnyWasm {
     try {
       await pending;
     } finally {
-      if (this.hostIo.pending === pending) this.hostIo.pending = null;
+      if (this.hostIo.pending === pending) {
+        this.hostIo.pending = null;
+        this.hostIo.pendingRange = null;
+      }
     }
   }
 
@@ -717,6 +920,12 @@ export class AnyWasm {
       throw new Error('WASM runtime is missing aw_retired_instructions; rebuild the runtime');
     }
     return Number(this.x.aw_retired_instructions());
+  }
+  retiredInstructionsExact() {
+    if (typeof this.x.aw_retired_instructions !== 'function') {
+      throw new Error('WASM runtime is missing aw_retired_instructions; rebuild the runtime');
+    }
+    return this.x.aw_retired_instructions();
   }
 
   pushStdin(bytes) {

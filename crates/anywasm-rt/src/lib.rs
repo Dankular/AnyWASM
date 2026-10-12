@@ -1,4 +1,4 @@
-//! Win64 process runtime for AnyWASM.
+//! Win32/Win64 process runtime for AnyWASM.
 //!
 //! The technique mirrors AnyPS5: guest machine code is executed as-is (here on the interpreter in
 //! `anywasm-cpu`), while every *import* is bound by name to a reimplemented system library that
@@ -7,7 +7,10 @@
 
 pub mod bundle;
 mod exception;
+mod exception32;
 pub mod hle;
+mod msvc_eh;
+mod msvc_eh32;
 pub mod process;
 pub mod vfs;
 

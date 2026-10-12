@@ -47,7 +47,12 @@ fn multi_dll_imports() {
     let d = load("d3dprobe.exe");
     let pe = Pe::parse(&d).unwrap();
     assert_eq!(pe.subsystem, SUBSYSTEM_WINDOWS_GUI);
-    let dlls: Vec<_> = pe.imports().unwrap().into_iter().map(|i| canonical_dll(&i.dll)).collect();
+    let dlls: Vec<_> = pe
+        .imports()
+        .unwrap()
+        .into_iter()
+        .map(|i| canonical_dll(&i.dll))
+        .collect();
     assert_eq!(dlls, ["kernel32", "user32", "d3d11"]);
 }
 
@@ -62,7 +67,11 @@ fn relocations_present_and_in_range() {
     // Every relocated slot must hold a VA inside the image at preferred base.
     for r in &rel {
         let v = pe.u64_at_rva(r.rva).unwrap();
-        assert!(v >= pe.image_base && v < pe.image_base + pe.size_of_image as u64, "slot {:#x} = {v:#x}", r.rva);
+        assert!(
+            v >= pe.image_base && v < pe.image_base + pe.size_of_image as u64,
+            "slot {:#x} = {v:#x}",
+            r.rva
+        );
     }
 }
 

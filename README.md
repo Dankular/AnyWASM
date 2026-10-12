@@ -9,8 +9,9 @@ WASM module.
 
 > **Status: early.** Console programs run, including real mingw-compiled programs that import the
 > actual `msvcrt.dll` API, and a **Direct3D 11 program renders through WebGPU** (verified
-> pixel-for-pixel on a coloured triangle). There is **no audio, no threads, no GDI**, the D3D11
-> surface is a vertical slice, and cached-only guest execution is around 20 M instructions/s on the
+> pixel-for-pixel on a coloured triangle). Guest threads run cooperatively, not in parallel; there
+> is no audio or GDI. The D3D11 surface is a vertical slice, and cached-only guest execution is
+> around 20 M instructions/s on the
 > current benchmark fixtures (games need 10-50x more). An experimental WASM JIT is available behind
 > explicit opt-in and remains disabled by default. See
 > [docs/STATUS.md](docs/STATUS.md) for exactly what is verified and what is not, and

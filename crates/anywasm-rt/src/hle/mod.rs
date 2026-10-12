@@ -7,8 +7,8 @@ pub mod advapi32;
 pub mod com;
 pub mod crt;
 pub mod d3d11;
-pub mod ddraw;
 pub mod d3d9;
+pub mod ddraw;
 pub mod directinput8;
 pub mod dsound;
 pub mod dxgi;
@@ -48,6 +48,7 @@ pub struct Extra {
     pub ctype_table: u64,
     pub exit_hooks: Vec<u64>,
     pub onexit_table: Vec<u64>,
+    pub cpp_exception_cells: HashMap<u32, (u64, u64)>,
     pub tmp_a: u64,
     pub win: user32::WinState,
     pub gpu: gpu::GpuStream,
@@ -66,6 +67,9 @@ pub fn group_of(name: &str) -> Option<&'static str> {
     }
     if name == "ntdll" {
         return Some("ntdll");
+    }
+    if name.starts_with("msvcp") {
+        return Some("msvcp");
     }
     if name == "msvcrt"
         || name == "ucrtbase"
@@ -106,6 +110,7 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         // kernel32 re-exports a few ntdll functions and vice versa; try both.
         "kernel32" => kernel32::lookup(name).or_else(|| ntdll::lookup(name)),
         "ntdll" => ntdll::lookup(name).or_else(|| crt::lookup(name)),
+        "msvcp" => crt::lookup(name),
         "ole32" => ole32::lookup(name),
         "crt" => crt::lookup(name),
         "advapi32" => advapi32::lookup(name),
@@ -127,6 +132,12 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
 
 /// Imports that are *data* (a variable the program reads), not code.
 pub fn data_symbol(group: &str, name: &str) -> Option<u64> {
+    if group == "msvcp" {
+        return match name {
+            crt::MSVC_STD_COUT_SYMBOL | crt::MSVC_STD_CERR_SYMBOL => Some(0xe0),
+            _ => None,
+        };
+    }
     if group != "crt" {
         return None;
     }
@@ -182,7 +193,10 @@ mod crt_locale_lock_tests {
         assert_eq!(state.recursion, 2);
 
         unlock(&mut process).unwrap();
-        assert_eq!(process.critical_sections.values().next().unwrap().recursion, 1);
+        assert_eq!(
+            process.critical_sections.values().next().unwrap().recursion,
+            1
+        );
         unlock(&mut process).unwrap();
         let state = process.critical_sections.values().next().unwrap();
         assert_eq!(state.owner, None);

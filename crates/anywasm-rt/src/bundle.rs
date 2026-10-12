@@ -43,21 +43,40 @@ impl Bundle {
         if b.get(..4) != Some(b"AWB1") {
             return Err(bad("bad magic"));
         }
-        let n = u32::from_le_bytes(b.get(4..8).ok_or_else(|| bad("header"))?.try_into().unwrap()) as usize;
+        let n = u32::from_le_bytes(
+            b.get(4..8)
+                .ok_or_else(|| bad("header"))?
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let mut p = 8usize;
         let mut dir = Vec::with_capacity(n);
         for _ in 0..n {
-            let nl = u16::from_le_bytes(b.get(p..p + 2).ok_or_else(|| bad("dir"))?.try_into().unwrap()) as usize;
+            let nl = u16::from_le_bytes(
+                b.get(p..p + 2)
+                    .ok_or_else(|| bad("dir"))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             p += 2;
-            let name = std::str::from_utf8(b.get(p..p + nl).ok_or_else(|| bad("name"))?).map_err(|_| bad("utf8"))?.to_string();
+            let name = std::str::from_utf8(b.get(p..p + nl).ok_or_else(|| bad("name"))?)
+                .map_err(|_| bad("utf8"))?
+                .to_string();
             p += nl;
-            let sz = u64::from_le_bytes(b.get(p..p + 8).ok_or_else(|| bad("size"))?.try_into().unwrap()) as usize;
+            let sz = u64::from_le_bytes(
+                b.get(p..p + 8)
+                    .ok_or_else(|| bad("size"))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             p += 8;
             dir.push((name, sz));
         }
         let mut bundle = Bundle::default();
         for (name, sz) in dir {
-            let data = b.get(p..p.checked_add(sz).ok_or_else(|| bad("overflow"))?).ok_or_else(|| bad("data"))?;
+            let data = b
+                .get(p..p.checked_add(sz).ok_or_else(|| bad("overflow"))?)
+                .ok_or_else(|| bad("data"))?;
             p += sz;
             if name == "__manifest__" {
                 for line in String::from_utf8_lossy(data).lines() {
@@ -100,7 +119,12 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let b = Bundle { exe: "a.exe".into(), cmdline: Some("\"a.exe\" x".into()), cwd: Some("C:\\games".into()), files: vec![("a.exe".into(), vec![1, 2, 3]), ("d\\x.dll".into(), vec![])] };
+        let b = Bundle {
+            exe: "a.exe".into(),
+            cmdline: Some("\"a.exe\" x".into()),
+            cwd: Some("C:\\games".into()),
+            files: vec![("a.exe".into(), vec![1, 2, 3]), ("d\\x.dll".into(), vec![])],
+        };
         let r = Bundle::from_bytes(&b.to_bytes()).unwrap();
         assert_eq!(r.exe, "a.exe");
         assert_eq!(r.cmdline.as_deref(), Some("\"a.exe\" x"));
@@ -110,7 +134,12 @@ mod tests {
 
     #[test]
     fn bundles_without_cwd_keep_the_legacy_default() {
-        let b = Bundle { exe: "a.exe".into(), cmdline: None, cwd: None, files: vec![("a.exe".into(), vec![9])] };
+        let b = Bundle {
+            exe: "a.exe".into(),
+            cmdline: None,
+            cwd: None,
+            files: vec![("a.exe".into(), vec![9])],
+        };
         let decoded = Bundle::from_bytes(&b.to_bytes()).unwrap();
         assert_eq!(decoded.cwd, None);
         let (vfs, exe, cmdline, cwd) = decoded.into_vfs_with_cwd();
@@ -122,10 +151,19 @@ mod tests {
 
     #[test]
     fn rejects_truncated_and_bad_magic() {
-        let good = Bundle { exe: "a.exe".into(), cmdline: None, cwd: None, files: vec![("a.exe".into(), vec![9; 10])] }.to_bytes();
+        let good = Bundle {
+            exe: "a.exe".into(),
+            cmdline: None,
+            cwd: None,
+            files: vec![("a.exe".into(), vec![9; 10])],
+        }
+        .to_bytes();
         assert!(Bundle::from_bytes(b"XXXX").is_err());
         for n in 0..good.len() {
-            assert!(Bundle::from_bytes(&good[..n]).is_err() || n == good.len(), "prefix {n} accepted");
+            assert!(
+                Bundle::from_bytes(&good[..n]).is_err() || n == good.len(),
+                "prefix {n} accepted"
+            );
         }
     }
 }

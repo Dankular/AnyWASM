@@ -79,7 +79,11 @@ fn fmt_exp(v: f64, prec: usize, upper: bool) -> String {
 fn strip_zeros(s: &str) -> String {
     if let Some((mant, exp)) = s.split_once(['e', 'E']) {
         let sep = if s.contains('E') { 'E' } else { 'e' };
-        let m = if mant.contains('.') { mant.trim_end_matches('0').trim_end_matches('.') } else { mant };
+        let m = if mant.contains('.') {
+            mant.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            mant
+        };
         format!("{m}{sep}{exp}")
     } else if s.contains('.') {
         s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -96,32 +100,85 @@ fn fmt_float(v: f64, conv: u8, sp: &Spec) -> String {
     let neg = v.is_sign_negative();
     let a = v.abs();
     let body = if a.is_infinite() {
-        if upper { "INF".to_string() } else { "inf".to_string() }
+        if upper {
+            "INF".to_string()
+        } else {
+            "inf".to_string()
+        }
     } else {
         let prec = sp.prec.unwrap_or(6);
         match conv.to_ascii_lowercase() {
             b'f' => {
                 let s = format!("{:.*}", prec, a);
-                if sp.alt && prec == 0 { s + "." } else { s }
+                if sp.alt && prec == 0 {
+                    s + "."
+                } else {
+                    s
+                }
             }
             b'e' => fmt_exp(a, prec, upper),
             b'g' => {
                 let p = if prec == 0 { 1 } else { prec };
                 if a == 0.0 {
-                    if sp.alt { format!("{:.*}", p - 1, 0.0) } else { "0".into() }
+                    if sp.alt {
+                        format!("{:.*}", p - 1, 0.0)
+                    } else {
+                        "0".into()
+                    }
                 } else {
                     let e_form = fmt_exp(a, p - 1, false);
                     let x: i32 = e_form.split_once('e').unwrap().1.parse().unwrap();
-                    let s = if x >= -4 && x < p as i32 { format!("{:.*}", (p as i32 - 1 - x).max(0) as usize, a) } else { e_form };
+                    let s = if x >= -4 && x < p as i32 {
+                        format!("{:.*}", (p as i32 - 1 - x).max(0) as usize, a)
+                    } else {
+                        e_form
+                    };
                     let s = if sp.alt { s } else { strip_zeros(&s) };
-                    if upper { s.to_uppercase() } else { s }
+                    if upper {
+                        s.to_uppercase()
+                    } else {
+                        s
+                    }
                 }
             }
             _ => format!("{a}"),
         }
     };
-    let sign = if neg { "-" } else if sp.plus { "+" } else if sp.space { " " } else { "" };
+    let sign = if neg {
+        "-"
+    } else if sp.plus {
+        "+"
+    } else if sp.space {
+        " "
+    } else {
+        ""
+    };
     format!("{sign}{body}")
+}
+
+pub(crate) fn format_ostream_float(value: f64, precision: usize, flags: u32) -> String {
+    let conv = match flags & 0x3000 {
+        0x2000 => b'f', // fixed
+        0x1000 => b'e', // scientific
+        _ => b'g',      // defaultfloat (and the current hexfloat fallback)
+    };
+    let conv = if flags & 0x4 != 0 {
+        conv.to_ascii_uppercase()
+    } else {
+        conv
+    };
+    let spec = Spec {
+        plus: flags & 0x20 != 0,
+        alt: flags & 0x10 != 0,
+        prec: Some(precision),
+        ..Spec::default()
+    };
+    let mut output = fmt_float(value, conv, &spec);
+    if flags & 0x10 != 0 && value.is_finite() && !output.contains('.') {
+        let point = output.find(['e', 'E']).unwrap_or(output.len());
+        output.insert(point, '.');
+    }
+    output
 }
 
 fn wide_to_utf8(p: &Process, a: u64, max: Option<usize>) -> Result<Vec<u8>, Stop> {
@@ -164,7 +221,12 @@ fn narrow_bytes(p: &Process, a: u64, max: Option<usize>) -> Result<Vec<u8>, Stop
 
 /// Format `fmt` (UTF-8 / raw bytes). `wide_default` makes `%s`/`%c` mean wide (wprintf family).
 /// The result is raw bytes (UTF-8 for wide strings).
-pub fn format(p: &Process, fmt: &[u8], args: &mut dyn Args, wide_default: bool) -> Result<Vec<u8>, Stop> {
+pub fn format(
+    p: &Process,
+    fmt: &[u8],
+    args: &mut dyn Args,
+    wide_default: bool,
+) -> Result<Vec<u8>, Stop> {
     let mut out = Vec::with_capacity(fmt.len() + 16);
     let mut i = 0;
     while i < fmt.len() {
@@ -282,7 +344,15 @@ pub fn format(p: &Process, fmt: &[u8], args: &mut dyn Args, wide_default: bool) 
                         digits.clear();
                     }
                 }
-                let sign = if v < 0 { "-" } else if sp.plus { "+" } else if sp.space { " " } else { "" };
+                let sign = if v < 0 {
+                    "-"
+                } else if sp.plus {
+                    "+"
+                } else if sp.space {
+                    " "
+                } else {
+                    ""
+                };
                 let mut s = format!("{sign}{digits}");
                 if sp.prec.is_some() {
                     sp.zero = false;
@@ -329,9 +399,15 @@ pub fn format(p: &Process, fmt: &[u8], args: &mut dyn Args, wide_default: bool) 
             }
             b'c' | b'C' => {
                 let v = args.next(p)? as u32;
-                let wide = if conv == b'C' { !wide_default } else { wide_arg.unwrap_or(wide_default) };
+                let wide = if conv == b'C' {
+                    !wide_default
+                } else {
+                    wide_arg.unwrap_or(wide_default)
+                };
                 let s: Vec<u8> = if wide || v > 0x7f && wide_default {
-                    char::from_u32(v & 0xffff).map(|ch| ch.to_string().into_bytes()).unwrap_or_default()
+                    char::from_u32(v & 0xffff)
+                        .map(|ch| ch.to_string().into_bytes())
+                        .unwrap_or_default()
                 } else {
                     vec![v as u8]
                 };
@@ -339,7 +415,11 @@ pub fn format(p: &Process, fmt: &[u8], args: &mut dyn Args, wide_default: bool) 
             }
             b's' | b'S' => {
                 let a = args.next(p)?;
-                let wide = if conv == b'S' { !wide_default } else { wide_arg.unwrap_or(wide_default) };
+                let wide = if conv == b'S' {
+                    !wide_default
+                } else {
+                    wide_arg.unwrap_or(wide_default)
+                };
                 let bytes = if a == 0 {
                     b"(null)".to_vec()
                 } else if wide {
@@ -388,18 +468,48 @@ mod tests {
 
     #[test]
     fn integers() {
-        assert_eq!(f("%d|%5d|%-5d|%05d|%+d", vec![42, 42, 42, 42, 42]), "42|   42|42   |00042|+42");
-        assert_eq!(f("%x %X %#x %o %u", vec![255, 255, 255, 8, (-1i32) as u32 as u64]), "ff FF 0xff 10 4294967295");
-        assert_eq!(f("%lld %I64d %hd %hhd", vec![-5i64 as u64, 1 << 40, 70000, 300]), "-5 1099511627776 4464 44");
+        assert_eq!(
+            f("%d|%5d|%-5d|%05d|%+d", vec![42, 42, 42, 42, 42]),
+            "42|   42|42   |00042|+42"
+        );
+        assert_eq!(
+            f(
+                "%x %X %#x %o %u",
+                vec![255, 255, 255, 8, (-1i32) as u32 as u64]
+            ),
+            "ff FF 0xff 10 4294967295"
+        );
+        assert_eq!(
+            f(
+                "%lld %I64d %hd %hhd",
+                vec![-5i64 as u64, 1 << 40, 70000, 300]
+            ),
+            "-5 1099511627776 4464 44"
+        );
         assert_eq!(f("%.3d|%.0d|%d", vec![5, 0, (-7i64) as u64]), "005||-7");
     }
 
     #[test]
     fn floats() {
         let b = |x: f64| x.to_bits();
-        assert_eq!(f("%f %.2f %8.3f %-8.1f|", vec![b(3.14159), b(2.0), b(-1.5), b(9.99)]), "3.141590 2.00   -1.500 10.0    |");
-        assert_eq!(f("%e %E %.0e", vec![b(12345.678), b(0.00012), b(5.0)]), "1.234568e+04 1.200000E-04 5e+00");
-        assert_eq!(f("%g %g %g %g %g", vec![b(100000.0), b(1e6), b(0.0001), b(0.00001), b(1.5)]), "100000 1e+06 0.0001 1e-05 1.5");
+        assert_eq!(
+            f(
+                "%f %.2f %8.3f %-8.1f|",
+                vec![b(3.14159), b(2.0), b(-1.5), b(9.99)]
+            ),
+            "3.141590 2.00   -1.500 10.0    |"
+        );
+        assert_eq!(
+            f("%e %E %.0e", vec![b(12345.678), b(0.00012), b(5.0)]),
+            "1.234568e+04 1.200000E-04 5e+00"
+        );
+        assert_eq!(
+            f(
+                "%g %g %g %g %g",
+                vec![b(100000.0), b(1e6), b(0.0001), b(0.00001), b(1.5)]
+            ),
+            "100000 1e+06 0.0001 1e-05 1.5"
+        );
         assert_eq!(f("%g|%G", vec![b(f64::INFINITY), b(f64::NAN)]), "inf|NAN");
         assert_eq!(f("%.3g %.10g", vec![b(1234.5678), b(0.1)]), "1.23e+03 0.1");
     }

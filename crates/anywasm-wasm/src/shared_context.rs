@@ -4,7 +4,6 @@ use anywasm_cpu_state::{Cpu, CpuMode};
 
 const CPU_CONTEXT_BYTES: usize = 784;
 const CPU_CONTEXT_ALIGN: usize = 16;
-const SHARED_CPU_QUANTUM: u64 = 10_000;
 const _: [(); CPU_CONTEXT_BYTES] = [(); core::mem::size_of::<Cpu>()];
 const _: [(); CPU_CONTEXT_ALIGN] = [(); core::mem::align_of::<Cpu>()];
 
@@ -40,6 +39,68 @@ pub extern "C" fn aw_shared_context_thread_id(index: u32) -> u32 {
     ids.get(index as usize).copied().unwrap_or(0)
 }
 
+/// Number of contexts that can begin a shared CPU slice without a scheduler turn.
+#[no_mangle]
+pub extern "C" fn aw_shared_runnable_context_count() -> u32 {
+    super::state()
+        .map(|s| s.p.shared_cpu_runnable_context_ids().len() as u32)
+        .unwrap_or(0)
+}
+
+/// Runnable thread ID at an index, in coordinator scheduling order; zero means out of range.
+#[no_mangle]
+pub extern "C" fn aw_shared_runnable_context_thread_id(index: u32) -> u32 {
+    let Some(s) = super::state() else { return 0 };
+    s.p.shared_cpu_runnable_context_ids()
+        .get(index as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Remaining worker budget for a runnable context, or zero when it is not eligible.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_quantum_remaining_for(thread_id: u32) -> u32 {
+    let Some(s) = super::state() else { return 0 };
+    s.p.shared_cpu_context_quantum_remaining(thread_id) as u32
+}
+
+/// Cumulative retired instructions for an active or saved context; zero for an unknown ID.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_instruction_count(thread_id: u32) -> u64 {
+    let Some(s) = super::state() else { return 0 };
+    s.p.shared_cpu_context_instruction_count(thread_id)
+        .unwrap_or(0)
+}
+
+/// Select a completed saved context for one coordinator HLE/fault turn.
+/// Returns 0 when selected, 1 when it is already the active context, and 2 on failure.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_begin_handoff(thread_id: u32) -> i32 {
+    let Some(s) = super::state() else { return 2 };
+    match s.p.begin_shared_context_handoff(thread_id) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(stop) => {
+            s.message = format!("{stop:?}").into_bytes();
+            2
+        }
+    }
+}
+
+/// Restore the prior active thread or run the scheduler after a coordinator handoff.
+/// Returns 0 on success and 1 when no process or active handoff is available.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_finish_handoff() -> i32 {
+    let Some(s) = super::state() else { return 1 };
+    match s.p.finish_shared_context_handoff() {
+        Ok(()) => 0,
+        Err(stop) => {
+            s.message = format!("{stop:?}").into_bytes();
+            1
+        }
+    }
+}
+
 /// Active coordinator context when it is safe to dispatch, or zero when scheduling must run first.
 #[no_mangle]
 pub extern "C" fn aw_shared_context_active_thread_id() -> u32 {
@@ -49,7 +110,8 @@ pub extern "C" fn aw_shared_context_active_thread_id() -> u32 {
     if !p.current_thread_saved
         && !p.schedule_requested
         && p.current_thread_state == ThreadState::Running
-        && p.quantum_used < SHARED_CPU_QUANTUM // matches Process::run_with_budget's thread quantum
+        && p.quantum_used < anywasm_rt::process::THREAD_QUANTUM
+    // matches Process::run_with_budget's thread quantum
     {
         p.current_thread_id
     } else {
@@ -65,9 +127,9 @@ pub extern "C" fn aw_shared_context_quantum_remaining() -> u32 {
     if !p.current_thread_saved
         && !p.schedule_requested
         && p.current_thread_state == anywasm_rt::process::ThreadState::Running
-        && p.quantum_used < SHARED_CPU_QUANTUM
+        && p.quantum_used < anywasm_rt::process::THREAD_QUANTUM
     {
-        (SHARED_CPU_QUANTUM - p.quantum_used) as u32
+        (anywasm_rt::process::THREAD_QUANTUM - p.quantum_used) as u32
     } else {
         0
     }
@@ -100,12 +162,21 @@ pub unsafe extern "C" fn aw_shared_context_export(
     capacity: usize,
 ) -> usize {
     let Some(s) = super::state() else { return 0 };
-    if output.is_null()
-        || capacity < CPU_CONTEXT_BYTES
-        || output as usize % CPU_CONTEXT_ALIGN != 0
+    if output.is_null() || capacity < CPU_CONTEXT_BYTES || output as usize % CPU_CONTEXT_ALIGN != 0
     {
         s.message = b"invalid shared CPU context output buffer".to_vec();
         return 0;
+    }
+    match s.p.sync_shared_cpu_context_teb(thread_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            s.message = b"unknown guest thread for shared CPU context export".to_vec();
+            return 0;
+        }
+        Err(stop) => {
+            s.message = format!("{stop:?}").into_bytes();
+            return 0;
+        }
     }
     let p = &s.p;
     let cpu = if !p.current_thread_saved && thread_id == p.current_thread_id {
@@ -113,11 +184,19 @@ pub unsafe extern "C" fn aw_shared_context_export(
     } else {
         p.guest_threads.get(&thread_id).map(|thread| &thread.cpu)
     };
-    let Some(cpu) = cpu else {
+    let (Some(cpu), Some(teb_base)) = (cpu, p.shared_cpu_context_teb_base(thread_id)) else {
         s.message = b"unknown guest thread for shared CPU context export".to_vec();
         return 0;
     };
-    output.cast::<Cpu>().write(cpu.clone());
+    let mut exported = cpu.clone();
+    if exported.mode == CpuMode::X86_32 {
+        exported.fs_base = teb_base;
+        exported.gs_base = 0;
+    } else {
+        exported.fs_base = 0;
+        exported.gs_base = teb_base;
+    }
+    output.cast::<Cpu>().write(exported);
     s.message.clear();
     CPU_CONTEXT_BYTES
 }
@@ -138,41 +217,69 @@ pub unsafe extern "C" fn aw_shared_context_import(
     thread_id: u32,
     input: *const u8,
     length: usize,
+    sync_teb_alias: u32,
 ) -> i32 {
     let Some(s) = super::state() else { return 1 };
     if input.is_null()
         || length != CPU_CONTEXT_BYTES
         || input as usize % CPU_CONTEXT_ALIGN != 0
+        || sync_teb_alias > 1
         || *input > CpuMode::X86_64 as u8
         || *input.add(core::mem::offset_of!(Cpu, fpu_top)) > 7
     {
         s.message = b"invalid shared CPU context input".to_vec();
         return 2;
     }
-    let imported = input.cast::<Cpu>().read();
-    let p = &mut s.p;
-    let is_active = !p.current_thread_saved && thread_id == p.current_thread_id;
-    let target = if is_active {
-        Some(&mut p.cpu)
+    let mut imported = input.cast::<Cpu>().read();
+    if imported.mode == CpuMode::X86_32 {
+        imported.fs_base = anywasm_rt::process::TEB_ADDR;
+        imported.gs_base = 0;
     } else {
-        p.guest_threads
-            .get_mut(&thread_id)
-            .map(|thread| &mut thread.cpu)
-    };
-    let Some(target) = target else {
+        imported.fs_base = 0;
+        imported.gs_base = anywasm_rt::process::TEB_ADDR;
+    }
+    let p = &mut s.p;
+    let is_active = !p.current_thread_saved
+        && !p.schedule_requested
+        && p.current_thread_state == anywasm_rt::process::ThreadState::Running
+        && thread_id == p.current_thread_id;
+    let is_saved_ready = p
+        .guest_threads
+        .get(&thread_id)
+        .is_some_and(|thread| thread.state == anywasm_rt::process::ThreadState::Ready);
+    if !is_active && !is_saved_ready {
         s.message = b"unknown guest thread for shared CPU context import".to_vec();
         return 3;
+    }
+    let retired = {
+        let target = if is_active {
+            &mut p.cpu
+        } else {
+            &mut p.guest_threads.get_mut(&thread_id).unwrap().cpu
+        };
+        if imported.mode != target.mode || imported.icount < target.icount {
+            s.message =
+                b"shared CPU context mode changed or instruction count moved backwards".to_vec();
+            return 4;
+        }
+        let retired = imported.icount - target.icount;
+        *target = imported;
+        retired
     };
-    if imported.mode != target.mode || imported.icount < target.icount {
-        s.message = b"shared CPU context mode changed or instruction count moved backwards".to_vec();
-        return 4;
+    p.account_shared_cpu_context_retired(thread_id, retired);
+    if sync_teb_alias != 0 && is_active {
+        match p.sync_shared_cpu_context_alias(thread_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                s.message = b"active shared CPU context lost its TEB backing".to_vec();
+                return 5;
+            }
+            Err(stop) => {
+                s.message = format!("{stop:?}").into_bytes();
+                return 5;
+            }
+        }
     }
-    let retired = imported.icount - target.icount;
-    *target = imported;
-    if is_active {
-        p.quantum_used = p.quantum_used.saturating_add(retired);
-    }
-    p.retired_instructions = p.retired_instructions.saturating_add(retired);
     s.message.clear();
     0
 }

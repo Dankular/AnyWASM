@@ -70,10 +70,12 @@ Why: the cached-block executor's earlier baseline measured 32.2 M guest instr/s 
 under Node). A preliminary D3D11-only Diligent GLFW Demo run reached eight guest `Present` stops,
 and a corrected aggregate counter now includes synchronous guest callbacks and yielding HLE calls.
 The cached-only eight-frame sample retired 580.8M guest instructions, with 580.8M on the first
-frame; forcing the current MOV emitter was about 60.5% slower on that cold pass. The benchmark uses
-one 1B-instruction run slice because synchronous callbacks cannot yet suspend at a smaller slice
-boundary. These are guest/HLE timings: AnyWASM did not execute this target's command stream in the
-browser renderer. The latest same-build fixture run used 10 paired rounds after one warm-up:
+frame; forcing the current MOV emitter was about 60.5% slower on that cold pass. The native CLI
+benchmark uses one 1B-instruction run slice because its synchronous callback continuation cannot
+resume at a smaller configured slice boundary. The WASM/browser path uses Asyncify and has passed a
+normal-slice callback-resumption replay; see `docs/TARGETS.md`. These are guest/HLE timings: AnyWASM
+did not execute this target's command stream in the browser renderer. The latest same-build fixture
+run used 10 paired rounds after one warm-up:
 memory-heavy improved from 19.61 to 65.14 MIPS (+232.2%) and SSE-float from 26.35 to 42.74 MIPS
 (+62.2%); compute regressed 68.8%, call-heavy 75.1%, and block-chain 73.6%. Every pair matched
 status, exit code, stdout/stderr, and retired count. Emission remains disabled by default because
@@ -169,10 +171,23 @@ register-stack subset):
       guest `Dispatch`, `Draw`, and `Present` calls. It does not verify a host renderer or frame.
 - [~] **SEH / C++ exceptions**: PE32+ `.pdata` entries are parsed and validated;
       `RtlLookupFunctionEntry` and a tested `RtlVirtualUnwind` subset support leaf frames, common
-      version 1 unwind opcodes, handler metadata, and chained records. Target-grounded frame search,
-      language-handler invocation, second-pass unwind, `RtlUnwindEx`, and the selected MSVC C++ catch
-      are verified with a synthetic regression and bounded target replay. Version 2 unwind records,
-      general SEH behavior, vectored handlers, and guest faults → exceptions remain open.
+      version 1 unwind opcodes, handler metadata, and chained records. `RaiseException` now searches
+      ordinary x64 records through registered vectored exception handlers and `__C_specific_handler`
+      scope tables, including filters, catch-all scopes, continuation, and termination handlers;
+      target unwind uses the existing second-pass `RtlUnwindEx` path. Synthetic regressions cover
+      handler ordering and scope selection, while the selected MSVC C++ catch remains verified by a
+      bounded target replay. The source now also routes continuable VEH/SEH exceptions through
+      vectored-continue callbacks and invokes the registered top-level filter after an exhausted
+      search; synthetic regressions cover VCH ordering, ignored callback returns, filter replacement,
+      and filter-edited context resumption. Selected x64 access violations, integer divide errors,
+      illegal instructions, privileged instructions, and software breakpoints now enter the
+      dispatcher; guest VEH tests cover exception records, CONTEXT.Rip edits, and MXCSR
+      round-tripping. The first PE32 path serializes x86 EXCEPTION_RECORD/CONTEXT data, invokes
+      vectored handlers and linked NT_TIB exception registrations, resumes edited contexts, and
+      applies RaiseException's x86 stdcall cleanup. Synthetic guest execution covers selected x86
+      illegal, privileged, divide, and breakpoint exceptions; a scheduler regression preserves each
+      thread's NT_TIB.ExceptionList. PE32 nested/collided unwind and compiler-specific C/C++ handlers,
+      other CPU exits, and version 2 unwind data remain open.
 - [~] **More of kernel32/ntdll/user32/shlwapi**: target-grounded work adds
       `VerifyVersionInfoA/W`, `PathFileExistsA/W`, and cooperative wait support alongside the
       earlier `InitializeSListHead`, `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and
@@ -211,17 +226,21 @@ register-stack subset):
 - [~] **32-bit PE (WoW64-style)**: x86-32 decode/execution, PE32 image mapping, 32-bit TEB/PEB
       setup, and stdcall stack cleanup are in place. A synthetic PE32 entry plus `SetLastError`
       import-table call now verifies IAT binding, guest execution, and TEB last-error state;
-      import-heavy DLLs, broad Win32 API coverage, and a real 32-bit program remain unverified.
+      another synthetic PE32 image verifies process TLS callbacks and per-thread static TLS through
+      the 32-bit TEB vector. Import-heavy DLLs, broad Win32 API coverage, and a real 32-bit program
+      remain unverified.
       This is still a large target-compatibility task.
 - [~] **DLL loading**: the selected Diligent target maps and executes code from
       `GraphicsEngineD3D11_64r.dll` and `D3Dcompiler_47.dll`; their nonzero entry points ran through
-      `DllMain` successfully in the bounded target trace. `Archiver_64r.dll` has an entry point but
-      was not observed loading. All four target images have TLS directories but no TLS callbacks,
-      and none has forwarded exports, so those behaviours are not verified. Source inspection shows
-      initialization follows module creation order (the importer is reserved before recursive
-      dependency loading), not a dependency-first order; TLS callback invocation is absent, and
-      forwarded-export failures are not surfaced. Verify these paths with a representative DLL
-      before expanding support.
+      `DllMain` successfully in the bounded target trace. Initial loading and `LoadLibrary` now run
+      bundled DLL process-attach calls dependency-first; synthetic nested-DLL coverage exercises
+      both paths. PE TLS callbacks now run in image order before `DllMain`; EXE callbacks run after
+      DLL initialization and before the EXE entry point. Synthetic fixtures cover callback ordering,
+      attach arguments, and EXE startup. `Archiver_64r.dll` has an entry point but was not observed
+      loading. Static TLS data is initialized. Named forwarded exports are resolved
+      opportunistically, failed names are omitted, and ordinal forwarders are dropped. The four
+      observed target images do not contain TLS callbacks or forwarded exports, so target coverage
+      for those paths remains unverified.
 - [x] **Packer/analyzer**: `--dir` recursively adds assets with preserved relative subpaths and
       `--args` embeds the caller's command line. `run` and `pack` accept `--cwd`; the process stores
       a guest current directory, resolves relative Win32 and CRT file paths against it, and `.awb`
@@ -361,9 +380,11 @@ register-stack subset):
 - [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
       VMOVDQA/DQU, VMOVSS/SD, VPXOR/VXORPS, VADDSS/VDIVSS, VCOMISS/VUCOMISS, VROUNDSS,
       VCVTSI2SS/VCVTTSS2SI, VEXTRACTF128, VZEROUPPER, ANDN, SHLX, SHRX, BZHI, VPBROADCASTD,
-      VPADDD, VMOVDQU, VMOVQ, VPEXTRD/Q, VCMPEQSS, VBLENDVPS, VMOVD, and BLSI. These are exact
-      target-grounded forms, not broad AVX/AVX2/BMI2 support; remaining AVX/AVX2/BMI/FMA and
-      AES/PCLMUL/MMX instructions are open.
+      VPADDD, VMOVDQU, VMOVQ, VPEXTRD/Q, VCMPEQSS, VBLENDVPS, VPERMILPS/PD, VMOVD, and BLSI.
+      Target-grounded packed-single VADDPS/VMULPS now support XMM and YMM forms; Tutorial03's
+      observed sequence exercises the XMM forms beside VPERMILPS.
+      These are exact target-grounded forms, not broad AVX/AVX2/BMI2 support. Remaining
+      AVX/AVX2/BMI/FMA and AES/PCLMUL/MMX instructions are open.
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
 - [x] Document `rcpps`/`rsqrtps` approximation behavior. Intel and AMD specify a maximum relative
       error of `1.5 × 2^-12`, without fixing exact result bits (confirmed by the linked manuals);
@@ -399,10 +420,23 @@ register-stack subset):
 
 ## 6. Productisation (after a real target runs)
 - [~] Analyze three Win64 Diligent samples (HelloTriangle, Texturing, Asteroids) and record their
-      import blockers in `docs/TARGETS.md`. Both tutorials now have D3D11 first-stop AnyWASM traces
-      and reach virtual device discovery/creation, then stop at the unresolved MSVCP140
-      `basic_ios<char>` constructor; neither reaches shaders or `Present`. Asteroids remains
-      static-analysis only and needs a separate Intel-origin code/assets redistribution review.
+      import blockers in `docs/TARGETS.md`. Historical D3D11 traces stopped at the MSVCP140
+      `basic_ios<char>` constructor; HLE support and a local-runtime probe now advance past it.
+      A package-aware browser capture of Tutorial03 shows the textured Diligent cube after 59 draws
+      and 30 presents, with two pipelines and no WebGPU validation errors. A fresh current-source
+      HLE-only browser replay without local MSVC/UCRT DLLs recorded 2,759 draws, 1,380 presents,
+      5,519 passes, two pipelines, 16 Asyncify yield/resume pairs, and no WebGPU validation errors; it
+      remains in `Starting` at the bounded report timeout, without terminal process status. Its only
+      404 was the browser's `/favicon.ico` request. The current static import report lists 205
+      implemented / 46 missing, including 26 of 65 MSVCP140 imports still missing; see
+      `docs/target-imports/tutorial03-current-source.json`. Neither report shows the sample's later
+      execution. HLE-only Tutorial01
+      now renders its colored triangle without local MSVC/UCRT DLLs at the standard 250,000-step
+      worker slice (659 draws, 330 presents, two pipelines, 16 Asyncify yields/resumes, no WebGPU
+      validation errors), but remains in `Starting`. Complete runtime support and redistribution of
+      local runtime DLLs remain open.
+      Asteroids remains static-analysis only and needs a separate Intel-origin code/assets
+      redistribution review.
       The Apache-2.0 GLFW Demo maze is now the selected game candidate. A separate D3D11-only `/MT`
       build succeeded; the current
       package-aware analyzer reports 84 missing imports across its EXE and three DLLs. A prior
@@ -443,9 +477,11 @@ register-stack subset):
       rerun before its route timing is treated as current. The general Release bundle uses
       `std::random_device` for map generation; its flashlight threshold
       varies between launches and failed once in an unseeded replay. Keep the stored flashlight claim
-      scoped to its seeded build and aim direction; see `docs/TARGETS.md`. The
-      normal worker slice still stops in a synchronous callback that cannot resume. One pre-correction
-      controlled seed-1 maze traversal reached the teleport; rerun it with the corrected frame clock.
+      scoped to its seeded build and aim direction; see `docs/TARGETS.md`. The normal
+      250,000-instruction browser worker slice resumed the target callback 16 times in a
+      bounded replay (three draws, one dispatch, three presents); its page remained in `Starting`
+      and the recorded maze route did not finish. One pre-correction controlled seed-1 maze traversal
+      reached the teleport; rerun it with the corrected frame clock.
       Broad gameplay and end-to-end game acceptance remain open; see `docs/TARGETS.md` for exact
       evidence and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible

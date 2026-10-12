@@ -11,7 +11,10 @@ fn vex_vpaddq_adds_qword_lanes_and_zeros_upper_ymm_on_xmm_form() {
         0xc5, 0xe1, 0xd4, 0xc4, // vpaddq xmm0, xmm3, xmm4
     ];
     let decoded = decode(&code, CODE);
-    assert_eq!(decoded.as_ref().map(|i| (i.op, i.osz)), Ok((Op::Vpaddq, 32)));
+    assert_eq!(
+        decoded.as_ref().map(|i| (i.op, i.osz)),
+        Ok((Op::Vpaddq, 32))
+    );
 
     let mut mem = Memory::new();
     assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));

@@ -1,5 +1,5 @@
 const ABI_MAGIC = 0x4853_5741; // little-endian "AWSH"
-const ABI_VERSION = 1;
+const ABI_VERSION = 2;
 const HEADER_BYTES = 128;
 const SLOT_BYTES = 64;
 const CPU_BYTES = 784;
@@ -42,7 +42,9 @@ function layoutFor({ workerCount, contextCount, pageCount, base }) {
   const contexts = { offset: cursor, length: contextCount * CPU_BYTES };
   cursor = align(cursor + contexts.length, 8);
   const pageMap = { offset: cursor, length: pageCount * 16 };
-  cursor = align(cursor + pageMap.length, PAGE_BYTES);
+  cursor = align(cursor + pageMap.length, 8);
+  const dirtyMap = { offset: cursor, length: Math.ceil(pageCount / 8) };
+  cursor = align(cursor + dirtyMap.length, PAGE_BYTES);
   const frames = { offset: cursor, length: pageCount * PAGE_BYTES };
   cursor = align(cursor + frames.length, 16);
   const stacks = { offset: cursor, length: workerCount * WORKER_STACK_BYTES };
@@ -50,7 +52,7 @@ function layoutFor({ workerCount, contextCount, pageCount, base }) {
   if (cursor > 0xffff_ffff || base + cursor > MAX_WASM_PAGES * WASM_PAGE_BYTES) {
     throw new RangeError('shared CPU worker memory exceeds its 1 GiB maximum');
   }
-  return { base, totalBytes: cursor, slots, contexts, pageMap, frames, stacks };
+  return { base, totalBytes: cursor, slots, contexts, pageMap, dirtyMap, frames, stacks };
 }
 
 /**
@@ -157,7 +159,7 @@ export class SharedCpuWorkerPool {
   }
 
   initializeHeader() {
-    const { base, totalBytes, slots, contexts, pageMap, frames } = this.layout;
+    const { base, totalBytes, slots, contexts, pageMap, dirtyMap, frames } = this.layout;
     const bytes = new Uint8Array(this.memory.buffer, base, totalBytes);
     bytes.fill(0);
     const view = new DataView(this.memory.buffer, base, HEADER_BYTES);
@@ -171,12 +173,15 @@ export class SharedCpuWorkerPool {
       view.setUint32(offset, region.offset, true);
       view.setUint32(offset + 4, region.length, true);
     }
+    view.setUint32(76, dirtyMap.offset, true);
+    view.setUint32(80, dirtyMap.length, true);
     const header = new Int32Array(this.memory.buffer, base, HEADER_BYTES / 4);
     Atomics.store(header, 14, this.pageCount);
     Atomics.store(header, 15, 1); // mapping generation
     Atomics.store(header, 16, 1); // code generation
     Atomics.store(header, 17, 1); // dispatch generation
     Atomics.store(header, 18, 0); // flags
+    this.dirtyMap = new Uint8Array(this.memory.buffer, base + dirtyMap.offset, dirtyMap.length);
   }
 
   /** Return the offset to pass as `frameBase` to AnyWasm.exportSharedSnapshot. */
@@ -218,7 +223,9 @@ export class SharedCpuWorkerPool {
       this.layout.frames.length,
     );
     const firstPublish = !this.snapshot;
+    const mappingGeneration = snapshot.mappingGeneration ?? this.snapshot?.mappingGeneration ?? 1;
     const mappingChanged = firstPublish || this.snapshot.pageCount !== snapshotPageCount ||
+      mappingGeneration !== this.snapshot.mappingGeneration ||
       snapshot.mappings.some((byte, index) => byte !== this.snapshot.mappings[index]);
     const previousMapBytes = this.snapshot ? this.snapshot.pageCount * 16 : 0;
     const previousFrameBytes = this.snapshot ? this.snapshot.pageCount * PAGE_BYTES : 0;
@@ -228,6 +235,7 @@ export class SharedCpuWorkerPool {
     if (nextFrameBytes < previousFrameBytes) framesView.fill(0, nextFrameBytes, previousFrameBytes);
     mappingsView.set(snapshot.mappings);
     framesView.set(snapshot.frames);
+    this.dirtyMap.fill(0);
     const header = new Int32Array(this.memory.buffer, this.layout.base, HEADER_BYTES / 4);
     if (!firstPublish && mappingChanged) Atomics.add(header, 15, 1);
     if (!firstPublish) Atomics.add(header, 16, 1);
@@ -243,6 +251,7 @@ export class SharedCpuWorkerPool {
     this.snapshot = {
       frameBase: snapshot.frameBase,
       pageCount: snapshotPageCount,
+      mappingGeneration,
       mappings: snapshot.mappings.slice(),
     };
   }
@@ -251,9 +260,9 @@ export class SharedCpuWorkerPool {
   publishFrom(anyWasm) {
     this.requireQuiescent();
     const pageCount = Number(anyWasm.sharedSnapshotPageCount());
+    const mappingGeneration = anyWasm.sharedSnapshotMappingGeneration();
     if (pageCount > this.pageCapacity) throw new Error('guest mapping size exceeded shared CPU page capacity');
-    const snapshot = anyWasm.exportSharedSnapshot(this.layout.frames.offset);
-    const threadIds = anyWasm.sharedCpuContextThreadIds();
+    const threadIds = anyWasm.sharedCpuRunnableThreadIds();
     if (threadIds.length > this.contextCount) {
       throw new Error('guest thread count exceeded shared CPU context capacity');
     }
@@ -262,8 +271,66 @@ export class SharedCpuWorkerPool {
       bytes: anyWasm.exportSharedCpuContext(threadId),
     }));
     this.trapRange = anyWasm.sharedCpuTrapRange();
-    this.publish({ snapshot, contexts });
+    const mappingChanged = !this.snapshot || this.snapshot.pageCount !== pageCount ||
+      mappingGeneration !== this.snapshot.mappingGeneration;
+    if (mappingChanged) {
+      const snapshot = anyWasm.exportSharedSnapshot(this.layout.frames.offset);
+      this.publish({ snapshot, contexts });
+      anyWasm.clearAllSharedSnapshotDirty();
+    } else {
+      const delta = anyWasm.exportSharedDelta(this.layout.frames.offset);
+      if (delta.pageCount !== pageCount || delta.frameBase !== this.layout.frames.offset ||
+          delta.mappingGeneration !== mappingGeneration ||
+          !(delta.dirtyPages instanceof Uint32Array) || !(delta.frames instanceof Uint8Array) ||
+          delta.frames.byteLength !== delta.dirtyPages.length * PAGE_BYTES) {
+        throw new RangeError('guest-memory delta does not match the shared worker layout');
+      }
+      this.publishDelta({ delta, contexts });
+      if (delta.dirtyPages.length) anyWasm.clearSharedSnapshotDirtyPages(delta.dirtyPages);
+    }
     return threadIds;
+  }
+
+  /** Publish only coordinator-written frames when the mapping generation is unchanged. */
+  publishDelta({ delta, contexts }) {
+    this.requireQuiescent();
+    if (!this.snapshot || delta.pageCount !== this.snapshot.pageCount ||
+        delta.mappingGeneration !== this.snapshot.mappingGeneration) {
+      throw new Error('shared worker mapping changed during a dirty-page publication');
+    }
+    if (!Array.isArray(contexts) || contexts.length > this.contextCount) {
+      throw new RangeError('guest CPU contexts exceed the shared context capacity');
+    }
+    let previous = -1;
+    const framesView = new Uint8Array(
+      this.memory.buffer,
+      this.layout.base + this.layout.frames.offset,
+      this.layout.frames.length,
+    );
+    for (let index = 0; index < delta.dirtyPages.length; index++) {
+      const page = delta.dirtyPages[index];
+      if (page <= previous || page >= delta.pageCount) {
+        throw new RangeError('dirty mapping indices must be sorted, unique, and in range');
+      }
+      previous = page;
+      const sourceStart = index * PAGE_BYTES;
+      const targetStart = page * PAGE_BYTES;
+      framesView.set(delta.frames.subarray(sourceStart, sourceStart + PAGE_BYTES), targetStart);
+    }
+    const header = new Int32Array(this.memory.buffer, this.layout.base, HEADER_BYTES / 4);
+    Atomics.add(header, 16, 1);
+    new Uint8Array(this.memory.buffer, this.layout.base + this.layout.contexts.offset, this.layout.contexts.length).fill(0);
+    this.contextIndex.clear();
+    for (let index = 0; index < contexts.length; index++) {
+      const { threadId, bytes } = contexts[index];
+      u32(threadId, 'threadId');
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength !== CPU_BYTES || this.contextIndex.has(threadId)) {
+        throw new TypeError('each shared CPU context must have a unique thread ID and 784 bytes');
+      }
+      const offset = this.layout.base + this.layout.contexts.offset + index * CPU_BYTES;
+      new Uint8Array(this.memory.buffer, offset, CPU_BYTES).set(bytes);
+      this.contextIndex.set(threadId, index);
+    }
   }
 
   /** Copy worker-written frames and their immutable mapping snapshot for coordinator import. */
@@ -280,20 +347,56 @@ export class SharedCpuWorkerPool {
     };
   }
 
-  /** Import all worker-written frames and contexts after every active slice has completed. */
+  /** Copy only worker-dirty pages after all active slices have completed. */
+  readDirtyGuestSnapshot() {
+    this.requireQuiescent();
+    if (!this.snapshot) throw new Error('shared CPU pool has no published guest snapshot');
+    const dirtyPages = [];
+    for (let page = 0; page < this.snapshot.pageCount; page++) {
+      const byteIndex = page >>> 3;
+      const bit = 1 << (page & 7);
+      if (Atomics.load(this.dirtyMap, byteIndex) & bit) dirtyPages.push(page);
+    }
+    const frames = new Uint8Array(dirtyPages.length * PAGE_BYTES);
+    const sharedFrames = new Uint8Array(
+      this.memory.buffer,
+      this.layout.base + this.layout.frames.offset,
+      this.layout.frames.length,
+    );
+    for (let index = 0; index < dirtyPages.length; index++) {
+      const page = dirtyPages[index];
+      frames.set(sharedFrames.subarray(page * PAGE_BYTES, (page + 1) * PAGE_BYTES), index * PAGE_BYTES);
+    }
+    return {
+      frameBase: this.snapshot.frameBase,
+      pageCount: this.snapshot.pageCount,
+      mappingGeneration: this.snapshot.mappingGeneration,
+      dirtyPages: Uint32Array.from(dirtyPages),
+      frames,
+    };
+  }
+
+  /** Import worker-written pages and contexts after every active slice has completed. */
   importTo(anyWasm) {
     this.requireQuiescent();
-    const snapshot = this.readGuestSnapshot();
-    anyWasm.importSharedSnapshot(snapshot);
-    this.importSharedCpuContexts(anyWasm);
+    const snapshot = this.readDirtyGuestSnapshot();
+    if (snapshot.dirtyPages.length) {
+      anyWasm.importSharedDirtySnapshot(snapshot);
+      for (const page of snapshot.dirtyPages) {
+        const byteIndex = page >>> 3;
+        const bit = 1 << (page & 7);
+        Atomics.and(this.dirtyMap, byteIndex, ~bit);
+      }
+    }
+    this.importSharedCpuContexts(anyWasm, true);
   }
 
   /** Import returned CPU registers and counters without copying the guest frame store. */
-  importSharedCpuContexts(anyWasm) {
+  importSharedCpuContexts(anyWasm, syncTebAlias = false) {
     this.requireQuiescent();
     for (const [threadId, index] of this.contextIndex) {
       const context = new Uint8Array(this.memory.buffer, this.contextOffset(index), CPU_BYTES).slice();
-      anyWasm.importSharedCpuContext(threadId, context);
+      anyWasm.importSharedCpuContext(threadId, context, { syncTebAlias });
     }
   }
 
@@ -310,6 +413,29 @@ export class SharedCpuWorkerPool {
 
   /** Dispatch one guest thread and resolve with its completion and returned CPU context. */
   dispatch(threadId, instructionBudget, options = {}) {
+    const dispatch = this.prepareDispatch(threadId, instructionBudget, options);
+    const workerIndex = this.busy.findIndex((isBusy) => !isBusy);
+    if (workerIndex < 0) throw new Error('no shared CPU worker is available');
+    this.claimWorkerSlot(workerIndex);
+    this.advanceDispatchGeneration();
+    this.busy[workerIndex] = true;
+    this.activeThreads.add(dispatch.threadId);
+    try {
+      return this.dispatchClaimed(workerIndex, dispatch);
+    } catch (error) {
+      const slot = new Int32Array(
+        this.memory.buffer,
+        this.layout.base + this.layout.slots.offset + workerIndex * SLOT_BYTES,
+        SLOT_BYTES / 4,
+      );
+      Atomics.compareExchange(slot, 0, SLOT_WRITING, SLOT_IDLE);
+      this.busy[workerIndex] = false;
+      this.activeThreads.delete(dispatch.threadId);
+      throw error;
+    }
+  }
+
+  prepareDispatch(threadId, instructionBudget, options = {}) {
     this.requireInitialized();
     u32(threadId, 'threadId');
     const budget = BigInt(instructionBudget);
@@ -327,13 +453,26 @@ export class SharedCpuWorkerPool {
     const contextIndex = this.contextIndex.get(threadId);
     if (contextIndex === undefined) throw new RangeError(`unknown shared CPU context for thread ${threadId}`);
     if (this.activeThreads.has(threadId)) throw new Error(`thread ${threadId} already has an active CPU slice`);
-    const workerIndex = this.busy.findIndex((isBusy) => !isBusy);
-    if (workerIndex < 0) throw new Error('no shared CPU worker is available');
+    return { threadId, budget, firstTrap, endTrap, contextIndex };
+  }
+
+  claimWorkerSlot(workerIndex) {
     const slotOffset = this.layout.slots.offset + workerIndex * SLOT_BYTES;
     const slot = new Int32Array(this.memory.buffer, this.layout.base + slotOffset, SLOT_BYTES / 4);
     if (Atomics.compareExchange(slot, 0, SLOT_IDLE, SLOT_WRITING) !== SLOT_IDLE) {
       throw new Error(`shared CPU worker slot ${workerIndex} is unavailable`);
     }
+  }
+
+  advanceDispatchGeneration() {
+    const header = new Int32Array(this.memory.buffer, this.layout.base, HEADER_BYTES / 4);
+    Atomics.add(header, 17, 1);
+  }
+
+  dispatchClaimed(workerIndex, dispatch) {
+    const { threadId, budget, firstTrap, endTrap, contextIndex } = dispatch;
+    const slotOffset = this.layout.slots.offset + workerIndex * SLOT_BYTES;
+    const slot = new Int32Array(this.memory.buffer, this.layout.base + slotOffset, SLOT_BYTES / 4);
     const sequence = (Atomics.add(slot, 1, 1) + 1) >>> 0;
     const contextOffset = this.layout.contexts.offset + contextIndex * CPU_BYTES;
     const header = new Int32Array(this.memory.buffer, this.layout.base, HEADER_BYTES / 4);
@@ -349,8 +488,6 @@ export class SharedCpuWorkerPool {
     Atomics.store(slot, 8, dispatchGeneration);
     for (let index = 9; index < SLOT_BYTES / 4; index++) Atomics.store(slot, index, 0);
     Atomics.store(slot, 0, SLOT_READY);
-    this.busy[workerIndex] = true;
-    this.activeThreads.add(threadId);
     const result = this.request(workerIndex, 'complete', {
       type: 'run',
       sharedBase: this.layout.base,
@@ -361,7 +498,115 @@ export class SharedCpuWorkerPool {
       trapStart: firstTrap,
       trapEnd: endTrap,
     });
-    return result.then((message) => this.takeCompletion(workerIndex, threadId, sequence, message));
+    return result.then((message) => ({
+      ...this.takeCompletion(workerIndex, threadId, sequence, message),
+      threadId,
+      reservedInstructions: budget,
+    })).catch((error) => {
+      this.activeThreads.delete(threadId);
+      const activeSlot = new Int32Array(
+        this.memory.buffer,
+        this.layout.base + slotOffset,
+        SLOT_BYTES / 4,
+      );
+      Atomics.store(activeSlot, 0, SLOT_DISABLED);
+      this.busy[workerIndex] = true;
+      throw error;
+    });
+  }
+
+  /** Dispatch distinct runnable contexts concurrently within one process-wide instruction budget. */
+  async dispatchBatch(contexts, processBudget) {
+    this.requireInitialized();
+    if (!Array.isArray(contexts)) throw new TypeError('contexts must be an array');
+    let remaining = BigInt(processBudget);
+    if (remaining < 0n || remaining > 0xffff_ffff_ffff_ffffn) {
+      throw new RangeError('processBudget must be a u64');
+    }
+    if (remaining === 0n || contexts.length === 0) return [];
+
+    const idleWorkers = this.busy.reduce((count, isBusy) => count + Number(!isBusy), 0);
+    if (contexts.length > idleWorkers) throw new Error('batch exceeds the available shared CPU workers');
+    const threadIds = new Set();
+    const dispatches = [];
+    for (const context of contexts) {
+      const threadId = u32(context?.threadId, 'threadId');
+      if (threadIds.has(threadId)) throw new Error(`thread ${threadId} appears more than once in a batch`);
+      const item = this.prepareDispatch(threadId, context.instructionBudget);
+      const quantum = item.budget;
+      if (quantum <= 0n || quantum > 0xffff_ffff_ffff_ffffn) {
+        throw new RangeError(`instructionBudget for thread ${threadId} must be a positive u64`);
+      }
+      threadIds.add(threadId);
+      if (remaining === 0n) break;
+      const budget = quantum < remaining ? quantum : remaining;
+      dispatches.push({ ...item, budget });
+      remaining -= budget;
+    }
+    if (dispatches.length === 0) return [];
+
+    const workerIndices = this.busy
+      .map((isBusy, index) => isBusy ? -1 : index)
+      .filter((index) => index >= 0)
+      .slice(0, dispatches.length);
+    if (workerIndices.length !== dispatches.length) {
+      throw new Error('batch exceeds the available shared CPU workers');
+    }
+    const claimed = [];
+    try {
+      for (const workerIndex of workerIndices) {
+        this.claimWorkerSlot(workerIndex);
+        claimed.push(workerIndex);
+      }
+    } catch (error) {
+      for (const workerIndex of claimed) {
+        const slot = new Int32Array(
+          this.memory.buffer,
+          this.layout.base + this.layout.slots.offset + workerIndex * SLOT_BYTES,
+          SLOT_BYTES / 4,
+        );
+        Atomics.compareExchange(slot, 0, SLOT_WRITING, SLOT_IDLE);
+      }
+      throw error;
+    }
+
+    this.advanceDispatchGeneration();
+    for (let index = 0; index < dispatches.length; index++) {
+      this.busy[workerIndices[index]] = true;
+      this.activeThreads.add(dispatches[index].threadId);
+    }
+    const pending = [];
+    let synchronousFailure = null;
+    for (let index = 0; index < dispatches.length; index++) {
+      try {
+        pending.push(this.dispatchClaimed(workerIndices[index], dispatches[index]));
+      } catch (error) {
+        synchronousFailure = error;
+        for (let unsent = index; unsent < dispatches.length; unsent++) {
+          const workerIndex = workerIndices[unsent];
+          const slot = new Int32Array(
+            this.memory.buffer,
+            this.layout.base + this.layout.slots.offset + workerIndex * SLOT_BYTES,
+            SLOT_BYTES / 4,
+          );
+          if (Atomics.compareExchange(slot, 0, SLOT_WRITING, SLOT_IDLE) === SLOT_WRITING) {
+            this.busy[workerIndex] = false;
+            this.activeThreads.delete(dispatches[unsent].threadId);
+          }
+        }
+        break;
+      }
+    }
+
+    const outcomes = await Promise.allSettled(pending);
+    const failures = outcomes.filter((outcome) => outcome.status === 'rejected');
+    if (failures.length || synchronousFailure) {
+      throw new AggregateError([
+        ...failures.map((outcome) => outcome.reason),
+        ...(synchronousFailure ? [synchronousFailure] : []),
+      ], 'shared CPU batch failed');
+    }
+    return outcomes.map((outcome) => outcome.value);
   }
 
   takeCompletion(workerIndex, threadId, sequence, message) {

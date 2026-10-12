@@ -26,6 +26,9 @@ fn vex_vshufps_uses_vvvv_and_modrm_sources() {
 
     step(&mut cpu, &mut mem).unwrap();
 
-    assert_eq!(cpu.xmm[2], (2u128 << 96) | (2u128 << 64) | (2u128 << 32) | 2);
+    assert_eq!(
+        cpu.xmm[2],
+        (2u128 << 96) | (2u128 << 64) | (2u128 << 32) | 2
+    );
     assert_eq!(cpu.ymm_hi[2], 0);
 }

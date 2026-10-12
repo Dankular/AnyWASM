@@ -1,9 +1,44 @@
 # Windows target evaluation
 
 These are analysis fixtures for measuring real Win64 program import coverage. `anywasm analyze`
-found unresolved imports for every executable. Both D3D11 tutorials now have first-stop runtime
-traces through AnyWASM, but neither reached shader creation, Present, or pixel verification;
-Asteroids has not been run. None is a runtime acceptance pass.
+found unresolved static imports for every executable. Historical pre-shim D3D11 tutorial traces
+stopped at the MSVC `basic_ios<char>` constructor. With local MSVC/UCRT DLLs, Tutorial03 now reaches
+and renders a visible browser frame after target-used AVX instructions were added. The package-aware
+capture recorded 59 draws, 30 presents, two pipelines, and no WebGPU validation errors. A fresh
+HLE-only browser replay without local MSVC/UCRT DLLs continued rendering; its 45-second report recorded
+2,759 draws, 1,380 presents, 5,519 passes, two pipelines, and zero WebGPU validation errors. It ended
+with the page still in `Starting`, without terminal process status. The only 404 was the browser's
+`/favicon.ico` request; the page context reported no failed requests or HTTP errors for sample resources. An
+earlier HLE-only CLI capture without runtime DLLs passed the observed narrow stream constructors,
+stream-buffer lock/unlock, `good`, `sputn`/`xsputn`, `setstate`, uncaught-exception query, `_Osfx`,
+unsigned-integer insertion, the stream and iostream destructors, and `sputc`, then faulted at
+`tutorial03_texturing.exe+0x34fc` while inserting the ANSI string `\x1b[39m`. Static imports remain a
+packaging concern when those DLLs are absent.
+The HLE-only Tutorial01 HelloTriangle also rendered its colored triangle in Chromium without local
+MSVC/UCRT DLLs. At the 250,000-instruction worker slice, the bounded capture reported 659 draws,
+330 presents, two pipelines, 16 Asyncify yields/resumes, and no WebGPU validation errors. The page
+remained in `Starting`; process completion is not established. See
+[`target-data/tutorial01-hle-browser.json`](target-data/tutorial01-hle-browser.json).
+
+### Tutorial01 shared CPU worker probe
+
+On 2026-10-12, the same HLE-only Tutorial01 bundle was replayed with `?sharedCpuWorkers=1` under
+cross-origin-isolated Chromium. The harness supplied the locally built no-std worker module from
+`target/wasm32-unknown-unknown/release/anywasm_cpu_worker.wasm`; the page confirmed
+`crossOriginIsolated`, `SharedArrayBuffer`, and `[runtime] shared CPU worker mode enabled`. After 30
+seconds the 1280x1024 canvas reported 719 draws, 360 presents, 1,439 passes, two pipelines, and no
+WebGPU errors; Asyncify recorded 7,543 yields and resumes. The process remained active and the UI
+status stayed at `Starting`; target completion was not observed. The screenshot request timed out,
+and the console reported one unidentified 404 with no failed HTTP response.
+
+Shared synchronization now tracks worker and coordinator dirty pages. Stable mappings use cached
+mapping rows and transfer only dirty frames; mapping or protection changes trigger a full refresh.
+The capture also exposed a scheduler fallback that stepped one guest instruction per coordinator
+turn after the worker quantum expired. The fallback now runs a normal 250,000-instruction slice;
+before that change it made roughly 300,000 single-instruction turns in 30 seconds without rendering.
+The exact observation and limits are in
+[`target-data/shared-cpu-worker-tutorial01.json`](target-data/shared-cpu-worker-tutorial01.json).
+Asteroids has not been run; none of these fixtures is a full runtime acceptance pass.
 
 ## Sources and build
 
@@ -62,8 +97,9 @@ All three reports also import `VCRUNTIME140_1.dll`; its single imported symbol i
 each. Other imported `api-ms-win-crt-*` symbols are implemented.
 
 `SleepConditionVariableSRW` is now recognized by the HLE and therefore is not a static missing
-import. At runtime, its infinite wait stops explicitly because no guest-thread scheduler can resume
-the waiting thread; this is the current GLFW Demo trace blocker below.
+import. The cooperative scheduler now retains and resumes condition-variable waiters. A fresh
+30,000,000-step GLFW Demo replay continued beyond the observed wait and hit its cap in D3DCompiler;
+that establishes progress after the wait, but does not by itself identify which waiter resumed.
 
 | Runtime group | Tutorial01_HelloTriangle | Tutorial03_Texturing | Asteroids | Aggregate missing |
 |---|---:|---:|---:|---:|
@@ -88,11 +124,12 @@ three programs remain preliminary candidates, not acceptance runs. Asteroids als
 the redistributable acceptance set until its Intel-origin code and sample media have a documented
 licence review.
 
-### First D3D11 tutorial runtime stops
+### Historical first D3D11 tutorial runtime stops (before the constructor HLE)
 
 The dynamic-runtime Release outputs were run with the selected D3D11 backend and a 500,000,000-step
-cap. Both stopped before reaching the cap. Their traces pass adapter enumeration, `D3D11CreateDevice`,
-and `ID3D11Device1::CheckFeatureSupport`, then stop at the same imported MSVCP140 constructor:
+cap before the constructor HLE was added. Both stopped before reaching the cap. Their traces pass
+adapter enumeration, `D3D11CreateDevice`, and `ID3D11Device1::CheckFeatureSupport`, then stop at the
+same imported MSVCP140 constructor:
 `??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ`. The HLE trace labels the missing thunk
 `unknown!` because that import is not implemented; the analyzer maps it to `MSVCP140.dll`.
 
@@ -101,7 +138,155 @@ and `ID3D11Device1::CheckFeatureSupport`, then stop at the same imported MSVCP14
 | `Tutorial01_HelloTriangle.exe` | exit 120, unimplemented `basic_ios<char>` constructor | `0x140003320` | `D3D11CreateDevice`, feature queries, adapter/output enumeration |
 | `Tutorial03_Texturing.exe` | exit 120, unimplemented `basic_ios<char>` constructor | `0x140004660` | `D3D11CreateDevice`, feature queries, adapter/output enumeration |
 
-Reproduction from the repository root (adjust `$exe` for each tutorial):
+### MSVCP constructor follow-up
+
+On 2026-10-12, inspection of the installed `MSVCP140.dll` showed the exact default-constructor
+initialization for `basic_ios<char>`, `basic_ios<char16_t>`, and `basic_ios<wchar_t>`: each sets its
+vtable, zeros the stream pointers, flags, locale/callback storage, and returns `this`; the narrow
+variant clears one byte at offset `0x58`, while the two wide variants clear a word. The HLE now maps
+`msvcp*` to its own diagnostic group and implements these field writes. It uses a synthetic vtable
+with an explicit unresolved destructor thunk; other virtual calls are not implemented.
+
+The rebuilt source analyzer lists the `char` and `wchar_t` constructors as implemented for both
+tutorials. A later local probe package included the installed `MSVCP140.dll`, `VCRUNTIME140.dll`,
+`VCRUNTIME140_1.dll`, and `ucrtbase.dll`. This exposed and led to HLE support for the observed
+`_wsetlocale` call and resolution of bundled `api-ms-win-crt-*` imports through the single loaded
+UCRT module. Both MSVC runtime DLLs then completed process attach.
+
+With those local DLLs, `Tutorial01_HelloTriangle` passed `GetLogicalProcessorInformationEx` for
+`RelationProcessorPackage`, using the runtime's one-processor topology, and reached D3D11 resource
+creation and D3DCompiler. A 30,000,000-step module trace hit its cap inside `d3dcompiler_47.dll`.
+A separate 100,000,000-step run hit its cap at `Tutorial01_HelloTriangle.exe+0x2cbb`; the observed
+instruction sequence is in a string-buffer growth path, which does not establish a new runtime
+failure. A later 250,000,000-step Release replay was stopped before its result was captured. These
+probe DLLs are local under the ignored `target` tree and do not establish a supported runtime package
+or a redistribution decision.
+
+### Tutorial03 Texturing probe with local runtime DLLs
+
+The probe VFS used the Texturing sample's Release files plus the same locally installed MSVC and UCRT
+runtime DLLs. With the HLE/API-set path loaded, `Tutorial03_Texturing` passed DLL initialization and
+reached D3D11 resource creation and D3DCompiler. A 30,000,000-step trace stopped at
+`d3dcompiler_47.dll+0x1a326`; at 60,000,000 steps it had issued shader creation calls and stopped at
+`d3dcompiler_47.dll+0x308884`. At 100,000,000 steps the trace showed two sequences of
+`CreateVertexShader`, `CreatePixelShader`, and `CreateInputLayout`, followed by buffer creation, then
+hit the cap at `tutorial03_texturing.exe+0x44280`. The log contains no guest `Present` and no
+unimplemented-import stop. This confirms guest-side shader-object setup, not WebGPU shader translation
+or a rendered frame. The source analyzer still reports many static MSVCP stream operations and
+globals as missing when the runtime DLL is not bundled.
+
+The 100,000,000-step trace was run from the repository root with this environment-specific VFS:
+
+```powershell
+$exe = '.\target\msvcp-vfs-probe03\Tutorial03_Texturing.exe'
+.\target\debug\anywasm.exe run $exe --dir '.\target\msvcp-vfs-probe03' --trace-modules --max-steps 100000000 -- --mode d3d11 *> '.\target-trace\tutorial03-100m.log'
+```
+
+The VFS and trace log are ignored local artifacts and are not produced by the normal build.
+
+### HLE-only Tutorial03 import probe
+
+On 2026-10-12, the CLI rebuilt from the current worktree analyzed the dynamic-runtime Tutorial03
+executable with its Release directory. The current report lists 205 implemented and 46 missing static
+imports. It implements 39 of 65 `MSVCP140.dll` imports and 15 of 18 `VCRUNTIME140.dll` imports;
+`VCRUNTIME140_1.dll`'s `__CxxFrameHandler4` is implemented. The missing imports are listed in
+[`target-imports/tutorial03-current-source.json`](target-imports/tutorial03-current-source.json).
+The analyzer preflight is `review`, `staticOnly: true`, and does not guarantee runtime success. These
+counts do not show which imports the selected D3D11 path reaches.
+
+A short HLE-only VFS contained the tutorial executable, Diligent D3D11 DLLs, D3DCompiler, shaders,
+and logo, with MSVC/UCRT runtime DLLs omitted. A run configured for 1,000,000 guest steps loaded
+D3DCompiler and logged repeated `HeapAlloc` calls from `d3dcompiler_47.dll`, then exited with
+`synchronous guest callback exhausted the run budget; its continuation cannot be resumed`. The
+captured interval has no MSVCP import call or unresolved-import diagnostic. It also has no `Present`.
+This native CLI probe identifies the callback budget as the next observed stop; it does not establish
+whether later guest execution reaches additional MSVCP imports or produces a browser frame.
+
+### Tutorial03 browser capture attempt
+
+On 2026-10-12, the one-off Playwright harness ran the packaged Tutorial03 with the local MSVC/UCRT
+runtime DLLs with normal 250,000-instruction worker slices. After 16 Asyncify yield/resume pairs, it
+crashed at `tutorial03_texturing.exe+0x17a0` after 139,715,814 guest instructions with
+`Decode(Unsupported("VEX3 0F3A instruction"))`. The bytes at that RVA are
+`c4 e3 79 04 c5 55`, which decode as `VPERMILPS xmm0,xmm5,0x55`. GPU stats show zero draws,
+dispatches, presents, passes, and pipelines, with no WebGPU validation errors. The 1280x1024
+back-buffer readback has zero nonblack and zero nontransparent pixels; visual inspection of both
+the back-buffer PNG and canvas screenshot confirms the blank output. The page also logged one 404
+resource error. This identifies a CPU decode blocker before GPU submission for this run, rather
+than an unresolved MSVCP import. The bundle, report log, and images are ignored artifacts under
+`target/` and `target-trace/`.
+
+Static disassembly of the surrounding target code shows the same XMM immediate form with selectors
+`0x00`, `0x55`, `0xaa`, and `0xff`, interleaved with `VMULPS` and `VADDPS`. The CPU source now
+decodes and executes immediate and variable XMM/YMM forms of both `VPERMILPS` and `VPERMILPD`, plus
+packed-single `VMULPS` and `VADDPS`. The historical first browser capture stopped at VPERMILPS; the
+current-source capture below passes that sequence. Intel's
+[VPERMILPS instruction reference](https://cdrdv2-public.intel.com/835757/325383-sdm-vol-2abcd.pdf)
+specifies the `VEX.128.66.0F3A.W0 04 /r ib` form, two selector bits per 32-bit destination lane,
+and zeroing of the destination's bits above 128.
+
+### Tutorial03 current-source browser frame
+
+On 2026-10-12, the release Wasm runtime was rebuilt from current CPU/runtime sources, Asyncify was
+rerun into `web/anywasm_wasm.wasm`, and the existing Playwright report harness loaded the local
+Tutorial03 bundle containing MSVC/UCRT DLLs. The target passed the former `VPERMILPS` stop at RVA
+`0x17a0` and the following `VMULPS` at RVA `0x17a6` (`c4 c1 78 59 d8`), then executed the
+surrounding `VADDPS` sequence. The capture shows the textured Diligent logo cube in the page canvas
+and back-buffer readback (1280x1024). At capture, GPU stats reported 59 draws, 30 presents, 119
+passes, two pipelines, and zero WebGPU validation errors; the image was fully opaque. No unresolved
+import appeared before the capture.
+
+The report harness captures as soon as GPU stats become available, so its status text still says
+“Starting”; it does not wait for process termination. The page also logged one 404 resource error.
+This confirms browser rendering reached a visible frame with local runtime DLLs, but leaves the
+sample's later execution and terminal status unverified. A fresh bounded rerun recorded the visible
+textured cube in a 1280x1024 fully opaque readback, with 59 draws, 30 presents, 119 passes, two
+pipelines, 16 Asyncify yield/resume pairs, and an empty WebGPU error list. Visual inspection confirms
+the cube is visible in `target/Tutorial03_Texturing-task7-runtime.canvas.png`. The HLE-only CLI probe
+without those DLLs still stops at its callback budget before proving whether later MSVCP imports are
+reached. The bundle and screenshots are ignored local artifacts under `target/`.
+
+### Tutorial03 HLE-only browser replay follow-up
+
+On 2026-10-12, the release Wasm runtime was rebuilt from current sources and Asyncify-processed. A
+45-second HLE-only browser replay without local MSVC/UCRT DLLs recorded 3,299 draws, 1,650 presents,
+6,599 passes, two pipelines, and zero WebGPU validation errors. It stayed in `Starting` when the
+report timed out, so process completion and later execution are unverified. The one browser-console
+404 was for `/favicon.ico`; the page context recorded no failed requests or HTTP errors for sample
+resources. This removes the favicon request as an observed sample-resource failure while leaving the
+sample lifecycle question open.
+
+A fresh 45-second rerun recorded 2,759 draws, 1,380 presents, 5,519 passes, two pipelines, and an
+empty WebGPU error list. It again remained in `Starting` with no terminal status. The browser context
+reported no failed requests or HTTP error responses; the only console 404 was `/favicon.ico`.
+
+### Tutorial01 HLE-only browser frame
+
+On 2026-10-12, the release Tutorial01 bundle was packed from the external D3D11 Release directory
+without local MSVC/UCRT DLLs. In Playwright Chromium revision 1234, the normal 250,000-instruction
+worker slice produced a visible colored triangle. The 1280x1024 canvas capture reported 659 draws,
+330 presents, 1,319 passes, two pipelines, 16 Asyncify yields and resumes, and no WebGPU validation
+errors. This advances the sample beyond the historical MSVCP140 import stop on the HLE-only browser
+path.
+
+The page was still `Starting` after the bounded capture, with no terminal process status. The browser
+console reported one generic resource 404, but the report did not observe a failed HTTP response, so
+the resource is unidentified. The bundle hash is
+`c027ddc6dea26ed77c0e7a01d7f9164e7d899ffa4edd4791b792fb03c32c39a6`; the report data is in
+[`target-data/tutorial01-hle-browser.json`](target-data/tutorial01-hle-browser.json). The screenshot,
+bundle, and one-off Playwright report script are ignored local artifacts under `target/`.
+
+Reproduction from the repository root, using an HLE-only directory prepared from the named files
+above:
+
+```powershell
+$dir = '.\target\msvcp-vfs-probe03-hle-only'
+$exe = "$dir\Tutorial03_Texturing.exe"
+.\target\debug\anywasm.exe run $exe --dir $dir --trace-imports --max-steps 1000000 -- --mode d3d11 *> '.\target-trace\tutorial03-hle-only-1m-current.log'
+```
+
+Reproduction of the historical pre-shim stop from the repository root (adjust `$exe` for each
+tutorial):
 
 ```powershell
 $exe = 'D:\target-eval\DiligentBuild\DiligentSamples\Tutorials\Tutorial01_HelloTriangle\Release\Tutorial01_HelloTriangle.exe'
@@ -109,11 +294,22 @@ $dir = Split-Path -Parent $exe
 .\target\debug\anywasm.exe run $exe --dir $dir --trace-imports --max-steps 500000000 -- --mode d3d11
 ```
 
+The later bounded probe used an ignored local VFS package containing the tutorial DLLs and copies
+of the installed MSVC/UCRT runtime DLLs. From the repository root, its module-trace command was:
+
+```powershell
+$exe = '.\target\msvcp-vfs-probe\Tutorial01_HelloTriangle.exe'
+.\target\debug\anywasm.exe run $exe --dir '.\target\msvcp-vfs-probe' --trace-modules --max-steps 30000000 -- --mode d3d11
+```
+
+That package is environment-specific and is not checked in or produced by the normal build.
+
 The CLI now passes its full remaining step budget to each `Process::run` call and charges actual
 retired instructions across frame stops. A regression fixture exercises a guest monitor callback
 that exceeds the former 2,000,000-instruction internal slice. This removes an artificial CLI stop;
-it does not make callbacks resumable when the configured run budget itself expires. These tutorial
-traces did not reach shader compilation, guest `Present`, browser WebGPU execution, or visible pixels.
+it does not make callbacks resumable when the configured run budget itself expires. The historical
+import probes and the bounded Tutorial03 trace do not establish guest `Present`, browser WebGPU
+execution, or visible pixels.
 
 ## Selected game candidate: DiligentSamples GLFW Demo
 
@@ -235,14 +431,14 @@ traverses them dependency-first before calling `DllMain`. Synthetic regressions 
 dependencies during initial loading and `LoadLibrary`. The engine and compiler DLLs have nonzero
 entry points; their process-attach calls returned successfully, but these selected images do not
 establish target-specific ordering. `Archiver_64r.dll` also has an entry point, but its runtime load
-was not observed. Static TLS data is initialized, but the loader does not invoke
-`Pe::tls_callbacks()`. Named forwarded exports are resolved opportunistically; ordinal forwarders
+was not observed. Static TLS data and process-attach TLS callbacks are initialized. Named forwarded exports are resolved opportunistically; ordinal forwarders
 are dropped, while failed named forwarders are omitted and only fail if later imported.
 
-The selected artifacts leave TLS callback and forwarded-export cases untested. Use a representative
-DLL that contains those features before claiming support. Dependency-first `DllMain` ordering is
-covered by synthetic nested-DLL regressions but still lacks a target trace with a bundled dependency
-chain.
+The selected artifacts leave TLS callback and forwarded-export cases untested. Synthetic PE fixtures
+verify process-attach callbacks run in image order before `DllMain`, receive the module base,
+`DLL_PROCESS_ATTACH`, and a null reserved argument, and run for the EXE after DLL initialization.
+Dependency-first DLL initialization is covered synthetically; a target trace containing TLS callbacks
+and a bundled dependency chain remains outstanding.
 
 ### Bounded AnyWASM trial
 
@@ -308,6 +504,8 @@ renderer was observed; the higher-cap guest traces below are separate evidence. 
 static TLS support assigns the image's TLS slot from index zero, initializes private blocks from each
 module template, and saves/restores `TEB+0x58` per thread. The freestanding
 `static_tls_thread_test.exe` verifies template initialization and worker/main isolation.
+An additional synthetic PE32 image verifies static TLS vectors through the four-byte pointer at
+`TEB+0x2c`, per-thread block isolation, zero-fill bytes, and x86 TLS callback arguments.
 
 The next trace stopped at `GLFWDemo.exe+0x96d8` with a read fault at `0x4`. Its sequence loaded the
 TLS vector from `GS:[0x58]`, loaded slot zero, then dereferenced a null block. After the TLS fix, the
@@ -325,11 +523,40 @@ exception parameters contain MSVC C++ EH magic `0x19930520`, an exception object
 `0x1400dcb08`, and image base `0x140000000`; the ThrowInfo type descriptors identify
 `std::runtime_error` and `std::exception`.
 
+### Compiler-generated MSVC EH3/EH4 fixtures
+
+The fixtures in `test/fixtures/msvc_eh/exception_fixture.cpp` were built on 2026-10-12 with MSVC
+19.44.35214.0 and linker 14.44.35214.0 using `/MD /EHsc /std:c++17 /Od /Ob0 /W4`; the FH3 variant
+also uses `/d2FH4-`. The analyzer reports 46 implemented imports and 0 missing for each fixture.
+With an HLE-only VFS containing only the two executables and a 2,000,000-step cap, both variants
+return 0 and reach `crt!exit`. Their traces cover by-value derived catches, adjusted base-reference
+catches, catch-all, nested try/catch, and unwind funclets.
+
+With a runtime VFS containing the installed x64 VC143 CRT redist DLLs and Windows
+`System32\ucrtbase.dll` 10.0.22621.3593, both fixtures also return 0 under the same cap. Their traces
+show guest calls from `ucrtbase.dll` and `vcruntime140.dll`; the EH4 path also executes
+`vcruntime140_1.dll`. The runtime's unwind path reaches `RtlUnwindEx` and returns through the
+compiler-generated catch continuations. API-set contracts without physical DLLs in the VFS continue
+to use HLE, so this is not proof that every CRT API-set import executes in the guest UCRT. The VFS
+contains local probe DLLs only and does not define a product packaging or redistribution decision.
+See [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md) for the exact setup.
+
 PE32+ exception tables are now parsed and validated; this image has 2,092 `.pdata` records, including
 2,089 version 1 and 3 version 2 unwind records. Target-grounded frame search invokes the image's
 language handler, and second-pass unwinding through `RtlUnwindEx` resumes at the C++ catch. A
 synthetic regression checks handler calls, active unwind-stack use, flags, target RIP/RSP, and return
 value. The bounded target replay confirms the catch path.
+
+The runtime also has synthetic x64 SEH coverage for vectored-handler registration, ordering,
+removal, and first-chance dispatch; a generic `RaiseException` code with arbitrary parameters; a
+catch-all scope-table landing pad; filter callbacks receiving `EXCEPTION_POINTERS` and the
+establisher frame; filter-requested continuation; and `__finally` calls during unwind. These fixtures
+build the `.pdata`/scope-table records directly; they do not establish compatibility with a separately
+compiled real-world `__try` binary. Synthetic tests also cover vectored-continue ordering and ignored
+callback returns, plus top-level filter replacement and resumption with a modified context. PE32
+exception support is partial: synthetic tests cover `RaiseException` through an x86 registration
+handler and CPU exceptions through VEH resumption. Compiled x86 `__try`/`__finally` and the PE32
+C++ EH3 search and two-pass catch-transfer paths remain unverified.
 
 The next imports are `advapi32!RegOpenKeyExA` probes for
 `Software\Microsoft\Direct3D\Direct3D12` under predefined roots `HKCU` and `HKLM`, with options
@@ -384,14 +611,12 @@ instructions before a later instruction in the same cached block faults. The JS 
 the `aw_retired_instructions` export and fails clearly for a stale WASM module instead of falling
 back to the active-thread `aw_icount` counter.
 
-A synchronous callback still runs on the host stack and cannot suspend. If its callback does not
+In the native CLI, a synchronous callback runs on the host stack and cannot suspend. If it does not
 return before the current `Process::run` budget expires, the runtime returns a diagnostic crash
-without exceeding that run budget; it cannot resume that callback on a later call. A GLFW Demo run
-with 10,000,000-instruction slices stopped at 10,000,000 instructions in such a callback. The frame
-benchmark therefore defaults to one run slice equal to its full instruction cap. This keeps the
-representative run bounded while giving its synchronous callbacks enough budget to return. It does
-not remove the runtime's continuation limitation for callers that deliberately request smaller
-slices.
+without exceeding that run budget; it cannot resume the callback on a later call. A GLFW Demo run
+with 10,000,000-instruction slices stopped at 10,000,000 instructions in such a callback. The native
+frame benchmark therefore defaults to one run slice equal to its full instruction cap. The
+WASM/browser path uses Asyncify and has separate normal-slice continuation evidence below.
 
 The `test/target_frame_bench.mjs` benchmark drives the target until guest `Present` frame stops,
 reads the process-wide counter, and drains the recorded GPU stream at each stop. Its fixture
@@ -450,11 +675,12 @@ Pinned upstream references: [DiligentSamples README](https://github.com/Diligent
 
 ### Browser attempt with the selected Diligent target
 
-On 2026-10-11, the rebuilt `web/anywasm_wasm.wasm` and the D3D11-only `/MT` `GLFWDemo.awb`
-were served to headless Chromium. The normal worker run slice is 250,000 instructions; this
+On 2026-10-11, an earlier build of `web/anywasm_wasm.wasm` and the D3D11-only `/MT` `GLFWDemo.awb`
+were served to headless Chromium. The normal worker run slice was 250,000 instructions; this
 attempt stopped after 8,524,265 aggregate guest instructions. The diagnostic was
 `synchronous guest callback exhausted the run budget; its continuation cannot be resumed`.
-The synchronous callback path still cannot suspend and resume across worker slices.
+That build did not resume the synchronous callback across worker slices; the later Asyncify replay
+below verifies callback continuation in the WASM/browser path.
 
 For diagnosis only, a Playwright response route temporarily changed the served worker's run
 slice to 1,000,000,000 instructions; no repository runtime code was changed for this probe. The
@@ -477,8 +703,8 @@ Naga's hidden `@group(3) @binding(0)` draw-parameter uniform while the graphics 
 no binding there. The vendored Naga manifest defines four i32 values (`baseVertex`, `baseInstance`,
 and two reserved values). Its generated WGSL subtracts the first two from WebGPU's built-in vertex
 and instance indices to reproduce the D3D system values. The earlier 1040x807 readback contained
-only transparent black pixels. The normal worker slice still stopped in a synchronous callback that
-cannot resume.
+only transparent black pixels. This was an earlier run before normal-slice callback continuation was
+verified; see the Asyncify replay below for the current worker-slice evidence.
 
 ### Browser replay after draw-parameter binding
 
@@ -488,6 +714,21 @@ uniform allocation in the staging ring. `test/shaders.mjs` checks the translated
 `test/browser/run.mjs` renders two indexed instanced draws with different nonzero offsets; the
 second draw must update the per-draw values for its green center pixel. The existing R32_FLOAT UAV
 dispatch/readback/sample regression still passes after the binding shift.
+
+### Normal-slice callback continuation replay
+
+On 2026-10-12, the HLE-only seed-1 D3D11 `/MT` bundle (SHA-256
+`34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36`) passed the browser harness's
+callback-resumption gate in Playwright Chromium revision 1234 with the production 250,000-instruction
+worker slice. Asyncify yielded and resumed 16 times; the capture recorded three draws, one dispatch,
+three presents, and no WebGPU validation errors. The gate required at least one callback suspension
+and successful resume, so this verifies the WASM/browser path across ordinary worker slices.
+
+The page remained in `Starting` when captured, and the stored route did not finish: measured travel
+was 137.12 pixels and final distance from its start was 210.54 pixels. This does not establish native
+CLI callback continuation, nested callback scheduling, process completion, or full gameplay
+acceptance. The measurement and exact reproduction command are in
+[`target-data/glfwdemo-normal-slice-callbacks.json`](target-data/glfwdemo-normal-slice-callbacks.json).
 
 ### Diligent DrawMap shader translation
 
@@ -624,23 +865,59 @@ bundle hash are in
 [`target-data/glfwdemo-seed1-playthrough.json`](target-data/glfwdemo-seed1-playthrough.json). This
 route record needs a rerun before its timing is treated as current. It does not establish general
 gameplay acceptance: the random Release map, other gameplay states, graphics states, and other
-readback paths remain unverified. The default
-250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
-is diagnostic test routing only.
+readback paths remain unverified. The default 250,000-instruction worker slice now resumes the
+synchronous guest callback through Asyncify, as verified in
+[`target-data/glfwdemo-normal-slice-callbacks.json`](target-data/glfwdemo-normal-slice-callbacks.json).
+The recorded route did not finish and the process had no terminal status at capture.
+
+## GTA San Andreas first-game POC
+
+The default GTA demo bundle still enters through `gta_sa_compact1.0.exe`. The loader measurements
+below deliberately used the installed `gta_sa.exe` through `?exe=gta_sa.exe`, preserving the compact
+entry binary while profiling the alternate executable the owner requested. Both runs reached the
+New Game loading artwork. Neither reached gameplay or a terminal process status during its capture.
+
+### New Game loader and range read-ahead profile (2026-10-13)
+
+The clean browser baseline used the existing 256 KiB on-demand AGP cache. A second run enabled one
+same-file read-ahead chunk when sequential reads approached a chunk boundary. Both used Chromium,
+the regular `gta_sa.exe`, the same local 5,013,432,573-byte AGP package, and the same automated menu
+inputs. At 30 seconds after selecting New Game, the baseline had retired 261,716,763 instructions,
+made 68 AGP range requests, and completed 53 Asyncify yields/resumes. The read-ahead run had retired
+273,439,130 instructions, made 68 range requests, and completed the same 53 yields/resumes. At 60
+seconds, the baseline had retired 339,709,519 instructions, made 70 range requests, completed 55
+yields/resumes, and remained at 990 presents. The read-ahead run had retired 374,493,314
+instructions, made 71 range requests, completed 56 yields/resumes, and reached 1,080 presents. No
+asset read was pending at those checkpoints, and WebGPU reported no validation errors. The second
+run displayed the game's loading artwork, not gameplay.
+
+Between the 30- and 60-second checkpoints, the observed guest rate was 2.60 M instructions/s in
+the baseline and 3.37 M instructions/s with read-ahead, a 29.6% increase in this single pair. This
+is not a stable speedup claim: it needs a repeated paired run, and the similar request and
+Asyncify counts do not establish that read-ahead caused the difference. The source trace did show
+39 adjacent chunk transitions in 74 requests, which motivated same-file lookahead. Separate RIP
+samples repeatedly entered GTA's statically linked `vsscanf` at `gta_sa.exe+0x4290d4` (preferred
+address `0x8290d4`) while parsing map/effect rows; the wrapper at `0x8220ad` calls that parser, and a
+sampled format was `%d %s %s %f %d`. This, along with idle range state during the long samples,
+points to guest parsing as the larger remaining loader cost. The existing shared CPU worker mode
+was also activated for a bounded replay, but that run remained at 653 presents and did not provide
+a comparable New Game measurement.
 
 ## Next evidence needed
 
 - A controlled seed-1 maze traversal is now recorded, but it does not establish general gameplay
   acceptance. Flashlight behavior across more maps and aim positions, other gameplay states, other
   UAV formats, and general staging readback remain untested.
-- Make the selected target's synchronous guest callbacks suspend and resume across normal worker
-  slices; the large-slice replay does not address the default browser scheduling limit.
+- Complete a bounded selected-target browser run that reaches a terminal process status and finishes
+  the stored seed-1 route. The normal-slice callback continuation itself is now verified, but the
+  current replay remained in `Starting` and the route did not finish.
 - Extend the virtual registry only from observed target paths and required values. The current
   `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
   registry query, create, write, or persisted-value behavior.
-- Continue the tutorial traces from the reached `MSVCP140.dll` `basic_ios<char>` constructor only
-  after defining the required C++ stream-state semantics; each tutorial still has many other static
-  MSVC runtime imports. Their current D3D11 traces do not reach shader creation or Present.
+- Continue the HLE-only Tutorial03 replay past its bounded browser capture. The latest run without
+  local MSVC/UCRT DLLs recorded 2,759 draws and 1,380 presents with no WebGPU validation errors, but
+  remained in `Starting` with no terminal process status. The only 404 was `/favicon.ico`; capture the
+  sample's intended process lifecycle.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
 - The D3D11-only GLFW Demo remains the selected game candidate. The latest package-aware source-built

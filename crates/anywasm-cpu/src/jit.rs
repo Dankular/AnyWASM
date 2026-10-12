@@ -21,6 +21,10 @@ const TLB_WRITE_PTR_OFFSET: u32 = 172;
 const CHAIN_FALLBACKS_OFFSET: u32 = 176;
 const CHAIN_TRANSITIONS_OFFSET: u32 = 180;
 const CHAIN_REGREG_HITS_OFFSET: u32 = 184;
+const DIRTY_FRAMES_PTR_OFFSET: u32 = 188;
+const DIRTY_FRAME_INDICES_PTR_OFFSET: u32 = 976;
+const DIRTY_FRAME_COUNT_PTR_OFFSET: u32 = 980;
+const DIRTY_FRAME_INDEX_LOCAL: u32 = 78;
 const CHAIN_SCRATCH_OFFSET: u32 = 192;
 const ADD_LHS_LOCAL: u32 = 5;
 const ADD_RHS_LOCAL: u32 = 6;
@@ -67,7 +71,7 @@ struct JitState {
     chain_fallbacks: u32,
     chain_transitions: u32,
     chain_register_hits: u32,
-    _reserved: u32,
+    dirty_frames: u32,
     chain_scratch: [u8; 160],
     xmm: [u128; 16],
     mxcsr: u32,
@@ -80,9 +84,11 @@ struct JitState {
     fpu_cw: u32,
     fpu_sw: u32,
     fpu_tw: u32,
+    dirty_frame_indices: u32,
+    dirty_frame_count: u32,
 }
 
-const _: [(); 976] = [(); std::mem::size_of::<JitState>()];
+const _: [(); 992] = [(); std::mem::size_of::<JitState>()];
 const _: [(); GPR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, gpr)];
 const _: [(); RIP_OFFSET as usize] = [(); std::mem::offset_of!(JitState, rip)];
 const _: [(); RFLAGS_OFFSET as usize] = [(); std::mem::offset_of!(JitState, rflags)];
@@ -98,6 +104,12 @@ const _: [(); CHAIN_TRANSITIONS_OFFSET as usize] =
     [(); std::mem::offset_of!(JitState, chain_transitions)];
 const _: [(); CHAIN_REGREG_HITS_OFFSET as usize] =
     [(); std::mem::offset_of!(JitState, chain_register_hits)];
+const _: [(); DIRTY_FRAMES_PTR_OFFSET as usize] =
+    [(); std::mem::offset_of!(JitState, dirty_frames)];
+const _: [(); DIRTY_FRAME_INDICES_PTR_OFFSET as usize] =
+    [(); std::mem::offset_of!(JitState, dirty_frame_indices)];
+const _: [(); DIRTY_FRAME_COUNT_PTR_OFFSET as usize] =
+    [(); std::mem::offset_of!(JitState, dirty_frame_count)];
 const _: [(); CHAIN_SCRATCH_OFFSET as usize] = [(); std::mem::offset_of!(JitState, chain_scratch)];
 const _: [(); XMM_OFFSET as usize] = [(); std::mem::offset_of!(JitState, xmm)];
 const _: [(); MXCSR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, mxcsr)];
@@ -123,7 +135,7 @@ impl From<&Cpu> for JitState {
             chain_fallbacks: 0,
             chain_transitions: 0,
             chain_register_hits: 0,
-            _reserved: 0,
+            dirty_frames: 0,
             chain_scratch: [0; 160],
             xmm: cpu.xmm,
             mxcsr: cpu.mxcsr,
@@ -136,6 +148,8 @@ impl From<&Cpu> for JitState {
             fpu_cw: cpu.fpu_cw as u32,
             fpu_sw: cpu.fpu_sw as u32,
             fpu_tw: cpu.fpu_tw as u32,
+            dirty_frame_indices: 0,
+            dirty_frame_count: 0,
         }
     }
 }
@@ -236,6 +250,10 @@ enum JitInstruction {
         width: u8,
         len: u8,
     },
+    Inc {
+        dst: u8,
+        len: u8,
+    },
     Xor {
         dst: u8,
         source: u8,
@@ -246,6 +264,11 @@ enum JitInstruction {
         lhs: u8,
         source: AddSource,
         width: u8,
+        len: u8,
+    },
+    Test {
+        lhs: u8,
+        source: AddSource,
         len: u8,
     },
     Lea {
@@ -326,6 +349,9 @@ impl EmittedBlock {
         state.frames_len = view.frames_len;
         state.tlb_read = view.tlb_read;
         state.tlb_write = view.tlb_write;
+        state.dirty_frames = view.dirty_frames;
+        state.dirty_frame_indices = view.dirty_frame_indices;
+        state.dirty_frame_count = view.dirty_frame_count;
         let budget = budget.min(u32::MAX as u64) as u32;
         // SAFETY: both buffers are live in the main module's linear memory for this synchronous
         // import call. The host reads the module bytes and passes the state pointer to the emitted
@@ -365,6 +391,17 @@ pub fn emit_mov_block(
     instructions: &[Inst],
     min_prefix: usize,
 ) -> Option<EmittedBlock> {
+    emit_mov_block_mode(id, start, instructions, min_prefix, CpuMode::X86_64)
+}
+
+/// Emit a supported prefix with the guest's instruction-pointer and register-width semantics.
+pub fn emit_mov_block_mode(
+    id: u32,
+    start: u64,
+    instructions: &[Inst],
+    min_prefix: usize,
+    mode: CpuMode,
+) -> Option<EmittedBlock> {
     let min_prefix = min_prefix.max(1);
     if min_prefix > instructions.len() {
         return None;
@@ -372,9 +409,12 @@ pub fn emit_mov_block(
     let mut emitted = Vec::new();
     let mut ends_with_store = false;
     for inst in instructions.iter().copied() {
-        let Some(instruction) = translate_instruction(inst) else {
+        let Some(instruction) = translate_instruction(inst, mode) else {
             break;
         };
+        if mode == CpuMode::X86_32 && !safe_x86_32_instruction(instruction) {
+            break;
+        }
         let is_store = matches!(
             instruction,
             JitInstruction::Store(_)
@@ -407,14 +447,59 @@ pub fn emit_mov_block(
     Some(EmittedBlock {
         id,
         start,
-        wasm: emit_module(start, &emitted),
+        wasm: emit_module(start, &emitted, mode),
         instructions: emitted.len(),
         first_register_register,
         ends_with_store,
     })
 }
 
-fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
+fn safe_x86_32_instruction(instruction: JitInstruction) -> bool {
+    match instruction {
+        JitInstruction::Nop { .. }
+        | JitInstruction::Jump { .. }
+        | JitInstruction::Branch { .. } => true,
+        JitInstruction::Mov(mov) if mov.dst < 8 => match mov.source {
+            MovSource::Immediate(_) => true,
+            MovSource::Register { index, zero_extend } => index < 8 && zero_extend,
+        },
+        JitInstruction::Load {
+            dst,
+            address,
+            size: 4,
+            ..
+        } => dst < 8 && address.addr32 && inline_address_shape(address),
+        JitInstruction::Inc { dst, .. } => dst < 8,
+        JitInstruction::Test { lhs, source, .. } if lhs < 8 => match source {
+            AddSource::Immediate(_) => true,
+            AddSource::Register(index) => index < 8,
+        },
+        JitInstruction::Add {
+            dst,
+            source,
+            width: 4,
+            ..
+        }
+        | JitInstruction::Cmp {
+            lhs: dst,
+            source,
+            width: 4,
+            ..
+        } if dst < 8 => match source {
+            AddSource::Immediate(_) => true,
+            AddSource::Register(index) => index < 8,
+        },
+        JitInstruction::Xor {
+            dst,
+            source,
+            width: 4,
+            ..
+        } => dst < 8 && source < 8,
+        _ => false,
+    }
+}
+
+fn translate_instruction(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
     if inst.lock || inst.len == 0 {
         return None;
     }
@@ -449,12 +534,14 @@ fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
         }
         _ => {}
     }
-    translate_mov(inst)
-        .or_else(|| translate_add(inst))
+    translate_mov(inst, mode)
+        .or_else(|| translate_add(inst, mode))
         .or_else(|| translate_xor(inst))
         .or_else(|| translate_cmp(inst))
-        .or_else(|| translate_lea(inst))
-        .or_else(|| translate_sse(inst))
+        .or_else(|| translate_test(inst))
+        .or_else(|| translate_inc(inst))
+        .or_else(|| translate_lea(inst, mode))
+        .or_else(|| translate_sse(inst, mode))
 }
 
 fn translate_x87_stack(inst: Inst) -> Option<JitInstruction> {
@@ -468,15 +555,13 @@ fn translate_x87_stack(inst: Inst) -> Option<JitInstruction> {
         (1, 0) => X87StackOp::Load(index),
         (1, 1) => X87StackOp::Exchange(index),
         (1, 3) => X87StackOp::StorePop(index),
-        (0, operation @ (0 | 1 | 4 | 5 | 6 | 7)) => {
-            X87StackOp::Arithmetic { index, operation }
-        }
+        (0, operation @ (0 | 1 | 4 | 5 | 6 | 7)) => X87StackOp::Arithmetic { index, operation },
         _ => return None,
     };
     Some(JitInstruction::X87Stack { op, len: inst.len })
 }
 
-fn translate_add(inst: Inst) -> Option<JitInstruction> {
+fn translate_add(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
     if inst.op != Op::Add || !matches!(inst.osz, 4 | 8) {
         return None;
     }
@@ -496,7 +581,7 @@ fn translate_add(inst: Inst) -> Option<JitInstruction> {
             })
         }
         (Opnd::Mem(address), Opnd::Gpr(source))
-            if inst.osz == 8 && inline_address(address) && source < 16 =>
+            if inst.osz == 8 && inline_address(address, mode) && source < 16 =>
         {
             Some(JitInstruction::MemoryAdd {
                 address,
@@ -524,7 +609,7 @@ fn translate_xor(inst: Inst) -> Option<JitInstruction> {
 }
 
 fn translate_cmp(inst: Inst) -> Option<JitInstruction> {
-    if inst.op != Op::Cmp || inst.osz != 8 {
+    if inst.op != Op::Cmp || !matches!(inst.osz, 4 | 8) {
         return None;
     }
     let Opnd::Gpr(lhs) = inst.ops[0] else {
@@ -543,21 +628,50 @@ fn translate_cmp(inst: Inst) -> Option<JitInstruction> {
     })
 }
 
-fn translate_lea(inst: Inst) -> Option<JitInstruction> {
+fn translate_test(inst: Inst) -> Option<JitInstruction> {
+    if inst.op != Op::Test || inst.osz != 4 {
+        return None;
+    }
+    let Opnd::Gpr(lhs) = inst.ops[0] else {
+        return None;
+    };
+    let source = match inst.ops[1] {
+        Opnd::Imm => AddSource::Immediate(inst.imm as u32 as u64),
+        Opnd::Gpr(index) if index < 16 => AddSource::Register(index),
+        _ => return None,
+    };
+    (lhs < 16).then_some(JitInstruction::Test {
+        lhs,
+        source,
+        len: inst.len,
+    })
+}
+
+fn translate_inc(inst: Inst) -> Option<JitInstruction> {
+    if inst.op != Op::Inc || inst.osz != 4 {
+        return None;
+    }
+    let Opnd::Gpr(dst) = inst.ops[0] else {
+        return None;
+    };
+    (dst < 16).then_some(JitInstruction::Inc { dst, len: inst.len })
+}
+
+fn translate_lea(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
     if inst.op != Op::Lea || inst.osz != 8 {
         return None;
     }
     let (Opnd::Gpr(dst), Opnd::Mem(address)) = (inst.ops[0], inst.ops[1]) else {
         return None;
     };
-    (dst < 16 && inline_address(address)).then_some(JitInstruction::Lea {
+    (dst < 16 && inline_address(address, mode)).then_some(JitInstruction::Lea {
         dst,
         address,
         len: inst.len,
     })
 }
 
-fn translate_sse(inst: Inst) -> Option<JitInstruction> {
+fn translate_sse(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
     match inst.op {
         Op::MovVec => match (inst.ops[0], inst.ops[1]) {
             (Opnd::Xmm(dst), Opnd::Xmm(src)) if dst < 16 && src < 16 => {
@@ -567,14 +681,14 @@ fn translate_sse(inst: Inst) -> Option<JitInstruction> {
                     len: inst.len,
                 })
             }
-            (Opnd::Xmm(dst), Opnd::Mem(address)) if dst < 16 && inline_address(address) => {
+            (Opnd::Xmm(dst), Opnd::Mem(address)) if dst < 16 && inline_address(address, mode) => {
                 Some(JitInstruction::XmmMove {
                     dst,
                     source: XmmSource::Memory(address),
                     len: inst.len,
                 })
             }
-            (Opnd::Mem(address), Opnd::Xmm(src)) if src < 16 && inline_address(address) => {
+            (Opnd::Mem(address), Opnd::Xmm(src)) if src < 16 && inline_address(address, mode) => {
                 Some(JitInstruction::XmmStore {
                     address,
                     source: src,
@@ -598,7 +712,7 @@ fn translate_sse(inst: Inst) -> Option<JitInstruction> {
     }
 }
 
-fn translate_mov(inst: Inst) -> Option<JitInstruction> {
+fn translate_mov(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
     if inst.op != Op::Mov || !matches!(inst.osz, 4 | 8) {
         return None;
     }
@@ -622,7 +736,7 @@ fn translate_mov(inst: Inst) -> Option<JitInstruction> {
                 len: inst.len,
             }))
         }
-        (Opnd::Gpr(dst), Opnd::Mem(address)) if dst < 16 && inline_address(address) => {
+        (Opnd::Gpr(dst), Opnd::Mem(address)) if dst < 16 && inline_address(address, mode) => {
             Some(JitInstruction::Load {
                 dst,
                 address,
@@ -630,7 +744,7 @@ fn translate_mov(inst: Inst) -> Option<JitInstruction> {
                 len: inst.len,
             })
         }
-        (Opnd::Mem(address), Opnd::Gpr(src)) if src < 16 && inline_address(address) => {
+        (Opnd::Mem(address), Opnd::Gpr(src)) if src < 16 && inline_address(address, mode) => {
             Some(JitInstruction::Store(StoreInstruction {
                 address,
                 source: StoreSource::Register(src),
@@ -638,7 +752,7 @@ fn translate_mov(inst: Inst) -> Option<JitInstruction> {
                 len: inst.len,
             }))
         }
-        (Opnd::Mem(address), Opnd::Imm) if inline_address(address) => {
+        (Opnd::Mem(address), Opnd::Imm) if inline_address(address, mode) => {
             Some(JitInstruction::Store(StoreInstruction {
                 address,
                 source: StoreSource::Immediate(if inst.osz == 4 {
@@ -654,20 +768,23 @@ fn translate_mov(inst: Inst) -> Option<JitInstruction> {
     }
 }
 
-fn inline_address(address: MemOp) -> bool {
-    !address.addr32
-        && address.seg == 0
+fn inline_address(address: MemOp, mode: CpuMode) -> bool {
+    address.addr32 == (mode == CpuMode::X86_32) && inline_address_shape(address)
+}
+
+fn inline_address_shape(address: MemOp) -> bool {
+    address.seg == 0
         && address.scale <= 3
         && (address.base == 0xff || address.base < 16)
         && (address.index == 0xff || address.index < 16)
 }
 
-fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
+fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Vec<u8> {
     let mut code = Vec::new();
     // Locals: execution scratch, GPRs, both XMM lanes, RIP/count/TSC, and 64-bit ALU scratch.
     code.extend_from_slice(&[
-        0x0b, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03,
-        0x7e, 0x03, 0x7e, 0x01, 0x7f, 0x03, 0x7e, 0x01, 0x7f,
+        0x0b, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03, 0x7e,
+        0x03, 0x7e, 0x01, 0x7f, 0x03, 0x7e, 0x01, 0x7f, 0x01, 0x7f,
     ]);
     let (initial_gprs, written_gprs, initial_xmms, written_xmms) = register_masks(instructions);
     for register in 0..16 {
@@ -692,7 +809,9 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::Mov(mov) => mov.len,
             JitInstruction::Load { len, .. } => *len,
             JitInstruction::Store(store) => store.len,
-            JitInstruction::Add { len, .. } => *len,
+            JitInstruction::Add { len, .. }
+            | JitInstruction::Inc { len, .. }
+            | JitInstruction::Test { len, .. } => *len,
             JitInstruction::Xor { len, .. }
             | JitInstruction::Cmp { len, .. }
             | JitInstruction::Lea { len, .. }
@@ -705,7 +824,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             | JitInstruction::JumpRegister { len, .. }
             | JitInstruction::Branch { len, .. } => *len,
         };
-        rip = rip.wrapping_add(len as u64);
+        rip = wrap_ip(mode, rip.wrapping_add(len as u64));
         let mut rip_after = rip;
         // if (executed >= budget) branch to the shared state-flush epilogue.
         code.extend_from_slice(&[0x20, 0x02, 0x20, 0x01, 0x4f, 0x0d, 0x00]);
@@ -716,7 +835,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::Load {
                 dst, address, size, ..
             } => {
-                emit_effective_address(*address, &mut code);
+                emit_effective_address(*address, mode, &mut code);
                 emit_tlb_guard(false, *size, &mut code);
                 emit_frame_address(&mut code);
                 if *size == 4 {
@@ -733,8 +852,9 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                 uleb(gpr_local(*dst), &mut code);
             }
             JitInstruction::Store(store) => {
-                emit_effective_address(store.address, &mut code);
+                emit_effective_address(store.address, mode, &mut code);
                 emit_tlb_guard(true, store.size, &mut code);
+                emit_dirty_frame_mark(&mut code);
                 emit_frame_address(&mut code);
                 match store.source {
                     StoreSource::Immediate(value) if store.size == 4 => {
@@ -771,14 +891,16 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                     emit_add64_gpr(*dst, *source, &mut code);
                 }
             }
+            JitInstruction::Inc { dst, .. } => emit_inc32(*dst, &mut code),
             JitInstruction::Xor {
                 dst, source, width, ..
             } => emit_xor_gpr(*dst, *source, *width, &mut code),
             JitInstruction::Cmp {
                 lhs, source, width, ..
             } => emit_cmp_gpr(*lhs, *source, *width, &mut code),
+            JitInstruction::Test { lhs, source, .. } => emit_test32(*lhs, *source, &mut code),
             JitInstruction::Lea { dst, address, .. } => {
-                emit_effective_address(*address, &mut code);
+                emit_effective_address(*address, mode, &mut code);
                 code.push(0x20);
                 uleb(3, &mut code);
                 code.push(0x21);
@@ -787,9 +909,9 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::MemoryAdd {
                 address, source, ..
             } => {
-                emit_effective_address(*address, &mut code);
+                emit_effective_address(*address, mode, &mut code);
                 emit_tlb_guard(false, 8, &mut code);
-                emit_effective_address(*address, &mut code);
+                emit_effective_address(*address, mode, &mut code);
                 emit_tlb_guard(true, 8, &mut code);
                 emit_frame_address(&mut code);
                 code.push(0x29); // i64.load old destination
@@ -807,6 +929,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                     ALU64_RESULT_LOCAL,
                     &mut code,
                 );
+                emit_dirty_frame_mark(&mut code);
                 emit_frame_address(&mut code);
                 code.push(0x20);
                 uleb(ALU64_RESULT_LOCAL, &mut code);
@@ -817,7 +940,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::XmmMove { dst, source, .. } => match source {
                 XmmSource::Register(src) => emit_xmm_register_move(*dst, *src, &mut code),
                 XmmSource::Memory(address) => {
-                    emit_effective_address(*address, &mut code);
+                    emit_effective_address(*address, mode, &mut code);
                     emit_tlb_guard(false, 16, &mut code);
                     emit_xmm_memory_load(*dst, &mut code);
                 }
@@ -825,15 +948,16 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::XmmStore {
                 address, source, ..
             } => {
-                emit_effective_address(*address, &mut code);
+                emit_effective_address(*address, mode, &mut code);
                 emit_tlb_guard(true, 16, &mut code);
+                emit_dirty_frame_mark(&mut code);
                 emit_xmm_memory_store(*source, &mut code);
             }
             JitInstruction::XmmFp {
                 dst, source, kind, ..
             } => emit_xmm_fp(*dst, *source, *kind, &mut code),
             JitInstruction::X87Stack { op, .. } => emit_x87_stack(*op, &mut code),
-            JitInstruction::Jump { target, .. } => rip_after = *target,
+            JitInstruction::Jump { target, .. } => rip_after = wrap_ip(mode, *target),
             JitInstruction::JumpRegister { register, .. } => {
                 code.push(0x20);
                 uleb(gpr_local(*register), &mut code);
@@ -844,7 +968,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                 emit_condition(*cc, &mut code);
                 code.extend_from_slice(&[0x04, 0x7e]); // if (result i64)
                 code.push(0x42);
-                sleb(*target as i64, &mut code);
+                sleb(wrap_ip(mode, *target) as i64, &mut code);
                 code.push(0x05); // else
                 code.push(0x42);
                 sleb(rip as i64, &mut code);
@@ -895,6 +1019,13 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
     code_section.extend_from_slice(&body);
     section(10, &code_section, &mut module);
     module
+}
+
+fn wrap_ip(mode: CpuMode, address: u64) -> u64 {
+    match mode {
+        CpuMode::X86_32 => address as u32 as u64,
+        CpuMode::X86_64 => address,
+    }
 }
 
 fn emit_condition(cc: u8, code: &mut Vec<u8>) {
@@ -1123,8 +1254,8 @@ fn emit_x87_stack(op: X87StackOp, code: &mut Vec<u8>) {
             uleb(rhs, code);
             code.push(0xbf);
             code.push(match operation {
-                0 => 0xa0, // f64.add
-                1 => 0xa2, // f64.mul
+                0 => 0xa0,     // f64.add
+                1 => 0xa2,     // f64.mul
                 4 | 5 => 0xa1, // f64.sub
                 6 | 7 => 0xa3, // f64.div
                 _ => unreachable!("translation restricts x87 arithmetic selectors"),
@@ -1477,7 +1608,63 @@ fn emit_add64_values(lhs: u32, rhs: u32, result: u32, code: &mut Vec<u8>) {
     emit_commit_arithmetic_flags(code);
 }
 
+fn emit_inc32(dst: u8, code: &mut Vec<u8>) {
+    // INC preserves CF. Save it across the shared ADD emitter, then restore that one flag.
+    emit_flag(crate::cpu::CF, code);
+    code.push(0xad); // i64.extend_i32_u
+    code.push(0x21);
+    uleb(ALU64_RESULT_LOCAL, code);
+    emit_add32(dst, AddSource::Immediate(1), code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x29); // i64.load RFLAGS
+    uleb(3, code);
+    uleb(RFLAGS_OFFSET, code);
+    code.push(0x42);
+    sleb((!crate::cpu::CF) as i64, code);
+    code.push(0x83); // clear the computed carry
+    code.push(0x20);
+    uleb(ALU64_RESULT_LOCAL, code);
+    code.push(0x84); // restore original CF
+    code.push(0x37);
+    uleb(3, code);
+    uleb(RFLAGS_OFFSET, code);
+}
+
+fn emit_test32(lhs: u8, source: AddSource, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(gpr_local(lhs), code);
+    code.push(0xa7); // i32.wrap_i64
+    code.push(0x21);
+    uleb(ADD_LHS_LOCAL, code);
+    match source {
+        AddSource::Immediate(value) => {
+            code.push(0x41);
+            sleb(value as u32 as i32 as i64, code);
+        }
+        AddSource::Register(index) => {
+            code.push(0x20);
+            uleb(gpr_local(index), code);
+            code.push(0xa7); // i32.wrap_i64
+        }
+    }
+    code.push(0x21);
+    uleb(ADD_RHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_LHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_RHS_LOCAL, code);
+    code.push(0x71); // i32.and
+    code.push(0x21);
+    uleb(ADD_RESULT_LOCAL, code);
+    emit_logic_flags32(ADD_RESULT_LOCAL, code);
+}
+
 fn emit_cmp_gpr(lhs: u8, source: AddSource, width: u8, code: &mut Vec<u8>) {
+    if width == 4 {
+        emit_cmp32_gpr(lhs, source, code);
+        return;
+    }
     debug_assert_eq!(width, 8);
     code.push(0x20);
     uleb(gpr_local(lhs), code);
@@ -1560,6 +1747,92 @@ fn emit_cmp_gpr(lhs: u8, source: AddSource, width: u8, code: &mut Vec<u8>) {
         code.push(0x45);
     });
     emit_parity_flag64(ALU64_RESULT_LOCAL, code);
+    emit_commit_arithmetic_flags(code);
+}
+
+fn emit_cmp32_gpr(lhs: u8, source: AddSource, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(gpr_local(lhs), code);
+    code.push(0xa7); // i32.wrap_i64
+    code.push(0x21);
+    uleb(ADD_LHS_LOCAL, code);
+    match source {
+        AddSource::Immediate(value) => {
+            code.push(0x41);
+            sleb(value as u32 as i32 as i64, code);
+        }
+        AddSource::Register(index) => {
+            code.push(0x20);
+            uleb(gpr_local(index), code);
+            code.push(0xa7); // i32.wrap_i64
+        }
+    }
+    code.push(0x21);
+    uleb(ADD_RHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_LHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_RHS_LOCAL, code);
+    code.push(0x6b); // i32.sub
+    code.push(0x21);
+    uleb(ADD_RESULT_LOCAL, code);
+    code.push(0x41);
+    sleb(0, code);
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
+
+    emit_add_flag(code, crate::cpu::CF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RHS_LOCAL, code);
+        code.push(0x49); // unsigned borrow
+    });
+    emit_add_flag(code, crate::cpu::ZF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x45);
+    });
+    emit_add_flag(code, crate::cpu::SF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x41);
+        sleb(0, code);
+        code.push(0x48); // i32.lt_s
+    });
+    emit_add_flag(code, crate::cpu::OF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RHS_LOCAL, code);
+        code.push(0x73); // lhs ^ rhs
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x73); // lhs ^ result
+        code.push(0x71); // i32.and
+        code.push(0x41);
+        sleb(i32::MIN as i64, code);
+        code.push(0x71);
+        code.push(0x45);
+        code.push(0x45); // signed overflow
+    });
+    emit_add_flag(code, crate::cpu::AF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RHS_LOCAL, code);
+        code.push(0x73);
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x73);
+        code.push(0x41);
+        sleb(0x10, code);
+        code.push(0x71);
+        code.push(0x45);
+    });
+    emit_parity_flag32(ADD_RESULT_LOCAL, code);
     emit_commit_arithmetic_flags(code);
 }
 
@@ -1730,7 +2003,7 @@ fn emit_add_flag(code: &mut Vec<u8>, flag: u32, condition: impl FnOnce(&mut Vec<
     uleb(ADD_FLAGS_LOCAL, code);
 }
 
-fn emit_effective_address(address: MemOp, code: &mut Vec<u8>) {
+fn emit_effective_address(address: MemOp, mode: CpuMode, code: &mut Vec<u8>) {
     code.push(0x42); // i64.const displacement (RIP-relative displacements are pre-resolved)
     sleb(address.disp, code);
     if address.base != 0xff {
@@ -1747,6 +2020,11 @@ fn emit_effective_address(address: MemOp, code: &mut Vec<u8>) {
             code.push(0x86); // i64.shl
         }
         code.push(0x7c); // i64.add
+    }
+    if mode == CpuMode::X86_32 {
+        code.push(0x42);
+        sleb(u32::MAX as i64, code);
+        code.push(0x83); // i64.and: 32-bit effective-address wrap
     }
     code.push(0x21); // local.set effective address
     uleb(3, code);
@@ -1858,6 +2136,91 @@ fn emit_frame_address(code: &mut Vec<u8>) {
     code.push(0x6a); // i32.add
 }
 
+fn emit_dirty_frame_mark(code: &mut Vec<u8>) {
+    // The TLB guard left the checked frame-relative byte offset in local 4. Record a frame only
+    // when its dirty byte changes from zero so each host publication scans dirty frames only.
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28); // i32.load pointer to host dirty-frame bitmap
+    uleb(2, code);
+    uleb(DIRTY_FRAMES_PTR_OFFSET, code);
+    code.push(0x20);
+    uleb(4, code);
+    code.push(0x41);
+    sleb(12, code);
+    code.push(0x76); // i32.shr_u frame-relative byte offset to frame index
+    code.push(0x21); // local.set dirty frame index
+    uleb(DIRTY_FRAME_INDEX_LOCAL, code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28);
+    uleb(2, code);
+    uleb(DIRTY_FRAMES_PTR_OFFSET, code);
+    code.push(0x20);
+    uleb(DIRTY_FRAME_INDEX_LOCAL, code);
+    code.push(0x6a); // i32.add dirty-frame byte address
+    code.push(0x2d); // i32.load8_u
+    uleb(0, code);
+    uleb(0, code);
+    code.push(0x45); // i32.eqz
+    code.extend_from_slice(&[0x04, 0x40]); // if (frame was not already dirty)
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28);
+    uleb(2, code);
+    uleb(DIRTY_FRAMES_PTR_OFFSET, code);
+    code.push(0x20);
+    uleb(DIRTY_FRAME_INDEX_LOCAL, code);
+    code.push(0x6a);
+    code.push(0x41);
+    sleb(1, code);
+    code.push(0x3a); // i32.store8 dirty = 1
+    uleb(0, code);
+    uleb(0, code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28); // i32.load pointer to dirty-frame indices
+    uleb(2, code);
+    uleb(DIRTY_FRAME_INDICES_PTR_OFFSET, code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28); // i32.load pointer to dirty-frame count
+    uleb(2, code);
+    uleb(DIRTY_FRAME_COUNT_PTR_OFFSET, code);
+    code.push(0x28); // i32.load current dirty-frame count
+    uleb(2, code);
+    uleb(0, code);
+    code.push(0x41);
+    sleb(2, code);
+    code.push(0x74); // i32.shl count * sizeof(u32)
+    code.push(0x6a); // i32.add list element address
+    code.push(0x20);
+    uleb(DIRTY_FRAME_INDEX_LOCAL, code);
+    code.push(0x36); // i32.store frame index
+    uleb(2, code);
+    uleb(0, code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28); // i32.load dirty-frame count pointer
+    uleb(2, code);
+    uleb(DIRTY_FRAME_COUNT_PTR_OFFSET, code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28); // i32.load dirty-frame count pointer
+    uleb(2, code);
+    uleb(DIRTY_FRAME_COUNT_PTR_OFFSET, code);
+    code.push(0x28); // i32.load current count
+    uleb(2, code);
+    uleb(0, code);
+    code.push(0x41);
+    sleb(1, code);
+    code.push(0x6a); // i32.add count + 1
+    code.push(0x36); // i32.store updated count
+    uleb(2, code);
+    uleb(0, code);
+    code.push(0x0b); // end if
+}
+
 fn emit_fallback_if_true(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0x04, 0x40, 0x41, 0x7f, 0x0f, 0x0b]); // if { return -1 }
 }
@@ -1960,6 +2323,11 @@ fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
                 initialized |= 1 << *dst;
                 written |= 1 << *dst;
             }
+            JitInstruction::Inc { dst, .. } => {
+                require_initial_register(*dst, initialized, &mut initial_reads);
+                initialized |= 1 << *dst;
+                written |= 1 << *dst;
+            }
             JitInstruction::Xor { dst, source, .. } => {
                 require_initial_register(*dst, initialized, &mut initial_reads);
                 require_initial_register(*source, initialized, &mut initial_reads);
@@ -1967,6 +2335,12 @@ fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
                 written |= 1 << *dst;
             }
             JitInstruction::Cmp { lhs, source, .. } => {
+                require_initial_register(*lhs, initialized, &mut initial_reads);
+                if let AddSource::Register(index) = source {
+                    require_initial_register(*index, initialized, &mut initial_reads);
+                }
+            }
+            JitInstruction::Test { lhs, source, .. } => {
                 require_initial_register(*lhs, initialized, &mut initial_reads);
                 if let AddSource::Register(index) = source {
                     require_initial_register(*index, initialized, &mut initial_reads);
@@ -2287,7 +2661,7 @@ mod tests {
     #[test]
     fn initializes_the_old_destination_for_a_leading_add() {
         let add_eax_minus_eight = decode(&[0x83, 0xc0, 0xf8], 0x1850).unwrap();
-        let add = translate_instruction(add_eax_minus_eight).unwrap();
+        let add = translate_instruction(add_eax_minus_eight, CpuMode::X86_64).unwrap();
         let (initial_reads, written, _, _) = register_masks(&[add]);
 
         assert_eq!(initial_reads & 1, 1, "ADD reads the incoming EAX value");
@@ -2305,6 +2679,10 @@ mod tests {
 
         assert_eq!(emitted.instruction_count(), 3);
         assert_eq!(emitted.first_register_register, Some(1));
+        assert!(
+            emitted.wasm.contains(&0x3a),
+            "missing host dirty-frame store"
+        );
     }
 
     #[test]

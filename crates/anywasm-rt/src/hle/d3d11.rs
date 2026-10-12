@@ -128,7 +128,8 @@ fn format_support_flags(format: u32) -> u32 {
     }
     let mut flags = 0x0003_ffff; // common sampling, render-target and texture capabilities
     if supports_4x_multisample_render_target(format) {
-        flags |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE | D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+        flags |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE
+            | D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
     }
     if matches!(
         format,
@@ -169,7 +170,11 @@ fn create_device(p: &mut Process, with_swap_chain: bool) -> R {
     // D3D11CreateDevice(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion,
     //                   ppDevice, pFeatureLevel, ppImmediateContext)
     // ...AndSwapChain(..., SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppContext)
-    let (pdev, pfl, pctx, pdesc, psc) = if with_swap_chain { (p.arg(9), p.arg(10), p.arg(11), p.arg(7), p.arg(8)) } else { (p.arg(7), p.arg(8), p.arg(9), 0, 0) };
+    let (pdev, pfl, pctx, pdesc, psc) = if with_swap_chain {
+        (p.arg(9), p.arg(10), p.arg(11), p.arg(7), p.arg(8))
+    } else {
+        (p.arg(7), p.arg(8), p.arg(9), 0, 0)
+    };
     let Some(feature_level) = requested_feature_level(p)? else {
         return Ok(E_INVALIDARG);
     };
@@ -245,7 +250,21 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "GetResource" => |p| {
             let (this, out) = (p.arg(0), p.arg(1));
             if let Some(Kind::View { resource, .. }) = kind_of(p, this) {
-                let obj = p.extra.com.objs.iter().find(|(_, o)| o.kind.host_id() == Some(resource) && matches!(o.kind, Kind::Buffer { .. } | Kind::Texture2D { .. } | Kind::Texture3D { .. })).map(|(k, _)| *k);
+                let obj = p
+                    .extra
+                    .com
+                    .objs
+                    .iter()
+                    .find(|(_, o)| {
+                        o.kind.host_id() == Some(resource)
+                            && matches!(
+                                o.kind,
+                                Kind::Buffer { .. }
+                                    | Kind::Texture2D { .. }
+                                    | Kind::Texture3D { .. }
+                            )
+                    })
+                    .map(|(k, _)| *k);
                 if let Some(o) = obj {
                     p.extra.com.objs.get_mut(&o).map(|x| x.refs += 1);
                     p.wr64(out, o)?;
@@ -288,9 +307,15 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CreatePixelShader" => |p| create_shader(p, 1, "ID3D11PixelShader"),
         "CreateComputeShader" => |p| create_shader(p, 2, "ID3D11ComputeShader"),
         "CreateSamplerState" => |p| create_state(p, op::CREATE_SAMPLER, 52, "ID3D11SamplerState"),
-        "CreateBlendState" | "CreateBlendState1" => |p| create_state(p, op::CREATE_BLEND, 264, "ID3D11BlendState"),
-        "CreateRasterizerState" | "CreateRasterizerState1" => |p| create_state(p, op::CREATE_RASTER, 40, "ID3D11RasterizerState"),
-        "CreateDepthStencilState" => |p| create_state(p, op::CREATE_DEPTH, 52, "ID3D11DepthStencilState"),
+        "CreateBlendState" | "CreateBlendState1" => {
+            |p| create_state(p, op::CREATE_BLEND, 264, "ID3D11BlendState")
+        }
+        "CreateRasterizerState" | "CreateRasterizerState1" => {
+            |p| create_state(p, op::CREATE_RASTER, 40, "ID3D11RasterizerState")
+        }
+        "CreateDepthStencilState" => {
+            |p| create_state(p, op::CREATE_DEPTH, 52, "ID3D11DepthStencilState")
+        }
         "CreateQuery" => |p| create_query(p, false),
         "CreatePredicate" => |p| create_query(p, true),
         "GetImmediateContext" | "GetImmediateContext1" => |p| {
@@ -353,7 +378,9 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "IASetVertexBuffers" => ia_set_vertex_buffers,
         "IASetIndexBuffer" => |p| {
             let (b, f, o) = (obj_id(p, p.arg(1)), p.arg(2) as u32, p.arg(3) as u32);
-            p.extra.gpu.emit(op::SET_INDEX_BUFFER, Pk::new().u32(b).u32(f).u32(o));
+            p.extra
+                .gpu
+                .emit(op::SET_INDEX_BUFFER, Pk::new().u32(b).u32(f).u32(o));
             Ok(0)
         },
         "IASetPrimitiveTopology" => |p| {
@@ -382,7 +409,11 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             let (b, f, mask) = (obj_id(p, p.arg(1)), p.arg(2), p.arg(3) as u32);
             let mut pk = Pk::new().u32(b);
             for i in 0..4 {
-                pk = pk.f32(if f != 0 { f32::from_bits(p.rd32(f + 4 * i)?) } else { 1.0 });
+                pk = pk.f32(if f != 0 {
+                    f32::from_bits(p.rd32(f + 4 * i)?)
+                } else {
+                    1.0
+                });
             }
             p.extra.gpu.emit(op::SET_BLEND, pk.u32(mask));
             Ok(0)
@@ -423,22 +454,42 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         "DrawIndexed" => |p| {
             let (a, b, c) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3) as i32);
-            p.extra.gpu.emit(op::DRAW_INDEXED, Pk::new().u32(a).u32(b).i32(c));
+            p.extra
+                .gpu
+                .emit(op::DRAW_INDEXED, Pk::new().u32(a).u32(b).i32(c));
             Ok(0)
         },
         "DrawInstanced" => |p| {
-            let (a, b, c, d) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3) as u32, p.arg(4) as u32);
-            p.extra.gpu.emit(op::DRAW_INSTANCED, Pk::new().u32(a).u32(b).u32(c).u32(d));
+            let (a, b, c, d) = (
+                p.arg(1) as u32,
+                p.arg(2) as u32,
+                p.arg(3) as u32,
+                p.arg(4) as u32,
+            );
+            p.extra
+                .gpu
+                .emit(op::DRAW_INSTANCED, Pk::new().u32(a).u32(b).u32(c).u32(d));
             Ok(0)
         },
         "DrawIndexedInstanced" => |p| {
-            let (a, b, c, d, e) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3) as u32, p.arg(4) as i32, p.arg(5) as u32);
-            p.extra.gpu.emit(op::DRAW_INDEXED_INSTANCED, Pk::new().u32(a).u32(b).u32(c).i32(d).u32(e));
+            let (a, b, c, d, e) = (
+                p.arg(1) as u32,
+                p.arg(2) as u32,
+                p.arg(3) as u32,
+                p.arg(4) as i32,
+                p.arg(5) as u32,
+            );
+            p.extra.gpu.emit(
+                op::DRAW_INDEXED_INSTANCED,
+                Pk::new().u32(a).u32(b).u32(c).i32(d).u32(e),
+            );
             Ok(0)
         },
         "Dispatch" => |p| {
             let (a, b, c) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3) as u32);
-            p.extra.gpu.emit(op::DISPATCH, Pk::new().u32(a).u32(b).u32(c));
+            p.extra
+                .gpu
+                .emit(op::DISPATCH, Pk::new().u32(a).u32(b).u32(c));
             Ok(0)
         },
         "ClearRenderTargetView" => |p| {
@@ -456,7 +507,10 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             let (v, flags) = (obj_id(p, p.arg(1)), p.arg(2) as u32);
             let depth = f32::from_bits(p.cpu.xmm[3] as u32);
             let stencil = p.arg(4) as u32 & 0xff;
-            p.extra.gpu.emit(op::CLEAR_DSV, Pk::new().u32(v).u32(flags).f32(depth).u32(stencil));
+            p.extra.gpu.emit(
+                op::CLEAR_DSV,
+                Pk::new().u32(v).u32(flags).f32(depth).u32(stencil),
+            );
             Ok(0)
         },
         "GenerateMips" => |p| {
@@ -498,9 +552,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
                 .deferred_contexts
                 .get(&p.arg(0))
                 .map(|state| (state.bound_rtv.clone(), state.bound_dsv))
-                .unwrap_or_else(|| {
-                    (p.extra.com.bound_rtv.clone(), p.extra.com.bound_dsv)
-                });
+                .unwrap_or_else(|| (p.extra.com.bound_rtv.clone(), p.extra.com.bound_dsv));
             for i in 0..n {
                 if rtvs != 0 {
                     p.wr64(rtvs + 8 * i as u64, bound.get(i).copied().unwrap_or(0))?;
@@ -552,7 +604,11 @@ fn finish_command_list(p: &mut Process) -> R {
         Vec::new()
     };
     if out != 0 {
-        let command_list = create(p, "ID3D11CommandList", Kind::CommandList { commands, flags });
+        let command_list = create(
+            p,
+            "ID3D11CommandList",
+            Kind::CommandList { commands, flags },
+        );
         out_ptr(p, out, command_list)?;
     }
     Ok(S_OK)
@@ -622,12 +678,7 @@ fn set_query_complete(p: &mut Process) -> R {
     if let Some(Kind::Query {
         query_type: D3D11_QUERY_EVENT,
         complete: state,
-    }) = p
-        .extra
-        .com
-        .objs
-        .get_mut(&query)
-        .map(|obj| &mut obj.kind)
+    }) = p.extra.com.objs.get_mut(&query).map(|obj| &mut obj.kind)
     {
         *state = true;
     }
@@ -715,15 +766,15 @@ pub fn format_info(f: u32) -> (u32, u32, u32) {
     match f {
         1..=4 => (1, 1, 16),
         5..=8 => (1, 1, 12),
-        9..=22 => (1, 1, 8),   // R16G16B16A16, R32G32, R32G8X24
-        23..=47 => (1, 1, 4),  // R10G10B10A2, R11G11B10, R8G8B8A8, R16G16, R32, R24G8
-        48..=59 => (1, 1, 2),  // R8G8, R16
-        60..=65 => (1, 1, 1),  // R8, A8
+        9..=22 => (1, 1, 8),  // R16G16B16A16, R32G32, R32G8X24
+        23..=47 => (1, 1, 4), // R10G10B10A2, R11G11B10, R8G8B8A8, R16G16, R32, R24G8
+        48..=59 => (1, 1, 2), // R8G8, R16
+        60..=65 => (1, 1, 1), // R8, A8
         67..=69 => (1, 1, 4),
-        70..=72 | 79..=81 => (4, 4, 8),                  // BC1, BC4
-        73..=78 | 82..=84 | 94..=99 => (4, 4, 16),       // BC2, BC3, BC5, BC6H, BC7
-        85 | 86 | 115 => (1, 1, 2),                      // B5G6R5, B5G5R5A1, B4G4R4A4
-        87..=93 => (1, 1, 4),                            // B8G8R8A8 / X8
+        70..=72 | 79..=81 => (4, 4, 8),            // BC1, BC4
+        73..=78 | 82..=84 | 94..=99 => (4, 4, 16), // BC2, BC3, BC5, BC6H, BC7
+        85 | 86 | 115 => (1, 1, 2),                // B5G6R5, B5G5R5A1, B4G4R4A4
+        87..=93 => (1, 1, 4),                      // B8G8R8A8 / X8
         _ => (1, 1, 4),
     }
 }
@@ -744,7 +795,9 @@ fn rows(format: u32, height: u32) -> u32 {
 
 fn set_shader(p: &mut Process, stage: u32) -> R {
     let id = obj_id(p, p.arg(1));
-    p.extra.gpu.emit(op::SET_SHADER, Pk::new().u32(stage).u32(id));
+    p.extra
+        .gpu
+        .emit(op::SET_SHADER, Pk::new().u32(stage).u32(id));
     Ok(0)
 }
 
@@ -770,10 +823,25 @@ fn set_slots1(p: &mut Process, stage: u32) -> R {
     );
     let mut pk = Pk::new().u32(stage).u32(start).u32(n);
     for i in 0..n as u64 {
-        let buffer = if buffers != 0 { p.rd64(buffers + 8 * i)? } else { 0 };
-        let first_constant = if first != 0 { p.rd32(first + 4 * i)? } else { 0 };
-        let num_constants = if count != 0 { p.rd32(count + 4 * i)? } else { 0 };
-        pk = pk.u32(obj_id(p, buffer)).u32(first_constant).u32(num_constants);
+        let buffer = if buffers != 0 {
+            p.rd64(buffers + 8 * i)?
+        } else {
+            0
+        };
+        let first_constant = if first != 0 {
+            p.rd32(first + 4 * i)?
+        } else {
+            0
+        };
+        let num_constants = if count != 0 {
+            p.rd32(count + 4 * i)?
+        } else {
+            0
+        };
+        pk = pk
+            .u32(obj_id(p, buffer))
+            .u32(first_constant)
+            .u32(num_constants);
     }
     p.extra.gpu.emit(op::SET_CBUFFERS1, pk);
     Ok(0)
@@ -781,16 +849,19 @@ fn set_slots1(p: &mut Process, stage: u32) -> R {
 
 fn set_uavs(p: &mut Process) -> R {
     // (this, StartSlot, NumUAVs, ppUAVs, pUAVInitialCounts)
-    let (start, n, views, counts) = (
-        p.arg(1) as u32,
-        p.arg(2) as u32,
-        p.arg(3),
-        p.arg(4),
-    );
+    let (start, n, views, counts) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3), p.arg(4));
     let mut pk = Pk::new().u32(start).u32(n);
     for i in 0..n as u64 {
-        let view = if views != 0 { p.rd64(views + 8 * i)? } else { 0 };
-        let initial_count = if counts != 0 { p.rd32(counts + 4 * i)? } else { u32::MAX };
+        let view = if views != 0 {
+            p.rd64(views + 8 * i)?
+        } else {
+            0
+        };
+        let initial_count = if counts != 0 {
+            p.rd32(counts + 4 * i)?
+        } else {
+            u32::MAX
+        };
         pk = pk.u32(obj_id(p, view)).u32(initial_count);
     }
     p.extra.gpu.emit(op::SET_UAVS, pk);
@@ -799,11 +870,28 @@ fn set_uavs(p: &mut Process) -> R {
 
 fn ia_set_vertex_buffers(p: &mut Process) -> R {
     // (this, StartSlot, NumBuffers, ppVertexBuffers, pStrides, pOffsets)
-    let (start, n, bufs, strides, offsets) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3), p.arg(4), p.arg(5));
+    let (start, n, bufs, strides, offsets) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3),
+        p.arg(4),
+        p.arg(5),
+    );
     let mut pk = Pk::new().u32(start).u32(n);
     for i in 0..n as u64 {
         let ptr = if bufs != 0 { p.rd64(bufs + 8 * i)? } else { 0 };
-        let (s, o) = (if strides != 0 { p.rd32(strides + 4 * i)? } else { 0 }, if offsets != 0 { p.rd32(offsets + 4 * i)? } else { 0 });
+        let (s, o) = (
+            if strides != 0 {
+                p.rd32(strides + 4 * i)?
+            } else {
+                0
+            },
+            if offsets != 0 {
+                p.rd32(offsets + 4 * i)?
+            } else {
+                0
+            },
+        );
         pk = pk.u32(obj_id(p, ptr)).u32(s).u32(o);
     }
     p.extra.gpu.emit(op::SET_VERTEX_BUFFERS, pk);
@@ -826,7 +914,9 @@ fn om_set_render_targets(p: &mut Process) -> R {
         p.extra.com.bound_rtv = bound;
         p.extra.com.bound_dsv = dsv;
     }
-    p.extra.gpu.emit(op::SET_RENDER_TARGETS, pk.u32(obj_id(p, dsv)));
+    p.extra
+        .gpu
+        .emit(op::SET_RENDER_TARGETS, pk.u32(obj_id(p, dsv)));
     Ok(0)
 }
 
@@ -836,7 +926,14 @@ fn create_buffer(p: &mut Process) -> R {
     if desc == 0 || out == 0 {
         return Ok(E_INVALIDARG);
     }
-    let (size, usage, bind, cpu, misc, stride) = (p.rd32(desc)?, p.rd32(desc + 4)?, p.rd32(desc + 8)?, p.rd32(desc + 12)?, p.rd32(desc + 16)?, p.rd32(desc + 20)?);
+    let (size, usage, bind, cpu, misc, stride) = (
+        p.rd32(desc)?,
+        p.rd32(desc + 4)?,
+        p.rd32(desc + 8)?,
+        p.rd32(desc + 12)?,
+        p.rd32(desc + 16)?,
+        p.rd32(desc + 20)?,
+    );
     let mut shadow = vec![0u8; size as usize];
     if init != 0 {
         let data = p.rd64(init)?;
@@ -844,10 +941,35 @@ fn create_buffer(p: &mut Process) -> R {
             shadow = p.read_bytes(data, size as usize)?;
         }
     }
-    let id = new_res(p, ResInfo { is_buffer: true, size, usage, bind, cpu, misc, stride, shadow: shadow.clone(), ..Default::default() });
-    p.extra.gpu.emit(op::CREATE_BUFFER, Pk::new().u32(id).u32(size).u32(bind).u32(usage).u32(misc).u32(stride));
+    let id = new_res(
+        p,
+        ResInfo {
+            is_buffer: true,
+            size,
+            usage,
+            bind,
+            cpu,
+            misc,
+            stride,
+            shadow: shadow.clone(),
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_BUFFER,
+        Pk::new()
+            .u32(id)
+            .u32(size)
+            .u32(bind)
+            .u32(usage)
+            .u32(misc)
+            .u32(stride),
+    );
     if init != 0 {
-        p.extra.gpu.emit(op::BUFFER_WRITE, Pk::new().u32(id).u32(0).u32(size).bytes(&shadow));
+        p.extra.gpu.emit(
+            op::BUFFER_WRITE,
+            Pk::new().u32(id).u32(0).u32(size).bytes(&shadow),
+        );
     }
     let o = create(p, "ID3D11Buffer", Kind::Buffer { id });
     p.wr64(out, o)?;
@@ -868,9 +990,20 @@ fn create_texture2d(p: &mut Process) -> R {
     if desc == 0 || out == 0 {
         return Ok(E_INVALIDARG);
     }
-    let (w, h, mut mips, array, format) = (p.rd32(desc)?, p.rd32(desc + 4)?, p.rd32(desc + 8)?, p.rd32(desc + 12)?, p.rd32(desc + 16)?);
+    let (w, h, mut mips, array, format) = (
+        p.rd32(desc)?,
+        p.rd32(desc + 4)?,
+        p.rd32(desc + 8)?,
+        p.rd32(desc + 12)?,
+        p.rd32(desc + 16)?,
+    );
     let (samples, sample_quality, usage, bind, cpu, misc) = (
-        p.rd32(desc + 20)?, p.rd32(desc + 24)?, p.rd32(desc + 28)?, p.rd32(desc + 32)?, p.rd32(desc + 36)?, p.rd32(desc + 40)?,
+        p.rd32(desc + 20)?,
+        p.rd32(desc + 24)?,
+        p.rd32(desc + 28)?,
+        p.rd32(desc + 32)?,
+        p.rd32(desc + 36)?,
+        p.rd32(desc + 40)?,
     );
     if mips == 0 {
         mips = mip_count(w, h);
@@ -897,8 +1030,42 @@ fn create_texture2d(p: &mut Process) -> R {
     }
     let keep_shadow = cpu != 0;
     let size = row_bytes(format, w) * rows(format, h);
-    let id = new_res(p, ResInfo { width: w, height: h, mips, array, format, samples: sample_count, usage, bind, cpu, misc, size, shadow: if keep_shadow { vec![0u8; size as usize] } else { Vec::new() }, ..Default::default() });
-    p.extra.gpu.emit(op::CREATE_TEXTURE2D, Pk::new().u32(id).u32(w).u32(h).u32(mips).u32(array).u32(format).u32(bind).u32(usage).u32(sample_count).u32(misc));
+    let id = new_res(
+        p,
+        ResInfo {
+            width: w,
+            height: h,
+            mips,
+            array,
+            format,
+            samples: sample_count,
+            usage,
+            bind,
+            cpu,
+            misc,
+            size,
+            shadow: if keep_shadow {
+                vec![0u8; size as usize]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_TEXTURE2D,
+        Pk::new()
+            .u32(id)
+            .u32(w)
+            .u32(h)
+            .u32(mips)
+            .u32(array)
+            .u32(format)
+            .u32(bind)
+            .u32(usage)
+            .u32(sample_count)
+            .u32(misc),
+    );
     if init != 0 {
         for slice in 0..array {
             for mip in 0..mips {
@@ -909,10 +1076,27 @@ fn create_texture2d(p: &mut Process) -> R {
                     continue;
                 }
                 let (mw, mh) = (mip_dim(w, mip), mip_dim(h, mip));
-                let pitch = if pitch == 0 { row_bytes(format, mw) } else { pitch };
+                let pitch = if pitch == 0 {
+                    row_bytes(format, mw)
+                } else {
+                    pitch
+                };
                 let nrows = rows(format, mh);
                 let bytes = p.read_bytes(data, (pitch * nrows) as usize)?;
-                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(slice).u32(0).u32(0).u32(mw).u32(mh).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+                p.extra.gpu.emit(
+                    op::TEXTURE_WRITE,
+                    Pk::new()
+                        .u32(id)
+                        .u32(mip)
+                        .u32(slice)
+                        .u32(0)
+                        .u32(0)
+                        .u32(mw)
+                        .u32(mh)
+                        .u32(pitch)
+                        .u32(bytes.len() as u32)
+                        .bytes(&bytes),
+                );
                 if keep_shadow && sub == 0 {
                     if let Some(r) = p.extra.com.res.get_mut(&id) {
                         let n = r.shadow.len().min(bytes.len());
@@ -934,9 +1118,18 @@ fn create_texture3d(p: &mut Process) -> R {
         return Ok(E_INVALIDARG);
     }
     let (w, h, depth, mut mips, format) = (
-        p.rd32(desc)?, p.rd32(desc + 4)?, p.rd32(desc + 8)?, p.rd32(desc + 12)?, p.rd32(desc + 16)?,
+        p.rd32(desc)?,
+        p.rd32(desc + 4)?,
+        p.rd32(desc + 8)?,
+        p.rd32(desc + 12)?,
+        p.rd32(desc + 16)?,
     );
-    let (usage, bind, cpu, misc) = (p.rd32(desc + 20)?, p.rd32(desc + 24)?, p.rd32(desc + 28)?, p.rd32(desc + 32)?);
+    let (usage, bind, cpu, misc) = (
+        p.rd32(desc + 20)?,
+        p.rd32(desc + 24)?,
+        p.rd32(desc + 28)?,
+        p.rd32(desc + 32)?,
+    );
     if w == 0 || h == 0 || depth == 0 {
         return Ok(E_INVALIDARG);
     }
@@ -947,31 +1140,85 @@ fn create_texture3d(p: &mut Process) -> R {
     let base_pitch = row_bytes(format, w);
     let base_depth_pitch = base_pitch * rows(format, h);
     let size = base_depth_pitch.saturating_mul(depth);
-    let id = new_res(p, ResInfo {
-        width: w, height: h, depth, is_3d: true, mips, array: 1, format, usage, bind, cpu, misc, size,
-        shadow: if keep_shadow { vec![0u8; size as usize] } else { Vec::new() },
-        ..Default::default()
-    });
-    p.extra.gpu.emit(op::CREATE_TEXTURE3D, Pk::new().u32(id).u32(w).u32(h).u32(depth).u32(mips).u32(format).u32(bind).u32(usage).u32(misc));
+    let id = new_res(
+        p,
+        ResInfo {
+            width: w,
+            height: h,
+            depth,
+            is_3d: true,
+            mips,
+            array: 1,
+            format,
+            usage,
+            bind,
+            cpu,
+            misc,
+            size,
+            shadow: if keep_shadow {
+                vec![0u8; size as usize]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_TEXTURE3D,
+        Pk::new()
+            .u32(id)
+            .u32(w)
+            .u32(h)
+            .u32(depth)
+            .u32(mips)
+            .u32(format)
+            .u32(bind)
+            .u32(usage)
+            .u32(misc),
+    );
     if init != 0 {
         for mip in 0..mips {
             let sd = init + 16 * mip as u64;
-            let (data, mut pitch, mut depth_pitch) = (p.rd64(sd)?, p.rd32(sd + 8)?, p.rd32(sd + 12)?);
+            let (data, mut pitch, mut depth_pitch) =
+                (p.rd64(sd)?, p.rd32(sd + 8)?, p.rd32(sd + 12)?);
             if data == 0 {
                 continue;
             }
             let (mw, mh, md) = (mip_dim(w, mip), mip_dim(h, mip), mip_dim(depth, mip));
-            if pitch == 0 { pitch = row_bytes(format, mw); }
+            if pitch == 0 {
+                pitch = row_bytes(format, mw);
+            }
             let nrows = rows(format, mh);
-            if depth_pitch == 0 { depth_pitch = pitch * nrows; }
+            if depth_pitch == 0 {
+                depth_pitch = pitch * nrows;
+            }
             for z in 0..md {
-                let bytes = p.read_bytes(data + z as u64 * depth_pitch as u64, (pitch * nrows) as usize)?;
-                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(z).u32(0).u32(0).u32(mw).u32(mh).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+                let bytes = p.read_bytes(
+                    data + z as u64 * depth_pitch as u64,
+                    (pitch * nrows) as usize,
+                )?;
+                p.extra.gpu.emit(
+                    op::TEXTURE_WRITE,
+                    Pk::new()
+                        .u32(id)
+                        .u32(mip)
+                        .u32(z)
+                        .u32(0)
+                        .u32(0)
+                        .u32(mw)
+                        .u32(mh)
+                        .u32(pitch)
+                        .u32(bytes.len() as u32)
+                        .bytes(&bytes),
+                );
                 if keep_shadow && mip == 0 {
                     let dst = z as usize * base_depth_pitch as usize;
                     if dst < size as usize {
-                        let n = (bytes.len()).min(base_depth_pitch as usize).min(size as usize - dst);
-                        p.extra.com.res.get_mut(&id).unwrap().shadow[dst..dst + n].copy_from_slice(&bytes[..n]);
+                        let n = (bytes.len())
+                            .min(base_depth_pitch as usize)
+                            .min(size as usize - dst);
+                        p.extra.com.res.get_mut(&id).unwrap().shadow[dst..dst + n]
+                            .copy_from_slice(&bytes[..n]);
                     }
                 }
             }
@@ -985,7 +1232,9 @@ fn create_texture3d(p: &mut Process) -> R {
 fn create_view(p: &mut Process, vk: ViewKind) -> R {
     // (this, ID3D11Resource*, const D3D11_xxx_VIEW_DESC*, ID3D11xxxView**)
     let (res, desc, out) = (p.arg(1), p.arg(2), p.arg(3));
-    let Some(rid) = kind_of(p, res).and_then(|k| k.host_id()) else { return Ok(E_INVALIDARG) };
+    let Some(rid) = kind_of(p, res).and_then(|k| k.host_id()) else {
+        return Ok(E_INVALIDARG);
+    };
     let info = p.extra.com.res.get(&rid).cloned().unwrap_or_default();
     let default_dim = if info.is_buffer {
         1
@@ -996,7 +1245,11 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     } else {
         4
     };
-    let default_buffer_stride = if info.misc & 0x20 != 0 { 4 } else { info.stride.max(4) };
+    let default_buffer_stride = if info.misc & 0x20 != 0 {
+        4
+    } else {
+        info.stride.max(4)
+    };
     let default_count = if info.is_buffer {
         info.size / default_buffer_stride
     } else if vk == ViewKind::Uav {
@@ -1011,7 +1264,14 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     } else {
         info.array.max(1)
     };
-    let (mut format, mut dim, mut a, mut b, mut c, mut d) = (info.format, default_dim, 0u32, default_count, 0u32, default_slices);
+    let (mut format, mut dim, mut a, mut b, mut c, mut d) = (
+        info.format,
+        default_dim,
+        0u32,
+        default_count,
+        0u32,
+        default_slices,
+    );
     if desc != 0 {
         let f = p.rd32(desc)?;
         if f != 0 {
@@ -1080,7 +1340,10 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     }
     if b == u32::MAX {
         if info.is_buffer {
-            b = info.size.saturating_sub(a.saturating_mul(default_buffer_stride)) / default_buffer_stride;
+            b = info
+                .size
+                .saturating_sub(a.saturating_mul(default_buffer_stride))
+                / default_buffer_stride;
         } else {
             b = info.mips.max(1) - a.min(info.mips.max(1) - 1);
         }
@@ -1092,21 +1355,44 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
         ViewKind::Srv => 2,
         ViewKind::Uav => 3,
     };
-    p.extra.gpu.emit(op::CREATE_VIEW, Pk::new().u32(id).u32(kind_code).u32(rid).u32(format).u32(dim).u32(a).u32(b).u32(c).u32(d));
+    p.extra.gpu.emit(
+        op::CREATE_VIEW,
+        Pk::new()
+            .u32(id)
+            .u32(kind_code)
+            .u32(rid)
+            .u32(format)
+            .u32(dim)
+            .u32(a)
+            .u32(b)
+            .u32(c)
+            .u32(d),
+    );
     let iface = match vk {
         ViewKind::Rtv => "ID3D11RenderTargetView",
         ViewKind::Dsv => "ID3D11DepthStencilView",
         ViewKind::Srv => "ID3D11ShaderResourceView",
         ViewKind::Uav => "ID3D11UnorderedAccessView",
     };
-    let o = create(p, iface, Kind::View { vk, id, resource: rid });
+    let o = create(
+        p,
+        iface,
+        Kind::View {
+            vk,
+            id,
+            resource: rid,
+        },
+    );
     p.wr64(out, o)?;
     Ok(S_OK)
 }
 
 /// Parse the DXBC input signature (`ISGN`/`ISG1`) -> (semantic name lowercase, index, register).
 pub fn input_signature(dxbc: &[u8]) -> Vec<(String, u32, u32)> {
-    let rd = |o: usize| dxbc.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let rd = |o: usize| {
+        dxbc.get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
     let mut out = Vec::new();
     if dxbc.get(..4) != Some(b"DXBC") {
         return out;
@@ -1124,14 +1410,28 @@ pub fn input_signature(dxbc: &[u8]) -> Vec<(String, u32, u32)> {
         let stride = if tag == b"ISG1" { 32 } else { 24 };
         for e in 0..count.min(64) {
             let at = data + 8 + e * stride;
-            let (name_off, idx, sv, reg) = if tag == b"ISG1" { (rd(at + 4), rd(at + 8), rd(at + 12), rd(at + 20)) } else { (rd(at), rd(at + 4), rd(at + 8), rd(at + 16)) };
-            let (Some(name_off), Some(idx), Some(sv), Some(reg)) = (name_off, idx, sv, reg) else { continue };
+            let (name_off, idx, sv, reg) = if tag == b"ISG1" {
+                (rd(at + 4), rd(at + 8), rd(at + 12), rd(at + 20))
+            } else {
+                (rd(at), rd(at + 4), rd(at + 8), rd(at + 16))
+            };
+            let (Some(name_off), Some(idx), Some(sv), Some(reg)) = (name_off, idx, sv, reg) else {
+                continue;
+            };
             if sv != 0 {
                 continue; // system-value inputs (SV_VertexID, SV_InstanceID...) have no vertex buffer data
             }
             let s = data + name_off as usize;
-            let end = dxbc[s..].iter().position(|&b| b == 0).map(|k| s + k).unwrap_or(s);
-            out.push((String::from_utf8_lossy(&dxbc[s..end]).to_ascii_lowercase(), idx, reg));
+            let end = dxbc[s..]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|k| s + k)
+                .unwrap_or(s);
+            out.push((
+                String::from_utf8_lossy(&dxbc[s..end]).to_ascii_lowercase(),
+                idx,
+                reg,
+            ));
         }
     }
     out
@@ -1139,7 +1439,13 @@ pub fn input_signature(dxbc: &[u8]) -> Vec<(String, u32, u32)> {
 
 fn create_input_layout(p: &mut Process) -> R {
     // (this, const D3D11_INPUT_ELEMENT_DESC*, NumElements, pShaderBytecodeWithInputSignature, BytecodeLength, ID3D11InputLayout**)
-    let (descs, n, code, len, out) = (p.arg(1), p.arg(2) as u64, p.arg(3), p.arg(4) as usize, p.arg(5));
+    let (descs, n, code, len, out) = (
+        p.arg(1),
+        p.arg(2) as u64,
+        p.arg(3),
+        p.arg(4) as usize,
+        p.arg(5),
+    );
     if descs == 0 || out == 0 {
         return Ok(E_INVALIDARG);
     }
@@ -1150,14 +1456,31 @@ fn create_input_layout(p: &mut Process) -> R {
     for i in 0..n {
         let d = descs + 32 * i;
         let name = p.read_cstr(p.rd64(d)?)?.to_ascii_lowercase();
-        let (idx, fmt, slot, off, class, step) = (p.rd32(d + 8)?, p.rd32(d + 12)?, p.rd32(d + 16)?, p.rd32(d + 20)?, p.rd32(d + 24)?, p.rd32(d + 28)?);
+        let (idx, fmt, slot, off, class, step) = (
+            p.rd32(d + 8)?,
+            p.rd32(d + 12)?,
+            p.rd32(d + 16)?,
+            p.rd32(d + 20)?,
+            p.rd32(d + 24)?,
+            p.rd32(d + 28)?,
+        );
         let (bw, _, bytes) = format_info(fmt);
         let _ = bw;
         let slot_i = (slot as usize).min(15);
-        let offset = if off == 0xffff_ffff { offsets[slot_i] } else { off };
+        let offset = if off == 0xffff_ffff {
+            offsets[slot_i]
+        } else {
+            off
+        };
         offsets[slot_i] = offset + bytes;
         if let Some((_, _, reg)) = sig.iter().find(|(n2, i2, _)| *n2 == name && *i2 == idx) {
-            pk = pk.u32(*reg).u32(fmt).u32(slot).u32(offset).u32(class).u32(step);
+            pk = pk
+                .u32(*reg)
+                .u32(fmt)
+                .u32(slot)
+                .u32(offset)
+                .u32(class)
+                .u32(step);
             count += 1;
         }
     }
@@ -1184,7 +1507,10 @@ fn create_shader(p: &mut Process, stage: u32, iface: &'static str) -> R {
     }
     let bytes = p.read_bytes(code, len)?;
     let id = p.extra.gpu.new_id();
-    p.extra.gpu.emit(op::CREATE_SHADER, Pk::new().u32(id).u32(stage).u32(len as u32).bytes(&bytes));
+    p.extra.gpu.emit(
+        op::CREATE_SHADER,
+        Pk::new().u32(id).u32(stage).u32(len as u32).bytes(&bytes),
+    );
     let o = create(p, iface, Kind::Shader { id, stage });
     p.wr64(out, o)?;
     Ok(S_OK)
@@ -1210,7 +1536,10 @@ fn copy_resource(p: &mut Process, dst: u64, src: u64) -> Result<(), Stop> {
         return Ok(());
     }
     // Keep CPU shadows coherent for buffer -> buffer copies (staging readback of CPU-written data).
-    if let (Some(sh), true) = (p.extra.com.res.get(&s).map(|r| r.shadow.clone()), p.extra.com.res.contains_key(&d)) {
+    if let (Some(sh), true) = (
+        p.extra.com.res.get(&s).map(|r| r.shadow.clone()),
+        p.extra.com.res.contains_key(&d),
+    ) {
         if let Some(dr) = p.extra.com.res.get_mut(&d) {
             if !sh.is_empty() && dr.shadow.len() == sh.len() {
                 dr.shadow = sh;
@@ -1223,9 +1552,25 @@ fn copy_resource(p: &mut Process, dst: u64, src: u64) -> Result<(), Stop> {
 
 fn copy_subresource_region(p: &mut Process) -> R {
     // (this, pDst, DstSubresource, DstX, DstY, DstZ, pSrc, SrcSubresource, pSrcBox)
-    let (dst, dsub, dx, dy, dz, src, ssub, sbox) = (p.arg(1), p.arg(2) as u32, p.arg(3) as u32, p.arg(4) as u32, p.arg(5) as u32, p.arg(6), p.arg(7) as u32, p.arg(8));
+    let (dst, dsub, dx, dy, dz, src, ssub, sbox) = (
+        p.arg(1),
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+        p.arg(6),
+        p.arg(7) as u32,
+        p.arg(8),
+    );
     let (d, s) = (obj_id(p, dst), obj_id(p, src));
-    let mut pk = Pk::new().u32(d).u32(dsub).u32(dx).u32(dy).u32(dz).u32(s).u32(ssub);
+    let mut pk = Pk::new()
+        .u32(d)
+        .u32(dsub)
+        .u32(dx)
+        .u32(dy)
+        .u32(dz)
+        .u32(s)
+        .u32(ssub);
     if sbox != 0 {
         pk = pk.u32(1);
         for i in 0..6 {
@@ -1252,8 +1597,20 @@ fn resolve_subresource(p: &mut Process) -> R {
     let dst_info = p.extra.com.res.get(&dst);
     let src_info = p.extra.com.res.get(&src);
     if let (Some(dst_info), Some(src_info)) = (dst_info, src_info) {
-        if src_info.samples > 1 && dst_info.samples == 1 && src_info.format == format && dst_info.format == format {
-            p.extra.gpu.emit(op::RESOLVE_TEXTURE, Pk::new().u32(dst).u32(dst_sub).u32(src).u32(src_sub).u32(format));
+        if src_info.samples > 1
+            && dst_info.samples == 1
+            && src_info.format == format
+            && dst_info.format == format
+        {
+            p.extra.gpu.emit(
+                op::RESOLVE_TEXTURE,
+                Pk::new()
+                    .u32(dst)
+                    .u32(dst_sub)
+                    .u32(src)
+                    .u32(src_sub)
+                    .u32(format),
+            );
         }
     }
     Ok(0)
@@ -1261,12 +1618,25 @@ fn resolve_subresource(p: &mut Process) -> R {
 
 fn update_subresource(p: &mut Process) -> R {
     // (this, pDstResource, DstSubresource, const D3D11_BOX* pDstBox, const void* pSrcData, SrcRowPitch, SrcDepthPitch)
-    let (res, sub, bx, src, row_pitch, depth_pitch) = (p.arg(1), p.arg(2) as u32, p.arg(3), p.arg(4), p.arg(5) as u32, p.arg(6) as u32);
-    let Some(kind) = kind_of(p, res) else { return Ok(0) };
+    let (res, sub, bx, src, row_pitch, depth_pitch) = (
+        p.arg(1),
+        p.arg(2) as u32,
+        p.arg(3),
+        p.arg(4),
+        p.arg(5) as u32,
+        p.arg(6) as u32,
+    );
+    let Some(kind) = kind_of(p, res) else {
+        return Ok(0);
+    };
     match kind {
         Kind::Buffer { id } => {
             let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-            let (left, right) = if bx != 0 { (p.rd32(bx)?, p.rd32(bx + 12)?) } else { (0, info.size) };
+            let (left, right) = if bx != 0 {
+                (p.rd32(bx)?, p.rd32(bx + 12)?)
+            } else {
+                (0, info.size)
+            };
             let n = right.saturating_sub(left) as usize;
             let bytes = p.read_bytes(src, n)?;
             if let Some(r) = p.extra.com.res.get_mut(&id) {
@@ -1274,22 +1644,55 @@ fn update_subresource(p: &mut Process) -> R {
                     r.shadow[left as usize..left as usize + n].copy_from_slice(&bytes);
                 }
             }
-            p.extra.gpu.emit(op::BUFFER_WRITE, Pk::new().u32(id).u32(left).u32(n as u32).bytes(&bytes));
+            p.extra.gpu.emit(
+                op::BUFFER_WRITE,
+                Pk::new().u32(id).u32(left).u32(n as u32).bytes(&bytes),
+            );
         }
         Kind::Texture2D { id } => {
             let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
             let (mip, slice) = (sub % info.mips.max(1), sub / info.mips.max(1));
             let (mw, mh) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
-            let (x, y, w, h) = if bx != 0 { (p.rd32(bx)?, p.rd32(bx + 4)?, p.rd32(bx + 12)? - p.rd32(bx)?, p.rd32(bx + 16)? - p.rd32(bx + 4)?) } else { (0, 0, mw, mh) };
-            let pitch = if row_pitch == 0 { row_bytes(info.format, w) } else { row_pitch };
+            let (x, y, w, h) = if bx != 0 {
+                (
+                    p.rd32(bx)?,
+                    p.rd32(bx + 4)?,
+                    p.rd32(bx + 12)? - p.rd32(bx)?,
+                    p.rd32(bx + 16)? - p.rd32(bx + 4)?,
+                )
+            } else {
+                (0, 0, mw, mh)
+            };
+            let pitch = if row_pitch == 0 {
+                row_bytes(info.format, w)
+            } else {
+                row_pitch
+            };
             let nrows = rows(info.format, h);
             let bytes = p.read_bytes(src, (pitch * nrows) as usize)?;
-            p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(slice).u32(x).u32(y).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+            p.extra.gpu.emit(
+                op::TEXTURE_WRITE,
+                Pk::new()
+                    .u32(id)
+                    .u32(mip)
+                    .u32(slice)
+                    .u32(x)
+                    .u32(y)
+                    .u32(w)
+                    .u32(h)
+                    .u32(pitch)
+                    .u32(bytes.len() as u32)
+                    .bytes(&bytes),
+            );
         }
         Kind::Texture3D { id } => {
             let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
             let mip = sub % info.mips.max(1);
-            let (mw, mh, md) = (mip_dim(info.width, mip), mip_dim(info.height, mip), mip_dim(info.depth, mip));
+            let (mw, mh, md) = (
+                mip_dim(info.width, mip),
+                mip_dim(info.height, mip),
+                mip_dim(info.depth, mip),
+            );
             let (x, y, z, w, h, depth) = if bx != 0 {
                 let (left, top, front) = (p.rd32(bx)?, p.rd32(bx + 4)?, p.rd32(bx + 8)?);
                 let (right, bottom, back) = (p.rd32(bx + 12)?, p.rd32(bx + 16)?, p.rd32(bx + 20)?);
@@ -1297,12 +1700,36 @@ fn update_subresource(p: &mut Process) -> R {
             } else {
                 (0, 0, 0, mw, mh, md)
             };
-            let pitch = if row_pitch == 0 { row_bytes(info.format, w) } else { row_pitch };
+            let pitch = if row_pitch == 0 {
+                row_bytes(info.format, w)
+            } else {
+                row_pitch
+            };
             let nrows = rows(info.format, h);
-            let depth_pitch = if depth_pitch == 0 { pitch * nrows } else { depth_pitch };
+            let depth_pitch = if depth_pitch == 0 {
+                pitch * nrows
+            } else {
+                depth_pitch
+            };
             for slice in 0..depth {
-                let bytes = p.read_bytes(src + slice as u64 * depth_pitch as u64, (pitch * nrows) as usize)?;
-                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(z + slice).u32(x).u32(y).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+                let bytes = p.read_bytes(
+                    src + slice as u64 * depth_pitch as u64,
+                    (pitch * nrows) as usize,
+                )?;
+                p.extra.gpu.emit(
+                    op::TEXTURE_WRITE,
+                    Pk::new()
+                        .u32(id)
+                        .u32(mip)
+                        .u32(z + slice)
+                        .u32(x)
+                        .u32(y)
+                        .u32(w)
+                        .u32(h)
+                        .u32(pitch)
+                        .u32(bytes.len() as u32)
+                        .bytes(&bytes),
+                );
             }
         }
         _ => {}
@@ -1320,7 +1747,9 @@ fn map_with_readback(
 ) -> R {
     // (this, pResource, Subresource, MapType, MapFlags, D3D11_MAPPED_SUBRESOURCE*)
     let (res, sub, ty, out) = (p.arg(1), p.arg(2) as u32, p.arg(3) as u32, p.arg(5));
-    let Some(id) = obj_id_opt(p, res) else { return Ok(E_INVALIDARG) };
+    let Some(id) = obj_id_opt(p, res) else {
+        return Ok(E_INVALIDARG);
+    };
     let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
     let (len, pitch, depth_pitch) = if info.is_buffer {
         (info.size as u64, info.size, info.size)
@@ -1329,10 +1758,18 @@ fn map_with_readback(
         let (w, h) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
         let pitch = row_bytes(info.format, w);
         let depth_pitch = pitch * rows(info.format, h);
-        let depth = if info.is_3d { mip_dim(info.depth, mip) } else { 1 };
+        let depth = if info.is_3d {
+            mip_dim(info.depth, mip)
+        } else {
+            1
+        };
         (depth_pitch as u64 * depth as u64, pitch, depth_pitch)
     };
-    let addr = if info.map_addr != 0 { info.map_addr } else { kernel32::alloc_block(p, len.max(16), true) };
+    let addr = if info.map_addr != 0 {
+        info.map_addr
+    } else {
+        kernel32::alloc_block(p, len.max(16), true)
+    };
     // MAP_READ=1, WRITE=2, READ_WRITE=3, WRITE_DISCARD=4, WRITE_NO_OVERWRITE=5
     let reads = ty == 1 || ty == 3;
     let writes = ty != 1;
@@ -1370,7 +1807,9 @@ fn obj_id_opt(p: &Process, ptr: u64) -> Option<u32> {
 
 fn unmap(p: &mut Process) -> R {
     let (res, _sub) = (p.arg(1), p.arg(2));
-    let Some(id) = obj_id_opt(p, res) else { return Ok(0) };
+    let Some(id) = obj_id_opt(p, res) else {
+        return Ok(0);
+    };
     let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
     if info.map_addr == 0 || !info.map_write {
         return Ok(0);
@@ -1381,7 +1820,10 @@ fn unmap(p: &mut Process) -> R {
             r.shadow = bytes.clone();
             r.map_write = false;
         }
-        p.extra.gpu.emit(op::BUFFER_WRITE, Pk::new().u32(id).u32(0).u32(info.size).bytes(&bytes));
+        p.extra.gpu.emit(
+            op::BUFFER_WRITE,
+            Pk::new().u32(id).u32(0).u32(info.size).bytes(&bytes),
+        );
     } else {
         let sub = info.map_sub;
         let mip = sub % info.mips.max(1);
@@ -1389,7 +1831,11 @@ fn unmap(p: &mut Process) -> R {
         let pitch = row_bytes(info.format, w);
         let nrows = rows(info.format, h);
         let depth_pitch = pitch * nrows;
-        let depth = if info.is_3d { mip_dim(info.depth, mip) } else { 1 };
+        let depth = if info.is_3d {
+            mip_dim(info.depth, mip)
+        } else {
+            1
+        };
         let bytes = p.read_bytes(info.map_addr, (depth_pitch * depth) as usize)?;
         if let Some(r) = p.extra.com.res.get_mut(&id) {
             if sub == 0 && !r.shadow.is_empty() {
@@ -1400,12 +1846,39 @@ fn unmap(p: &mut Process) -> R {
         }
         if info.is_3d {
             for z in 0..depth {
-                let slice_bytes = &bytes[(z * depth_pitch) as usize..((z + 1) * depth_pitch) as usize];
-                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(z).u32(0).u32(0).u32(w).u32(h).u32(pitch).u32(slice_bytes.len() as u32).bytes(slice_bytes));
+                let slice_bytes =
+                    &bytes[(z * depth_pitch) as usize..((z + 1) * depth_pitch) as usize];
+                p.extra.gpu.emit(
+                    op::TEXTURE_WRITE,
+                    Pk::new()
+                        .u32(id)
+                        .u32(mip)
+                        .u32(z)
+                        .u32(0)
+                        .u32(0)
+                        .u32(w)
+                        .u32(h)
+                        .u32(pitch)
+                        .u32(slice_bytes.len() as u32)
+                        .bytes(slice_bytes),
+                );
             }
         } else {
             let slice = sub / info.mips.max(1);
-            p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(slice).u32(0).u32(0).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+            p.extra.gpu.emit(
+                op::TEXTURE_WRITE,
+                Pk::new()
+                    .u32(id)
+                    .u32(mip)
+                    .u32(slice)
+                    .u32(0)
+                    .u32(0)
+                    .u32(w)
+                    .u32(h)
+                    .u32(pitch)
+                    .u32(bytes.len() as u32)
+                    .bytes(&bytes),
+            );
         }
     }
     Ok(0)
@@ -1434,7 +1907,9 @@ fn get_parent(p: &mut Process) -> R {
 
 fn get_desc(p: &mut Process) -> R {
     let (this, out) = (p.arg(0), p.arg(1));
-    let Some(kind) = kind_of(p, this) else { return Ok(E_INVALIDARG) };
+    let Some(kind) = kind_of(p, this) else {
+        return Ok(E_INVALIDARG);
+    };
     match kind {
         Kind::Adapter => {
             let mut b = vec![0u8; 304];
@@ -1460,10 +1935,22 @@ fn get_desc(p: &mut Process) -> R {
             p.write_bytes(out, &b)?;
         }
         Kind::SwapChain { backbuffer, .. } => {
-            let Some(Kind::Texture2D { id }) = kind_of(p, backbuffer) else { return Ok(E_FAIL) };
+            let Some(Kind::Texture2D { id }) = kind_of(p, backbuffer) else {
+                return Ok(E_FAIL);
+            };
             let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
             let mut b = vec![0u8; 72];
-            for (off, v) in [(0usize, r.width), (4, r.height), (8, 60), (12, 1), (16, r.format), (28, 1), (36, 0x20), (40, 2), (56, 1)] {
+            for (off, v) in [
+                (0usize, r.width),
+                (4, r.height),
+                (8, 60),
+                (12, 1),
+                (16, r.format),
+                (28, 1),
+                (36, 0x20),
+                (40, 2),
+                (56, 1),
+            ] {
                 b[off..off + 4].copy_from_slice(&v.to_le_bytes());
             }
             b[48..56].copy_from_slice(&p.extra.win.main_window.to_le_bytes());
@@ -1471,20 +1958,37 @@ fn get_desc(p: &mut Process) -> R {
         }
         Kind::Buffer { id } => {
             let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-            for (i, v) in [r.size, r.usage, r.bind, r.cpu, r.misc, r.stride].iter().enumerate() {
+            for (i, v) in [r.size, r.usage, r.bind, r.cpu, r.misc, r.stride]
+                .iter()
+                .enumerate()
+            {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
         }
         Kind::Texture2D { id } => {
             let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-            let vals = [r.width, r.height, r.mips, r.array, r.format, r.samples.max(1), 0, r.usage, r.bind, r.cpu, r.misc];
+            let vals = [
+                r.width,
+                r.height,
+                r.mips,
+                r.array,
+                r.format,
+                r.samples.max(1),
+                0,
+                r.usage,
+                r.bind,
+                r.cpu,
+                r.misc,
+            ];
             for (i, v) in vals.iter().enumerate() {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
         }
         Kind::Texture3D { id } => {
             let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-            let vals = [r.width, r.height, r.depth, r.mips, r.format, r.usage, r.bind, r.cpu, r.misc];
+            let vals = [
+                r.width, r.height, r.depth, r.mips, r.format, r.usage, r.bind, r.cpu, r.misc,
+            ];
             for (i, v) in vals.iter().enumerate() {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
@@ -1499,9 +2003,9 @@ mod tests {
     use super::*;
 
     fn call_create_device(levels: Option<&[u32]>) -> (Process, u64) {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const LEVELS: u64 = 0x10000;
         const OUT_LEVEL: u64 = 0x11000;
@@ -1534,9 +2038,9 @@ mod tests {
     }
 
     fn call_create_query(method_name: &str, query_type: u32) -> (Process, u64) {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DESC: u64 = 0x10000;
         const OUT: u64 = 0x11000;
@@ -1555,9 +2059,9 @@ mod tests {
 
     #[test]
     fn map_readback_for_3d_rgba8_preserves_packed_data_and_depth_pitches() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const OUT: u64 = 0x14000;
         const STACK: u64 = 0x20000;
@@ -1566,18 +2070,21 @@ mod tests {
             assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
         }
         let id = p.extra.gpu.new_id();
-        p.extra.com.res.insert(id, ResInfo {
-            width: 2,
-            height: 2,
-            depth: 2,
-            is_3d: true,
-            mips: 1,
-            array: 1,
-            format: DXGI_FORMAT_R8G8B8A8_UNORM,
-            usage: 3,
-            cpu: 0x0002_0000, // D3D11_CPU_ACCESS_READ
-            ..Default::default()
-        });
+        p.extra.com.res.insert(
+            id,
+            ResInfo {
+                width: 2,
+                height: 2,
+                depth: 2,
+                is_3d: true,
+                mips: 1,
+                array: 1,
+                format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                usage: 3,
+                cpu: 0x0002_0000, // D3D11_CPU_ACCESS_READ
+                ..Default::default()
+            },
+        );
         let texture = create(&mut p, "ID3D11Texture3D", Kind::Texture3D { id });
         let stack = STACK + PAGE_SIZE - 0x100;
         p.cpu.gpr[RSP] = stack;
@@ -1594,7 +2101,8 @@ mod tests {
             assert_eq!(output.len(), expected.len());
             output.copy_from_slice(&expected);
             1
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(result, S_OK);
         let mapped = p.rd64(OUT).unwrap();
@@ -1605,8 +2113,8 @@ mod tests {
 
     #[test]
     fn clear_state_unbinds_render_targets_and_emits_a_gpu_state_reset() {
-        use anywasm_cpu::cpu::RCX;
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::RCX;
 
         let mut p = Process::new(Vfs::new());
         let context = create(&mut p, "ID3D11DeviceContext1", Kind::Context);
@@ -1628,9 +2136,9 @@ mod tests {
 
     #[test]
     fn flush1_signals_the_selected_target_idle_event() {
-        use anywasm_cpu::cpu::{R8, RCX};
         use crate::process::Handle;
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, RCX};
 
         let mut p = Process::new(Vfs::new());
         let event = p.new_handle(Handle::Event {
@@ -1650,9 +2158,9 @@ mod tests {
 
     #[test]
     fn event_query_completes_after_end_for_diligent_idle_wait() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const OUT: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -1771,10 +2279,8 @@ mod tests {
 
     #[test]
     fn create_device_rejects_11_1_in_the_requested_feature_levels() {
-        let (_, result) = call_create_device(Some(&[
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_11_0,
-        ]));
+        let (_, result) =
+            call_create_device(Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]));
         assert_eq!(result, E_INVALIDARG);
     }
 
@@ -1787,10 +2293,70 @@ mod tests {
     }
 
     #[test]
-    fn create_texture3d_emits_volume_creation_and_each_initial_z_slice() {
+    fn create_texture1d_emits_resource_and_initial_texels() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const DESC: u64 = 0x10000;
+        const INIT: u64 = 0x11000;
+        const DATA: u64 = 0x12000;
+        const OUT: u64 = 0x13000;
+        let mut p = Process::new(Vfs::new());
+        for addr in [DESC, INIT, DATA, OUT] {
+            assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
+        }
+        let desc = [4u32, 1, 1, 28, 0, 8, 0, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        p.write_bytes(DESC, &desc).unwrap();
+        let mut initial = DATA.to_le_bytes().to_vec();
+        initial.extend(16u32.to_le_bytes()); // SysMemPitch
+        initial.extend(16u32.to_le_bytes()); // SysMemSlicePitch
+        p.write_bytes(INIT, &initial).unwrap();
+        let texels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        p.write_bytes(DATA, &texels).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = INIT;
+        p.cpu.gpr[R9] = OUT;
+
+        let Some(create_texture) = method("ID3D11Device", "CreateTexture1D") else {
+            panic!("CreateTexture1D should be exposed by the D3D11 device");
+        };
+        assert_eq!(create_texture(&mut p).unwrap(), S_OK);
+
+        let texture = p.rd64(OUT).unwrap();
+        let texture_id = kind_of(&p, texture)
+            .and_then(|kind| kind.host_id())
+            .expect("CreateTexture1D should return a GPU texture resource");
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].0, 53); // CREATE_TEXTURE1D
+        let fields = commands[0]
+            .1
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(fields, vec![texture_id, 4, 1, 1, 28, 8, 0, 0]);
+        let (opcode, payload) = &commands[1];
+        assert_eq!(*opcode, op::TEXTURE_WRITE);
+        let fields = payload[..36]
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(fields, vec![texture_id, 0, 0, 0, 0, 4, 1, 16, 16]);
+        assert_eq!(&payload[36..], &texels);
+    }
+
+    #[test]
+    fn create_texture3d_emits_volume_creation_and_each_initial_z_slice() {
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const DESC: u64 = 0x10000;
         const INIT: u64 = 0x11000;
@@ -1832,18 +2398,27 @@ mod tests {
         let commands = gpu::decode(&p.extra.gpu.buf);
         assert_eq!(commands.len(), 3);
         assert_eq!(commands[0].0, op::CREATE_TEXTURE3D);
-        let fields = commands[0].1.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+        let fields = commands[0]
+            .1
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect::<Vec<_>>();
         assert_eq!(fields, vec![texture_id, 4, 4, 2, 1, 28, 8, 0, 0]);
         for (z, rgba) in [[255, 0, 0, 255], [0, 255, 0, 255]].into_iter().enumerate() {
             let (opcode, payload) = &commands[z + 1];
             assert_eq!(*opcode, op::TEXTURE_WRITE);
-            let fields = payload[..36].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+            let fields = payload[..36]
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>();
             assert_eq!(fields, vec![texture_id, 0, z as u32, 0, 0, 4, 4, 16, 64]);
             assert!(payload[36..].chunks_exact(4).all(|pixel| pixel == rgba));
         }
 
         let mut srv_desc = Vec::new();
-        for value in [28u32, 8, 0, 1] { srv_desc.extend(value.to_le_bytes()); }
+        for value in [28u32, 8, 0, 1] {
+            srv_desc.extend(value.to_le_bytes());
+        }
         p.write_bytes(DESC, &srv_desc).unwrap(); // Texture3D SRV: first mip 0, one mip
         p.cpu.gpr[RCX] = 0;
         p.cpu.gpr[RDX] = texture;
@@ -1853,12 +2428,17 @@ mod tests {
         assert_eq!(create_srv(&mut p).unwrap(), S_OK);
         let srv = p.rd64(OUT).unwrap();
         let view_id = match kind_of(&p, srv) {
-            Some(Kind::View { vk: ViewKind::Srv, id, .. }) => id,
+            Some(Kind::View {
+                vk: ViewKind::Srv,
+                id,
+                ..
+            }) => id,
             other => panic!("expected Texture3D SRV, got {other:?}"),
         };
         let (opcode, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
         assert_eq!(opcode, op::CREATE_VIEW);
-        let fields = payload.chunks_exact(4)
+        let fields = payload
+            .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(fields, vec![view_id, 2, texture_id, 28, 8, 0, 1, 0, 1]);
@@ -1866,19 +2446,28 @@ mod tests {
 
     #[test]
     fn update_texture3d_emits_each_boxed_z_slice_with_depth_pitch() {
-        use anywasm_cpu::cpu::{RSP, RCX, RDX, R8, R9};
-        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const BOX: u64 = 0x10000;
         const DATA: u64 = 0x11000;
         const STACK: u64 = 0x12000;
         let mut p = Process::new(Vfs::new());
         let id = p.extra.gpu.new_id();
-        p.extra.com.res.insert(id, ResInfo {
-            width: 4, height: 4, depth: 4, is_3d: true, mips: 1, array: 1, format: 28,
-            ..Default::default()
-        });
+        p.extra.com.res.insert(
+            id,
+            ResInfo {
+                width: 4,
+                height: 4,
+                depth: 4,
+                is_3d: true,
+                mips: 1,
+                array: 1,
+                format: 28,
+                ..Default::default()
+            },
+        );
         let texture = create(&mut p, "ID3D11Texture3D", Kind::Texture3D { id });
         for addr in [BOX, DATA, STACK] {
             assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
@@ -1905,7 +2494,8 @@ mod tests {
         for (slice, command) in commands.iter().enumerate() {
             let (opcode, payload) = command;
             assert_eq!(*opcode, op::TEXTURE_WRITE);
-            let fields = payload[..36].chunks_exact(4)
+            let fields = payload[..36]
+                .chunks_exact(4)
                 .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
                 .collect::<Vec<_>>();
             assert_eq!(fields, vec![id, 0, 1 + slice as u32, 1, 1, 2, 2, 8, 16]);
@@ -1935,23 +2525,47 @@ mod tests {
         assert_ne!(format_support_flags(31) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_SNORM
         assert_ne!(format_support_flags(30) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UINT
         assert_ne!(format_support_flags(32) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_SINT
-        assert_ne!(format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE, 0);
-        assert_ne!(format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
-        assert_ne!(format_support_flags(87) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
-        assert_ne!(format_support_flags(10) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE, 0);
-        assert_ne!(format_support_flags(10) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
-        assert_eq!(format_support_flags(12) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
-        assert_eq!(format_support_flags(14) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
-        assert_eq!(format_support_flags(54) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
+        assert_ne!(
+            format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE,
+            0
+        );
+        assert_ne!(
+            format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET,
+            0
+        );
+        assert_ne!(
+            format_support_flags(87) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET,
+            0
+        );
+        assert_ne!(
+            format_support_flags(10) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE,
+            0
+        );
+        assert_ne!(
+            format_support_flags(10) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET,
+            0
+        );
+        assert_eq!(
+            format_support_flags(12) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET,
+            0
+        );
+        assert_eq!(
+            format_support_flags(14) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET,
+            0
+        );
+        assert_eq!(
+            format_support_flags(54) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET,
+            0
+        );
         assert_eq!(format_support_flags(54) & TYPED_UAV, 0); // DXGI_FORMAT_R16_FLOAT
         assert_eq!(format_support_flags(61) & TYPED_UAV, 0); // DXGI_FORMAT_R8_UNORM
     }
 
     #[test]
     fn check_feature_support_reports_typed_uav_format_queries() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DATA: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -1964,7 +2578,10 @@ mod tests {
 
         let check = method("ID3D11Device", "CheckFeatureSupport").unwrap();
         assert_eq!(check(&mut p).unwrap(), S_OK);
-        assert_ne!(p.rd32(DATA + 4).unwrap() & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW, 0);
+        assert_ne!(
+            p.rd32(DATA + 4).unwrap() & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW,
+            0
+        );
 
         p.cpu.gpr[RDX] = 3; // D3D11_FEATURE_FORMAT_SUPPORT2
         p.wr32(DATA, DXGI_FORMAT_R8G8B8A8_UINT).unwrap();
@@ -1984,9 +2601,9 @@ mod tests {
 
     #[test]
     fn check_feature_support_reports_disabled_d3d11_options1_capabilities() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DATA: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -2007,9 +2624,9 @@ mod tests {
 
     #[test]
     fn create_deferred_context_returns_a_deferred_context_with_its_flags() {
-        use anywasm_cpu::cpu::{RCX, RDX, R8};
-        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const OUT: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -2034,9 +2651,9 @@ mod tests {
 
     #[test]
     fn create_deferred_context_rejects_nonzero_reserved_flags() {
-        use anywasm_cpu::cpu::{RCX, RDX, R8};
-        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const OUT: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -2054,9 +2671,9 @@ mod tests {
 
     #[test]
     fn command_list_execution_brackets_recorded_commands_and_restores_state() {
-        use anywasm_cpu::cpu::{RCX, RDX, R8};
-        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const OUT: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -2079,7 +2696,12 @@ mod tests {
             .insert(deferred, DeferredContextState::default());
         let mut recorded = gpu::GpuStream::default();
         recorded.emit(op::SET_TOPOLOGY, Pk::new().u32(4));
-        p.extra.com.deferred_contexts.get_mut(&deferred).unwrap().commands = recorded.buf;
+        p.extra
+            .com
+            .deferred_contexts
+            .get_mut(&deferred)
+            .unwrap()
+            .commands = recorded.buf;
 
         p.cpu.gpr[RCX] = deferred;
         p.cpu.gpr[RDX] = 1; // RestoreDeferredContextState
@@ -2113,7 +2735,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             opcodes,
-            vec![op::PUSH_STATE, op::CLEAR_STATE, op::SET_TOPOLOGY, op::POP_STATE]
+            vec![
+                op::PUSH_STATE,
+                op::CLEAR_STATE,
+                op::SET_TOPOLOGY,
+                op::POP_STATE
+            ]
         );
 
         p.extra.gpu.buf.clear();
@@ -2230,9 +2857,9 @@ mod tests {
 
     #[test]
     fn create_texture2d_forwards_supported_sample_count() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DESC: u64 = 0x10000;
         const OUT: u64 = 0x11000;
@@ -2282,27 +2909,54 @@ mod tests {
         }
 
         let stream = &p.extra.gpu.buf;
-        assert_eq!(u32::from_le_bytes(stream[0..4].try_into().unwrap()), op::CREATE_TEXTURE2D);
+        assert_eq!(
+            u32::from_le_bytes(stream[0..4].try_into().unwrap()),
+            op::CREATE_TEXTURE2D
+        );
         assert_eq!(u32::from_le_bytes(stream[40..44].try_into().unwrap()), 4);
-        assert_eq!(u32::from_le_bytes(stream[76..80].try_into().unwrap()), DXGI_FORMAT_B8G8R8A8_UNORM);
+        assert_eq!(
+            u32::from_le_bytes(stream[76..80].try_into().unwrap()),
+            DXGI_FORMAT_B8G8R8A8_UNORM
+        );
         assert_eq!(u32::from_le_bytes(stream[88..92].try_into().unwrap()), 4);
-        assert_eq!(u32::from_le_bytes(stream[124..128].try_into().unwrap()), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        assert_eq!(
+            u32::from_le_bytes(stream[124..128].try_into().unwrap()),
+            DXGI_FORMAT_R16G16B16A16_FLOAT
+        );
         assert_eq!(u32::from_le_bytes(stream[136..140].try_into().unwrap()), 4);
     }
 
     #[test]
     fn resolve_subresource_emits_the_source_and_destination_resources() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const STACK: u64 = 0x20000;
         let mut p = Process::new(Vfs::new());
         assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
         let dst_id = p.extra.gpu.new_id();
         let src_id = p.extra.gpu.new_id();
-        p.extra.com.res.insert(dst_id, ResInfo { width: 8, height: 8, format: 28, samples: 1, ..Default::default() });
-        p.extra.com.res.insert(src_id, ResInfo { width: 8, height: 8, format: 28, samples: 4, ..Default::default() });
+        p.extra.com.res.insert(
+            dst_id,
+            ResInfo {
+                width: 8,
+                height: 8,
+                format: 28,
+                samples: 1,
+                ..Default::default()
+            },
+        );
+        p.extra.com.res.insert(
+            src_id,
+            ResInfo {
+                width: 8,
+                height: 8,
+                format: 28,
+                samples: 4,
+                ..Default::default()
+            },
+        );
         let dst = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: dst_id });
         let src = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: src_id });
 
@@ -2317,26 +2971,57 @@ mod tests {
         let resolve = method("ID3D11DeviceContext", "ResolveSubresource").unwrap();
         assert_eq!(resolve(&mut p).unwrap(), 0);
         let stream = &p.extra.gpu.buf;
-        assert_eq!(u32::from_le_bytes(stream[0..4].try_into().unwrap()), op::RESOLVE_TEXTURE);
+        assert_eq!(
+            u32::from_le_bytes(stream[0..4].try_into().unwrap()),
+            op::RESOLVE_TEXTURE
+        );
         let payload = &stream[8..28];
-        let fields = payload.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+        let fields = payload
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect::<Vec<_>>();
         assert_eq!(fields, vec![dst_id, 0, src_id, 0, 28]);
 
         let dst16_id = p.extra.gpu.new_id();
         let src16_id = p.extra.gpu.new_id();
-        p.extra.com.res.insert(dst16_id, ResInfo { width: 8, height: 8, format: DXGI_FORMAT_R16G16B16A16_FLOAT, samples: 1, ..Default::default() });
-        p.extra.com.res.insert(src16_id, ResInfo { width: 8, height: 8, format: DXGI_FORMAT_R16G16B16A16_FLOAT, samples: 4, ..Default::default() });
+        p.extra.com.res.insert(
+            dst16_id,
+            ResInfo {
+                width: 8,
+                height: 8,
+                format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+                samples: 1,
+                ..Default::default()
+            },
+        );
+        p.extra.com.res.insert(
+            src16_id,
+            ResInfo {
+                width: 8,
+                height: 8,
+                format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+                samples: 4,
+                ..Default::default()
+            },
+        );
         let dst16 = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: dst16_id });
         let src16 = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: src16_id });
         p.cpu.gpr[RDX] = dst16;
         p.cpu.gpr[R9] = src16;
-        p.wr64(STACK + 48, DXGI_FORMAT_R16G16B16A16_FLOAT as u64).unwrap();
+        p.wr64(STACK + 48, DXGI_FORMAT_R16G16B16A16_FLOAT as u64)
+            .unwrap();
         assert_eq!(resolve(&mut p).unwrap(), 0);
         let commands = gpu::decode(&p.extra.gpu.buf);
         assert_eq!(commands.len(), 2);
         let (_, payload) = &commands[1];
-        let fields = payload.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
-        assert_eq!(fields, vec![dst16_id, 0, src16_id, 0, DXGI_FORMAT_R16G16B16A16_FLOAT]);
+        let fields = payload
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            vec![dst16_id, 0, src16_id, 0, DXGI_FORMAT_R16G16B16A16_FLOAT]
+        );
 
         let dst_srgb_id = p.extra.gpu.new_id();
         let src_srgb_id = p.extra.gpu.new_id();
@@ -2360,24 +3045,45 @@ mod tests {
                 ..Default::default()
             },
         );
-        let dst_srgb = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: dst_srgb_id });
-        let src_srgb = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: src_srgb_id });
+        let dst_srgb = create(
+            &mut p,
+            "ID3D11Texture2D",
+            Kind::Texture2D { id: dst_srgb_id },
+        );
+        let src_srgb = create(
+            &mut p,
+            "ID3D11Texture2D",
+            Kind::Texture2D { id: src_srgb_id },
+        );
         p.cpu.gpr[RDX] = dst_srgb;
         p.cpu.gpr[R9] = src_srgb;
-        p.wr64(STACK + 48, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB as u64).unwrap();
+        p.wr64(STACK + 48, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB as u64)
+            .unwrap();
         assert_eq!(resolve(&mut p).unwrap(), 0);
         let commands = gpu::decode(&p.extra.gpu.buf);
         assert_eq!(commands.len(), 3);
         let (_, payload) = &commands[2];
-        let fields = payload.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
-        assert_eq!(fields, vec![dst_srgb_id, 0, src_srgb_id, 0, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB]);
+        let fields = payload
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fields,
+            vec![
+                dst_srgb_id,
+                0,
+                src_srgb_id,
+                0,
+                DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+            ]
+        );
     }
 
     #[test]
     fn create_unordered_access_view_tracks_texture2d_mip_slice() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DESC: u64 = 0x10000;
         const OUT: u64 = 0x11000;
@@ -2429,9 +3135,9 @@ mod tests {
 
     #[test]
     fn create_unordered_access_view_tracks_buffer_range_and_flags() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DESC: u64 = 0x10000;
         const OUT: u64 = 0x11000;
@@ -2475,9 +3181,9 @@ mod tests {
 
     #[test]
     fn create_raw_buffer_uav_preserves_raw_flag_and_element_range() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DESC: u64 = 0x10000;
         const OUT: u64 = 0x11000;
@@ -2520,9 +3226,9 @@ mod tests {
 
     #[test]
     fn create_structured_buffer_srv_preserves_element_range() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const DESC: u64 = 0x10000;
         const OUT: u64 = 0x11000;
@@ -2566,9 +3272,9 @@ mod tests {
 
     #[test]
     fn cs_set_unordered_access_views_emits_view_ids_and_initial_counts() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const VIEWS: u64 = 0x10000;
         const COUNTS: u64 = 0x11000;
@@ -2621,9 +3327,9 @@ mod tests {
 
     #[test]
     fn vs_set_constant_buffers1_emits_buffer_ranges_in_shader_constants() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const BUFFERS: u64 = 0x10000;
         const FIRST: u64 = 0x11000;
@@ -2671,9 +3377,9 @@ mod tests {
 
     #[test]
     fn texture_update_and_bounded_copy_emit_the_requested_subresources() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const UPDATE_BOX: u64 = 0x10000;
         const COPY_BOX: u64 = 0x11000;
@@ -2759,9 +3465,9 @@ mod tests {
 
     #[test]
     fn create_default_3d_uav_covers_one_mip_and_the_full_depth() {
-        use anywasm_cpu::cpu::{R9, RCX, RDX, R8};
-        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const OUT: u64 = 0x10000;
         const RESOURCE_ID: u32 = 41;
@@ -2779,7 +3485,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let texture = create(&mut p, "ID3D11Texture3D", Kind::Texture3D { id: RESOURCE_ID });
+        let texture = create(
+            &mut p,
+            "ID3D11Texture3D",
+            Kind::Texture3D { id: RESOURCE_ID },
+        );
         p.cpu.gpr[RCX] = 0;
         p.cpu.gpr[RDX] = texture;
         p.cpu.gpr[R8] = 0; // default view descriptor
@@ -2798,9 +3508,9 @@ mod tests {
 
     #[test]
     fn create_default_array_uav_covers_one_mip_and_every_array_slice() {
-        use anywasm_cpu::cpu::{R9, RCX, RDX, R8};
-        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
         use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
         const OUT: u64 = 0x10000;
         const RESOURCE_ID: u32 = 42;
@@ -2817,7 +3527,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let texture = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: RESOURCE_ID });
+        let texture = create(
+            &mut p,
+            "ID3D11Texture2D",
+            Kind::Texture2D { id: RESOURCE_ID },
+        );
         p.cpu.gpr[RCX] = 0;
         p.cpu.gpr[RDX] = texture;
         p.cpu.gpr[R8] = 0; // default view descriptor
@@ -2835,9 +3549,9 @@ mod tests {
     }
 
     fn call_clear_uav(method_name: &str, value_words: [u32; 4]) -> Process {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const VALUES: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -2865,7 +3579,12 @@ mod tests {
     fn clear_uav_float_emits_view_and_preserves_float_bits() {
         let p = call_clear_uav(
             "ClearUnorderedAccessViewFloat",
-            [1.5f32.to_bits(), (-2.0f32).to_bits(), 0.25f32.to_bits(), 1.0f32.to_bits()],
+            [
+                1.5f32.to_bits(),
+                (-2.0f32).to_bits(),
+                0.25f32.to_bits(),
+                1.0f32.to_bits(),
+            ],
         );
         let commands = gpu::decode(&p.extra.gpu.buf);
         assert_eq!(commands.len(), 1);
@@ -2875,7 +3594,17 @@ mod tests {
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
-        assert_eq!(words, vec![73, 1, 1.5f32.to_bits(), (-2.0f32).to_bits(), 0.25f32.to_bits(), 1.0f32.to_bits()]);
+        assert_eq!(
+            words,
+            vec![
+                73,
+                1,
+                1.5f32.to_bits(),
+                (-2.0f32).to_bits(),
+                0.25f32.to_bits(),
+                1.0f32.to_bits()
+            ]
+        );
     }
 
     #[test]

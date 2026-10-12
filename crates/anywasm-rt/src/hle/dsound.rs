@@ -13,6 +13,38 @@ const E_NOTIMPL: u64 = 0x8000_4001;
 const DSBUFFERDESC_SIZE: u32 = 36;
 const DSBCAPS_SIZE: u32 = 20;
 const MAX_SOUND_BUFFER: u32 = 16 * 1024 * 1024;
+pub const DSBCAPS_PRIMARYBUFFER: u32 = 0x1;
+pub const DSBCAPS_CTRL3D: u32 = 0x10;
+const IID_IDIRECTSOUND3DLISTENER: &str = "279afa84-4981-11ce-a521-0020af0be560";
+
+const LISTENER_METHODS: &[&str] = &[
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetAllParameters",
+    "GetDistanceFactor",
+    "GetDopplerFactor",
+    "GetOrientation",
+    "GetPosition",
+    "GetRolloffFactor",
+    "GetVelocity",
+    "SetAllParameters",
+    "SetDistanceFactor",
+    "SetDopplerFactor",
+    "SetOrientation",
+    "SetPosition",
+    "SetRolloffFactor",
+    "SetVelocity",
+    "CommitDeferredSettings",
+];
+
+pub fn methods(interface: &str) -> Option<&'static [&'static str]> {
+    (interface == "IDirectSound3DListener").then_some(LISTENER_METHODS)
+}
+
+pub fn iid_name(iid: &str) -> Option<&'static str> {
+    (iid == IID_IDIRECTSOUND3DLISTENER).then_some("IDirectSound3DListener")
+}
 
 pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
@@ -43,6 +75,21 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSoundBuffer8", "GetObjectInPath") => get_object_in_path,
         ("IDirectSoundBuffer8", "SetFX") => set_fx,
         ("IDirectSoundBuffer8", "AcquireResources") => acquire_resources,
+        ("IDirectSound3DListener", "GetAllParameters") => get_listener_parameters,
+        ("IDirectSound3DListener", "GetDistanceFactor") => get_listener_distance_factor,
+        ("IDirectSound3DListener", "GetDopplerFactor") => get_listener_doppler_factor,
+        ("IDirectSound3DListener", "GetOrientation") => get_listener_orientation,
+        ("IDirectSound3DListener", "GetPosition") => get_listener_position,
+        ("IDirectSound3DListener", "GetRolloffFactor") => get_listener_rolloff_factor,
+        ("IDirectSound3DListener", "GetVelocity") => get_listener_velocity,
+        ("IDirectSound3DListener", "SetAllParameters")
+        | ("IDirectSound3DListener", "SetDistanceFactor")
+        | ("IDirectSound3DListener", "SetDopplerFactor")
+        | ("IDirectSound3DListener", "SetOrientation")
+        | ("IDirectSound3DListener", "SetPosition")
+        | ("IDirectSound3DListener", "SetRolloffFactor")
+        | ("IDirectSound3DListener", "SetVelocity")
+        | ("IDirectSound3DListener", "CommitDeferredSettings") => |_| Ok(S_OK),
         ("IDirectSoundBuffer8", "Initialize")
         | ("IDirectSoundBuffer8", "SetCurrentPosition")
         | ("IDirectSoundBuffer8", "SetFormat")
@@ -77,12 +124,13 @@ fn create_sound_buffer(p: &mut Process) -> R {
         p.wrptr(out, 0)?;
         return Ok(E_INVALIDARG);
     }
+    let caps = p.rd32(desc + 4)?;
     let size = p.rd32(desc + 8)?.clamp(1, MAX_SOUND_BUFFER);
     let memory = super::kernel32::alloc_block(p, size as u64, true);
     let buffer = com::create(
         p,
         "IDirectSoundBuffer8",
-        Kind::SoundBuffer { memory, size },
+        Kind::SoundBuffer { memory, size, caps },
     );
     p.wrptr(out, buffer)?;
     Ok(S_OK)
@@ -93,7 +141,7 @@ fn duplicate_sound_buffer(p: &mut Process) -> R {
     if out == 0 {
         return Ok(E_INVALIDARG);
     }
-    let Some(Kind::SoundBuffer { memory, size }) = com::kind_of(p, source) else {
+    let Some(Kind::SoundBuffer { memory, size, caps }) = com::kind_of(p, source) else {
         p.wrptr(out, 0)?;
         return Ok(E_INVALIDARG);
     };
@@ -106,6 +154,7 @@ fn duplicate_sound_buffer(p: &mut Process) -> R {
         Kind::SoundBuffer {
             memory: duplicate_memory,
             size,
+            caps,
         },
     );
     p.wrptr(out, duplicate)?;
@@ -137,6 +186,11 @@ fn get_buffer_caps(p: &mut Process) -> R {
     }
     p.write_bytes(out, &vec![0; size as usize])?;
     p.wr32(out, size)?;
+    let caps = match com::kind_of(p, p.arg(0)) {
+        Some(Kind::SoundBuffer { caps, .. }) => caps,
+        _ => 0,
+    };
+    p.wr32(out + 4, caps)?;
     let buffer_size = match com::kind_of(p, p.arg(0)) {
         Some(Kind::SoundBuffer { size, .. }) => size,
         _ => 0,
@@ -160,6 +214,64 @@ fn verify_certification(p: &mut Process) -> R {
         p.wr32(out, 0)?;
     }
     Ok(S_OK)
+}
+
+fn write_float(p: &mut Process, out: u64, value: f32) -> R {
+    if out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    p.wr32(out, value.to_bits())?;
+    Ok(S_OK)
+}
+
+fn write_vector(p: &mut Process, out: u64, value: [f32; 3]) -> R {
+    if out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    for (index, component) in value.into_iter().enumerate() {
+        p.wr32(out + index as u64 * 4, component.to_bits())?;
+    }
+    Ok(S_OK)
+}
+
+fn get_listener_parameters(p: &mut Process) -> R {
+    let out = p.arg(1);
+    if out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    p.write_bytes(out, &[0; 64])?;
+    p.wr32(out, 64)?;
+    p.wr32(out + 36, 0x3f80_0000)?;
+    p.wr32(out + 44, 0x3f80_0000)?;
+    p.wr32(out + 52, 0x3f80_0000)?;
+    p.wr32(out + 56, 0x3f80_0000)?;
+    p.wr32(out + 60, 0x3f80_0000)?;
+    Ok(S_OK)
+}
+
+fn get_listener_distance_factor(p: &mut Process) -> R {
+    write_float(p, p.arg(1), 1.0)
+}
+
+fn get_listener_doppler_factor(p: &mut Process) -> R {
+    write_float(p, p.arg(1), 1.0)
+}
+
+fn get_listener_orientation(p: &mut Process) -> R {
+    write_vector(p, p.arg(1), [0.0, 0.0, 1.0])?;
+    write_vector(p, p.arg(2), [0.0, 1.0, 0.0])
+}
+
+fn get_listener_position(p: &mut Process) -> R {
+    write_vector(p, p.arg(1), [0.0; 3])
+}
+
+fn get_listener_rolloff_factor(p: &mut Process) -> R {
+    write_float(p, p.arg(1), 1.0)
+}
+
+fn get_listener_velocity(p: &mut Process) -> R {
+    write_vector(p, p.arg(1), [0.0; 3])
 }
 
 fn get_current_position(p: &mut Process) -> R {
@@ -221,7 +333,7 @@ fn lock_buffer(p: &mut Process) -> R {
     if first_ptr == 0 || first_len == 0 {
         return Ok(E_INVALIDARG);
     }
-    let Some(Kind::SoundBuffer { memory, size }) = com::kind_of(p, this) else {
+    let Some(Kind::SoundBuffer { memory, size, .. }) = com::kind_of(p, this) else {
         return Ok(E_INVALIDARG);
     };
     let offset = offset % size;
@@ -282,4 +394,3 @@ mod tests {
         assert_eq!(play(&mut process).unwrap(), 0x8000_4001);
     }
 }
-

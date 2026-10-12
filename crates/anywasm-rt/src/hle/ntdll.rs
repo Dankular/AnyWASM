@@ -9,6 +9,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RtlCaptureContext" => rtl_capture_context,
         "RtlPcToFileHeader" => rtl_pc_to_file_header,
         "RtlLookupFunctionEntry" => rtl_lookup_function_entry,
+        "RtlAddFunctionTable" => rtl_add_function_table,
+        "RtlDeleteFunctionTable" => rtl_delete_function_table,
         "RtlVerifyVersionInfo" => rtl_verify_version_info,
         "RtlAllocateHeap" => |p| {
             let n = p.arg(2);
@@ -99,30 +101,80 @@ fn rtl_unwind_unimplemented(p: &mut Process, name: &str, arg_count: usize) -> R 
 
 fn rtl_lookup_function_entry(p: &mut Process) -> R {
     let control_pc = p.arg(0);
-    let entry = p.modules.iter().find_map(|module| {
-        if module.hle_group.is_some()
-            || control_pc < module.base
-            || control_pc - module.base >= module.size
-        {
-            return None;
+    let image_base_out = p.arg(1);
+    let Some((base, entry)) = crate::exception::lookup_frame(p, control_pc) else {
+        if image_base_out != 0 {
+            p.wr64(image_base_out, 0)?;
         }
-        let rva = control_pc - module.base;
-        let index = module
-            .runtime_functions
-            .partition_point(|function| function.begin_address as u64 <= rva)
-            .checked_sub(1)?;
-        if rva >= module.runtime_functions[index].end_address as u64 {
-            return None;
-        }
-        Some((module.base, module.exception_table_rva, index))
-    });
-    let Some((base, table_rva, index)) = entry else {
         return Ok(0);
     };
-    if p.arg(1) != 0 {
-        p.wr64(p.arg(1), base)?;
+    if entry == 0 {
+        if image_base_out != 0 {
+            p.wr64(image_base_out, 0)?;
+        }
+        return Ok(0);
     }
-    Ok(base + table_rva as u64 + index as u64 * 12)
+    if image_base_out != 0 {
+        p.wr64(image_base_out, base)?;
+    }
+    Ok(entry)
+}
+
+fn rtl_add_function_table(p: &mut Process) -> R {
+    const MAX_ENTRIES: u32 = 1 << 20;
+
+    let table = p.arg(0);
+    let entry_count = p.arg(1) as u32;
+    let base = p.arg(2);
+    let table_bytes = entry_count as u64 * 12;
+    if table == 0
+        || entry_count == 0
+        || entry_count > MAX_ENTRIES
+        || table.checked_add(table_bytes).is_none()
+        || p.dynamic_function_tables
+            .iter()
+            .any(|registered| registered.table == table)
+    {
+        return Ok(0);
+    }
+
+    let mut previous_end = None;
+    for index in 0..entry_count {
+        let entry = table + index as u64 * 12;
+        let begin = p.rd32(entry)?;
+        let end = p.rd32(entry + 4)?;
+        let unwind = p.rd32(entry + 8)?;
+        if begin >= end
+            || previous_end.is_some_and(|previous| begin < previous)
+            || unwind == 0
+            || unwind & 3 != 0
+            || base.checked_add(end as u64).is_none()
+            || base.checked_add(unwind as u64).is_none()
+        {
+            return Ok(0);
+        }
+        previous_end = Some(end);
+    }
+
+    p.dynamic_function_tables.push(DynamicFunctionTable {
+        table,
+        entry_count,
+        base,
+    });
+    Ok(1)
+}
+
+fn rtl_delete_function_table(p: &mut Process) -> R {
+    let table = p.arg(0);
+    let Some(index) = p
+        .dynamic_function_tables
+        .iter()
+        .position(|registered| registered.table == table)
+    else {
+        return Ok(0);
+    };
+    p.dynamic_function_tables.remove(index);
+    Ok(1)
 }
 
 pub(crate) fn rtl_verify_version_info(p: &mut Process) -> R {
@@ -260,6 +312,7 @@ mod rtl_pc_to_file_header_tests {
             size: 0x2000,
             entry: 0,
             is_dll: true,
+            tls_callbacks: Vec::new(),
             exports: HashMap::new(),
             ordinals: HashMap::new(),
             exception_table_rva: 0,

@@ -13,7 +13,10 @@ fn vex_vpcmpeqd_compares_register_and_memory_lanes_for_xmm_and_ymm() {
         0xc5, 0xf9, 0x76, 0x10, // vpcmpeqd xmm2, xmm0, [rax]
     ];
     let decoded = decode(&code, CODE).unwrap();
-    assert_eq!(decoded.op, Op::Vpi(anywasm_cpu::decode::PiK::Cmpeq, 4, true));
+    assert_eq!(
+        decoded.op,
+        Op::Vpi(anywasm_cpu::decode::PiK::Cmpeq, 4, true)
+    );
     assert_eq!(decoded.osz, 16);
     assert_eq!(decoded.ops[0], Opnd::Xmm(2));
     assert_eq!(decoded.ops[1], Opnd::Xmm(0));

@@ -104,6 +104,10 @@ pub enum Op {
     Lea,
     Push,
     Pop,
+    PushSs,
+    PopSs,
+    Pusha,
+    Popa,
     Xchg,
     Movbe,
     Bswap,
@@ -239,6 +243,8 @@ pub enum Op {
     Vpslldq,
     Vfp(FpK, Prec),
     Vblendvps,
+    Vpermilps { variable: bool },
+    Vpermilpd { variable: bool },
     Vroundss,
     Vcmpeqss,
     VcmpSs(u8),
@@ -570,7 +576,10 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
 pub fn decode_mode(bytes: &[u8], rip: u64, mode: CpuMode) -> Result<Inst, DecodeError> {
     let mode32 = mode == CpuMode::X86_32;
     let mut d = Dec { b: bytes, p: 0 };
-    let mut pfx = Pfx { mode32, ..Pfx::default() };
+    let mut pfx = Pfx {
+        mode32,
+        ..Pfx::default()
+    };
     // ── prefixes ──
     let mut opc;
     loop {
@@ -595,9 +604,7 @@ pub fn decode_mode(bytes: &[u8], rip: u64, mode: CpuMode) -> Result<Inst, Decode
         opc = d.u8()?;
     }
     if mode32 && pfx.adsz {
-        return Err(DecodeError::Unsupported(
-            "16-bit addressing in 32-bit mode",
-        ));
+        return Err(DecodeError::Unsupported("16-bit addressing in 32-bit mode"));
     }
     if opc == 0xc5 || opc == 0xc4 {
         if pfx.rex != 0 || pfx.lock || pfx.opsz || pfx.adsz || pfx.rep != 0 || pfx.seg != 0 {
@@ -797,6 +804,18 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         return Ok(i);
     }
     if map == 3 {
+        if matches!(opcode, 0x04 | 0x05) && pp == 1 && !pfx.w() && vvvv_encoded == 0xf {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(if opcode == 0x04 {
+                Op::Vpermilps { variable: false }
+            } else {
+                Op::Vpermilpd { variable: false }
+            });
+            i.osz = if l { 32 } else { 16 };
+            i.ops = [m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::X, pfx), Opnd::None];
+            i.imm = d.u8()? as i64;
+            return Ok(i);
+        }
         if opcode == 0x38 && pp == 1 && l && !pfx.w() {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(Op::Vinserti128);
@@ -878,10 +897,27 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         return Ok(i);
     }
     if map == 2 {
+        if matches!(opcode, 0x0c | 0x0d) && pp == 1 && !pfx.w() {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(if opcode == 0x0c {
+                Op::Vpermilps { variable: true }
+            } else {
+                Op::Vpermilpd { variable: true }
+            });
+            i.osz = if l { 32 } else { 16 };
+            i.ops = [
+                m.reg_opnd(RK::X, pfx),
+                Opnd::Xmm(vvvv),
+                m.rm_opnd(RK::X, pfx),
+            ];
+            return Ok(i);
+        }
         if opcode == 0x1a && pp == 1 && l && !pfx.w() && vvvv_encoded == 0xf {
             let m = parse_modrm(d, pfx)?;
             if m.md == 3 {
-                return Err(DecodeError::Unsupported("VBROADCASTF128 requires memory source"));
+                return Err(DecodeError::Unsupported(
+                    "VBROADCASTF128 requires memory source",
+                ));
             }
             let mut i = blank(Op::Vbroadcastf128);
             i.osz = 32;
@@ -1112,6 +1148,18 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             ];
             Ok(i)
         }
+        0x58 | 0x59 if pp == 0 => {
+            let m = parse_modrm(d, pfx)?;
+            let kind = if opcode == 0x58 { FpK::Add } else { FpK::Mul };
+            let mut i = blank(Op::Vfp(kind, Prec::Ps));
+            i.osz = if l { 32 } else { 16 };
+            i.ops = [
+                m.reg_opnd(RK::X, pfx),
+                Opnd::Xmm(vvvv),
+                m.rm_opnd(RK::X, pfx),
+            ];
+            Ok(i)
+        }
         0x51 | 0x58 | 0x59 | 0x5c | 0x5d | 0x5e | 0x5f if pp == 3 && !l => {
             let m = parse_modrm(d, pfx)?;
             let k = match opcode {
@@ -1144,7 +1192,11 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         }
         0x51 | 0x52 if pp == 2 && !l => {
             let m = parse_modrm(d, pfx)?;
-            let kind = if opcode == 0x51 { FpK::Sqrt } else { FpK::Rsqrt };
+            let kind = if opcode == 0x51 {
+                FpK::Sqrt
+            } else {
+                FpK::Rsqrt
+            };
             let mut i = blank(Op::Vfp(kind, Prec::Ss));
             i.ops = [
                 m.reg_opnd(RK::X, pfx),
@@ -1230,9 +1282,7 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             i.imm = d.u8()? as i64;
             Ok(i)
         }
-        0xef | 0x57
-            if (opcode == 0xef && pp == 1) || (opcode == 0x57 && matches!(pp, 0 | 1)) =>
-        {
+        0xef | 0x57 if (opcode == 0xef && pp == 1) || (opcode == 0x57 && matches!(pp, 0 | 1)) => {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(Op::Vpxor);
             i.osz = if l { 32 } else { 16 };
@@ -1267,14 +1317,7 @@ fn imm_z(d: &mut Dec, osz: u8) -> R<i64> {
     }
 }
 
-fn decode_1byte(
-    d: &mut Dec,
-    pfx: &Pfx,
-    opc: u8,
-    osz: u8,
-    _rip: u64,
-    mode: CpuMode,
-) -> R<Inst> {
+fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64, mode: CpuMode) -> R<Inst> {
     let g = RK::G;
     let stack_osz = if pfx.opsz {
         2
@@ -1335,6 +1378,22 @@ fn decode_1byte(
             i.op = Op::Pop;
             i.osz = stack_osz;
             i.ops[0] = Opnd::Gpr((opc & 7) | pfx.b());
+        }
+        0x16 if mode == CpuMode::X86_32 => {
+            i.op = Op::PushSs;
+            i.osz = stack_osz;
+        }
+        0x17 if mode == CpuMode::X86_32 => {
+            i.op = Op::PopSs;
+            i.osz = stack_osz;
+        }
+        0x60 if mode == CpuMode::X86_32 => {
+            i.op = Op::Pusha;
+            i.osz = stack_osz;
+        }
+        0x61 if mode == CpuMode::X86_32 => {
+            i.op = Op::Popa;
+            i.osz = stack_osz;
         }
         0x63 => {
             if mode == CpuMode::X86_32 {

@@ -7,7 +7,9 @@ fn pack32(lanes: [u32; 4]) -> u128 {
     lanes
         .into_iter()
         .enumerate()
-        .fold(0u128, |value, (index, lane)| value | ((lane as u128) << (index * 32)))
+        .fold(0u128, |value, (index, lane)| {
+            value | ((lane as u128) << (index * 32))
+        })
 }
 
 fn pack64(lanes: [u64; 2]) -> u128 {

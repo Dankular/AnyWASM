@@ -7,7 +7,7 @@ import { createServer as createProbe } from 'node:net';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { AssetRangeCache, fetchAssetIndex } from '../web/assets.mjs';
+import { AssetRangeCache, fetchAssetIndex } from '../web/assets.js';
 
 const CHUNK = 256 * 1024;
 
@@ -89,6 +89,10 @@ test('local static server serves exact byte ranges from disk', async (t) => {
     child.once('error', reject);
     child.once('exit', (code) => reject(new Error(`local server exited ${code}: ${serverOutput}`)));
   });
+
+  const home = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(home.status, 200);
+  assert.match(await home.text(), /AnyWASM/);
 
   const response = await fetch(`http://127.0.0.1:${port}/demo/${basename(file)}`, { headers: { Range: 'bytes=2-5' } });
   assert.equal(response.status, 206);

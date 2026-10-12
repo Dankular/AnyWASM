@@ -52,6 +52,7 @@ pub struct SharedGuestMemory<'a> {
     base: NonNull<AtomicU8>,
     total_bytes: u32,
     frames: Region,
+    dirty_map: Region,
     mappings: &'a [MappingEntry],
 }
 
@@ -97,10 +98,14 @@ impl<'a> SharedGuestMemory<'a> {
             base,
             total_bytes: header.total_bytes,
             frames: header.frames,
+            dirty_map: header.dirty_map,
             mappings,
         })
     }
 
+    /// Read bytes using atomic byte operations. Wider naturally aligned reads below use one
+    /// atomic operation when the width is supported and stays within a guest page; unaligned or
+    /// cross-page ordinary reads are race-free but may observe a concurrent write partway through.
     pub fn read_bytes(&self, address: u64, output: &mut [u8], access: Access) -> Result<(), Fault> {
         self.validate_range(address, output.len(), access)?;
         let mut guest = address;
@@ -120,6 +125,9 @@ impl<'a> SharedGuestMemory<'a> {
         Ok(())
     }
 
+    /// Write bytes using atomic byte operations. Wider naturally aligned writes below use one
+    /// atomic operation when the width is supported and stays within a guest page; unaligned or
+    /// cross-page ordinary writes are race-free but are not transactional across all bytes.
     pub fn write_bytes(&self, address: u64, input: &[u8]) -> Result<(), Fault> {
         self.validate_range(address, input.len(), Access::Write)?;
         let mut guest = address;
@@ -129,6 +137,7 @@ impl<'a> SharedGuestMemory<'a> {
             let page_offset = (guest & PAGE_MASK) as u32;
             let chunk = ((GUEST_PAGE_SIZE - page_offset) as usize).min(input.len() - done);
             let physical = self.frame_offset(entry, page_offset, guest, Access::Write)?;
+            self.mark_dirty(entry);
             for index in 0..chunk {
                 let byte = unsafe { &*self.base.as_ptr().add(physical as usize + index) };
                 byte.store(input[done + index], Ordering::SeqCst);
@@ -169,6 +178,7 @@ impl<'a> SharedGuestMemory<'a> {
             #[cfg(target_has_atomic = "16")]
             {
                 let ptr = unsafe { self.base.as_ptr().add(offset as usize).cast::<AtomicU16>() };
+                self.mark_dirty_address(address)?;
                 unsafe { &*ptr }.store(value.to_le(), Ordering::SeqCst);
                 return Ok(());
             }
@@ -191,6 +201,7 @@ impl<'a> SharedGuestMemory<'a> {
     pub fn write_u32(&self, address: u64, value: u32) -> Result<(), Fault> {
         if let Some(offset) = self.atomic_offset(address, 4, Access::Write)? {
             let ptr = unsafe { self.base.as_ptr().add(offset as usize).cast::<AtomicU32>() };
+            self.mark_dirty_address(address)?;
             unsafe { &*ptr }.store(value.to_le(), Ordering::SeqCst);
             return Ok(());
         }
@@ -217,6 +228,7 @@ impl<'a> SharedGuestMemory<'a> {
             #[cfg(target_has_atomic = "64")]
             {
                 let ptr = unsafe { self.base.as_ptr().add(offset as usize).cast::<AtomicU64>() };
+                self.mark_dirty_address(address)?;
                 unsafe { &*ptr }.store(value.to_le(), Ordering::SeqCst);
                 return Ok(());
             }
@@ -236,6 +248,9 @@ impl<'a> SharedGuestMemory<'a> {
         self.write_bytes(address, &value.to_le_bytes())
     }
 
+    /// Locked read/modify/write operations require natural alignment and must remain in one page.
+    /// Unsupported widths and invalid alignment are reported explicitly rather than split into
+    /// byte operations, which would not preserve the instruction's atomicity.
     pub fn compare_exchange_u8(
         &self,
         address: u64,
@@ -248,6 +263,7 @@ impl<'a> SharedGuestMemory<'a> {
                 .as_ptr()
                 .add(offset.ok_or_else(|| self.alignment_fault(address, 1))? as usize)
         };
+        self.mark_dirty_address(address)?;
         Ok(unsafe { &*ptr }.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst))
     }
 
@@ -263,6 +279,7 @@ impl<'a> SharedGuestMemory<'a> {
         #[cfg(target_has_atomic = "16")]
         {
             let ptr = unsafe { self.base.as_ptr().add(offset as usize).cast::<AtomicU16>() };
+            self.mark_dirty_address(address)?;
             return Ok(unsafe { &*ptr }
                 .compare_exchange(
                     current.to_le(),
@@ -291,6 +308,7 @@ impl<'a> SharedGuestMemory<'a> {
             return Err(self.alignment_fault(address, 4));
         };
         let ptr = unsafe { self.base.as_ptr().add(offset as usize).cast::<AtomicU32>() };
+        self.mark_dirty_address(address)?;
         Ok(unsafe { &*ptr }
             .compare_exchange(
                 current.to_le(),
@@ -314,6 +332,7 @@ impl<'a> SharedGuestMemory<'a> {
         #[cfg(target_has_atomic = "64")]
         {
             let ptr = unsafe { self.base.as_ptr().add(offset as usize).cast::<AtomicU64>() };
+            self.mark_dirty_address(address)?;
             return Ok(unsafe { &*ptr }
                 .compare_exchange(
                     current.to_le(),
@@ -444,6 +463,21 @@ impl<'a> SharedGuestMemory<'a> {
             });
         }
         Ok(offset)
+    }
+
+    fn mark_dirty_address(&self, address: u64) -> Result<(), Fault> {
+        let entry = self.mapping_for(address, Access::Write)?;
+        self.mark_dirty(entry);
+        Ok(())
+    }
+
+    #[inline]
+    fn mark_dirty(&self, entry: &MappingEntry) {
+        let page_index = ((entry.frame_offset - self.frames.offset) / GUEST_PAGE_SIZE) as usize;
+        let byte_offset = self.dirty_map.offset as usize + page_index / 8;
+        let bit = 1u8 << (page_index & 7);
+        let dirty = unsafe { &*self.base.as_ptr().add(byte_offset).cast::<AtomicU8>() };
+        dirty.fetch_or(bit, Ordering::Relaxed);
     }
 
     fn alignment_fault(&self, address: u64, width: u32) -> Fault {
@@ -586,5 +620,126 @@ fn to_cpu_fault(fault: Fault) -> CpuFault {
             Access::Execute => CpuAccess::Exec,
         },
         protection: fault.kind == FaultKind::Protection,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::{Region, SharedHeader};
+    use crate::Cpu;
+    use std::vec;
+
+    #[allow(dead_code)]
+    #[repr(align(64))]
+    #[derive(Clone)]
+    struct AlignedBlock([u8; 64]);
+
+    #[test]
+    fn writes_crossing_guest_pages_set_both_worker_dirty_bits() {
+        let slots = Region {
+            offset: 128,
+            length: 64,
+        };
+        let contexts = Region {
+            offset: 192,
+            length: core::mem::size_of::<Cpu>() as u32,
+        };
+        let page_map_offset = (contexts.offset + contexts.length + 7) & !7;
+        let page_map = Region {
+            offset: page_map_offset,
+            length: 32,
+        };
+        let dirty_map = Region {
+            offset: page_map.offset + page_map.length,
+            length: 1,
+        };
+        let frames_offset =
+            (dirty_map.offset + dirty_map.length + GUEST_PAGE_SIZE - 1) & !(GUEST_PAGE_SIZE - 1);
+        let frames = Region {
+            offset: frames_offset,
+            length: 2 * GUEST_PAGE_SIZE,
+        };
+        let total_bytes = frames.offset + frames.length;
+        let mut backing = vec![AlignedBlock([0; 64]); total_bytes.div_ceil(64) as usize];
+        let base = backing.as_mut_ptr().cast::<u8>();
+
+        unsafe {
+            core::ptr::write(
+                base.cast::<SharedHeader>(),
+                SharedHeader::new(
+                    total_bytes,
+                    1,
+                    1,
+                    slots,
+                    contexts,
+                    page_map,
+                    dirty_map,
+                    frames,
+                ),
+            );
+            let header = &*base.cast::<SharedHeader>();
+            header.page_map_count.store(2, Ordering::Release);
+            let mappings_ptr = base.add(page_map.offset as usize).cast::<MappingEntry>();
+            core::ptr::write(
+                mappings_ptr,
+                MappingEntry {
+                    guest_page: 1,
+                    frame_offset: frames.offset,
+                    protection: PROT_R | PROT_W,
+                    reserved: [0; 3],
+                },
+            );
+            core::ptr::write(
+                mappings_ptr.add(1),
+                MappingEntry {
+                    guest_page: 2,
+                    frame_offset: frames.offset + GUEST_PAGE_SIZE,
+                    protection: PROT_R | PROT_W,
+                    reserved: [0; 3],
+                },
+            );
+            let mappings = core::slice::from_raw_parts(mappings_ptr, 2);
+            let memory = SharedGuestMemory::new(base, total_bytes, header, mappings).unwrap();
+            memory
+                .write_bytes(0x1ffe, &[0xa1, 0xa2, 0xb1, 0xb2])
+                .unwrap();
+
+            let dirty = &*base.add(dirty_map.offset as usize).cast::<AtomicU8>();
+            assert_eq!(dirty.load(Ordering::Acquire) & 0b11, 0b11);
+            let frames_ptr = base.add(frames.offset as usize).cast::<AtomicU8>();
+            assert_eq!(
+                frames_ptr
+                    .add(4094)
+                    .as_ref()
+                    .unwrap()
+                    .load(Ordering::Relaxed),
+                0xa1
+            );
+            assert_eq!(
+                frames_ptr
+                    .add(4095)
+                    .as_ref()
+                    .unwrap()
+                    .load(Ordering::Relaxed),
+                0xa2
+            );
+            assert_eq!(
+                frames_ptr
+                    .add(4096)
+                    .as_ref()
+                    .unwrap()
+                    .load(Ordering::Relaxed),
+                0xb1
+            );
+            assert_eq!(
+                frames_ptr
+                    .add(4097)
+                    .as_ref()
+                    .unwrap()
+                    .load(Ordering::Relaxed),
+                0xb2
+            );
+        }
     }
 }

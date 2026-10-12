@@ -6,7 +6,7 @@
 //! modules can exchange it through a shared memory region. A worker must own its context for the
 //! duration of a dispatch; the slot's release/acquire transitions define that ownership boundary.
 
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 pub mod exec_core;
