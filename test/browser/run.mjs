@@ -1163,10 +1163,13 @@ try {
         Texture2D<float4> image : register(t0);
         SamplerState wrapSampler : register(s0);
         SamplerState clampSampler : register(s1);
+        SamplerState mirrorSampler : register(s2);
         float4 main(float4 position : SV_Position) : SV_Target {
-          return position.x < 32.0
+          return position.x < 22.0
             ? image.SampleLevel(wrapSampler, float2(1.25, 0.5), 0.0)
-            : image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0);
+            : position.x < 43.0
+              ? image.SampleLevel(mirrorSampler, float2(1.75, 0.5), 0.0)
+              : image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0);
         }
       `, 'main', 'ps_5_0');
       const linearPixel = tool.compileHlsl(`
@@ -1209,10 +1212,11 @@ try {
       command(8, sampler(15, 1)); // wrap U
       command(8, sampler(16, 3)); // clamp U
       command(8, sampler(17, 3, 0x15)); // linear min/mag/mip, clamp U
+      command(8, sampler(18, 2)); // mirror U
       shader(7, 0, vertex); shader(8, 1, pixel); shader(9, 1, linearPixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(21, words(1, 2, 0)); command(16, words(4));
-      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 2, 15, 16));
+      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 3, 15, 16, 18));
       command(29, words(3, 0));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
@@ -1227,16 +1231,17 @@ try {
       gpu.execute(secondCommands);
       const linearPixels = await gpu.readBackbuffer(1);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
-      const result = { wrap: at(pixels, 10), clamp: at(pixels, 48), linear: at(linearPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const result = { wrap: at(pixels, 10), mirror: at(pixels, 32), clamp: at(pixels, 48), linear: at(linearPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler repeat/clamp modes and linear filtering match sampled texels',
+  check('D3D11 sampler repeat/mirror/clamp modes and linear filtering match sampled texels',
     samplerAddressResult.draws === 2 && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
+      && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));

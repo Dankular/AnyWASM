@@ -64,6 +64,7 @@
 - [x] Verify D3D11 depth write mask `ZERO` allows a later farther draw through, while `ALL` preserves the nearer result.
 - [x] Verify stencil write mask `0x0f` preserves upper bits and stencil read mask `0x0f` compares only lower bits.
 - [x] Verify D3D11 stencil fail and depth-fail paths for KEEP, ZERO, REPLACE, saturating increment/decrement, invert, wrapping increment/decrement, and masked replace; all boundary pixels pass in the full Chromium suite with no WebGPU validation errors.
+- [x] Pixel-check D3D11 WRAP, MIRROR, and CLAMP sampler address modes with out-of-range coordinates and verify linear filtering; BORDER and MIRROR_ONCE remain open.
 
 **Gate:** Every render-state, copy, resolve, packing, and staging item listed open by the checklist has a named passing regression.
 
