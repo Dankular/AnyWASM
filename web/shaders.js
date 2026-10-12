@@ -123,6 +123,9 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
     3: { dataType: 4, spirvFormat: 30 }, // R32G32B32A32_UINT
     4: { dataType: 3, spirvFormat: 21 }, // R32G32B32A32_SINT
     10: { dataType: 5, spirvFormat: 2 }, // R16G16B16A16_FLOAT
+    16: { dataType: 5, spirvFormat: 6 }, // R32G32_FLOAT
+    17: { dataType: 4, spirvFormat: 35 }, // R32G32_UINT
+    18: { dataType: 3, spirvFormat: 25 }, // R32G32_SINT
     28: { dataType: 5, spirvFormat: 4 }, // R8G8B8A8_UNORM
     30: { dataType: 4, spirvFormat: 32 }, // R8G8B8A8_UINT
     32: { dataType: 3, spirvFormat: 23 }, // R8G8B8A8_SINT
@@ -135,6 +138,7 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
   if (!selected || selected.dataType !== uavs[0].dataType) return spirv;
   const spirvFormat = selected.spirvFormat;
   if (spirvFormat === undefined) return spirv;
+  const needsExtendedFormats = [6, 25, 35].includes(spirvFormat);
 
   const bytes = new Uint8Array(spirv);
   const words = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -145,20 +149,37 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
     const first = words.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
     if (wordCount === 0 || at + wordCount * 4 > bytes.byteLength) return spirv;
     if (opcode === 25 && wordCount >= 9 && words.getUint32(at + 7 * 4, true) === 2 && words.getUint32(at + 8 * 4, true) === 0) {
-      words.setUint32(at + 8 * 4, spirvFormat, true); // OpTypeImage Unknown -> scalar R32 format
+      words.setUint32(at + 8 * 4, spirvFormat, true); // OpTypeImage Unknown -> selected DXGI format
       storageImage = true;
     }
     at += wordCount * 4;
   }
   if (!storageImage) return spirv;
 
+  let extendedCapabilityInserted = false;
+  let lastCapabilityEnd = 20;
   for (let at = 20; at < bytes.byteLength;) {
     const first = words.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
     if (opcode === 17 && wordCount === 2) {
+      lastCapabilityEnd = at + wordCount * 4;
       const capability = words.getUint32(at + 4, true);
-      if (capability === 55 || capability === 56) words.setUint32(at + 4, 1, true); // formatless storage -> Shader
+      if (capability === 49) extendedCapabilityInserted = true;
+      if (capability === 55 || capability === 56) {
+        const specializedCapability = needsExtendedFormats && !extendedCapabilityInserted ? 49 : 1;
+        words.setUint32(at + 4, specializedCapability, true);
+        extendedCapabilityInserted ||= specializedCapability === 49;
+      }
     }
     at += wordCount * 4;
+  }
+  if (needsExtendedFormats && !extendedCapabilityInserted) {
+    const extended = new Uint8Array(bytes.byteLength + 8);
+    extended.set(bytes.subarray(0, lastCapabilityEnd));
+    const capability = new DataView(extended.buffer);
+    capability.setUint32(lastCapabilityEnd, (2 << 16) | 17, true); // OpCapability
+    capability.setUint32(lastCapabilityEnd + 4, 49, true); // StorageImageExtendedFormats
+    extended.set(bytes.subarray(lastCapabilityEnd), lastCapabilityEnd + 8);
+    return extended;
   }
   return bytes;
 }

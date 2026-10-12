@@ -39,7 +39,7 @@ const TEX = {
   94: 'bc6h-rgb-ufloat', 95: 'bc6h-rgb-ufloat', 96: 'bc6h-rgb-float',
   97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
 };
-const TYPED_UAV_DATA_TYPES = { 2: 5, 3: 4, 4: 3, 10: 5, 28: 5, 30: 4, 32: 3, 41: 5, 42: 4, 43: 3 };
+const TYPED_UAV_DATA_TYPES = { 2: 5, 3: 4, 4: 3, 10: 5, 16: 5, 17: 4, 18: 3, 28: 5, 30: 4, 32: 3, 41: 5, 42: 4, 43: 3 };
 
 // DXGI_FORMAT -> GPUVertexFormat
 const VTX = {
@@ -1686,17 +1686,19 @@ export class GpuExecutor {
     const format = view ? this.viewFormat(view.format, texture) : texture.format;
     const scalar32 = ['r32float', 'r32uint', 'r32sint'].includes(format);
     const scalarArray = format === 'r32uint' ? Uint32Array : format === 'r32sint' ? Int32Array : Float32Array;
+    const rg32 = ['rg32float', 'rg32uint', 'rg32sint'].includes(format);
+    const rg32Array = format === 'rg32uint' ? Uint32Array : format === 'rg32sint' ? Int32Array : Float32Array;
     const rgba32float = format === 'rgba32float';
     const rgba32Integer = format === 'rgba32uint' || format === 'rgba32sint';
     const rgba16float = format === 'rgba16float';
     const rgba8 = ['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb'].includes(format);
     const rgba8Integer = format === 'rgba8uint' || format === 'rgba8sint';
-    if (!scalar32 && !rgba32float && !rgba32Integer && !rgba16float && !rgba8 && !rgba8Integer) {
+    if (!scalar32 && !rg32 && !rgba32float && !rgba32Integer && !rgba16float && !rgba8 && !rgba8Integer) {
       throw new Error(`texture readback does not support format ${format}`);
     }
     const width = Math.max(1, texture.width >> mip);
     const height = Math.max(1, texture.height >> mip);
-    const bytesPerTexel = rgba32float || rgba32Integer ? 16 : rgba16float ? 8 : 4;
+    const bytesPerTexel = rgba32float || rgba32Integer ? 16 : rg32 || rgba16float ? 8 : 4;
     const bytesPerRow = (width * bytesPerTexel + 255) & ~255;
     const buffer = this.device.createBuffer({
       size: bytesPerRow * height,
@@ -1745,6 +1747,11 @@ export class GpuExecutor {
       data = new scalarArray(width * height);
       for (let row = 0; row < height; row++) {
         data.set(new scalarArray(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
+      }
+    } else if (rg32) {
+      data = new rg32Array(width * height * 2);
+      for (let row = 0; row < height; row++) {
+        data.set(new rg32Array(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width * 2), row * width * 2);
       }
     } else if (rgba8Integer) {
       const ArrayType = format === 'rgba8uint' ? Uint8Array : Int8Array;
