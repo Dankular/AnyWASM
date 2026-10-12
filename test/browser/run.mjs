@@ -3327,7 +3327,7 @@ try {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
     const canvas = document.createElement('canvas');
-    canvas.width = 64; canvas.height = 64;
+    canvas.width = 72; canvas.height = 64;
     try {
       const tool = new ShaderTool(new URL('/shaders/', location.href));
       await tool.init();
@@ -3363,9 +3363,9 @@ try {
         let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
         return data;
       };
-      command(38, words(1, 0, 9, 64, 64, 28));
+      command(38, words(1, 0, 9, 72, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
-      command(4, words(3, 64, 64, 1, 1, 45, 0x40, 0, 1, 0)); // D24S8 depth-stencil texture
+      command(4, words(3, 72, 64, 1, 1, 45, 0x40, 0, 1, 0)); // D24S8 depth-stencil texture
       command(12, words(4, 1, 3, 45, 3, 0, 1, 0, 1)); // DSV
       const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
       rasterView.setUint32(0, 12, true);
@@ -3374,14 +3374,14 @@ try {
       rasterView.setUint32(28, 1, true); // depth clip enabled
       rasterView.setUint32(32, 1, true); // scissor enabled
       command(10, raster);
-      const stencilState = (id, writeMask, compare, passOp) => {
+      const stencilState = (id, writeMask, compare, passOp, readMask = 0xff) => {
         const payload = new Uint8Array(56), view = new DataView(payload.buffer);
         view.setUint32(0, id, true);
         view.setUint32(4, 0, true); // depth disabled
         view.setUint32(8, 0, true);
         view.setUint32(12, 8, true); // depth compare: always
         view.setUint32(16, 1, true); // stencil enabled
-        view.setUint8(20, 0xff); view.setUint8(21, writeMask);
+        view.setUint8(20, readMask); view.setUint8(21, writeMask);
         for (const face of [24, 40]) {
           view.setUint32(face, 1, true); // fail: keep
           view.setUint32(face + 4, 1, true); // depth fail: keep
@@ -3399,10 +3399,12 @@ try {
         { name: 'invert', op: 6, initial: 5, reference: 9, expected: 250 },
         { name: 'increment-wrap', op: 7, initial: 255, reference: 9, expected: 0 },
         { name: 'decrement-wrap', op: 8, initial: 0, reference: 9, expected: 255 },
+        { name: 'masked-replace', op: 3, initial: 0xa5, reference: 0x3c, expected: 0xac, writeMask: 0x0f },
       ];
       stencilState(13, 0xff, 8, 3); // seed each region with the reference value
-      for (let i = 0; i < operations.length; i++) stencilState(20 + i, 0xff, 8, operations[i].op);
+      for (let i = 0; i < operations.length; i++) stencilState(20 + i, operations[i].writeMask ?? 0xff, 8, operations[i].op);
       stencilState(40, 0, 3, 1); // draw only where stored stencil equals reference
+      stencilState(60, 0, 3, 1, 0x0f); // compare only the low stencil nibble
       shader(7, 0, vertex); shader(8, 1, red); shader(9, 1, green);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
@@ -3441,6 +3443,9 @@ try {
           command(17, words(1, 9)); command(26, words(50 + func, 5)); scissor(); command(29, words(3, 0));
         }
       }
+      const maskScissor = () => command(23, words(1, 64, 0, 72, 64));
+      command(17, words(1, 8)); command(26, words(13, 0xa5)); maskScissor(); command(29, words(3, 0));
+      command(17, words(1, 9)); command(26, words(60, 0x05)); maskScissor(); command(29, words(3, 0));
       gpu.execute(append());
       const comparisonFrame = await gpu.readBackbuffer(1);
       const result = {
@@ -3451,6 +3456,7 @@ try {
           const top = Math.floor(value * 64 / 3), bottom = Math.floor((value + 1) * 64 / 3);
           return at(comparisonFrame, func * 8 + 4, Math.floor((top + bottom) / 2));
         })),
+        readMaskPixel: at(comparisonFrame, 68, 32),
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -3465,12 +3471,13 @@ try {
     [true, false, false], [true, false, true], [true, true, false], [true, true, true],
   ];
   check('D3D11 stencil operations and all comparison functions match boundary values',
-    stencilResult.draws === 72 && stencilResult.errors.length === 0
-      && stencilResult.operationPixels?.length === 8
+    stencilResult.draws === 77 && stencilResult.errors.length === 0
+      && stencilResult.operationPixels?.length === 9
       && stencilResult.operationPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1))
       && stencilResult.comparisonPixels?.length === 8
       && stencilResult.comparisonPixels.every((row, func) => row.length === 3
-        && row.every((pixel, value) => near(pixel, stencilComparisonPasses[func][value] ? [0, 255, 0, 255] : [255, 0, 0, 255], 1))),
+        && row.every((pixel, value) => near(pixel, stencilComparisonPasses[func][value] ? [0, 255, 0, 255] : [255, 0, 0, 255], 1)))
+      && near(stencilResult.readMaskPixel || [], [0, 255, 0, 255], 1),
     JSON.stringify(stencilResult));
 
   const reverseBlendResult = await page.evaluate(async () => {

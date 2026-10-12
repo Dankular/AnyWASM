@@ -61,6 +61,7 @@
 - [x] Implement D3D11 `SRC1_COLOR`, `INV_SRC1_COLOR`, `SRC1_ALPHA`, and `INV_SRC1_ALPHA` blend factors using the second pixel-shader output; browser pixels verify each factor.
 - [x] Verify a D3D11 render-target write mask of `0x5` updates red/blue while preserving green/alpha from the clear.
 - [x] Verify D3D11 depth write mask `ZERO` allows a later farther draw through, while `ALL` preserves the nearer result.
+- [x] Verify stencil write mask `0x0f` preserves upper bits and stencil read mask `0x0f` compares only lower bits.
 
 **Gate:** Every render-state, copy, resolve, packing, and staging item listed open by the checklist has a named passing regression.
 
