@@ -96,6 +96,26 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     }
 }
 
+/// Attach an `AGP1` index after loading a process. The package payload stays in the host.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes containing the complete asset header and index.
+#[no_mangle]
+pub unsafe extern "C" fn aw_assets_attach(ptr: *const u8, len: usize) -> i32 {
+    let Some(s) = state() else { return 1 };
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    match s.p.vfs.register_asset_index(bytes) {
+        Ok(()) => {
+            s.message.clear();
+            0
+        }
+        Err(message) => {
+            s.message = message.into_bytes();
+            1
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn aw_run(steps: u64) -> i32 {
     let Some(s) = state() else { return 3 };

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::process::*;
-use crate::vfs::{absolute, norm, CreateDirError};
+use crate::vfs::{absolute, norm, AssetReadError, CreateDirError};
 use anywasm_cpu::CpuMode;
 use anywasm_cpu::cpu::RSP;
 use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_W, PROT_RW, PROT_RWX, PROT_X};
@@ -12,6 +12,7 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+const ERROR_READ_FAULT: u32 = 30;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_TIMEOUT: u32 = 1460;
@@ -1765,15 +1766,27 @@ fn read_file(p: &mut Process) -> R {
         p.stdin.drain(..k).collect()
     } else if let Some(Handle::File { path, pos, .. }) = p.handles.get(&h) {
         let (path, at) = (path.clone(), *pos);
-        let f = p.vfs.get(&path).cloned().unwrap_or_default();
-        let end = (at + n).min(f.len());
-        let d = if at < f.len() {
-            f[at..end].to_vec()
-        } else {
-            Vec::new()
+        let d = match p.vfs.read_range(&path, at as u64, n) {
+            Ok(data) => data,
+            // Preserve the existing behavior if a file is removed after it was opened.
+            Err(AssetReadError::NotFound) => Vec::new(),
+            Err(AssetReadError::TooLarge) => {
+                p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                if read != 0 {
+                    p.wr32(read, 0)?;
+                }
+                return Ok(0);
+            }
+            Err(AssetReadError::Unavailable | AssetReadError::Failed) => {
+                p.set_last_error(ERROR_READ_FAULT);
+                if read != 0 {
+                    p.wr32(read, 0)?;
+                }
+                return Ok(0);
+            }
         };
         if let Some(Handle::File { pos, .. }) = p.handles.get_mut(&h) {
-            *pos += d.len();
+            *pos = at.saturating_add(d.len());
         }
         d
     } else {
@@ -1923,8 +1936,7 @@ fn create_file_mapping(p: &mut Process) -> R {
     let size = if requested_size == 0 {
         file_path
             .as_ref()
-            .and_then(|path| p.vfs.get(path))
-            .map(|data| data.len() as u64)
+            .and_then(|path| p.vfs.file_len(path))
             .unwrap_or(0)
     } else {
         requested_size
@@ -1982,17 +1994,27 @@ fn map_view_of_file(p: &mut Process) -> R {
     } else {
         PROT_R
     };
-    let address = p.alloc_virtual(len, guest_protection);
-    if let Some(path) = file_path {
-        if let Some(contents) = p.vfs.get(&path) {
-            let start = usize::try_from(offset).unwrap_or(usize::MAX);
-            if start < contents.len() {
-                let end = contents.len().min(start.saturating_add(len as usize));
-                p.mem
-                    .write_force(address, &contents[start..end])
-                    .map_err(|e| Stop::Crash(format!("mapped file initialization failed: {e:?}")))?;
+    let contents = if let Some(path) = file_path {
+        match p.vfs.read_range(&path, offset, len as usize) {
+            Ok(data) => Some(data),
+            Err(AssetReadError::NotFound) => None,
+            Err(AssetReadError::TooLarge) => {
+                p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                return Ok(0);
+            }
+            Err(AssetReadError::Unavailable | AssetReadError::Failed) => {
+                p.set_last_error(ERROR_READ_FAULT);
+                return Ok(0);
             }
         }
+    } else {
+        None
+    };
+    let address = p.alloc_virtual(len, guest_protection);
+    if let Some(contents) = contents {
+        p.mem
+            .write_force(address, &contents)
+            .map_err(|e| Stop::Crash(format!("mapped file initialization failed: {e:?}")))?;
     }
     p.set_last_error(0);
     Ok(address)
@@ -2035,7 +2057,7 @@ fn is_bad_memory_range(p: &Process, address: u64, size: u64, permission: u8) -> 
 
 fn file_len(p: &Process, h: u64) -> Option<u64> {
     match p.handles.get(&h) {
-        Some(Handle::File { path, .. }) => p.vfs.get(path).map(|f| f.len() as u64),
+        Some(Handle::File { path, .. }) => p.vfs.file_len(path),
         _ => None,
     }
 }
@@ -2101,7 +2123,7 @@ fn find_first_file(p: &mut Process, wide: bool) -> R {
             let (parent, name) = path.rsplit_once('\\').unwrap_or(("", path.as_str()));
             (parent == directory && wildcard_matches(leaf, name)).then(|| FindEntry {
                 name: name.to_string(),
-                size: p.vfs.get(path).map_or(0, |bytes| bytes.len() as u64),
+                size: p.vfs.file_len(path).unwrap_or(0),
             })
         })
         .collect();

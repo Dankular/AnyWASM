@@ -163,6 +163,79 @@ mod advapi32_hle_tests {
     }
 }
 
+#[cfg(test)]
+mod crt_locale_lock_tests {
+    use super::lookup;
+    use crate::{process::Process, vfs::Vfs};
+
+    #[test]
+    fn locale_lock_imports_are_reentrant_and_release_the_lock() {
+        let lock = lookup("crt", "_lock_locales").expect("UCRT locale lock should resolve");
+        let unlock = lookup("crt", "_unlock_locales").expect("UCRT locale unlock should resolve");
+        let mut process = Process::new(Vfs::new());
+        process.current_thread_id = 0x1234;
+
+        lock(&mut process).unwrap();
+        lock(&mut process).unwrap();
+        let state = process.critical_sections.values().next().unwrap();
+        assert_eq!(state.owner, Some(0x1234));
+        assert_eq!(state.recursion, 2);
+
+        unlock(&mut process).unwrap();
+        assert_eq!(process.critical_sections.values().next().unwrap().recursion, 1);
+        unlock(&mut process).unwrap();
+        let state = process.critical_sections.values().next().unwrap();
+        assert_eq!(state.owner, None);
+        assert_eq!(state.recursion, 0);
+    }
+}
+
+#[cfg(test)]
+mod crt_stream_pointer_tests {
+    use super::lookup;
+    use crate::{process::Process, vfs::Vfs};
+    use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+    use anywasm_cpu::mem::PROT_RW;
+
+    #[test]
+    fn get_stream_buffer_pointers_returns_addresses_of_file_fields() {
+        let get_pointers = lookup("crt", "_get_stream_buffer_pointers")
+            .expect("UCRT stream buffer helper should resolve");
+        let mut process = Process::new(Vfs::new());
+        let stream = process.alloc_virtual(0x30, PROT_RW);
+        let outputs = process.alloc_virtual(0x1000, PROT_RW);
+        process.cpu.gpr[RCX] = stream;
+        process.cpu.gpr[RDX] = outputs;
+        process.cpu.gpr[R8] = outputs + 8;
+        process.cpu.gpr[R9] = outputs + 16;
+
+        assert_eq!(get_pointers(&mut process).unwrap(), 0);
+        assert_eq!(process.rd64(outputs).unwrap(), stream + 8);
+        assert_eq!(process.rd64(outputs + 8).unwrap(), stream);
+        assert_eq!(process.rd64(outputs + 16).unwrap(), stream + 16);
+    }
+}
+
+#[cfg(test)]
+mod crt_setlocale_tests {
+    use super::lookup;
+    use crate::{process::Process, vfs::Vfs};
+    use anywasm_cpu::cpu::{RCX, RDX};
+
+    #[test]
+    fn default_locale_query_returns_the_c_locale_name() {
+        let setlocale = lookup("crt", "setlocale").expect("UCRT setlocale should resolve");
+        let mut process = Process::new(Vfs::new());
+        process.cpu.gpr[RCX] = 0; // LC_ALL
+        process.cpu.gpr[RDX] = 0; // query current locale
+
+        let name = setlocale(&mut process).unwrap();
+
+        assert_ne!(name, 0);
+        assert_eq!(process.mem.read_cstr(name, 4).unwrap(), b"C");
+    }
+}
+
 pub type R = Result<u64, Stop>;
 
 pub fn ok(v: u64) -> R {

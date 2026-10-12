@@ -1,6 +1,7 @@
 // AnyWASM runtime glue: loads the WASM module and drives a Windows x64 process inside it.
 // Works unchanged in browsers (main thread or worker) and Node >= 18.
 import { fillCryptoRandom } from './entropy.js';
+import { AssetRangeCache, fetchAssetIndex } from './assets.mjs';
 
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
@@ -195,7 +196,7 @@ function emitDispatchTree(entries, first, end, depth, body, wasm) {
 
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }, hostIo = {}) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
     /** Counts calls routed through the dynamic WebAssembly trampoline. */
@@ -203,6 +204,7 @@ export class AnyWasm {
     this.jitMinPrefix = jitMinPrefix;
     this.asyncifyData = asyncifyData;
     this.asyncifyControl = asyncifyControl;
+    this.hostIo = hostIo;
     this.callbackSuspended = false;
     this.pendingHostEvents = [];
   }
@@ -222,6 +224,7 @@ export class AnyWasm {
     let instance;
     let asyncifyData = 0;
     const asyncifyControl = { resumeSliceSteps: 0n, yields: 0, resumes: 0 };
+    const hostIo = { assetCache: null, pending: null, assetUrl: null };
     const modules = new Map();
     const modulesByStart = new Map();
     let activeCodeEpoch;
@@ -362,6 +365,31 @@ export class AnyWasm {
           asyncifyControl.yields++;
           return 0n;
         },
+        read_asset_range(packageOffset, length, destination) {
+          if (!hostIo.assetCache) throw new Error('guest requested package bytes before an AGP asset package was attached');
+          const n = Number(length);
+          const dst = Number(destination) >>> 0;
+          const output = new Uint8Array(instance.exports.memory.buffer, dst, n);
+          const exports = instance?.exports;
+          const state = exports?.asyncify_get_state ? exports.asyncify_get_state() : 0;
+          if (state === 2) {
+            exports.asyncify_stop_rewind();
+            asyncifyControl.resumes++;
+            if (hostIo.assetCache.copyRange(packageOffset, n, output)) return n;
+            throw new Error('asset range was still missing when the guest resumed');
+          }
+          if (state === 0 && hostIo.assetCache.copyRange(packageOffset, n, output)) return n;
+          if (!exports?.asyncify_get_state || !asyncifyData) {
+            throw new Error('asset range miss requires the Asyncify-enabled browser runtime');
+          }
+          if (state !== 0) throw new Error(`cannot suspend asset read from Asyncify state ${state}`);
+          if (!hostIo.pending) {
+            hostIo.pending = hostIo.assetCache.ensureRange(packageOffset, n);
+            exports.asyncify_start_unwind(asyncifyData);
+            asyncifyControl.yields++;
+          }
+          return 0;
+        },
       },
     };
     ({ instance } = await WebAssembly.instantiate(bytes, imports));
@@ -374,7 +402,7 @@ export class AnyWasm {
       view.setUint32(asyncifyData, (asyncifyData + 8) >>> 0, true);
       view.setUint32((asyncifyData + 4) >>> 0, (asyncifyData + ASYNCIFY_STACK_BYTES + 8) >>> 0, true);
     }
-    return new AnyWasm(instance, jitStats, jitMinPrefix, asyncifyData, asyncifyControl);
+    return new AnyWasm(instance, jitStats, jitMinPrefix, asyncifyData, asyncifyControl, hostIo);
   }
 
   /** Load an .awb bundle. Throws with the loader's message on failure. */
@@ -386,6 +414,36 @@ export class AnyWasm {
     this.x.aw_free(ptr, n);
     if (rc !== 0) throw new Error(this.message() || 'failed to load bundle');
     this.x.aw_jit_set_min_prefix?.(this.jitMinPrefix);
+  }
+
+  /** Attach the `AGP1` index; payload chunks remain in the HTTP-backed host cache. */
+  async attachAssets(url, onProgress = () => {}) {
+    if (typeof url !== 'string' || !url) throw new TypeError('asset package URL must be a nonempty string');
+    if (typeof this.x.aw_assets_attach !== 'function') throw new Error('WASM runtime is missing aw_assets_attach; rebuild it');
+    const index = await fetchAssetIndex(url);
+    const ptr = this.x.aw_alloc(index.bytes.byteLength) >>> 0;
+    try {
+      new Uint8Array(this.x.memory.buffer, ptr, index.bytes.byteLength).set(index.bytes);
+      const rc = this.x.aw_assets_attach(ptr, index.bytes.byteLength);
+      if (rc !== 0) throw new Error(this.message() || 'failed to attach AGP asset index');
+    } finally {
+      this.x.aw_free(ptr, index.bytes.byteLength);
+    }
+    this.hostIo.assetUrl = url;
+    this.hostIo.assetCache = new AssetRangeCache(url, index.packageLength, { onProgress });
+    return { packageLength: index.packageLength, indexBytes: index.bytes.byteLength };
+  }
+
+  get hostWaitPending() { return !!this.hostIo.pending; }
+
+  async waitForHost() {
+    const pending = this.hostIo.pending;
+    if (!pending) return;
+    try {
+      await pending;
+    } finally {
+      if (this.hostIo.pending === pending) this.hostIo.pending = null;
+    }
   }
 
   /** Execute up to `steps` guest instructions. Returns a Status value. */
@@ -484,6 +542,9 @@ export class AnyWasm {
       const o = this.takeStdout(); if (o.length) onOutput('stdout', textDec.decode(o));
       const e = this.takeStderr(); if (e.length) onOutput('stderr', textDec.decode(e));
       if (status === Status.FRAME) { this.takeGpu(); status = Status.RUNNING; }
+      if (this.hostWaitPending) {
+        return Promise.resolve(this.waitForHost()).then(() => this.runToEnd({ sliceSteps, maxSlices: maxSlices - i - 1, onOutput, yieldFn }));
+      }
       if (yieldFn && status === Status.RUNNING) return Promise.resolve(yieldFn()).then(() => this.runToEnd({ sliceSteps, maxSlices: maxSlices - i - 1, onOutput, yieldFn }));
     }
     return { status, exitCode: this.exitCode(), message: this.message() };

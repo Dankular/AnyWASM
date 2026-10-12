@@ -1,10 +1,34 @@
 //! In-memory virtual file system keyed by lower-cased, `\`-normalised paths.
 use std::collections::{HashMap, HashSet};
 
+const ASSET_HEADER_LEN: usize = 24;
+const MAX_ASSET_READ_LEN: usize = 64 * 1024 * 1024 - 256 * 1024;
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "anywasm")]
+extern "C" {
+    fn read_asset_range(package_offset: u64, len: u32, destination: *mut u8) -> u32;
+}
+
 #[derive(Default, Clone)]
 pub struct Vfs {
     files: HashMap<String, Vec<u8>>,
+    assets: HashMap<String, AssetFile>,
     directories: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AssetFile {
+    package_offset: u64,
+    len: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetReadError {
+    NotFound,
+    TooLarge,
+    Unavailable,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,15 +158,172 @@ impl Vfs {
         self.files.get_mut(&norm(path))
     }
     pub fn exists(&self, path: &str) -> bool {
-        self.files.contains_key(&norm(path))
+        let path = norm(path);
+        self.files.contains_key(&path) || self.assets.contains_key(&path)
     }
+
+    /// Register the fixed header and index prefix of an `AGP1` range package.
+    /// Payload bytes stay in the host and are read through the browser import.
+    pub fn register_asset_index(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let bad = |why: &str| format!("corrupt asset package index: {why}");
+        if bytes.get(..4) != Some(b"AGP1") {
+            return Err(bad("bad magic"));
+        }
+        if bytes.len() < ASSET_HEADER_LEN {
+            return Err(bad("truncated header"));
+        }
+        let entry_count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let index_len = usize::try_from(u64::from_le_bytes(bytes[8..16].try_into().unwrap()))
+            .map_err(|_| bad("index length overflows host address space"))?;
+        let package_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let index_end = ASSET_HEADER_LEN
+            .checked_add(index_len)
+            .ok_or_else(|| bad("index length overflow"))?;
+        if bytes.len() != index_end {
+            return Err(bad("header/index byte count mismatch"));
+        }
+        if package_len < index_end as u64 {
+            return Err(bad("package is shorter than its index"));
+        }
+
+        let mut cursor = ASSET_HEADER_LEN;
+        if entry_count > index_len / 18 {
+            return Err(bad("entry count cannot fit in index"));
+        }
+        let mut parsed = HashMap::with_capacity(entry_count);
+        let mut seen = HashSet::with_capacity(entry_count);
+        for _ in 0..entry_count {
+            let name_len = u16::from_le_bytes(
+                bytes
+                    .get(cursor..cursor + 2)
+                    .ok_or_else(|| bad("truncated path length"))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            cursor += 2;
+            let raw_name = std::str::from_utf8(
+                bytes
+                    .get(cursor..cursor.checked_add(name_len).ok_or_else(|| bad("path length overflow"))?)
+                    .ok_or_else(|| bad("truncated path"))?,
+            )
+            .map_err(|_| bad("path is not UTF-8"))?;
+            cursor += name_len;
+            if raw_name.is_empty()
+                || raw_name.starts_with('\\')
+                || raw_name.starts_with('/')
+                || raw_name.contains(':')
+                || raw_name.contains('\0')
+            {
+                return Err(bad("path must be nonempty and relative"));
+            }
+            let path = norm(raw_name);
+            if path.is_empty() || !seen.insert(path.clone()) {
+                return Err(bad("empty or duplicate normalized path"));
+            }
+
+            let package_offset = u64::from_le_bytes(
+                bytes
+                    .get(cursor..cursor + 8)
+                    .ok_or_else(|| bad("truncated package offset"))?
+                    .try_into()
+                    .unwrap(),
+            );
+            cursor += 8;
+            let len = u64::from_le_bytes(
+                bytes
+                    .get(cursor..cursor + 8)
+                    .ok_or_else(|| bad("truncated file length"))?
+                    .try_into()
+                    .unwrap(),
+            );
+            cursor += 8;
+            let end = package_offset
+                .checked_add(len)
+                .ok_or_else(|| bad("file range overflow"))?;
+            if package_offset < index_end as u64 || end > package_len {
+                return Err(bad("file range is outside the package data region"));
+            }
+            parsed.insert(path, AssetFile { package_offset, len });
+        }
+        if cursor != index_end {
+            return Err(bad("entry count does not match index length"));
+        }
+        self.assets = parsed;
+        Ok(())
+    }
+
+    /// Return a file's logical size, including files whose bytes live in a remote package.
+    pub fn file_len(&self, path: &str) -> Option<u64> {
+        let path = norm(path);
+        self.files
+            .get(&path)
+            .map(|data| data.len() as u64)
+            .or_else(|| self.assets.get(&path).map(|asset| asset.len))
+    }
+
+    /// Translate a remote file-relative range into its absolute package range.
+    pub fn asset_location(&self, path: &str, offset: u64, len: usize) -> Option<(u64, usize)> {
+        let asset = self.assets.get(&norm(path))?;
+        if offset >= asset.len {
+            return Some((asset.package_offset.checked_add(asset.len)?, 0));
+        }
+        let count = (asset.len - offset).min(len as u64) as usize;
+        Some((asset.package_offset.checked_add(offset)?, count))
+    }
+
+    /// Read a local or indexed file range. Remote bytes are supplied by the asyncified host.
+    pub fn read_range(
+        &self,
+        path: &str,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, AssetReadError> {
+        let path = norm(path);
+        if let Some(data) = self.files.get(&path) {
+            let Ok(start) = usize::try_from(offset) else {
+                return Ok(Vec::new());
+            };
+            if start >= data.len() {
+                return Ok(Vec::new());
+            }
+            let end = data.len().min(start.saturating_add(len));
+            return Ok(data[start..end].to_vec());
+        }
+        let (package_offset, count) = self
+            .asset_location(&path, offset, len)
+            .ok_or(AssetReadError::NotFound)?;
+        if count > MAX_ASSET_READ_LEN {
+            return Err(AssetReadError::TooLarge);
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        #[allow(unused_mut)]
+        let mut out = vec![0; count];
+        #[cfg(target_arch = "wasm32")]
+        {
+            let copied = unsafe {
+                read_asset_range(package_offset, count as u32, out.as_mut_ptr()) as usize
+            };
+            if copied == count {
+                return Ok(out);
+            }
+            return Err(AssetReadError::Failed);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (package_offset, out);
+            Err(AssetReadError::Unavailable)
+        }
+    }
+
     /// Directories are inferred from file prefixes and tracked when created explicitly.
     pub fn is_dir(&self, path: &str) -> bool {
         let dir = norm(path);
         if dir.is_empty() {
             return true;
         }
-        if self.files.contains_key(&dir) {
+        if self.files.contains_key(&dir) || self.assets.contains_key(&dir) {
             return false;
         }
         if self.directories.contains(&dir) {
@@ -150,6 +331,7 @@ impl Vfs {
         }
         let prefix = format!("{dir}\\");
         self.files.keys().any(|file| file.starts_with(&prefix))
+            || self.assets.keys().any(|file| file.starts_with(&prefix))
     }
     /// Create one directory without creating missing parents.
     pub fn create_dir(&mut self, path: &str) -> Result<(), CreateDirError> {
@@ -168,21 +350,47 @@ impl Vfs {
         Ok(())
     }
     pub fn remove(&mut self, path: &str) -> bool {
-        self.files.remove(&norm(path)).is_some()
+        let path = norm(path);
+        self.files.remove(&path).is_some() || self.assets.remove(&path).is_some()
     }
     pub fn paths(&self) -> impl Iterator<Item = &String> {
-        self.files.keys()
+        self.files
+            .keys()
+            .chain(self.assets.keys().filter(|path| !self.files.contains_key(*path)))
     }
     /// Find a file by bare file name anywhere in the VFS (DLL search fallback).
     pub fn find_by_name(&self, name: &str) -> Option<&String> {
         let n = norm(name);
-        self.files.keys().find(|k| k.rsplit('\\').next() == Some(n.as_str()))
+        self.paths()
+            .find(|k| k.rsplit('\\').next() == Some(n.as_str()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{absolute, norm, resolve, Vfs};
+
+    fn asset_package(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let index_len: usize = files.iter().map(|(name, _)| 2 + name.len() + 16).sum();
+        let data_start = 24 + index_len;
+        let package_len = data_start + files.iter().map(|(_, data)| data.len()).sum::<usize>();
+        let mut out = b"AGP1".to_vec();
+        out.extend((files.len() as u32).to_le_bytes());
+        out.extend((index_len as u64).to_le_bytes());
+        out.extend((package_len as u64).to_le_bytes());
+        let mut offset = data_start;
+        for (name, data) in files {
+            out.extend((name.len() as u16).to_le_bytes());
+            out.extend(name.as_bytes());
+            out.extend((offset as u64).to_le_bytes());
+            out.extend((data.len() as u64).to_le_bytes());
+            offset += data.len();
+        }
+        for (_, data) in files {
+            out.extend_from_slice(data);
+        }
+        out
+    }
 
     #[test]
     fn resolves_windows_paths_against_a_current_directory() {
@@ -230,5 +438,57 @@ mod tests {
             vfs.create_dir(""),
             Err(super::CreateDirError::PathNotFound)
         );
+    }
+
+    #[test]
+    fn indexed_assets_expose_paths_and_lengths_without_loading_payload() {
+        let package = asset_package(&[("data\\handling.cfg", &[4, 5]), ("models\\gta3.img", &[1, 2, 3])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+
+        assert!(vfs.exists("MODELS/gta3.img"));
+        assert!(vfs.is_dir("models"));
+        assert_eq!(vfs.file_len("models\\gta3.img"), Some(3));
+        assert_eq!(vfs.file_len("data/handling.cfg"), Some(2));
+        assert!(vfs.get("models\\gta3.img").is_none());
+        assert_eq!(vfs.paths().count(), 2);
+        let data_start = index_end as u64;
+        assert_eq!(vfs.asset_location("models/gta3.img", 1, 10), Some((data_start + 3, 2)));
+    }
+
+    #[test]
+    fn local_files_override_indexed_assets() {
+        let package = asset_package(&[("data\\handling.cfg", &[1, 2])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+        vfs.insert("data/handling.cfg", vec![9, 8, 7]);
+
+        assert_eq!(vfs.file_len("data\\handling.cfg"), Some(3));
+        assert_eq!(vfs.read_range("data/handling.cfg", 1, 8).unwrap(), vec![8, 7]);
+        assert_eq!(vfs.paths().count(), 1);
+    }
+
+    #[test]
+    fn rejects_duplicate_normalized_asset_paths() {
+        let package = asset_package(&[("Data\\Handling.cfg", &[1]), ("data/handling.cfg", &[2])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        assert!(Vfs::new().register_asset_index(&package[..index_end]).is_err());
+    }
+
+    #[test]
+    fn rejects_asset_records_outside_the_package_data_region() {
+        let mut package = asset_package(&[("data\\file.bin", &[1, 2, 3])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let record_offset = 24 + 2 + "data\\file.bin".len();
+        package[record_offset..record_offset + 8].copy_from_slice(&0u64.to_le_bytes());
+        assert!(Vfs::new().register_asset_index(&package[..index_end]).is_err());
+
+        let mut package = asset_package(&[("data\\file.bin", &[1, 2, 3])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let package_len = u64::from_le_bytes(package[16..24].try_into().unwrap());
+        package[16..24].copy_from_slice(&(package_len - 1).to_le_bytes());
+        assert!(Vfs::new().register_asset_index(&package[..index_end]).is_err());
     }
 }

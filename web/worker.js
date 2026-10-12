@@ -18,7 +18,7 @@ const nextFrame = () => (typeof requestAnimationFrame === 'function' ? new Promi
 const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
-async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMinPrefix }) {
+async function start({ wasm, bundle, assetUrl, canvas, testMode: requestedTestMode, jitMinPrefix }) {
   stopped = false;
   wake = null;
   testMode = !!requestedTestMode;
@@ -32,6 +32,16 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
     return;
   }
   bundle = null;
+  if (assetUrl) {
+    postMessage({ type: 'load-progress', message: 'Loading game data index…' });
+    let lastAssetProgress = 0;
+    await w.attachAssets(assetUrl, ({ fetchedBytes, packageLength }) => {
+      if (fetchedBytes - lastAssetProgress >= 4 * 1024 * 1024 || fetchedBytes === packageLength) {
+        lastAssetProgress = fetchedBytes;
+        postMessage({ type: 'asset-progress', fetchedBytes, packageLength: Number(packageLength) });
+      }
+    });
+  }
   if (canvas) {
     try {
       const tool = new ShaderTool(new URL('./shaders/', import.meta.url));
@@ -54,7 +64,7 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
   while (!stopped && (status === Status.RUNNING || status === Status.FRAME || status === Status.IDLE)) {
     const sliceStart = performance.now();
     status = Status.RUNNING;
-    while (status === Status.RUNNING && performance.now() - sliceStart < 12) status = w.run(250_000);
+    while (status === Status.RUNNING && performance.now() - sliceStart < 12 && !w.hostWaitPending) status = w.run(250_000);
     const g = w.takeGpu();
     if (g.length) {
       if (exec) exec.execute(g);
@@ -65,7 +75,16 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
     }
     const o = w.takeStdout(); if (o.length) postMessage({ type: 'out', stream: 'stdout', text: dec.decode(o) });
     const e = w.takeStderr(); if (e.length) postMessage({ type: 'out', stream: 'stderr', text: dec.decode(e) });
-    if (status === Status.FRAME) {
+    if (w.hostWaitPending) {
+      postMessage({ type: 'load-progress', message: 'Fetching requested game data…' });
+      try {
+        await w.waitForHost();
+      } catch (e) {
+        status = Status.CRASHED;
+        terminalMessage = `Game data range request failed: ${e.message}`;
+      }
+      continue;
+    } else if (status === Status.FRAME) {
       frames++;
       if (exec && frames % 30 === 0) postMessage({ type: 'gpu', ...exec.stats, asyncify: w.asyncifyStats });
       const waitStart = performance.now();
@@ -84,7 +103,9 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
 
 onmessage = async (ev) => {
   const m = ev.data;
-  if (m.type === 'start') start(m);
+  if (m.type === 'start') start(m).catch((e) => {
+    postMessage({ type: 'status', status: Status.CRASHED, exitCode: -1, message: e.message || String(e), instructions: 0, mips: 0 });
+  });
   else if (m.type === 'dispose') { stopped = true; wake?.(); close(); }
   else if (m.type === 'input' && w) { w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }
   else if (m.type === 'stdin' && w) { w.pushStdin(new TextEncoder().encode(m.text)); wake?.(); wake = null; }

@@ -64,6 +64,25 @@ fn ensure_iob(p: &mut Process) -> Result<u64, Stop> {
     Ok(p.extra.iob)
 }
 
+fn get_stream_buffer_pointers(p: &mut Process) -> R {
+    let stream = p.arg(0);
+    if stream == 0 {
+        let errno = errno_cell(p);
+        p.wr32(errno, 22)?; // EINVAL
+        return Ok(22);
+    }
+    for (output, field) in [
+        (p.arg(1), stream.wrapping_add(8)),
+        (p.arg(2), stream),
+        (p.arg(3), stream.wrapping_add(0x10)),
+    ] {
+        if output != 0 {
+            p.wr64(output, field)?;
+        }
+    }
+    Ok(0)
+}
+
 /// Build argc/argv from the command line (once).
 fn ensure_args(p: &mut Process) -> Result<(), Stop> {
     if p.extra.argv != 0 {
@@ -85,6 +104,32 @@ fn ensure_args(p: &mut Process) -> Result<(), Stop> {
         p.extra.cmdline_a = a;
     }
     Ok(())
+}
+
+fn setlocale(p: &mut Process) -> R {
+    let category = p.arg(0) as i32;
+    let locale = p.arg(1);
+    if !(0..=5).contains(&category) {
+        let errno = errno_cell(p);
+        p.wr32(errno, 22)?; // EINVAL
+        return Ok(0);
+    }
+    if locale != 0 {
+        let requested = p.mem.read_cstr(locale, 256).map_err(|e| Stop::Crash(format!("{e:?}")))?;
+        if !requested.is_empty() && requested != b"C" {
+            let errno = errno_cell(p);
+            p.wr32(errno, 22)?; // EINVAL
+            return Ok(0);
+        }
+    }
+    let key = "setlocale:C";
+    if let Some(&name) = p.extra.data_cells.get(key) {
+        return Ok(name);
+    }
+    let name = kernel32::alloc_block(p, 2, true);
+    p.write_cstr(name, "C")?;
+    p.extra.data_cells.insert(key.to_string(), name);
+    Ok(name)
 }
 
 /// CommandLineToArgv-style splitting (quotes and backslash rules simplified to the common case).
@@ -141,29 +186,54 @@ fn stream_write(p: &mut Process, fp: u64, data: &[u8]) -> Result<usize, Stop> {
     Ok(data.len())
 }
 
-fn stream_read_byte(p: &mut Process, fp: u64) -> Option<u8> {
-    let f = p.extra.files.get_mut(&fp)?;
-    if let Some(b) = f.ungot.take() {
-        return Some(b);
-    }
-    match &mut f.kind {
+fn stream_read(p: &mut Process, fp: u64, len: usize) -> Result<Vec<u8>, Stop> {
+    ensure_iob(p)?;
+    let Some(f) = p.extra.files.get(&fp) else {
+        return Ok(Vec::new());
+    };
+    match &f.kind {
         FileKind::Stdin => {
-            let b = p.stdin.pop_front();
-            if b.is_none() {
-                f.eof = true;
+            let mut out = Vec::with_capacity(len.min(p.stdin.len() + usize::from(f.ungot.is_some())));
+            if let Some(byte) = f.ungot {
+                out.push(byte);
             }
-            b
+            let from_stdin = len.saturating_sub(out.len()).min(p.stdin.len());
+            out.extend(p.stdin.drain(..from_stdin));
+            if let Some(f) = p.extra.files.get_mut(&fp) {
+                f.ungot = None;
+                f.eof = out.len() < len;
+            }
+            Ok(out)
         }
         FileKind::Vfs { path, pos, .. } => {
-            let b = p.vfs.get(path).and_then(|d| d.get(*pos).copied());
-            match b {
-                Some(_) => *pos += 1,
-                None => f.eof = true,
+            let (path, pos, ungot) = (path.clone(), *pos, f.ungot);
+            let disk_len = len.saturating_sub(usize::from(ungot.is_some()));
+            let disk_bytes = p
+                .vfs
+                .read_range(&path, pos as u64, disk_len)
+                .map_err(|error| Stop::Crash(format!("file read failed for {path}: {error:?}")))?;
+            let mut out = Vec::with_capacity(len.min(disk_bytes.len() + usize::from(ungot.is_some())));
+            if let Some(byte) = ungot {
+                out.push(byte);
             }
-            b
+            out.extend_from_slice(&disk_bytes);
+            if let Some(f) = p.extra.files.get_mut(&fp) {
+                if f.ungot == ungot {
+                    f.ungot = None;
+                }
+                if let FileKind::Vfs { pos, .. } = &mut f.kind {
+                    *pos = pos.saturating_add(disk_bytes.len());
+                }
+                f.eof = out.len() < len;
+            }
+            Ok(out)
         }
-        _ => None,
+        _ => Ok(Vec::new()),
     }
+}
+
+fn stream_read_byte(p: &mut Process, fp: u64) -> Result<Option<u8>, Stop> {
+    Ok(stream_read(p, fp, 1)?.first().copied())
 }
 
 fn do_printf(p: &mut Process, fmt: u64, args: &mut dyn Args, wide: bool) -> Result<Vec<u8>, Stop> {
@@ -297,6 +367,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "_errno" => |p| Ok(errno_cell(p)),
         "__doserrno" => |p| Ok(errno_cell(p) + 4),
+        "_lock_locales" => lock_locales,
+        "_unlock_locales" => unlock_locales,
         "_lock" | "_unlock" | "_lock_file" | "_unlock_file" | "_mlock" | "_munlock" => |_| Ok(0),
         "_getpid" => |_| Ok(0x1000),
         "___lc_codepage_func" | "__lc_codepage_func" => |_| Ok(1252),
@@ -318,6 +390,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(p.extra.locale_cell)
         },
+        "setlocale" => setlocale,
         "strerror" | "_strerror" => |p| {
             let e = p.arg(0) as i32;
             let msg = match e {
@@ -622,6 +695,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let base = ensure_iob(p)?;
             Ok(base + i * FILE_SIZE)
         },
+        "_get_stream_buffer_pointers" => get_stream_buffer_pointers,
         "__iob_func" => |p| ensure_iob(p),
         "puts" => |p| {
             let mut s = p.mem.read_cstr(p.arg(0), 1 << 20).map_err(|e| Stop::Crash(format!("{e:?}")))?;
@@ -652,23 +726,21 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "fread" | "_fread_nolock" => |p| {
             let (buf, sz, n, fp) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
-            let mut data = Vec::new();
-            for _ in 0..sz * n {
-                match stream_read_byte(p, fp) {
-                    Some(b) => data.push(b),
-                    None => break,
-                }
-            }
+            let requested = sz
+                .checked_mul(n)
+                .and_then(|count| usize::try_from(count).ok())
+                .ok_or_else(|| Stop::Crash("fread byte count overflow".into()))?;
+            let data = stream_read(p, fp, requested)?;
             p.write_bytes(buf, &data)?;
             Ok(if sz == 0 { 0 } else { data.len() as u64 / sz })
         },
         "fgetc" | "getc" | "_fgetc_nolock" => |p| {
             let fp = p.arg(0);
-            Ok(stream_read_byte(p, fp).map(|b| b as u64).unwrap_or(0xffff_ffff))
+            Ok(stream_read_byte(p, fp)?.map(|b| b as u64).unwrap_or(0xffff_ffff))
         },
         "getchar" => |p| {
             let fp = ensure_iob(p)?;
-            Ok(stream_read_byte(p, fp).map(|b| b as u64).unwrap_or(0xffff_ffff))
+            Ok(stream_read_byte(p, fp)?.map(|b| b as u64).unwrap_or(0xffff_ffff))
         },
         "ungetc" => |p| {
             let (c, fp) = (p.arg(0) as u8, p.arg(1));
@@ -681,7 +753,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let (buf, n, fp) = (p.arg(0), p.arg(1) as usize, p.arg(2));
             let mut v = Vec::new();
             while v.len() + 1 < n {
-                match stream_read_byte(p, fp) {
+                match stream_read_byte(p, fp)? {
                     Some(b) => {
                         v.push(b);
                         if b == b'\n' {
@@ -731,7 +803,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "fseek" | "_fseeki64" => |p| {
             let (fp, off, whence) = (p.arg(0), p.arg(1) as i64, p.arg(2));
             let len = match p.extra.files.get(&fp) {
-                Some(CFile { kind: FileKind::Vfs { path, .. }, .. }) => p.vfs.get(path).map(|d| d.len()).unwrap_or(0),
+                Some(CFile { kind: FileKind::Vfs { path, .. }, .. }) => p.vfs.file_len(path).unwrap_or(0),
                 _ => return Ok(u64::MAX),
             };
             if let Some(CFile { kind: FileKind::Vfs { pos, .. }, eof, .. }) = p.extra.files.get_mut(&fp) {
@@ -861,6 +933,42 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         _ => return None,
     })
+}
+
+const LOCALE_LOCK_ADDRESS: u64 = 0xffff_ffff_ffff_ff00;
+
+fn lock_locales(p: &mut Process) -> R {
+    let id = p.current_thread_id;
+    if p.try_acquire_critical(LOCALE_LOCK_ADDRESS, id) {
+        return Ok(0);
+    }
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "crt".into(),
+            name: "contended _lock_locales from a nested synchronous guest callback cannot be scheduled".into(),
+        }
+        .record(p));
+    }
+    let waiters = &mut p
+        .critical_sections
+        .entry(LOCALE_LOCK_ADDRESS)
+        .or_default()
+        .waiters;
+    if !waiters.contains(&id) {
+        waiters.push_back(id);
+    }
+    p.block_current_thread(ThreadWait::CriticalAcquire {
+        address: LOCALE_LOCK_ADDRESS,
+    });
+    Ok(0)
+}
+
+fn unlock_locales(p: &mut Process) -> R {
+    if !p.release_critical(LOCALE_LOCK_ADDRESS, p.current_thread_id) {
+        return Err(Stop::Crash("_unlock_locales called without owning the locale lock".into()));
+    }
+    p.refresh_waiters();
+    Ok(0)
 }
 
 trait Rec {

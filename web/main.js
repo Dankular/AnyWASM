@@ -46,7 +46,7 @@ function failLoading(label, message) {
   $('stop').disabled = true;
 }
 
-async function run(bundleBytes, label) {
+async function run(bundleBytes, label, assetUrl = null) {
   const reuseWorker = !!worker && stat.dataset.status !== undefined;
   if (worker && !reuseWorker) worker.postMessage({ type: 'dispose' });
   term.textContent = '';
@@ -83,6 +83,12 @@ async function run(bundleBytes, label) {
   worker.onmessage = (ev) => {
     const m = ev.data;
     if (m.type === 'ready') clearLoading();
+    else if (m.type === 'load-progress') showLoading(m.message);
+    else if (m.type === 'asset-progress') {
+      const fetched = (m.fetchedBytes / (1024 * 1024)).toFixed(1);
+      const total = (Number(m.packageLength) / (1024 * 1024)).toFixed(1);
+      showLoading(`Streaming game data: ${fetched} MiB fetched · ${total} MiB package`);
+    }
     else if (m.type === 'out') print(m.text, m.stream === 'stderr' ? 'err' : '');
     else if (m.type === 'window') {
       canvas.hidden = false;
@@ -124,7 +130,7 @@ async function run(bundleBytes, label) {
   };
   const testMode = new URLSearchParams(location.search).has('test');
   showLoading('Starting guest program…');
-  const message = { type: 'start', wasm, bundle: bundleBytes, testMode };
+  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, testMode };
   const transfer = [wasm, bundleBytes.buffer];
   if (off) {
     message.canvas = off;
@@ -171,7 +177,8 @@ async function demo(name) {
       stat.textContent = `demo ${name}.awb not found - build it with: anywasm pack`;
       return;
     }
-    await run(new Uint8Array(await res.arrayBuffer()), `${name}.exe`);
+    const assetUrl = name === 'gta_sa' ? new URL('./demo/gta_sa.agp', import.meta.url).href : null;
+    await run(new Uint8Array(await res.arrayBuffer()), `${name}.exe`, assetUrl);
   } catch (e) {
     failLoading(`${name}.awb`, `could not load bundle (${e.message})`);
   }

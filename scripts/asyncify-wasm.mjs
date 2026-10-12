@@ -10,7 +10,7 @@ const inputBytes = readFileSync(inputPath);
 const module = binaryen.readBinary(inputBytes);
 
 try {
-  binaryen.setPassArgument('asyncify-imports', 'anywasm.yield_slice');
+  binaryen.setPassArgument('asyncify-imports', 'anywasm.yield_slice,anywasm.read_asset_range');
   module.runPasses(['asyncify']);
   binaryen.setPassArgument('asyncify-imports', null);
 
@@ -30,6 +30,9 @@ try {
   if (missing.length) throw new Error(`Asyncify exports are missing: ${missing.join(', ')}`);
   if (!imports.some((entry) => entry.module === 'anywasm' && entry.name === 'yield_slice')) {
     throw new Error('WASM module does not import anywasm.yield_slice');
+  }
+  if (!imports.some((entry) => entry.module === 'anywasm' && entry.name === 'read_asset_range')) {
+    throw new Error('WASM module does not import anywasm.read_asset_range');
   }
 
   writeFileSync(outputPath, outputBytes);
