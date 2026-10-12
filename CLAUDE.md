@@ -251,7 +251,8 @@ register-stack subset):
       R32_UINT/SINT words,
       R32G32_FLOAT two-channel texels with row pitches, R32G32_UINT/SINT packed channel words,
       RGBA32_FLOAT four-channel rows and RGBA32_UINT/SINT packed channel words with 32-byte rows,
-      packed RGBA16_FLOAT and R16_FLOAT values,
+      R16 and RG16 UNORM/SNORM/UINT/SINT words, RG16_FLOAT rows, and RGBA16_UNORM/SNORM/UINT/SINT
+      words, plus packed RGBA16_FLOAT and R16_FLOAT values,
       raw BGRA8_UNORM and R10G10B10A2_UNORM bytes,
       encoded RGBA8_SRGB and BGRA8_SRGB bytes, R8G8_UNORM two-channel texels, odd-width R8_UNORM row
       packing plus mip/array subresource selection, depth-only D16_UNORM and D32_FLOAT values, and Texture3D

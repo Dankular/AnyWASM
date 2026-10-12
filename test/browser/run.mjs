@@ -322,6 +322,14 @@ try {
     triText.includes('staging R32_UINT readback=12345678,ffffffff,00000000,80000000 row_pitch=8'), triText);
   check('D3D11 staging R32_SINT Map(READ) preserves signed bit patterns in two rows',
     triText.includes('staging R32_SINT readback=80000000,ffffffff,00000000,7fffffff row_pitch=8'), triText);
+  check('D3D11 staging R16_UNORM Map(READ) preserves normalized words',
+    triText.includes('staging R16_UNORM readback=0000,4000,8000,ffff row_pitch=4'), triText);
+  check('D3D11 staging R16_SNORM Map(READ) preserves signed normalized words',
+    triText.includes('staging R16_SNORM readback=8000,c000,0000,7fff row_pitch=4'), triText);
+  check('D3D11 staging R16_UINT Map(READ) preserves unsigned words',
+    triText.includes('staging R16_UINT readback=0000,0001,7fff,ffff row_pitch=4'), triText);
+  check('D3D11 staging R16_SINT Map(READ) preserves signed words',
+    triText.includes('staging R16_SINT readback=8000,ffff,0000,7fff row_pitch=4'), triText);
   check('D3D11 staging R32G32_FLOAT Map(READ) preserves two-channel rows and row pitch',
     triText.includes('staging R32G32_FLOAT readback=0.125,-0.250,0.500,1.250,-0.500,2.000,-1.000,0.750 row_pitch=16'), triText);
   check('D3D11 staging R32G32_UINT Map(READ) preserves packed channel words',
@@ -334,8 +342,26 @@ try {
     triText.includes('staging R32G32B32A32_UINT readback=12345678,9abcdef0,01020304,ffffffff,00000001,80000000,deadbeef,55aa33cc,00000000,ffffffff,13579bdf,2468ace0,abcdef01,10203040,55667788,99aabbcc row_pitch=32'), triText);
   check('D3D11 staging R32G32B32A32_SINT Map(READ) preserves wide signed bit patterns',
     triText.includes('staging R32G32B32A32_SINT readback=80000000,ffffffff,00000000,00000001,7fffffff,87654321,fffffffe,0000002a,ffffffff,80000001,fffffffd,00000003,12345678,edcba987,40000000,c0000000 row_pitch=32'), triText);
+  check('D3D11 staging RG16_FLOAT Map(READ) preserves two-channel rows',
+    triText.includes('staging RG16_FLOAT readback=3400,b400,3800,3c00,b800,4000,bc00,3a00 row_pitch=8'), triText);
+  check('D3D11 staging RG16_UNORM Map(READ) preserves normalized words',
+    triText.includes('staging RG16_UNORM readback=0000,7fff,8000,ffff,1234,abcd,5555,aaaa row_pitch=8'), triText);
+  check('D3D11 staging RG16_SNORM Map(READ) preserves signed normalized words',
+    triText.includes('staging RG16_SNORM readback=8000,c000,0000,7fff,1234,edcb,4000,c000 row_pitch=8'), triText);
+  check('D3D11 staging RG16_UINT Map(READ) preserves unsigned words',
+    triText.includes('staging RG16_UINT readback=0000,ffff,1234,abcd,8000,7fff,5555,aaaa row_pitch=8'), triText);
+  check('D3D11 staging RG16_SINT Map(READ) preserves signed words',
+    triText.includes('staging RG16_SINT readback=8000,ffff,0000,7fff,edcb,1234,c000,4000 row_pitch=8'), triText);
   check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
     triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
+  check('D3D11 staging RGBA16_UNORM Map(READ) preserves normalized channel words',
+    triText.includes('staging RGBA16_UNORM readback=0000,1111,2222,3333,4444,5555,6666,7777,8888,9999,aaaa,bbbb,cccc,dddd,eeee,ffff row_pitch=16'), triText);
+  check('D3D11 staging RGBA16_SNORM Map(READ) preserves signed normalized channel words',
+    triText.includes('staging RGBA16_SNORM readback=8000,c000,0000,7fff,1234,edcb,4000,c000,ffff,8001,fffd,0003,4000,c000,2000,e000 row_pitch=16'), triText);
+  check('D3D11 staging RGBA16_UINT Map(READ) preserves unsigned channel words',
+    triText.includes('staging RGBA16_UINT readback=0000,ffff,1234,abcd,8000,7fff,5555,aaaa,0001,fffe,1357,2468,dead,beef,0102,0304 row_pitch=16'), triText);
+  check('D3D11 staging RGBA16_SINT Map(READ) preserves signed channel words',
+    triText.includes('staging RGBA16_SINT readback=8000,ffff,0000,7fff,edcb,1234,c000,4000,ffff,8001,fffd,0003,4000,c000,2000,e000 row_pitch=16'), triText);
   check('D3D11 staging BGRA8_UNORM Map(READ) preserves raw channel bytes',
     triText.includes('staging BGRA8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
   check('D3D11 staging R16_FLOAT Map(READ) preserves packed half-float rows',

@@ -50,8 +50,10 @@ cache-pressure probe. Both passed 640x480 back-buffer checks and visible-canvas 
 each reported clear pixel `[0,0,51,255]`, back-buffer center `[85,86,85,255]`, visible-canvas center
 `[85,85,84,255]`, and no WebGPU validation errors. The D3D11 fixture preserved R32_UINT/SINT words
 with 8-byte rows, R32G32_FLOAT values and R32G32_UINT/SINT words with 16-byte rows, and
-RGBA32_FLOAT/UINT/SINT rows with 32-byte
-pitches, along with expected BGRA8_SRGB encoded bytes in both browsers. WebKit exited hello, passed cache
+RGBA32_FLOAT/UINT/SINT rows with 32-byte pitches. R16 UNORM/SNORM/UINT/SINT readbacks used 4-byte
+rows; RG16_FLOAT and the RG16 integer/normalized formats used 8-byte rows; RGBA16_FLOAT and the
+RGBA16 integer/normalized formats used 16-byte rows. Both browsers also preserved BGRA8_SRGB bytes.
+WebKit exited hello, passed cache
 pressure, and returned the expected explicit graphics-unavailable status because WebGPU and
 OffscreenCanvas worker transfer are unavailable.
 These results are specific to the installed browser builds and platform.
@@ -61,7 +63,8 @@ x64. `node test/browser/run.mjs` passed the worker, emitted-module, input, D3D11
 and compute checks. The `?test=1` triangle back-buffer readback matched barycentric samples at 216
 pixels (worst error 1/255); a separate visible-canvas screenshot verified the clear colour and
 interpolated centre pixel. The triangle fixture preserved two-row R32G32_FLOAT values at a 16-byte
-pitch; R32G32_UINT/SINT packed words; RGBA32_FLOAT/UINT/SINT rows at a 32-byte pitch; and encoded
+pitch; R32G32_UINT/SINT packed words; RGBA32_FLOAT/UINT/SINT rows at a 32-byte pitch; the R16, RG16,
+and RGBA16 normalized and integer staging patterns with 4-, 8-, and 16-byte row pitches; and encoded
 bytes through RGBA8_SRGB and BGRA8_SRGB staging. The textured fixture
 passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
