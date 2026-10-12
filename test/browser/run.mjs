@@ -1719,6 +1719,13 @@ try {
           return image.SampleLevel(anisotropicBorderSampler, float2(2.0, 0.5), 0.0);
         }
       `, 'main', 'ps_5_0');
+      const a8BorderPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main() : SV_Target {
+          return image.SampleLevel(borderSampler, float2(2.0, 0.5), 0.0);
+        }
+      `, 'main', 'ps_5_0');
       const r8BorderPixel = tool.compileHlsl(`
         Texture2D<float4> image : register(t0);
         SamplerState borderSampler : register(s0);
@@ -1887,10 +1894,26 @@ try {
         gpu.execute(bc4Commands);
         bc4Pixels = await gpu.readBackbuffer(1);
       }
+
+      stream.length = 0;
+      command(4, words(31, 1, 1, 1, 1, 65, 8, 0, 1, 0)); // A8_UNORM texture
+      const a8Upload = new Uint8Array(40);
+      a8Upload.set(words(31, 0, 0, 0, 0, 1, 1, 4, 4));
+      a8Upload[36] = 128;
+      command(5, a8Upload);
+      command(12, words(32, 2, 31, 65, 4, 0, 1, 0, 1));
+      command(8, sampler(27, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+      shader(40, 1, a8BorderPixel);
+      command(17, words(1, 40)); command(19, words(1, 0, 1, 32)); command(20, words(1, 0, 1, 27)); command(29, words(3, 0));
+      const a8Size = stream.reduce((total, part) => total + part.length, 0), a8Commands = new Uint8Array(a8Size);
+      let a8Offset = 0; for (const part of stream) { a8Commands.set(part, a8Offset); a8Offset += part.length; }
+      gpu.execute(a8Commands);
+      const a8Pixels = await gpu.readBackbuffer(1);
       const result = {
         wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35),
         mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
         anisotropicBorderOutside: at(anisotropicPixels, 32),
+        a8BorderOutside: at(a8Pixels, 32),
         linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32),
         r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48),
         rg8BorderEdge: at(rg8Pixels, 16), rg8BorderOutside: at(rg8Pixels, 48),
@@ -1905,8 +1928,8 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler modes, anisotropic BORDER, and R8/RG8/RGB border defaults match pixels',
-    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 8 : 10) && samplerAddressResult.errors.length === 0
+  check('D3D11 sampler modes, anisotropic BORDER, and R8/RG8/RGB/A8 border defaults match pixels',
+    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 9 : 11) && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1915,6 +1938,7 @@ try {
       && near(samplerAddressResult.borderOut || [], [0, 0, 255, 255], 1)
       && near(samplerAddressResult.borderStraddle || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.anisotropicBorderOutside || [], [64, 128, 191, 255], 1)
+      && near(samplerAddressResult.a8BorderOutside || [], [0, 0, 0, 64], 1)
       && near(samplerAddressResult.borderGrad || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.borderBias || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.r8BorderEdge || [], [192, 0, 0, 255], 2)
