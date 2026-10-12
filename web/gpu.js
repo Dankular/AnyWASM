@@ -753,7 +753,7 @@ export class GpuExecutor {
 
   sampleTypeOf(format) {
     if (!format) return 'float';
-    if (isDepth(format)) return 'unfilterable-float';
+    if (isDepth(format)) return 'depth';
     if (/uint$/.test(format)) return 'uint';
     if (/sint$/.test(format)) return 'sint';
     if (/32float$/.test(format) && !this.features.has('float32-filterable')) return 'unfilterable-float';

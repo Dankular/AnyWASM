@@ -951,6 +951,84 @@ try {
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
+  const comparisonSamplerResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const logs = [];
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture2D<float> depthImage : register(t0);
+        SamplerComparisonState comparisonSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float reference = position.x < 32.0 ? 0.4 : 0.6;
+          float result = depthImage.SampleCmpLevelZero(comparisonSampler, float2(0.5, 0.5), reference);
+          return float4(result, result, result, 1.0);
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(20, 1, 1, 1, 1, 40, 0x48, 0, 1, 0)); // D32_FLOAT depth + SRV
+      command(12, words(21, 1, 20, 40, 3, 0, 1, 0, 1)); // depth-stencil view
+      command(12, words(22, 2, 20, 40, 4, 0, 1, 0, 1)); // shader-resource view
+      command(28, words(21, 1, 0x3f000000, 0)); // clear stored depth to 0.5
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 23, true); samplerView.setUint32(4, 0x80, true); // comparison, point filter
+      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setUint32(24, 1, true); samplerView.setUint32(28, 2, true); // LESS comparison
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
+      command(8, sampler);
+      shader(24, 0, vertex); shader(25, 1, pixel);
+      command(17, words(0, 24)); command(17, words(1, 25));
+      command(21, words(1, 2, 0)); command(16, words(4));
+      command(19, words(1, 0, 1, 22)); command(20, words(1, 0, 1, 23));
+      command(29, words(3, 0));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const result = { passing: at(10), failing: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors, logs };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 comparison sampler applies LESS to depth samples',
+    comparisonSamplerResult.draws === 1 && comparisonSamplerResult.errors.length === 0
+      && near(comparisonSamplerResult.passing, [255, 255, 255, 255], 1)
+      && near(comparisonSamplerResult.failing, [0, 0, 0, 255], 1),
+    JSON.stringify(comparisonSamplerResult));
+
   const d3d9FixedResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
