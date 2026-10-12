@@ -297,9 +297,9 @@ register-stack subset):
       blended quad and sampled texture colours. Other render paths, canvas sizes, and browser engines
       still need coverage.
 - [~] **Additional graphics APIs**: D3D9 has a pixel-tested fixed-function subset for selected
-      FVF layouts, stage-0 texture selection/modulation, triangle fans, alpha blending, and every
-      alpha compare function at its equality boundary; general D3D9 device, shader, and state
-      coverage remains incomplete. D3D12,
+      FVF layouts, stage-0 SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD, and SUBTRACT, triangle
+      fans, alpha blending, and every alpha compare function at its equality boundary; general D3D9
+      device, shader, and state coverage remains incomplete. D3D12,
       DXGI flip-model/fullscreen/resize/vsync
       semantics, OpenGL (WGL), and Vulkan remain open. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.

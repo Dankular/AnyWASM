@@ -1371,20 +1371,32 @@ try {
       const selectedPixels = await gpu.readBackbuffer(1);
       const selectedAt = (20 * selectedPixels.width + 32) * 4;
 
-      stream.length = 0;
       const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
       clearView.setUint32(0, 2, true);
       clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
       clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
-      command(27, clear);
-      command(45, words(0x144, 64, 64, 4, 2, 1, 2, 2, 1)); // MODULATE texture RGB with diffuse color
-      command(16, words(4)); command(29, words(3, 0));
-      gpu.execute(append());
-      const modulatedPixels = await gpu.readBackbuffer(1);
-      const modulatedAt = (20 * modulatedPixels.width + 32) * 4;
+      const renderOperation = async (colorOp) => {
+        stream.length = 0;
+        command(27, clear);
+        command(45, words(0x144, 64, 64, colorOp, 2, 1, 2, 2, 1));
+        command(16, words(4)); command(29, words(3, 0));
+        gpu.execute(append());
+        const pixels = await gpu.readBackbuffer(1);
+        const at = (20 * pixels.width + 32) * 4;
+        return Array.from(pixels.data.slice(at, at + 4));
+      };
+      const modulatedPixel = await renderOperation(4);
+      const selectedArg2Pixel = await renderOperation(3);
+      const modulated2xPixel = await renderOperation(5);
+      const addedPixel = await renderOperation(7);
+      const subtractedPixel = await renderOperation(10);
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
-        modulatedPixel: Array.from(modulatedPixels.data.slice(modulatedAt, modulatedAt + 4)),
+        modulatedPixel,
+        selectedArg2Pixel,
+        modulated2xPixel,
+        addedPixel,
+        subtractedPixel,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -1395,11 +1407,17 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 2 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 6 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 255], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 255], 2), JSON.stringify(d3d9TextureResult));
+  check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
+    d3d9TextureResult.draws === 6 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 255], 2)
+      && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 255], 2)
+      && near(d3d9TextureResult.addedPixel, [255, 127, 127, 255], 2)
+      && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 255], 2),
+    JSON.stringify(d3d9TextureResult));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
