@@ -166,28 +166,31 @@
   runtime stops with a diagnostic instead of exceeding the budget. PE64 unwind metadata and a
   selected version 1 unwind subset are tested,
   including one target-grounded MSVC C++ catch; general SEH dispatch, vectored handlers, audio,
-  DirectInput/XInput, 32-bit PE, D3D9/D3D12/OpenGL remain unsupported. GDI support is limited to
-  virtual display DCs and basic caps.
+  DirectInput/XInput, 32-bit PE, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
+  fixed-function subset is limited to the checked FVF layouts, stage-0 texture selection, triangle
+  fans, and alpha testing. GDI support is limited to virtual display DCs and basic caps.
 - DLL initialization remains partial: bundled DLL `DllMain` calls follow module creation order,
   static TLS data is initialized, but TLS callbacks are not invoked. Named forwarded exports are
   resolved opportunistically, with failed names omitted. The selected Diligent EXE and three DLLs
   have no TLS callbacks or forwarded exports, so they do not verify those paths. The bounded target
   replay completed process attach for the D3D11 engine and D3DCompiler; Archiver was not observed
   loading. See [`docs/TARGETS.md`](TARGETS.md).
-- Direct3D 11 coverage is a vertical slice: textures, depth/stencil, blending, rasterizer and
-  sampler state, mip generation, copies and instancing are implemented in the translator. Focused
-  pixel checks cover the coloured triangle (216 pixels) and `d3d11_textured` (2x2 point-sampled
-  texture, D32_FLOAT depth ordering, indexed draws, constant-factor and source-alpha blending, and
-  one texture plus one vertex-buffer `CopyResource` case). Target-level checks also cover visible
-  SDF output, W movement, and Tab map regeneration. The triangle's visible canvas screenshot
-  also checks its clear colour and centre pixel. Other blend modes, alpha-test, mips/filtering,
-  instancing and other copies are not pixel-verified. Compute support is limited to a single
-  R32_FLOAT storage-texture UAV; a small fixture checks its output, and the selected Diligent SDF
-  shader now translates and dispatches but has no verified UAV output. D3D11 event queries report
-  completion after `End` for the selected target's idle path; other query types remain unsupported.
-  Structured/raw UAVs,
-  geometry/tessellation, multisampling (forced to 1 sample), general staging read-back, and `SV_`
-  system values beyond the basics remain unsupported.
+- Direct3D 11 coverage is a vertical slice. Focused browser pixel/readback checks cover the coloured
+  triangle (216 pixels), constant-factor and source-alpha blending, reverse-subtract/add/subtract/
+  min/max blending, texture/vertex/index-buffer copies, texture region copies and uploads,
+  DXBC clip/discard, 2D and 3D mip generation, fractional-LOD linear filtering, an 8x anisotropic
+  sampler request, instance step rates, render-to-texture, multiple render targets, cube/array/3D
+  texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, and D3D11.1 constant-buffer
+  ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
+  rendering, stage-0 texture selection, and alpha-test comparisons. These checks do not establish
+  broad API or game compatibility. Target-level D3D11 checks cover visible SDF output, W movement,
+  and Tab map regeneration; the triangle canvas screenshot checks its clear colour and centre pixel.
+  Remaining D3D11 gaps include other buffer-copy classes, more format/resolve and sampler pixel
+  comparisons, render-state combinations, other query types, geometry/tessellation, general staging
+  read-back, deferred contexts, and system values beyond the basics. Compute browser fixtures cover
+  typed R32/RGBA textures, structured/raw/typed buffer ranges, and a 3D texture UAV. The selected
+  Diligent SDF shader dispatches and produces finite values on readback; broader format coverage and
+  pixel equivalence remain unverified.
 - **Pixel verification paths:** D3D11 back-buffer checks run in test mode (`?test=1`), which skips
   swap-chain presentation so the test can map the back buffer directly. A separate Chromium run
   without test mode captures the visible 640x480 canvas and checks the triangle's clear colour and

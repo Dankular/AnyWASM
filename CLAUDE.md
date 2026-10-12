@@ -238,14 +238,15 @@ register-stack subset):
       explicitly does not guarantee runtime success. The JSON serializer escapes control characters.
 
 ## 3. Graphics
-- [~] **D3D11 verification gaps** (implemented in the translator; constant blend-factor and
-      `SRC_ALPHA`/`INV_SRC_ALPHA` blending, one 2x2 texture-to-texture `CopyResource` case, and one same-size vertex-buffer
-      `CopyResource` case are pixel-verified in `test/browser/run.mjs` via `d3d11_textured`):
-      other buffer `CopyResource` cases, other blend modes,
-      alpha test/discard, mips and trilinear/anisotropic filtering, instancing,
-      `CopySubresourceRegion`/`UpdateSubresource`, render-to-texture, multiple render targets,
-      cube/array/3D textures, depth-stencil ops/stencil, rasterizer state
-      (cull/fill/scissor/bias), `GenerateMips`, constant-buffer packing edge cases.
+- [~] **D3D11 verification gaps**: browser pixel/readback checks cover constant-factor and
+      source-alpha blending plus reverse-subtract, add, subtract, min, and max blend operations;
+      texture, vertex-buffer, and index-buffer `CopyResource`; texture `CopySubresourceRegion` and
+      `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`; fractional-LOD linear
+      filtering; an 8x anisotropic sampler request; instance step rates; render-to-texture; multiple
+      render targets; cube, array, and 3D texture sampling; depth/stencil; cull, fill, scissor, and
+      depth bias; 4x MSAA resolve; and D3D11.1 constant-buffer ranges. Remaining gaps include other
+      buffer-copy classes, wider format/resolve combinations, fuller sampler pixel comparisons, and
+      broader combinations of render state.
 - [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
       buffer ranges, and emits dispatch commands. The WebGPU executor binds the selected
@@ -263,10 +264,11 @@ register-stack subset):
       replay traverses the maze to its teleport; other UAV formats, pixel equivalence, graphics
       states, other gameplay states, and broad game acceptance remain unverified. Target-driven Tab
       map reset is pixel-checked after adding D3D11 `Flush1` event signaling and event-query
-      completion; other query types are not supported. Structured/raw-buffer UAVs, geometry/hull/domain
-      shaders, MSAA (forced to 1 sample), general staging read-back, deferred
-      contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
-      feature-level reporting remain open.
+      completion; other query types are not supported. Browser fixtures also cover typed R32/RGBA
+      textures, structured/raw/typed buffer UAV ranges, and a 3D texture UAV. Other UAV formats,
+      geometry/hull/domain shaders, general staging read-back, deferred contexts/command lists,
+      `SV_` system values beyond the basics, tiled resources, and honest feature-level reporting
+      remain open.
 - [~] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; a captured
       Diligent GLFW Demo SDF shader now has a regression for its non-finite integer-register bit
       patterns and translates through a runtime bitcast. The target's draw-parameter uniform and UAV
@@ -275,8 +277,10 @@ register-stack subset):
 - [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
       pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
       canvas sizes, and browser engines still need coverage.
-- [ ] **Other APIs**: D3D9 (very common in older games), D3D12, DXGI flip-model/fullscreen/
-      resize/vsync semantics, OpenGL (WGL), Vulkan. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
+- [~] **Additional graphics APIs**: D3D9 has a pixel-tested fixed-function subset for selected
+      FVF layouts, stage-0 texture selection, triangle fans, and alpha testing; general D3D9 device,
+      shader, and state coverage remains incomplete. D3D12, DXGI flip-model/fullscreen/resize/vsync
+      semantics, OpenGL (WGL), and Vulkan remain open. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
 - [~] **Frame pacing**: after each `Stop::Frame`, the worker advances the virtual guest clock by the
       measured time spent waiting for browser `requestAnimationFrame`, converting elapsed 100 ns
