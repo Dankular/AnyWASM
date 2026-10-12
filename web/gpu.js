@@ -429,7 +429,7 @@ function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode)
     ? `f32(textureDimensions(${textureName}, 0))`
     : `vec${dimension}<f32>(textureDimensions(${textureName}, 0))`;
   const coordParams = `coord: ${coordType}${arrayTexture ? ', layer: i32' : ''}`;
-  const callArgs = (lod) => `${arrayTexture ? 'coord, layer' : 'coord'}, ${lod}`;
+  const callArgs = (lod) => `${arrayTexture ? 'coord, layer' : 'coord'}, ${lod}${mode === 'compare' ? ', reference' : ''}`;
   const gradientLength = (gradient) => dimension === 1 ? `abs(${gradient})` : `length(${gradient})`;
   let params = coordParams;
   let derivativeX, derivativeY, lodBias = '0.0';
@@ -442,6 +442,7 @@ function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode)
       params += ', sourceBias: f32';
       lodBias = 'sourceBias';
     }
+    if (mode === 'compare') params += ', reference: f32';
   }
   const source = `fn ${name}_${mode}(${params}) -> ${textureType.kind.startsWith('texture_depth_') ? 'f32' : `vec4<${textureType.component}>`} {
   let _size = ${size};
@@ -504,11 +505,12 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
       const mode = ({
         textureSample: 'implicit',
         textureSampleLevel: 'level',
+        textureSampleCompare: 'compare',
         textureSampleCompareLevel: 'compareLevel',
         textureSampleGrad: 'grad',
         textureSampleBias: 'bias',
       })[match[1]];
-      const expectedArgs = mode === 'level' || mode === 'compareLevel' ? (arrayTexture ? 5 : 4)
+      const expectedArgs = mode === 'level' || mode === 'compareLevel' || mode === 'compare' ? (arrayTexture ? 5 : 4)
         : mode === 'grad' ? (arrayTexture ? 6 : 5)
           : mode === 'bias' ? (arrayTexture ? 5 : 4)
             : mode === 'implicit' ? (arrayTexture ? 4 : 3) : 0;
@@ -524,6 +526,13 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
         if (mode === 'compareLevel') {
           sampleArgs.push('0.0', args[arrayTexture ? 4 : 3].text.trim());
           helperCall = `${helper.name}(${sampleArgs.join(', ')})`;
+        } else if (mode === 'compare') {
+          const wrapper = borderSampleLodWgsl(helper.name, textureName, textureType, arrayTexture, mode);
+          if (wrapper) {
+            borderHelpers.set(wrapper.name, wrapper.source);
+            sampleArgs.push(args[arrayTexture ? 4 : 3].text.trim());
+            helperCall = `${wrapper.name}(${sampleArgs.join(', ')})`;
+          }
         } else if (mode === 'level') {
           sampleArgs.push(args[arrayTexture ? 4 : 3].text.trim());
           helperCall = `${helper.name}(${sampleArgs.join(', ')})`;

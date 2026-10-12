@@ -1701,6 +1701,8 @@ try {
           float2 coordinate = position.y < 32.0 ? float2(0.5, 0.5) : float2(2.0, 0.5);
           float result;
           float borderOutside = 0.0;
+          float borderStraddleSample = depthImage.SampleCmp(greaterSampler, float2(0.9, 0.5), reference);
+          float borderOutsideSample = depthImage.SampleCmp(greaterSampler, float2(2.0, 0.5), reference);
           if (position.x < 8.0) result = depthImage.SampleCmpLevelZero(neverSampler, coordinate, reference);
           else if (position.x < 16.0) result = depthImage.SampleCmpLevelZero(lessSampler, coordinate, reference);
           else if (position.x < 24.0) result = depthImage.SampleCmpLevelZero(equalSampler, coordinate, reference);
@@ -1708,8 +1710,8 @@ try {
           else if (position.x < 40.0) {
             if (position.y < 32.0) result = depthImage.SampleCmpLevelZero(greaterSampler, float2(0.5, 0.5), reference);
             else {
-              result = depthImage.SampleCmpLevelZero(greaterSampler, float2(0.9, 0.5), reference);
-              borderOutside = depthImage.SampleCmpLevelZero(greaterSampler, float2(2.0, 0.5), reference);
+              result = borderStraddleSample;
+              borderOutside = borderOutsideSample;
             }
           }
           else if (position.x < 48.0) result = depthImage.SampleCmpLevelZero(notEqualSampler, coordinate, reference);

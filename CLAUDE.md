@@ -246,8 +246,8 @@ register-stack subset):
       fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
       BORDER verifies configured color for point and linear taps in 2D RGBA8 Sample, SampleLevel,
       SampleGrad, and SampleBias paths, plus 2D-array and 3D RGBA8 SampleLevel paths. D32_FLOAT
-      comparison BORDER verifies all eight comparison functions on fully outside samples and a
-      linear GREATER SampleCmpLevelZero edge footprint. Other dimensions/formats and comparison
+      comparison BORDER verifies all eight comparison functions on fully outside SampleCmpLevelZero
+      taps and a linear GREATER SampleCmp edge footprint. Other dimensions/formats and comparison
       sampling variants, gather/cube/anisotropic BORDER cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
