@@ -76,12 +76,13 @@
 **Files:** D3D11 HLE modules, `web/gpu.js`, `test/browser/run.mjs`, `docs/TARGETS.md`
 
 - [x] Enumerate D3D11 typed UAV formats advertised by the HLE and pixel-test all 16 through texture dispatch/readback.
-- [ ] Add readback cases for the remaining staging formats and subresource layouts.
+- [x] Read back D32_FLOAT_S8X24 depth and stencil aspects separately and pack the DXGI 8-byte texel layout; Chromium verifies all four depth/stencil texels.
+- [ ] Add readback for D24_UNORM_S8 and legacy packed 16-bit formats. WebGPU's `depth24plus-stencil8` depth representation is implementation-defined, and DXGI B5G6R5/B5G5R5A1/B4G4R4A4 still lack raw packed-texture support.
 - [x] Verify event-query `End`/`GetData` ordering and explicit rejection of unsupported valid query types; invalid query types return `E_INVALIDARG`.
 - [x] Verify `SV_DispatchThreadID`, group system values, dispatch-to-draw/readback visibility, and buffer copies feeding later dispatches.
 - [x] Report the unsupported D3D11.2 `OPTIONS1` capabilities, including tiled-resource tier 0, with a 16-byte HLE regression.
 - [x] Implement deferred contexts and command lists; Rust tests verify deferred-context creation/type/flags, command recording, finish/reset behavior, and execute ordering/state restoration. The browser suite separately verifies that saved WebGPU pipeline state, including nested arrays and maps, restores after clear.
-- [x] Verify executor readback of 14 typeless/BGRX DXGI formats using odd-width, padded rows, and all four mip/array subresource indices; depth-stencil and legacy packed 16-bit readback formats remain open.
+- [x] Verify executor readback of 14 typeless/BGRX DXGI formats using odd-width, padded rows, and all four mip/array subresource indices; D32_FLOAT_S8X24 depth/stencil rows are also verified.
 
 **Gate:** Each supported query/UAV/staging feature has typed value assertions and command-order checks; unsupported feature reporting matches implemented behavior.
 

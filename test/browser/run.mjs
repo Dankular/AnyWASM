@@ -435,6 +435,38 @@ try {
     triText.includes('staging BGRA8_SRGB readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
   check('D3D11 staging Texture3D Map(READ) preserves row and depth pitches',
     triText.includes('staging Texture3D R32_FLOAT readback=0.125,0.250,0.375,0.500,0.625,0.750,0.875,1.000 row_pitch=8 depth_pitch=16'), triText);
+  const depthStencilReadbackResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      if (!gpu.features.has('depth32float-stencil8')) {
+        gpu.device.destroy();
+        return { skipped: 'adapter does not support depth32float-stencil8' };
+      }
+      gpu.createTexture(1, 2, 2, 1, 1, 20, 0x40, 0, 0); // D32_FLOAT_S8X24_UINT depth-stencil texture
+      const pass = gpu.encoder().beginRenderPass({ colorAttachments: [], depthStencilAttachment: {
+        view: gpu.res.get(1).gpu.createView(), depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 0.375,
+        stencilLoadOp: 'clear', stencilStoreOp: 'store', stencilClearValue: 0x5a,
+      } });
+      pass.end();
+      const bytes = Array.from(await gpu.readBackResource(1));
+      const errors = gpu.stats.errors;
+      gpu.device.destroy();
+      return { bytes, errors };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  const depthStencilPixel = [0x00, 0x00, 0xc0, 0x3e, 0x5a, 0x00, 0x00, 0x00];
+  const expectedDepthStencilBytes = [...depthStencilPixel, ...depthStencilPixel, ...depthStencilPixel, ...depthStencilPixel];
+  check('D3D11 D32_FLOAT_S8X24 readback interleaves raw depth, stencil, and padding bytes',
+    Boolean(depthStencilReadbackResult.skipped)
+      || (!depthStencilReadbackResult.error && depthStencilReadbackResult.errors.length === 0
+        && depthStencilReadbackResult.bytes.length === expectedDepthStencilBytes.length
+        && depthStencilReadbackResult.bytes.every((value, i) => value === expectedDepthStencilBytes[i])),
+    JSON.stringify(depthStencilReadbackResult));
   const bcReadbackResult = await page.evaluate(async () => {
     const { GpuExecutor } = await import('/gpu.js');
     const canvas = document.createElement('canvas');

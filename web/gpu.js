@@ -1881,7 +1881,6 @@ export class GpuExecutor {
     }
     if (resource.kind !== 'texture') throw new Error(`resource ${id} has an unsupported kind`);
     if (resource.samples !== 1) throw new Error(`resource ${id} is multisampled and cannot be mapped for read`);
-    if (hasStencil(resource.format)) throw new Error(`stencil texture readback is unsupported for ${resource.format}`);
 
     const mip = resource.dimension === '3d' ? subresource : subresource % resource.mips;
     const slice = resource.dimension === '3d' ? 0 : Math.floor(subresource / resource.mips);
@@ -1891,6 +1890,46 @@ export class GpuExecutor {
     const width = Math.max(1, resource.width >> mip);
     const height = Math.max(1, resource.height >> mip);
     const depth = resource.dimension === '3d' ? Math.max(1, resource.depth >> mip) : 1;
+    if (resource.format === 'depth32float-stencil8') {
+      const depthBytesPerRow = (width * 4 + 255) & ~255;
+      const stencilBytesPerRow = (width + 255) & ~255;
+      const imageCount = depthBytesPerRow * height * depth;
+      const depthBuffer = this.device.createBuffer({ size: imageCount, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const stencilBuffer = this.device.createBuffer({ size: stencilBytesPerRow * height * depth, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      try {
+        this.flush();
+        const encoder = this.device.createCommandEncoder();
+        const source = { texture: resource.gpu, mipLevel: mip, origin: { x: 0, y: 0, z: slice } };
+        const copySize = { width, height, depthOrArrayLayers: depth };
+        encoder.copyTextureToBuffer({ ...source, aspect: 'depth-only' },
+          { buffer: depthBuffer, bytesPerRow: depthBytesPerRow, rowsPerImage: height }, copySize);
+        encoder.copyTextureToBuffer({ ...source, aspect: 'stencil-only' },
+          { buffer: stencilBuffer, bytesPerRow: stencilBytesPerRow, rowsPerImage: height }, copySize);
+        this.device.queue.submit([encoder.finish()]);
+        await Promise.all([depthBuffer.mapAsync(GPUMapMode.READ), stencilBuffer.mapAsync(GPUMapMode.READ)]);
+        const depthBytes = new Uint8Array(depthBuffer.getMappedRange());
+        const stencilBytes = new Uint8Array(stencilBuffer.getMappedRange());
+        const output = new Uint8Array(width * height * depth * 8);
+        for (let z = 0; z < depth; z++) {
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const destination = ((z * height + y) * width + x) * 8;
+              const depthOffset = z * depthBytesPerRow * height + y * depthBytesPerRow + x * 4;
+              const stencilOffset = z * stencilBytesPerRow * height + y * stencilBytesPerRow + x;
+              output.set(depthBytes.subarray(depthOffset, depthOffset + 4), destination);
+              output[destination + 4] = stencilBytes[stencilOffset];
+            }
+          }
+        }
+        return output;
+      } finally {
+        if (depthBuffer.mapState === 'mapped') depthBuffer.unmap();
+        if (stencilBuffer.mapState === 'mapped') stencilBuffer.unmap();
+        depthBuffer.destroy();
+        stencilBuffer.destroy();
+      }
+    }
+    if (hasStencil(resource.format)) throw new Error(`stencil texture readback is unsupported for ${resource.format}`);
     const block = BLOCK(resource.format) || [1, 1, BYTES(resource.format)];
     const rowBytes = Math.ceil(width / block[0]) * block[2];
     const rows = Math.ceil(height / block[1]);
