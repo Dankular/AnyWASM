@@ -360,6 +360,14 @@ try {
   check('canvas blit preserves the clear colour', near(atCanvas(10, 10), [0, 0, 51, 255], 2), JSON.stringify(atCanvas(10, 10)));
   const centroidY = Math.round(1 + 288.5 / 480 * (canvasPixels.h - 2));
   check('canvas blit presents the interpolated triangle', near(atCanvas(320, centroidY), [85, 85, 85, 255], 6), JSON.stringify(atCanvas(320, centroidY)));
+  await page.locator('#screen').evaluate((canvas) => { canvas.style.width = '320px'; });
+  const scaledCanvasPixels = decodePng(await page.locator('#screen').screenshot());
+  const atScaledCanvas = (x, y) => { const i = (y * scaledCanvasPixels.w + x) * 4; return Array.from(scaledCanvasPixels.data.slice(i, i + 4)); };
+  check('scaled canvas screenshot preserves the guest window aspect ratio',
+    scaledCanvasPixels.w === 320 && Math.abs(scaledCanvasPixels.h - scaledCanvasPixels.w * canvasLayout.aspectHeight / canvasLayout.aspectWidth) < 1,
+    `${scaledCanvasPixels.w}x${scaledCanvasPixels.h}`);
+  const scaledCentroidY = Math.round(1 + 288.5 / 480 * (scaledCanvasPixels.h - 2));
+  check('scaled canvas blit preserves the interpolated triangle', near(atScaledCanvas(160, scaledCentroidY), [85, 85, 85, 255], 6), JSON.stringify(atScaledCanvas(160, scaledCentroidY)));
 
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
   // Verify multisampled D3D11 render targets and ResolveSubresource in the WebGPU executor.
