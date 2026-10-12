@@ -635,6 +635,33 @@ try {
   const scaledCentroidY = Math.round(1 + 288.5 / 480 * (scaledCanvasPixels.h - 2));
   check('scaled canvas blit preserves the interpolated triangle', near(atScaledCanvas(160, scaledCentroidY), [85, 85, 85, 255], 6), JSON.stringify(atScaledCanvas(160, scaledCentroidY)));
 
+  const hidpiPage = await browser.newPage({ viewport: { width: 1280, height: 1000 }, deviceScaleFactor: 2 });
+  const hidpiErrors = [];
+  hidpiPage.on('pageerror', (error) => hidpiErrors.push(error.message));
+  await hidpiPage.goto('http://localhost:8099/index.html?run=d3d11_triangle');
+  await hidpiPage.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
+  const hidpiStats = await hidpiPage.evaluate(() => ({
+    dpr: devicePixelRatio,
+    canvas: { width: document.getElementById('screen').width, height: document.getElementById('screen').height },
+    rect: document.getElementById('screen').getBoundingClientRect().toJSON(),
+    gpu: window.__gpuStats,
+  }));
+  const hidpiPixels = decodePng(await hidpiPage.locator('#screen').screenshot());
+  const hidpiAt = (x, y) => Array.from(hidpiPixels.data.slice((y * hidpiPixels.w + x) * 4, (y * hidpiPixels.w + x) * 4 + 4));
+  const hidpiScaleX = hidpiPixels.w / hidpiStats.rect.width, hidpiScaleY = hidpiPixels.h / hidpiStats.rect.height;
+  const hidpiClear = hidpiAt(Math.round(10 * hidpiScaleX), Math.round(10 * hidpiScaleY));
+  const hidpiCentroid = hidpiAt(Math.round(1 + (hidpiPixels.w - 2) / 2), Math.round(1 + 288.5 / 480 * (hidpiPixels.h - 2)));
+  check('DPR2 worker canvas retains the 640x480 guest backing store and scales to physical pixels',
+    hidpiStats.dpr === 2 && hidpiStats.canvas.width === 640 && hidpiStats.canvas.height === 480
+      && hidpiPixels.w === 1280 && Math.abs(hidpiPixels.h - hidpiStats.rect.height * 2) <= 2
+      && hidpiStats.gpu?.presents === 3 && hidpiStats.gpu.errors.length === 0 && hidpiErrors.length === 0,
+    JSON.stringify({ dpr: hidpiStats.dpr, canvas: hidpiStats.canvas, rect: hidpiStats.rect,
+      screenshot: [hidpiPixels.w, hidpiPixels.h], presents: hidpiStats.gpu?.presents, errors: hidpiStats.gpu?.errors, pageErrors: hidpiErrors }));
+  check('DPR2 visible canvas preserves the clear and interpolated triangle pixels',
+    near(hidpiClear, [0, 0, 51, 255], 2) && near(hidpiCentroid, [85, 85, 85, 255], 6),
+    JSON.stringify({ clear: hidpiClear, centroid: hidpiCentroid }));
+  await hidpiPage.close();
+
   const resizeProbe = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');

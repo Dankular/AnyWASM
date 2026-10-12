@@ -131,7 +131,7 @@
 
 - [x] Verify the worker-transferred OffscreenCanvas blit at 640x480 and after CSS scaling to 320px; Chromium screenshots check the clear and interpolated triangle pixels.
 - [x] Verify visible swapchain blit pixels and backing/CSS dimensions at 32x24, then after ResizeBuffers at 96x64, with two presents and zero WebGPU validation errors.
-- [ ] Verify HiDPI backing-store sizing and visible pixels under a devicePixelRatio above 1.
+- [x] Verify DPR 2 worker-rendered presentation: the guest backing store remains 640x480, the canvas screenshot scales to 1280 physical pixels wide, clear and triangle pixels match, and three presents report zero validation or page errors.
 - [ ] Verify present interval semantics and virtual-clock accounting under JIT and worker scheduling.
 - [ ] Repeat selected-target rendering/input/gameplay checks and update every graphics status/checklist from the resulting evidence.
 
