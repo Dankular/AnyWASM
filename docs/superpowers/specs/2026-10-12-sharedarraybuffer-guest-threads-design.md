@@ -52,8 +52,11 @@ sample rendering path. Those remain in the parent runtime goal.
   operations use width-matched atomics, and cross-page or unaligned scalar accesses use byte
   operations. Host-side accesses use sequentially consistent atomics, which are stronger than the
   x86 ordering model. Compare-exchange supports naturally aligned 1/2/4/8-byte operands; misaligned
-  or cross-page locked operations return an explicit unsupported-alignment fault. The view requires
-  an immutable map and atomic access by every concurrent participant.
+  or cross-page locked operations return an explicit unsupported-alignment fault. The shared-memory
+  executor uses those operations for locked scalar arithmetic, bit updates, `CMPXCHG`, and `XADD`,
+  and for memory `XCHG`. Locked `CMPXCHG16B` reports an unsupported atomic-width fault because this
+  Wasm shared-memory backend has no 128-bit compare-exchange. The view requires an immutable map and
+  atomic access by every concurrent participant.
 - The ABI and `anywasm-cpu-worker` crates are not loaded by `web/worker.js`; the current runtime
   still runs cooperatively and keeps guest frame bytes in `Memory`'s `Vec<u8>`. The generic
   instruction executor is now in `anywasm-cpu-state`, and both the paged memory and shared-frame
@@ -102,10 +105,9 @@ The no-std boundary now includes the architectural `Cpu` context, decoder, integ
 instruction executor, shared-frame memory interface, and `anywasm-cpu-worker` slot runner. The
 ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and uses the same executor over
 its paged `Memory`. `Memory` can now export and import a validated sorted mapping/frame snapshot for
-a quiescent handoff. Production integration still needs no-std SSE/x87 execution, atomic locked
-guest operations, the process-level snapshot C ABI and browser copy-back, HLE return handling,
-worker-stack reservation, browser worker creation, and a target replay after the ABI has been
-exercised between browser workers.
+a quiescent handoff. Production integration still needs no-std SSE/x87 execution, the process-level
+snapshot C ABI and browser copy-back, HLE return handling, worker-stack reservation, browser worker
+creation, and a target replay after the ABI has been exercised between browser workers.
 
 ## Success criteria
 

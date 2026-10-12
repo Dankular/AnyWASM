@@ -501,6 +501,50 @@ impl GuestMemory for SharedGuestMemory<'_> {
     fn write_u128(&mut self, address: u64, value: u128) -> MemResult<()> {
         SharedGuestMemory::write_u128(self, address, value).map_err(to_cpu_fault)
     }
+    fn compare_exchange_u8(
+        &mut self,
+        address: u64,
+        current: u8,
+        new: u8,
+    ) -> MemResult<Result<u8, u8>> {
+        SharedGuestMemory::compare_exchange_u8(self, address, current, new).map_err(to_cpu_fault)
+    }
+    fn compare_exchange_u16(
+        &mut self,
+        address: u64,
+        current: u16,
+        new: u16,
+    ) -> MemResult<Result<u16, u16>> {
+        SharedGuestMemory::compare_exchange_u16(self, address, current, new).map_err(to_cpu_fault)
+    }
+    fn compare_exchange_u32(
+        &mut self,
+        address: u64,
+        current: u32,
+        new: u32,
+    ) -> MemResult<Result<u32, u32>> {
+        SharedGuestMemory::compare_exchange_u32(self, address, current, new).map_err(to_cpu_fault)
+    }
+    fn compare_exchange_u64(
+        &mut self,
+        address: u64,
+        current: u64,
+        new: u64,
+    ) -> MemResult<Result<u64, u64>> {
+        SharedGuestMemory::compare_exchange_u64(self, address, current, new).map_err(to_cpu_fault)
+    }
+    fn compare_exchange_u128(
+        &mut self,
+        address: u64,
+        _current: u128,
+        _new: u128,
+    ) -> MemResult<Result<u128, u128>> {
+        Err(to_cpu_fault(Fault {
+            address,
+            access: Access::Write,
+            kind: FaultKind::UnsupportedAtomicWidth,
+        }))
+    }
     fn read_into(&self, address: u64, output: &mut [u8], access: CpuAccess) -> MemResult<()> {
         SharedGuestMemory::read_bytes(self, address, output, from_cpu_access(access))
             .map_err(to_cpu_fault)

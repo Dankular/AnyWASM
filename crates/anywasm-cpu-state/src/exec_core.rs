@@ -146,6 +146,58 @@ pub fn wr<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, o: &Opnd, sz: u8, v: u64) 
     Ok(())
 }
 
+fn compare_exchange_scalar<M: GuestMemory>(
+    mem: &mut M,
+    address: u64,
+    size: u8,
+    current: u64,
+    new: u64,
+) -> ExecResult<Result<u64, u64>> {
+    Ok(match size {
+        1 => mem
+            .compare_exchange_u8(address, current as u8, new as u8)?
+            .map(u64::from)
+            .map_err(u64::from),
+        2 => mem
+            .compare_exchange_u16(address, current as u16, new as u16)?
+            .map(u64::from)
+            .map_err(u64::from),
+        4 => mem
+            .compare_exchange_u32(address, current as u32, new as u32)?
+            .map(u64::from)
+            .map_err(u64::from),
+        8 => mem.compare_exchange_u64(address, current, new)?,
+        _ => return Err(Exit::Undefined),
+    })
+}
+
+/// Atomically apply one scalar read/modify/write operation and update flags only after the
+/// compare-exchange succeeds. This is used for LOCK-prefixed guest operations and memory XCHG.
+fn atomic_update<M, F>(
+    cpu: &mut Cpu,
+    mem: &mut M,
+    address: u64,
+    size: u8,
+    mut update: F,
+) -> ExecResult<u64>
+where
+    M: GuestMemory,
+    F: FnMut(&mut Cpu, u64) -> u64,
+{
+    let mut observed = read_mem(mem, address, size)?;
+    loop {
+        let mut candidate_cpu = cpu.clone();
+        let new_value = update(&mut candidate_cpu, observed) & msk(size);
+        match compare_exchange_scalar(mem, address, size, observed, new_value)? {
+            Ok(_) => {
+                cpu.rflags = candidate_cpu.rflags;
+                return Ok(observed);
+            }
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
 // ── flag helpers ─────────────────────────────────────────────────────────────
 
 #[inline]
@@ -422,6 +474,34 @@ pub fn step<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M) -> ExecResult<()> {
 pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<()> {
     let next = next_ip(cpu, i.len);
     let sz = i.osz;
+    if i.lock {
+        let memory_destination = matches!(i.ops[0], Opnd::Mem(_));
+        let supported = match i.op {
+            Op::Add
+            | Op::Adc
+            | Op::Sub
+            | Op::Sbb
+            | Op::And
+            | Op::Or
+            | Op::Xor
+            | Op::Inc
+            | Op::Dec
+            | Op::Neg
+            | Op::Not
+            | Op::Bts
+            | Op::Btr
+            | Op::Btc
+            | Op::Cmpxchg
+            | Op::Xadd
+            | Op::Cmpxchg8b
+            | Op::Cmpxchg16b => memory_destination,
+            Op::Xchg => memory_destination || matches!(i.ops[1], Opnd::Mem(_)),
+            _ => false,
+        };
+        if !supported {
+            return Err(Exit::Undefined);
+        }
+    }
     macro_rules! r {
         ($n:expr) => {
             rd(cpu, mem, &i.ops[$n], sz, i.imm)?
@@ -456,9 +536,25 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             w!(0, ea(cpu, &m2));
         }
         Op::Xchg => {
-            let (a, b) = (r!(0), r!(1));
-            w!(0, b);
-            w!(1, a);
+            let memory_operand = match (i.ops[0], i.ops[1]) {
+                (Opnd::Mem(address), other) if !matches!(other, Opnd::Mem(_)) => {
+                    Some((address, 0, other))
+                }
+                (other, Opnd::Mem(address)) if !matches!(other, Opnd::Mem(_)) => {
+                    Some((address, 1, other))
+                }
+                (Opnd::Mem(_), Opnd::Mem(_)) => return Err(Exit::Undefined),
+                _ => None,
+            };
+            if let Some((address, memory_index, register_operand)) = memory_operand {
+                let replacement = rd(cpu, mem, &register_operand, sz, i.imm)?;
+                let old = atomic_update(cpu, mem, ea(cpu, &address), sz, |_, _| replacement)?;
+                wr(cpu, mem, &i.ops[1 - memory_index], sz, old)?;
+            } else {
+                let (a, b) = (r!(0), r!(1));
+                w!(0, b);
+                w!(1, a);
+            }
         }
         Op::Push => {
             let v = if let Opnd::Imm = i.ops[0] {
@@ -564,58 +660,131 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
 
         // ── ALU ──
         Op::Add | Op::Adc => {
-            let (a, b) = (r!(0), r!(1));
             let c = if i.op == Op::Adc {
                 cpu.flag(CF) as u64
             } else {
                 0
             };
-            let res = add_op(cpu, a, b, c, sz);
-            w!(0, res);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                let source = r!(1);
+                atomic_update(cpu, mem, address, sz, |candidate, a| {
+                    add_op(candidate, a, source, c, sz)
+                })?;
+            } else {
+                let (a, b) = (r!(0), r!(1));
+                let res = add_op(cpu, a, b, c, sz);
+                w!(0, res);
+            }
         }
         Op::Sub | Op::Sbb | Op::Cmp => {
-            let (a, b) = (r!(0), r!(1));
             let c = if i.op == Op::Sbb {
                 cpu.flag(CF) as u64
             } else {
                 0
             };
-            let res = sub_op(cpu, a, b, c, sz);
-            if i.op != Op::Cmp {
-                w!(0, res);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                let source = r!(1);
+                atomic_update(cpu, mem, address, sz, |candidate, a| {
+                    sub_op(candidate, a, source, c, sz)
+                })?;
+            } else {
+                let (a, b) = (r!(0), r!(1));
+                let res = sub_op(cpu, a, b, c, sz);
+                if i.op != Op::Cmp {
+                    w!(0, res);
+                }
             }
         }
         Op::And | Op::Or | Op::Xor | Op::Test => {
-            let (a, b) = (r!(0), r!(1));
-            let res = match i.op {
-                Op::And | Op::Test => a & b,
-                Op::Or => a | b,
-                _ => a ^ b,
-            };
-            logic_flags(cpu, res, sz);
-            if i.op != Op::Test {
-                w!(0, res);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                let source = r!(1);
+                atomic_update(cpu, mem, address, sz, |candidate, a| {
+                    let result = match i.op {
+                        Op::And => a & source,
+                        Op::Or => a | source,
+                        _ => a ^ source,
+                    };
+                    logic_flags(candidate, result, sz);
+                    result
+                })?;
+            } else {
+                let (a, b) = (r!(0), r!(1));
+                let res = match i.op {
+                    Op::And | Op::Test => a & b,
+                    Op::Or => a | b,
+                    _ => a ^ b,
+                };
+                logic_flags(cpu, res, sz);
+                if i.op != Op::Test {
+                    w!(0, res);
+                }
             }
         }
         Op::Inc | Op::Dec => {
-            let a = r!(0);
             let cf = cpu.flag(CF);
-            let res = if i.op == Op::Inc {
-                add_op(cpu, a, 1, 0, sz)
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                atomic_update(cpu, mem, address, sz, |candidate, a| {
+                    let result = if i.op == Op::Inc {
+                        add_op(candidate, a, 1, 0, sz)
+                    } else {
+                        sub_op(candidate, a, 1, 0, sz)
+                    };
+                    candidate.set_flag(CF, cf);
+                    result
+                })?;
             } else {
-                sub_op(cpu, a, 1, 0, sz)
-            };
-            cpu.set_flag(CF, cf);
-            w!(0, res);
+                let a = r!(0);
+                let res = if i.op == Op::Inc {
+                    add_op(cpu, a, 1, 0, sz)
+                } else {
+                    sub_op(cpu, a, 1, 0, sz)
+                };
+                cpu.set_flag(CF, cf);
+                w!(0, res);
+            }
         }
         Op::Neg => {
-            let a = r!(0);
-            let res = sub_op(cpu, 0, a, 0, sz);
-            w!(0, res);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                atomic_update(cpu, mem, address, sz, |candidate, a| {
+                    sub_op(candidate, 0, a, 0, sz)
+                })?;
+            } else {
+                let a = r!(0);
+                let res = sub_op(cpu, 0, a, 0, sz);
+                w!(0, res);
+            }
         }
         Op::Not => {
-            let a = r!(0);
-            w!(0, !a);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                atomic_update(cpu, mem, address, sz, |_, a| !a)?;
+            } else {
+                let a = r!(0);
+                w!(0, !a);
+            }
         }
         Op::Mul => {
             let a = r!(0) as u128;
@@ -770,21 +939,35 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
                     addr_adj = None;
                 }
             }
-            let val = match addr_adj {
-                Some(a) => read_mem(mem, a, sz)?,
-                None => rd(cpu, mem, &i.ops[0], sz, 0)?,
-            };
-            cpu.set_flag(CF, val >> bit & 1 != 0);
-            let newv = match i.op {
-                Op::Bts => val | 1 << bit,
-                Op::Btr => val & !(1 << bit),
-                Op::Btc => val ^ 1 << bit,
-                _ => val,
-            };
-            if i.op != Op::Bt {
-                match addr_adj {
-                    Some(a) => write_mem(mem, a, sz, newv)?,
-                    None => w!(0, newv),
+            if i.lock {
+                let Some(address) = addr_adj else {
+                    return Err(Exit::Undefined);
+                };
+                atomic_update(cpu, mem, address, sz, |candidate, val| {
+                    candidate.set_flag(CF, val >> bit & 1 != 0);
+                    match i.op {
+                        Op::Bts => val | 1 << bit,
+                        Op::Btr => val & !(1 << bit),
+                        _ => val ^ 1 << bit,
+                    }
+                })?;
+            } else {
+                let val = match addr_adj {
+                    Some(a) => read_mem(mem, a, sz)?,
+                    None => rd(cpu, mem, &i.ops[0], sz, 0)?,
+                };
+                cpu.set_flag(CF, val >> bit & 1 != 0);
+                let newv = match i.op {
+                    Op::Bts => val | 1 << bit,
+                    Op::Btr => val & !(1 << bit),
+                    Op::Btc => val ^ 1 << bit,
+                    _ => val,
+                };
+                if i.op != Op::Bt {
+                    match addr_adj {
+                        Some(a) => write_mem(mem, a, sz, newv)?,
+                        None => w!(0, newv),
+                    }
                 }
             }
         }
@@ -890,14 +1073,31 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             wr(cpu, mem, &i.ops[0], i.osz, value >> count)?;
         }
         Op::Cmpxchg => {
-            let dst = r!(0);
             let acc = cpu.gpr[RAX] & msk(sz);
-            sub_op(cpu, acc, dst, 0, sz);
-            if acc == dst {
-                let s = r!(1);
-                w!(0, s);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                let replacement = r!(1);
+                match compare_exchange_scalar(mem, address, sz, acc, replacement)? {
+                    Ok(_) => {
+                        sub_op(cpu, acc, acc, 0, sz);
+                    }
+                    Err(observed) => {
+                        sub_op(cpu, acc, observed, 0, sz);
+                        wr(cpu, mem, &Opnd::Gpr(RAX as u8), sz, observed)?;
+                    }
+                }
             } else {
-                wr(cpu, mem, &Opnd::Gpr(0), sz, dst)?;
+                let dst = r!(0);
+                sub_op(cpu, acc, dst, 0, sz);
+                if acc == dst {
+                    let s = r!(1);
+                    w!(0, s);
+                } else {
+                    wr(cpu, mem, &Opnd::Gpr(0), sz, dst)?;
+                }
             }
         }
         Op::Cmpxchg8b | Op::Cmpxchg16b => {
@@ -906,18 +1106,26 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             };
             let a = ea(cpu, &m);
             if i.op == Op::Cmpxchg8b {
-                let cur = mem.read_u64(a)?;
                 let cmp = (cpu.gpr[RDX] & 0xffff_ffff) << 32 | (cpu.gpr[RAX] & 0xffff_ffff);
-                if cur == cmp {
-                    mem.write_u64(
-                        a,
-                        (cpu.gpr[RCX] & 0xffff_ffff) << 32 | (cpu.gpr[RBX] & 0xffff_ffff),
-                    )?;
-                    cpu.set_flag(ZF, true);
+                let replacement = (cpu.gpr[RCX] & 0xffff_ffff) << 32 | (cpu.gpr[RBX] & 0xffff_ffff);
+                let result = if i.lock {
+                    mem.compare_exchange_u64(a, cmp, replacement)?
                 } else {
-                    cpu.gpr[RAX] = cur & 0xffff_ffff;
-                    cpu.gpr[RDX] = cur >> 32;
-                    cpu.set_flag(ZF, false);
+                    let current = mem.read_u64(a)?;
+                    if current == cmp {
+                        mem.write_u64(a, replacement)?;
+                        Ok(current)
+                    } else {
+                        Err(current)
+                    }
+                };
+                match result {
+                    Ok(_) => cpu.set_flag(ZF, true),
+                    Err(cur) => {
+                        cpu.gpr[RAX] = cur & 0xffff_ffff;
+                        cpu.gpr[RDX] = cur >> 32;
+                        cpu.set_flag(ZF, false);
+                    }
                 }
             } else {
                 if a & 15 != 0 {
@@ -927,23 +1135,46 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
                         protection: true,
                     }));
                 }
-                let cur = mem.read_u128(a)?;
                 let cmp = (cpu.gpr[RDX] as u128) << 64 | cpu.gpr[RAX] as u128;
-                if cur == cmp {
-                    mem.write_u128(a, (cpu.gpr[RCX] as u128) << 64 | cpu.gpr[RBX] as u128)?;
-                    cpu.set_flag(ZF, true);
+                let replacement = (cpu.gpr[RCX] as u128) << 64 | cpu.gpr[RBX] as u128;
+                let result = if i.lock {
+                    mem.compare_exchange_u128(a, cmp, replacement)?
                 } else {
-                    cpu.gpr[RAX] = cur as u64;
-                    cpu.gpr[RDX] = (cur >> 64) as u64;
-                    cpu.set_flag(ZF, false);
+                    let current = mem.read_u128(a)?;
+                    if current == cmp {
+                        mem.write_u128(a, replacement)?;
+                        Ok(current)
+                    } else {
+                        Err(current)
+                    }
+                };
+                match result {
+                    Ok(_) => cpu.set_flag(ZF, true),
+                    Err(cur) => {
+                        cpu.gpr[RAX] = cur as u64;
+                        cpu.gpr[RDX] = (cur >> 64) as u64;
+                        cpu.set_flag(ZF, false);
+                    }
                 }
             }
         }
         Op::Xadd => {
-            let (d, s) = (r!(0), r!(1));
-            let res = add_op(cpu, d, s, 0, sz);
-            w!(1, d);
-            w!(0, res);
+            if i.lock {
+                let Opnd::Mem(m) = i.ops[0] else {
+                    return Err(Exit::Undefined);
+                };
+                let address = ea(cpu, &m);
+                let source = r!(1);
+                let old = atomic_update(cpu, mem, address, sz, |candidate, dst| {
+                    add_op(candidate, dst, source, 0, sz)
+                })?;
+                wr(cpu, mem, &i.ops[1], sz, old)?;
+            } else {
+                let (d, s) = (r!(0), r!(1));
+                let res = add_op(cpu, d, s, 0, sz);
+                w!(1, d);
+                w!(0, res);
+            }
         }
 
         // ── control flow ──

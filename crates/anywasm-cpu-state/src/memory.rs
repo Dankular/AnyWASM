@@ -18,6 +18,7 @@ pub type MemResult<T> = Result<T, Fault>;
 
 /// The executor depends on this small interface instead of a process-owned memory manager.
 /// Shared-memory workers and the ordinary paged memory backend implement the same operations.
+/// A backend used concurrently must override each compare-exchange width it supports atomically.
 pub trait GuestMemory {
     fn read_u8(&self, address: u64) -> MemResult<u8>;
     fn read_u16(&self, address: u64) -> MemResult<u16>;
@@ -30,6 +31,51 @@ pub trait GuestMemory {
     fn write_u32(&mut self, address: u64, value: u32) -> MemResult<()>;
     fn write_u64(&mut self, address: u64, value: u64) -> MemResult<()>;
     fn write_u128(&mut self, address: u64, value: u128) -> MemResult<()>;
+
+    fn compare_exchange_u8(
+        &mut self,
+        address: u64,
+        current: u8,
+        new: u8,
+    ) -> MemResult<Result<u8, u8>> {
+        let observed = self.read_u8(address)?;
+        if observed == current {
+            self.write_u8(address, new)?;
+            Ok(Ok(observed))
+        } else {
+            Ok(Err(observed))
+        }
+    }
+
+    fn compare_exchange_u16(
+        &mut self,
+        address: u64,
+        current: u16,
+        new: u16,
+    ) -> MemResult<Result<u16, u16>> {
+        let observed = self.read_u16(address)?;
+        if observed == current {
+            self.write_u16(address, new)?;
+            Ok(Ok(observed))
+        } else {
+            Ok(Err(observed))
+        }
+    }
+
+    fn compare_exchange_u32(
+        &mut self,
+        address: u64,
+        current: u32,
+        new: u32,
+    ) -> MemResult<Result<u32, u32>> {
+        let observed = self.read_u32(address)?;
+        if observed == current {
+            self.write_u32(address, new)?;
+            Ok(Ok(observed))
+        } else {
+            Ok(Err(observed))
+        }
+    }
 
     fn read_into(&self, address: u64, output: &mut [u8], access: Access) -> MemResult<()>;
     fn write_from(&mut self, address: u64, input: &[u8]) -> MemResult<()>;
@@ -52,5 +98,20 @@ pub trait GuestMemory {
         } else {
             Err(observed)
         })
+    }
+
+    fn compare_exchange_u128(
+        &mut self,
+        address: u64,
+        current: u128,
+        new: u128,
+    ) -> MemResult<Result<u128, u128>> {
+        let observed = self.read_u128(address)?;
+        if observed == current {
+            self.write_u128(address, new)?;
+            Ok(Ok(observed))
+        } else {
+            Ok(Err(observed))
+        }
     }
 }
