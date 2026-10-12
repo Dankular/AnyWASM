@@ -104,6 +104,10 @@ try {
           `${item.name} staging RGBA16_FLOAT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R32G32_FLOAT readback=0\.125,-0\.250,0\.500,1\.250,-0\.500,2\.000,-1\.000,0\.750 row_pitch=16/,
           `${item.name} staging R32G32_FLOAT Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R32G32_UINT readback=12345678,9abcdef0,01020304,ffffffff,00000001,80000000,deadbeef,55aa33cc row_pitch=16/,
+          `${item.name} staging R32G32_UINT Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R32G32_SINT readback=80000000,ffffffff,00000000,00000001,7fffffff,87654321,fffffffe,0000002a row_pitch=16/,
+          `${item.name} staging R32G32_SINT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R8_UNORM subresource0=11,12,13,21,22,23 row_pitch=3/,
           `${item.name} staging R8_UNORM Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R8_UNORM subresource3=61 row_pitch=1/,

@@ -320,6 +320,10 @@ try {
     triText.includes('staging R32_FLOAT readback=0.25,0.50,0.75,1.00 row_pitch=8'), triText);
   check('D3D11 staging R32G32_FLOAT Map(READ) preserves two-channel rows and row pitch',
     triText.includes('staging R32G32_FLOAT readback=0.125,-0.250,0.500,1.250,-0.500,2.000,-1.000,0.750 row_pitch=16'), triText);
+  check('D3D11 staging R32G32_UINT Map(READ) preserves packed channel words',
+    triText.includes('staging R32G32_UINT readback=12345678,9abcdef0,01020304,ffffffff,00000001,80000000,deadbeef,55aa33cc row_pitch=16'), triText);
+  check('D3D11 staging R32G32_SINT Map(READ) preserves signed channel bit patterns',
+    triText.includes('staging R32G32_SINT readback=80000000,ffffffff,00000000,00000001,7fffffff,87654321,fffffffe,0000002a row_pitch=16'), triText);
   check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
     triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
   check('D3D11 staging BGRA8_UNORM Map(READ) preserves raw channel bytes',
