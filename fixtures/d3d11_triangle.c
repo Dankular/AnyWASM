@@ -185,6 +185,73 @@ static void check_staging_16bit_formats(ID3D11Device *dev, ID3D11DeviceContext *
     check_staging_r16_words(dev, ctx, DXGI_FORMAT_R16G16B16A16_SINT, "RGBA16_SINT", rgba16_sint, 4);
 }
 
+static void check_staging_u8_bytes(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+    UINT format, const char *name, const BYTE *expected, UINT components) {
+    const UINT row_bytes = 2 * components;
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = format; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init = { expected, row_bytes, 2 * row_bytes };
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, &init, &source);
+    if (FAILED(hr)) { printf("staging %s source hr=%08lx\n", name, (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const BYTE *row0 = (const BYTE *)mapped.pData;
+            const BYTE *row1 = row0 + mapped.RowPitch;
+            printf("staging %s readback=", name);
+            for (UINT i = 0; i < row_bytes; ++i) printf("%s%02x", i ? "," : "", row0[i]);
+            for (UINT i = 0; i < row_bytes; ++i) printf(",%02x", row1[i]);
+            printf(" row_pitch=%u\n", mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging %s Map hr=%08lx\n", name, (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging %s staging hr=%08lx\n", name, (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
+static void check_staging_8bit_formats(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const BYTE r8_snorm[4] = { 0x80, 0xc0, 0x00, 0x7f };
+    static const BYTE r8_uint[4] = { 0x00, 0x01, 0x7f, 0xff };
+    static const BYTE r8_sint[4] = { 0x80, 0xff, 0x00, 0x7f };
+    static const BYTE a8_unorm[4] = { 0x11, 0x7f, 0x80, 0xff };
+    static const BYTE rg8_snorm[8] = { 0x80, 0xc0, 0x00, 0x7f, 0x12, 0xed, 0x40, 0xc0 };
+    static const BYTE rg8_uint[8] = { 0x00, 0xff, 0x12, 0xab, 0x80, 0x7f, 0x55, 0xaa };
+    static const BYTE rg8_sint[8] = { 0x80, 0xff, 0x00, 0x7f, 0xed, 0x12, 0xc0, 0x40 };
+    static const BYTE rgba8_unorm[16] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
+    };
+    static const BYTE rgba8_snorm[16] = {
+        0x80, 0xc0, 0x00, 0x7f, 0x12, 0xed, 0x40, 0xc0,
+        0xff, 0x81, 0xfd, 0x03, 0x40, 0xc0, 0x20, 0xe0
+    };
+    static const BYTE rgba8_uint[16] = {
+        0x00, 0xff, 0x12, 0xab, 0x80, 0x7f, 0x55, 0xaa,
+        0x01, 0xfe, 0x13, 0x24, 0xde, 0xef, 0x02, 0x04
+    };
+    static const BYTE rgba8_sint[16] = {
+        0x80, 0xff, 0x00, 0x7f, 0xed, 0x12, 0xc0, 0x40,
+        0xff, 0x81, 0xfd, 0x03, 0x40, 0xc0, 0x20, 0xe0
+    };
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8_SNORM, "R8_SNORM", r8_snorm, 1);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8_UINT, "R8_UINT", r8_uint, 1);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8_SINT, "R8_SINT", r8_sint, 1);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_A8_UNORM, "A8_UNORM", a8_unorm, 1);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8_SNORM, "RG8_SNORM", rg8_snorm, 2);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8_UINT, "RG8_UINT", rg8_uint, 2);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8_SINT, "RG8_SINT", rg8_sint, 2);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8B8A8_UNORM, "RGBA8_UNORM", rgba8_unorm, 4);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8B8A8_SNORM, "RGBA8_SNORM", rgba8_snorm, 4);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8B8A8_UINT, "RGBA8_UINT", rgba8_uint, 4);
+    check_staging_u8_bytes(dev, ctx, DXGI_FORMAT_R8G8B8A8_SINT, "RGBA8_SINT", rgba8_sint, 4);
+}
+
 static void check_staging_rgba32_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     static const float expected[16] = {
         0.125f, -0.25f, 0.5f, 1.25f, -0.5f, 2.0f, -1.0f, 0.75f,
@@ -669,6 +736,7 @@ int main(void) {
             check_staging_r32_float(dev, ctx);
             check_staging_r32_integers(dev, ctx);
             check_staging_16bit_formats(dev, ctx);
+            check_staging_8bit_formats(dev, ctx);
             check_staging_r32g32_float(dev, ctx);
             check_staging_r32g32_integers(dev, ctx);
             check_staging_rgba32_float(dev, ctx);

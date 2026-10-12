@@ -377,7 +377,6 @@ export class GpuExecutor {
     if (bind & (0x20 | 0x40)) u |= GPUTextureUsage.RENDER_ATTACHMENT;
     if (bind & 0x80) u |= GPUTextureUsage.STORAGE_BINDING;
     if (dimension === '3d' && (format === 'rgba8unorm' || format === 'r32float')) u |= GPUTextureUsage.STORAGE_BINDING;
-    if (!BLOCK(format) && !isDepth(format)) u |= GPUTextureUsage.RENDER_ATTACHMENT; // allows mip generation and clears of any colour texture
     const cube = dimension === '2d' && (misc & 0x4) !== 0;
     const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], dimension, mipLevelCount: Math.max(1, mips), sampleCount, format, usage: u, viewFormats });
     this.res.set(id, {

@@ -52,7 +52,8 @@ each reported clear pixel `[0,0,51,255]`, back-buffer center `[85,86,85,255]`, v
 with 8-byte rows, R32G32_FLOAT values and R32G32_UINT/SINT words with 16-byte rows, and
 RGBA32_FLOAT/UINT/SINT rows with 32-byte pitches. R16 UNORM/SNORM/UINT/SINT readbacks used 4-byte
 rows; RG16_FLOAT and the RG16 integer/normalized formats used 8-byte rows; RGBA16_FLOAT and the
-RGBA16 integer/normalized formats used 16-byte rows. Both browsers also preserved BGRA8_SRGB bytes.
+RGBA16 integer/normalized formats used 16-byte rows. R8/RG8/RGBA8 SNORM/UINT/SINT and A8_UNORM also
+preserved their 2-, 4-, and 8-byte rows. Both browsers preserved these bytes and the BGRA8_SRGB data.
 WebKit exited hello, passed cache
 pressure, and returned the expected explicit graphics-unavailable status because WebGPU and
 OffscreenCanvas worker transfer are unavailable.
@@ -65,7 +66,8 @@ pixels (worst error 1/255); a separate visible-canvas screenshot verified the cl
 interpolated centre pixel. The triangle fixture preserved two-row R32G32_FLOAT values at a 16-byte
 pitch; R32G32_UINT/SINT packed words; RGBA32_FLOAT/UINT/SINT rows at a 32-byte pitch; the R16, RG16,
 and RGBA16 normalized and integer staging patterns with 4-, 8-, and 16-byte row pitches; and encoded
-bytes through RGBA8_SRGB and BGRA8_SRGB staging. The textured fixture
+bytes through RGBA8_SRGB and BGRA8_SRGB staging. R8/RG8/RGBA8 SNORM/UINT/SINT plus A8_UNORM
+preserved 2-, 4-, and 8-byte rows without WebGPU validation errors. The textured fixture
 passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
 following pixel shader sampled that result. The run reported no WebGPU validation errors or page

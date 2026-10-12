@@ -330,6 +330,14 @@ try {
     triText.includes('staging R16_UINT readback=0000,0001,7fff,ffff row_pitch=4'), triText);
   check('D3D11 staging R16_SINT Map(READ) preserves signed words',
     triText.includes('staging R16_SINT readback=8000,ffff,0000,7fff row_pitch=4'), triText);
+  check('D3D11 staging R8_SNORM Map(READ) preserves signed normalized bytes',
+    triText.includes('staging R8_SNORM readback=80,c0,00,7f row_pitch=2'), triText);
+  check('D3D11 staging R8_UINT Map(READ) preserves unsigned bytes',
+    triText.includes('staging R8_UINT readback=00,01,7f,ff row_pitch=2'), triText);
+  check('D3D11 staging R8_SINT Map(READ) preserves signed bytes',
+    triText.includes('staging R8_SINT readback=80,ff,00,7f row_pitch=2'), triText);
+  check('D3D11 staging A8_UNORM Map(READ) preserves alpha bytes',
+    triText.includes('staging A8_UNORM readback=11,7f,80,ff row_pitch=2'), triText);
   check('D3D11 staging R32G32_FLOAT Map(READ) preserves two-channel rows and row pitch',
     triText.includes('staging R32G32_FLOAT readback=0.125,-0.250,0.500,1.250,-0.500,2.000,-1.000,0.750 row_pitch=16'), triText);
   check('D3D11 staging R32G32_UINT Map(READ) preserves packed channel words',
@@ -352,6 +360,12 @@ try {
     triText.includes('staging RG16_UINT readback=0000,ffff,1234,abcd,8000,7fff,5555,aaaa row_pitch=8'), triText);
   check('D3D11 staging RG16_SINT Map(READ) preserves signed words',
     triText.includes('staging RG16_SINT readback=8000,ffff,0000,7fff,edcb,1234,c000,4000 row_pitch=8'), triText);
+  check('D3D11 staging RG8_SNORM Map(READ) preserves signed normalized channels',
+    triText.includes('staging RG8_SNORM readback=80,c0,00,7f,12,ed,40,c0 row_pitch=4'), triText);
+  check('D3D11 staging RG8_UINT Map(READ) preserves unsigned channels',
+    triText.includes('staging RG8_UINT readback=00,ff,12,ab,80,7f,55,aa row_pitch=4'), triText);
+  check('D3D11 staging RG8_SINT Map(READ) preserves signed channels',
+    triText.includes('staging RG8_SINT readback=80,ff,00,7f,ed,12,c0,40 row_pitch=4'), triText);
   check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
     triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
   check('D3D11 staging RGBA16_UNORM Map(READ) preserves normalized channel words',
@@ -362,6 +376,14 @@ try {
     triText.includes('staging RGBA16_UINT readback=0000,ffff,1234,abcd,8000,7fff,5555,aaaa,0001,fffe,1357,2468,dead,beef,0102,0304 row_pitch=16'), triText);
   check('D3D11 staging RGBA16_SINT Map(READ) preserves signed channel words',
     triText.includes('staging RGBA16_SINT readback=8000,ffff,0000,7fff,edcb,1234,c000,4000,ffff,8001,fffd,0003,4000,c000,2000,e000 row_pitch=16'), triText);
+  check('D3D11 staging RGBA8_UNORM Map(READ) preserves normalized channel bytes',
+    triText.includes('staging RGBA8_UNORM readback=00,11,22,33,44,55,66,77,88,99,aa,bb,cc,dd,ee,ff row_pitch=8'), triText);
+  check('D3D11 staging RGBA8_SNORM Map(READ) preserves signed normalized channel bytes',
+    triText.includes('staging RGBA8_SNORM readback=80,c0,00,7f,12,ed,40,c0,ff,81,fd,03,40,c0,20,e0 row_pitch=8'), triText);
+  check('D3D11 staging RGBA8_UINT Map(READ) preserves unsigned channel bytes',
+    triText.includes('staging RGBA8_UINT readback=00,ff,12,ab,80,7f,55,aa,01,fe,13,24,de,ef,02,04 row_pitch=8'), triText);
+  check('D3D11 staging RGBA8_SINT Map(READ) preserves signed channel bytes',
+    triText.includes('staging RGBA8_SINT readback=80,ff,00,7f,ed,12,c0,40,ff,81,fd,03,40,c0,20,e0 row_pitch=8'), triText);
   check('D3D11 staging BGRA8_UNORM Map(READ) preserves raw channel bytes',
     triText.includes('staging BGRA8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
   check('D3D11 staging R16_FLOAT Map(READ) preserves packed half-float rows',

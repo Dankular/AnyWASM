@@ -254,8 +254,9 @@ register-stack subset):
       R16 and RG16 UNORM/SNORM/UINT/SINT words, RG16_FLOAT rows, and RGBA16_UNORM/SNORM/UINT/SINT
       words, plus packed RGBA16_FLOAT and R16_FLOAT values,
       raw BGRA8_UNORM and R10G10B10A2_UNORM bytes,
-      encoded RGBA8_SRGB and BGRA8_SRGB bytes, R8G8_UNORM two-channel texels, odd-width R8_UNORM row
-      packing plus mip/array subresource selection, depth-only D16_UNORM and D32_FLOAT values, and Texture3D
+      encoded RGBA8_SRGB and BGRA8_SRGB bytes; RGBA8_UNORM and R8/RG8/RGBA8 SNORM/UINT/SINT plus
+      A8_UNORM raw bytes; R8G8_UNORM two-channel texels; odd-width R8_UNORM row packing plus
+      mip/array subresource selection; depth-only D16_UNORM and D32_FLOAT values; and Texture3D
       R32_FLOAT row/depth
       pitches. Comparison
       samplers pixel-test all eight
