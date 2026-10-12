@@ -883,6 +883,18 @@ try {
       command(29, words(4, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
+      const alphaFunctionPixels = {};
+      for (const alphaFunc of [1, 2, 3, 4, 6, 7, 8]) {
+        stream.length = 0;
+        command(27, clear);
+        command(48, words(25, alphaFunc)); // D3DRS_ALPHAFUNC
+        command(48, words(24, 255)); // Match the vertex alpha exactly.
+        command(29, words(4, 0));
+        gpu.execute(append());
+        const comparisonPixels = await gpu.readBackbuffer(1);
+        const center = (20 * comparisonPixels.width + 45) * 4;
+        alphaFunctionPixels[alphaFunc] = Array.from(comparisonPixels.data.slice(center, center + 4));
+      }
       const at = (x, y) => {
         const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
@@ -894,6 +906,7 @@ try {
       const result = {
         rejected: [rejectedAt(45, 20), rejectedAt(20, 45)],
         upperRight: at(45, 20), lowerLeft: at(20, 45), background: at(1, 1), stats: gpu.stats,
+        alphaFunctionPixels,
       };
       gpu.device.destroy();
       return result;
@@ -902,7 +915,7 @@ try {
     }
   });
   check('D3D9 FVF fixed-function triangle fan draws with no WebGPU validation errors',
-    d3d9FixedResult.stats?.draws === 2 && d3d9FixedResult.stats.errors.length === 0,
+    d3d9FixedResult.stats?.draws === 9 && d3d9FixedResult.stats.errors.length === 0,
     JSON.stringify(d3d9FixedResult));
   check('D3D9 alpha test discards fragments whose alpha equals the GREATER reference',
     d3d9FixedResult.rejected?.every((pixel) => near(pixel, [0, 0, 0, 255], 1)),
@@ -912,6 +925,11 @@ try {
       && near(d3d9FixedResult.lowerLeft, [255, 0, 0, 255], 1)
       && near(d3d9FixedResult.background, [0, 0, 0, 255], 1),
     JSON.stringify(d3d9FixedResult));
+  const alphaFunctionPasses = { 1: false, 2: false, 3: true, 4: true, 6: false, 7: true, 8: true };
+  check('D3D9 alpha compare functions preserve their equality boundary',
+    Object.entries(alphaFunctionPasses).every(([alphaFunc, passes]) =>
+      near(d3d9FixedResult.alphaFunctionPixels?.[alphaFunc], passes ? [255, 0, 0, 255] : [0, 0, 0, 255], 1)),
+    JSON.stringify(d3d9FixedResult.alphaFunctionPixels));
 
   const d3d9TextureResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

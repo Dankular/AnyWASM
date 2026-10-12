@@ -285,8 +285,9 @@ register-stack subset):
       pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
       canvas sizes, and browser engines still need coverage.
 - [~] **Additional graphics APIs**: D3D9 has a pixel-tested fixed-function subset for selected
-      FVF layouts, stage-0 texture selection, triangle fans, and alpha testing; general D3D9 device,
-      shader, and state coverage remains incomplete. D3D12, DXGI flip-model/fullscreen/resize/vsync
+      FVF layouts, stage-0 texture selection, triangle fans, and every alpha compare function at its
+      equality boundary; general D3D9 device, shader, and state coverage remains incomplete. D3D12,
+      DXGI flip-model/fullscreen/resize/vsync
       semantics, OpenGL (WGL), and Vulkan remain open. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
 - [~] **Frame pacing**: after each `Stop::Frame`, the worker advances the virtual guest clock by the

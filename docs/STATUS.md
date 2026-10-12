@@ -171,7 +171,8 @@
   including one target-grounded MSVC C++ catch; general SEH dispatch, vectored handlers, audio,
   DirectInput/XInput, 32-bit PE, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
   fixed-function subset is limited to the checked FVF layouts, stage-0 texture selection, triangle
-  fans, and alpha testing. GDI support is limited to virtual display DCs and basic caps.
+  fans, and alpha testing across all comparison functions at the equality boundary. GDI support is
+  limited to virtual display DCs and basic caps.
 - DLL initialization remains partial: bundled DLL `DllMain` calls now follow dependency-first graph
   order during initial loading and `LoadLibrary`, with synthetic regressions for both paths. Static
   TLS data is initialized, but TLS callbacks are not invoked. Named forwarded exports are resolved
@@ -186,10 +187,11 @@
   sampler request, instance step rates, render-to-texture, multiple render targets, cube/array/3D
   texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, and D3D11.1 constant-buffer
   ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
-  rendering, stage-0 texture selection, and alpha-test comparisons. These checks do not establish
-  broad API or game compatibility. Target-level D3D11 checks cover visible SDF output, W movement,
-  Tab map regeneration, and a flashlight response measured along an unobstructed SDF ray in two
-  fresh random-map runs; the triangle canvas screenshot checks its clear colour and centre pixel.
+  rendering, stage-0 texture selection, and all alpha-test comparison functions at equality. These
+  checks do not establish broad API or game compatibility. Target-level D3D11 checks cover visible
+  SDF output, W movement, and Tab map regeneration; two fresh random-map runs measure a flashlight
+  response along an unobstructed SDF ray. The triangle canvas screenshot checks its clear colour
+  and centre pixel.
   Remaining D3D11 gaps include other buffer-copy classes, more format/resolve and sampler pixel
   comparisons, render-state combinations, other query types, geometry/tessellation, general staging
   read-back, deferred contexts, and system values beyond the basics. Compute browser fixtures cover
