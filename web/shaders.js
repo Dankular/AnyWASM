@@ -123,6 +123,8 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
     3: { dataType: 4, spirvFormat: 30 }, // R32G32B32A32_UINT
     4: { dataType: 3, spirvFormat: 21 }, // R32G32B32A32_SINT
     10: { dataType: 5, spirvFormat: 2 }, // R16G16B16A16_FLOAT
+    12: { dataType: 4, spirvFormat: 31 }, // R16G16B16A16_UINT
+    14: { dataType: 3, spirvFormat: 22 }, // R16G16B16A16_SINT
     16: { dataType: 5, spirvFormat: 6 }, // R32G32_FLOAT
     17: { dataType: 4, spirvFormat: 35 }, // R32G32_UINT
     18: { dataType: 3, spirvFormat: 25 }, // R32G32_SINT
@@ -138,7 +140,7 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
   if (!selected || selected.dataType !== uavs[0].dataType) return spirv;
   const spirvFormat = selected.spirvFormat;
   if (spirvFormat === undefined) return spirv;
-  const needsExtendedFormats = [6, 25, 35].includes(spirvFormat);
+  const needsExtendedFormats = [6, 22, 25, 31, 35].includes(spirvFormat);
 
   const bytes = new Uint8Array(spirv);
   const words = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

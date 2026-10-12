@@ -1739,6 +1739,16 @@ try {
         [numthreads(1, 1, 1)]
         void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = int2(-12345678, int(id.x) - int(id.y) * 4); }
       `, 'main', 'cs_5_0');
+      const rgba16UintCompute = tool.compileHlsl(`
+        RWTexture2D<uint4> dst : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = uint4(0x1234, 0xabcd, 0x8000, 0xffff); }
+      `, 'main', 'cs_5_0');
+      const rgba16SintCompute = tool.compileHlsl(`
+        RWTexture2D<int4> dst : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = int4(-32768, -1, 0, 32767); }
+      `, 'main', 'cs_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -1827,6 +1837,18 @@ try {
       command(17, words(2, 17));
       command(43, words(0, 1, 114, 0xffffffff));
       command(42, words(4, 4, 1));
+      command(4, words(123, 4, 4, 1, 1, 12, 0x88, 0, 1, 0)); // RGBA16_UINT SRV + UAV texture
+      command(12, words(124, 3, 123, 12, 4, 0, 1, 0, 1)); // RGBA16_UINT UAV
+      shader(18, rgba16UintCompute);
+      command(17, words(2, 18));
+      command(43, words(0, 1, 124, 0xffffffff));
+      command(42, words(4, 4, 1));
+      command(4, words(133, 4, 4, 1, 1, 14, 0x88, 0, 1, 0)); // RGBA16_SINT SRV + UAV texture
+      command(12, words(134, 3, 133, 14, 4, 0, 1, 0, 1)); // RGBA16_SINT UAV
+      shader(19, rgba16SintCompute);
+      command(17, words(2, 19));
+      command(43, words(0, 1, 134, 0xffffffff));
+      command(42, words(4, 4, 1));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -1842,6 +1864,8 @@ try {
       const rg32FloatReadback = await gpu.readBackTexture(94);
       const rg32UintReadback = await gpu.readBackTexture(104);
       const rg32SintReadback = await gpu.readBackTexture(114);
+      const rgba16UintReadback = await gpu.readBackTexture(124);
+      const rgba16SintReadback = await gpu.readBackTexture(134);
       const result = {
         width: readback.width,
         height: readback.height,
@@ -1869,6 +1893,10 @@ try {
         rg32UintValues: Array.from(rg32UintReadback.data),
         rg32SintFormat: rg32SintReadback.format,
         rg32SintValues: Array.from(rg32SintReadback.data),
+        rgba16UintFormat: rgba16UintReadback.format,
+        rgba16UintValues: Array.from(rgba16UintReadback.data),
+        rgba16SintFormat: rgba16SintReadback.format,
+        rgba16SintValues: Array.from(rgba16SintReadback.data),
         dispatches: gpu.stats.dispatches,
         errors: gpu.stats.errors,
         logs,
@@ -1882,7 +1910,7 @@ try {
   check('typed R32 and RGBA UAV dispatches and readback preserve values',
     typedTextureUavResult.width === 4 && typedTextureUavResult.height === 4
       && typedTextureUavResult.format === 'r32uint'
-      && typedTextureUavResult.dispatches === 12 && typedTextureUavResult.errors.length === 0
+      && typedTextureUavResult.dispatches === 14 && typedTextureUavResult.errors.length === 0
       && typedTextureUavResult.values.every((value, i) => value === i)
       && typedTextureUavResult.signedFormat === 'r32sint'
       && typedTextureUavResult.signedValues.every((value, i) => value === i - 8)
@@ -1912,7 +1940,13 @@ try {
       && typedTextureUavResult.rg32UintValues.every((value, i) => value === ((i % 2) === 0 ? 0x12345678 : (i >> 1)))
       && typedTextureUavResult.rg32SintFormat === 'rg32sint'
       && typedTextureUavResult.rg32SintValues.length === 32
-      && typedTextureUavResult.rg32SintValues.every((value, i) => value === ((i % 2) === 0 ? -12345678 : ((i >> 1) % 4) - Math.floor((i >> 1) / 4) * 4)),
+      && typedTextureUavResult.rg32SintValues.every((value, i) => value === ((i % 2) === 0 ? -12345678 : ((i >> 1) % 4) - Math.floor((i >> 1) / 4) * 4))
+      && typedTextureUavResult.rgba16UintFormat === 'rgba16uint'
+      && typedTextureUavResult.rgba16UintValues.length === 64
+      && typedTextureUavResult.rgba16UintValues.every((value, i) => value === [0x1234, 0xabcd, 0x8000, 0xffff][i % 4])
+      && typedTextureUavResult.rgba16SintFormat === 'rgba16sint'
+      && typedTextureUavResult.rgba16SintValues.length === 64
+      && typedTextureUavResult.rgba16SintValues.every((value, i) => value === [-32768, -1, 0, 32767][i % 4]),
     JSON.stringify(typedTextureUavResult));
 
   const structuredBufferUavResult = await page.evaluate(async () => {

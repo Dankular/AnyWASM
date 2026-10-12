@@ -66,6 +66,8 @@ const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
 const DXGI_FORMAT_R8G8B8A8_UINT: u32 = 30;
 const DXGI_FORMAT_R8G8B8A8_SINT: u32 = 32;
 const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
+const DXGI_FORMAT_R16G16B16A16_UINT: u32 = 12;
+const DXGI_FORMAT_R16G16B16A16_SINT: u32 = 14;
 const DXGI_FORMAT_R32G32B32A32_FLOAT: u32 = 2;
 const DXGI_FORMAT_R32G32B32A32_UINT: u32 = 3;
 const DXGI_FORMAT_R32G32B32A32_SINT: u32 = 4;
@@ -100,6 +102,8 @@ fn format_support_flags(format: u32) -> u32 {
             | DXGI_FORMAT_R8G8B8A8_UINT
             | DXGI_FORMAT_R8G8B8A8_SINT
             | DXGI_FORMAT_R16G16B16A16_FLOAT
+            | DXGI_FORMAT_R16G16B16A16_UINT
+            | DXGI_FORMAT_R16G16B16A16_SINT
             | DXGI_FORMAT_R32G32B32A32_FLOAT
             | DXGI_FORMAT_R32G32B32A32_UINT
             | DXGI_FORMAT_R32G32B32A32_SINT
@@ -1639,6 +1643,8 @@ mod tests {
         assert_ne!(format_support_flags(16) & TYPED_UAV, 0); // DXGI_FORMAT_R32G32_FLOAT
         assert_ne!(format_support_flags(17) & TYPED_UAV, 0); // DXGI_FORMAT_R32G32_UINT
         assert_ne!(format_support_flags(18) & TYPED_UAV, 0); // DXGI_FORMAT_R32G32_SINT
+        assert_ne!(format_support_flags(12) & TYPED_UAV, 0); // DXGI_FORMAT_R16G16B16A16_UINT
+        assert_ne!(format_support_flags(14) & TYPED_UAV, 0); // DXGI_FORMAT_R16G16B16A16_SINT
         assert_ne!(format_support_flags(10) & TYPED_UAV, 0); // DXGI_FORMAT_R16G16B16A16_FLOAT
         assert_ne!(format_support_flags(28) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UNORM
         assert_ne!(format_support_flags(30) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UINT
@@ -1648,6 +1654,8 @@ mod tests {
         assert_ne!(format_support_flags(87) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
         assert_ne!(format_support_flags(10) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE, 0);
         assert_ne!(format_support_flags(10) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
+        assert_eq!(format_support_flags(12) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
+        assert_eq!(format_support_flags(14) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
         assert_eq!(format_support_flags(54) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
         assert_eq!(format_support_flags(54) & TYPED_UAV, 0); // DXGI_FORMAT_R16_FLOAT
         assert_eq!(format_support_flags(61) & TYPED_UAV, 0); // DXGI_FORMAT_R8_UNORM
