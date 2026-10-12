@@ -19,6 +19,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 }
 
 const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
+const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
 const D3D11_QUERY_EVENT: u32 = 0;
 const DXGI_FORMAT_R32_FLOAT: u32 = 41;
 const DXGI_FORMAT_R32_UINT: u32 = 42;
@@ -71,6 +72,9 @@ fn create_device(p: &mut Process, with_swap_chain: bool) -> R {
     //                   ppDevice, pFeatureLevel, ppImmediateContext)
     // ...AndSwapChain(..., SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppContext)
     let (pdev, pfl, pctx, pdesc, psc) = if with_swap_chain { (p.arg(9), p.arg(10), p.arg(11), p.arg(7), p.arg(8)) } else { (p.arg(7), p.arg(8), p.arg(9), 0, 0) };
+    let Some(feature_level) = requested_feature_level(p)? else {
+        return Ok(E_INVALIDARG);
+    };
     ensure_device(p);
     let (dev, ctx) = (p.extra.com.device, p.extra.com.context);
     if pdev != 0 {
@@ -82,7 +86,7 @@ fn create_device(p: &mut Process, with_swap_chain: bool) -> R {
         p.extra.com.objs.get_mut(&ctx).map(|o| o.refs += 1);
     }
     if pfl != 0 {
-        p.wr32(pfl, D3D_FEATURE_LEVEL_11_0)?;
+        p.wr32(pfl, feature_level)?;
     }
     if with_swap_chain && psc != 0 && pdesc != 0 {
         let (w, h, fmt) = (p.rd32(pdesc)?, p.rd32(pdesc + 4)?, p.rd32(pdesc + 16)?);
@@ -91,6 +95,29 @@ fn create_device(p: &mut Process, with_swap_chain: bool) -> R {
         p.wr64(psc, sc)?;
     }
     Ok(S_OK)
+}
+
+fn requested_feature_level(p: &Process) -> Result<Option<u32>, Stop> {
+    let (levels, count) = (p.arg(4), p.arg(5) as u32);
+    if levels == 0 {
+        return Ok((count == 0).then_some(D3D_FEATURE_LEVEL_11_0));
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+
+    let mut selected = None;
+    for index in 0..count {
+        let level = p.rd32(levels + 4 * index as u64)?;
+        // D3D11 runtimes without 11.1 reject a request containing 11.1 rather than falling back.
+        if level == D3D_FEATURE_LEVEL_11_1 {
+            return Ok(None);
+        }
+        if level == D3D_FEATURE_LEVEL_11_0 && selected.is_none() {
+            selected = Some(level);
+        }
+    }
+    Ok(selected)
 }
 
 pub fn method(iface: &str, m: &str) -> Option<HleFn> {
@@ -1155,6 +1182,41 @@ fn get_desc(p: &mut Process) -> R {
 mod tests {
     use super::*;
 
+    fn call_create_device(levels: Option<&[u32]>) -> (Process, u64) {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const LEVELS: u64 = 0x10000;
+        const OUT_LEVEL: u64 = 0x11000;
+        const STACK: u64 = 0x20000;
+        let mut p = Process::new(Vfs::new());
+        for address in [LEVELS, OUT_LEVEL, STACK] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        if let Some(levels) = levels {
+            for (index, level) in levels.iter().enumerate() {
+                p.wr32(LEVELS + 4 * index as u64, *level).unwrap();
+            }
+        }
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = 0;
+        p.cpu.gpr[RSP] = STACK + PAGE_SIZE - 0x100;
+        let feature_levels = if levels.is_some() { LEVELS } else { 0 };
+        let feature_level_count = levels.map_or(0, |levels| levels.len() as u64);
+        let stack = p.cpu.gpr[RSP];
+        for (index, value) in [feature_levels, feature_level_count, 7, 0, OUT_LEVEL, 0]
+            .into_iter()
+            .enumerate()
+        {
+            p.wr64(stack + 40 + index as u64 * 8, value).unwrap();
+        }
+        let result = create_device(&mut p, false).unwrap();
+        (p, result)
+    }
+
     #[test]
     fn flush1_signals_the_selected_target_idle_event() {
         use anywasm_cpu::cpu::{R8, RCX};
@@ -1209,6 +1271,37 @@ mod tests {
         p.cpu.gpr[R9] = 4;
         assert_eq!(get_data(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_device_rejects_a_feature_level_it_does_not_support() {
+        let (_, result) = call_create_device(Some(&[0xa000])); // D3D_FEATURE_LEVEL_10_0
+        assert_eq!(result, E_INVALIDARG);
+    }
+
+    #[test]
+    fn create_device_selects_11_0_from_the_requested_feature_levels() {
+        const OUT_LEVEL: u64 = 0x11000;
+        let (p, result) = call_create_device(Some(&[0xa000, D3D_FEATURE_LEVEL_11_0]));
+        assert_eq!(result, S_OK);
+        assert_eq!(p.rd32(OUT_LEVEL).unwrap(), D3D_FEATURE_LEVEL_11_0);
+    }
+
+    #[test]
+    fn create_device_rejects_11_1_in_the_requested_feature_levels() {
+        let (_, result) = call_create_device(Some(&[
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+        ]));
+        assert_eq!(result, E_INVALIDARG);
+    }
+
+    #[test]
+    fn create_device_uses_11_0_when_no_feature_level_list_is_provided() {
+        const OUT_LEVEL: u64 = 0x11000;
+        let (p, result) = call_create_device(None);
+        assert_eq!(result, S_OK);
+        assert_eq!(p.rd32(OUT_LEVEL).unwrap(), D3D_FEATURE_LEVEL_11_0);
     }
 
     #[test]
