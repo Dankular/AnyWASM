@@ -489,6 +489,20 @@ uniform allocation in the staging ring. `test/shaders.mjs` checks the translated
 second draw must update the per-draw values for its green center pixel. The existing R32_FLOAT UAV
 dispatch/readback/sample regression still passes after the binding shift.
 
+### Diligent DrawMap shader translation
+
+Two DXBC fixtures exercise the selected Diligent GLFW Demo's real `DrawMap.hlsl` vertex and pixel
+stages. They were compiled with the vendored HLSL compiler from the Release `DrawMap.hlsl` source,
+with `Structures.fxh` inlined, `VERTEX_SHADER`/`PIXEL_SHADER` defined respectively, and the `vs_5_0`
+`VSmain` / `ps_5_0` `PSmain` entry points. The vertex fixture is 1,444 bytes (SHA-256
+`19e9d1ddf8485e33d262eea01b4604c98623b2b8877437a1ac88ffd303c61be8`); the pixel fixture is 9,396
+bytes (SHA-256 `1052ec7d432a92ac675edcac4a91c0ffa1b04f40d43dcfc7fae599e71392fb78`).
+
+`test/shaders.mjs` checks the constant buffers, texture and sampler descriptors, stage outputs, and
+ray-loop translation. `test/browser/run.mjs` compiles both translated WGSL modules and creates their
+WebGPU render pipeline in Chromium; shader compilation and pipeline validation report no errors.
+This covers translation and pipeline creation, not rendered pixels from the DrawMap shader.
+
 The reusable target smoke replay is `test/browser/target.mjs`. It temporarily serves the worker with
 a 1,000,000,000-instruction run slice and per-frame GPU reporting, then captures the first reported
 back buffer from a caller-supplied target bundle. Run it after packing the D3D11-only `/MT` build:

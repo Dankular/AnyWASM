@@ -371,7 +371,7 @@ try {
 
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
   // Verify multisampled D3D11 render targets and ResolveSubresource in the WebGPU executor.
-  const msaaResolveResult = await page.evaluate(async () => {
+  const msaaResolveResult = await page.evaluate(async ({ drawMapVertexBytes, drawMapPixelBytes }) => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
     const canvas = document.createElement('canvas');
@@ -382,6 +382,23 @@ try {
       const logs = [];
       const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
       await gpu.init();
+      const drawMapVertex = tool.translate(new Uint8Array(drawMapVertexBytes));
+      const drawMapPixel = tool.translate(new Uint8Array(drawMapPixelBytes));
+      const drawMapVertexModule = gpu.device.createShaderModule({ code: drawMapVertex.wgsl });
+      const drawMapPixelModule = gpu.device.createShaderModule({ code: drawMapPixel.wgsl });
+      const drawMapInfo = await Promise.all([drawMapVertexModule.getCompilationInfo(), drawMapPixelModule.getCompilationInfo()]);
+      const drawMapShaderErrors = drawMapInfo.flatMap((info) => info.messages.filter((message) => message.type === 'error').map((message) => message.message));
+      let drawMapPipeline = null, drawMapPipelineError = '';
+      gpu.device.pushErrorScope('validation');
+      try {
+        drawMapPipeline = await gpu.device.createRenderPipelineAsync({
+          layout: 'auto',
+          vertex: { module: drawMapVertexModule, entryPoint: 'main' },
+          fragment: { module: drawMapPixelModule, entryPoint: 'main', targets: [{ format: 'rgba8unorm' }] },
+          primitive: { topology: 'triangle-list' },
+        });
+      } catch (error) { drawMapPipelineError = String(error); }
+      const drawMapValidation = await gpu.device.popErrorScope();
       const vertexShader = tool.compileHlsl(`
         float4 main(uint vertexId : SV_VertexID) : SV_Position {
           float x = vertexId == 2 ? 3.0 : -1.0;
@@ -438,6 +455,8 @@ try {
         height: pixels.height,
         format: pixels.format,
         allPixelsMatch: pixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
+        drawMapPipelineValidated: !!drawMapPipeline && !drawMapValidation && !drawMapPipelineError && drawMapShaderErrors.length === 0,
+        drawMapPipelineError: drawMapPipelineError || drawMapValidation?.message || drawMapShaderErrors.join('\n'),
         bgraFormat: bgraPixels.format,
         bgraPixelsMatch: bgraPixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
         draws: gpu.stats.draws,
@@ -449,6 +468,9 @@ try {
     } catch (error) {
       return { error: String(error) };
     }
+  }, {
+    drawMapVertexBytes: Array.from(readFileSync(join(repoRoot, 'fixtures', 'diligent_glfwdemo_drawmap_vs.dxbc'))),
+    drawMapPixelBytes: Array.from(readFileSync(join(repoRoot, 'fixtures', 'diligent_glfwdemo_drawmap_ps.dxbc'))),
   });
   check('4x multisampled render target draws and resolves into a single-sample texture',
     msaaResolveResult.samples === 4 && msaaResolveResult.width === 8 && msaaResolveResult.height === 8
@@ -456,6 +478,8 @@ try {
       && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
       && msaaResolveResult.bgraPixelsMatch && msaaResolveResult.draws === 2 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
+  check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
+    msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));
 
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });

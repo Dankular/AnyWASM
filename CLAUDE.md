@@ -274,8 +274,10 @@ register-stack subset):
 - [~] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; a captured
       Diligent GLFW Demo SDF shader now has a regression for its non-finite integer-register bit
       patterns and translates through a runtime bitcast. The target's draw-parameter uniform and UAV
-      binding collision is fixed and pixel-tested. More failing real-world shaders, shader/pipeline
-      caching (IndexedDB), and async pipeline creation to avoid stalls remain open.
+      binding collision is fixed and pixel-tested. Diligent DrawMap vertex/pixel shader fixtures
+      cover constant buffers, texture sampling, and ray loops; Chromium validates their WebGPU
+      pipeline. More failing real-world shaders, shader/pipeline caching (IndexedDB), and async
+      pipeline creation to avoid stalls remain open.
 - [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
       pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
       canvas sizes, and browser engines still need coverage.

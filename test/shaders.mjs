@@ -52,6 +52,23 @@ try {
 check('Diligent GLFW Demo SDF integer loop constants translate through runtime bitcasts',
   /local\s*=\s*-8i;/.test(sdfWgsl) && /let (\w+) = local;\s*r1_\[1u\] = bitcast<f32>\(\1\);/.test(sdfWgsl),
   sdfError || sdfWgsl.slice(0, 400));
+let drawMapVs, drawMapPs, drawMapError = '';
+try {
+  const vsDxbc = new Uint8Array(await readFile(new URL('../fixtures/diligent_glfwdemo_drawmap_vs.dxbc', import.meta.url)));
+  const psDxbc = new Uint8Array(await readFile(new URL('../fixtures/diligent_glfwdemo_drawmap_ps.dxbc', import.meta.url)));
+  drawMapVs = t.translate(vsDxbc);
+  drawMapPs = t.translate(psDxbc);
+} catch (e) { drawMapError = String(e); }
+check('Diligent DrawMap vertex shader translates with its constant buffer and position output',
+  drawMapVs?.descriptors.some((d) => d.type === 2 && d.register === 0)
+    && /@vertex\s+fn\s+main/.test(drawMapVs.wgsl) && /@builtin\(position\)/.test(drawMapVs.wgsl),
+  drawMapError || JSON.stringify(drawMapVs?.descriptors));
+check('Diligent DrawMap pixel shader translates its constant buffers, SDF texture, sampler, and ray loops',
+  [0, 1].every((register) => drawMapPs?.descriptors.some((d) => d.type === 2 && d.register === register))
+    && drawMapPs?.descriptors.some((d) => d.type === 0 && d.register === 0)
+    && drawMapPs?.descriptors.some((d) => d.type === 3 && d.register === 0)
+    && /@fragment\s+fn\s+main/.test(drawMapPs.wgsl) && (drawMapPs.wgsl.match(/loop\s*\{/g) || []).length >= 2,
+  drawMapError || JSON.stringify(drawMapPs?.descriptors));
 if (process.env.SHOW) { console.log(v.wgsl); console.log(p.wgsl); }
 console.log(failures ? `\n${failures} FAILED` : '\nshader toolchain tests passed');
 process.exit(failures ? 1 : 0);
