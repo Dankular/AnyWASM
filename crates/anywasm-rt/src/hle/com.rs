@@ -65,6 +65,12 @@ pub enum Kind {
         query_type: u32,
         complete: bool,
     },
+    DirectInput8,
+    DirectInputDevice {
+        device_type: u32,
+        acquired: bool,
+        data_size: u32,
+    },
     DirectDraw,
     DirectSound,
     SoundBuffer { memory: u64, size: u32 },
@@ -181,7 +187,9 @@ fn vtable_for(p: &mut Process, iface: &'static str) -> u64 {
     if let Some(&v) = p.extra.com.vtables.get(iface) {
         return v;
     }
-    let methods = vtables::methods(iface).unwrap_or(&["QueryInterface", "AddRef", "Release"]);
+    let methods = vtables::methods(iface)
+        .or_else(|| directinput8::methods(iface))
+        .unwrap_or(&["QueryInterface", "AddRef", "Release"]);
     let pointer_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
     let vt = kernel32::alloc_block(p, methods.len() as u64 * pointer_size + pointer_size, true);
     for (i, m) in methods.iter().enumerate() {
@@ -229,6 +237,8 @@ fn supports(kind: &Kind, want: &str) -> bool {
         return true;
     }
     let fam: &[&str] = match kind {
+        Kind::DirectInput8 => &["IDirectInput8A", "IDirectInput8W"],
+        Kind::DirectInputDevice { .. } => &["IDirectInputDevice8A", "IDirectInputDevice8W"],
         Kind::Device => &["ID3D11Device", "IDXGIDevice", "IDXGIObject"],
         Kind::Context => &["ID3D11DeviceContext", "ID3D11DeviceChild"],
         Kind::SwapChain { .. } => &["IDXGISwapChain", "IDXGIObject", "IDXGIDeviceSubObject"],
@@ -281,7 +291,9 @@ fn supports(kind: &Kind, want: &str) -> bool {
 
 fn static_iface(name: &str) -> Option<&'static str> {
     // Interned lookup: only names we have vtables for are valid interfaces.
-    vtables::methods(name)?;
+    if vtables::methods(name).is_none() && directinput8::methods(name).is_none() {
+        return None;
+    }
     for (k, _) in ALL_NAMES.iter().map(|n| (*n, ())) {
         if k == name {
             return Some(k);
@@ -321,6 +333,10 @@ const ALL_NAMES: &[&str] = &[
     "ID3D11DeviceContext1",
     "ID3D11DeviceContext2",
     "ID3D11DeviceContext3",
+    "IDirectInput8A",
+    "IDirectInput8W",
+    "IDirectInputDevice8A",
+    "IDirectInputDevice8W",
     "ID3D11DeviceChild",
     "ID3D11Resource",
     "ID3D11Buffer",
@@ -353,7 +369,7 @@ pub fn query_interface(p: &mut Process) -> R {
     };
     let (kind, own) = (obj.kind.clone(), obj.iface);
     let iid = guid_string(p, riid)?;
-    let Some(name) = vtables::iid_name(&iid) else {
+    let Some(name) = vtables::iid_name(&iid).or_else(|| directinput8::iid_name(&iid)) else {
         if p.trace_imports {
             p.stderr.extend_from_slice(
                 format!(
@@ -509,6 +525,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                 .or_else(|| dxgi::method(iface, m))
                 .or_else(|| ddraw::method(iface, m))
                 .or_else(|| dsound::method(iface, m))
+                .or_else(|| directinput8::method(iface, m))
         }
     })
 }

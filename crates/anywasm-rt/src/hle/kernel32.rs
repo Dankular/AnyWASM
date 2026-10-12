@@ -2515,6 +2515,10 @@ fn load_library(p: &mut Process, name: &str) -> R {
     if let Some(i) = p.module_by_name(&n) {
         return Ok(p.modules[i].base);
     }
+    if anywasm_pe::canonical_dll(crate::process::base_name(&n)) == "dinput8" {
+        let i = p.register_hle_module(&n, "dinput8");
+        return Ok(p.modules[i].base);
+    }
     let relative = absolute(&n, &p.current_directory);
     let file = if p.vfs.exists(&relative) {
         Some(norm(&relative))

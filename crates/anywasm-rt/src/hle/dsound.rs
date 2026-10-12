@@ -1,7 +1,7 @@
 //! DirectSound 8 compatibility used to keep legacy Win32 startup moving.
 //!
-//! Sound buffers are guest-memory backed and accept lock, format, and playback calls. No audio
-//! is emitted to the browser yet; playback methods report success and remain silent.
+//! Sound buffers are guest-memory backed for startup compatibility. No audio is emitted to the
+//! browser yet, and playback reports `E_NOTIMPL` instead of claiming to play silently.
 
 use super::com::{self, Kind, S_OK};
 use super::*;
@@ -9,6 +9,7 @@ use crate::process::Process;
 
 const E_INVALIDARG: u64 = 0x8007_0057;
 const E_NOINTERFACE: u64 = 0x8000_4002;
+const E_NOTIMPL: u64 = 0x8000_4001;
 const DSBUFFERDESC_SIZE: u32 = 36;
 const DSBCAPS_SIZE: u32 = 20;
 const MAX_SOUND_BUFFER: u32 = 16 * 1024 * 1024;
@@ -43,7 +44,6 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSoundBuffer8", "SetFX") => set_fx,
         ("IDirectSoundBuffer8", "AcquireResources") => acquire_resources,
         ("IDirectSoundBuffer8", "Initialize")
-        | ("IDirectSoundBuffer8", "Play")
         | ("IDirectSoundBuffer8", "SetCurrentPosition")
         | ("IDirectSoundBuffer8", "SetFormat")
         | ("IDirectSoundBuffer8", "SetVolume")
@@ -52,6 +52,7 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         | ("IDirectSoundBuffer8", "Stop")
         | ("IDirectSoundBuffer8", "Unlock")
         | ("IDirectSoundBuffer8", "Restore") => |_| Ok(S_OK),
+        ("IDirectSoundBuffer8", "Play") => playback_not_implemented,
         _ => return None,
     })
 }
@@ -263,5 +264,22 @@ fn acquire_resources(p: &mut Process) -> R {
         }
     }
     Ok(S_OK)
+}
+
+fn playback_not_implemented(_p: &mut Process) -> R {
+    Ok(E_NOTIMPL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_reports_not_implemented_without_an_audio_backend() {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        let play = method("IDirectSoundBuffer8", "Play").unwrap();
+
+        assert_eq!(play(&mut process).unwrap(), 0x8000_4001);
+    }
 }
 

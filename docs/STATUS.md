@@ -103,7 +103,7 @@
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (opt-in prototype, default disabled):** at a block entry, Rust emits a module for a
-  leading sequence of 32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs. Register-to-register 32-bit
+  leading sequence of NOPs and 32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs. Register-to-register 32-bit
   moves zero-extend; self-moves retire normally. The module imports the main runtime's
   memory and runs through `anywasm.run_emitted_block` in `web/anywasm.js`. It mutates a copied
   160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC); Rust commits only a valid exact
@@ -120,13 +120,14 @@
   fallback and preserve output/count parity. A dedicated browser-worker run forces the emitter,
   confirms register-register execution without fallback, and matches the page-realm output and
   retired count. The standard worker, input, and WebGPU checks pass with the default gate. A
-  `jit_state.exe` fixture executes six leading GPR MOVs, stores their values to guest memory, and
-  fails if those values differ; the WASM smoke compares emitted, cached-only, and interpreter
-  status, exit code, output, errors, and retired count, while Windows also runs the fixture natively.
+  `jit_state.exe` fixture emits a leading NOP and six GPR MOVs as one forced seven-instruction
+  prefix, stores their values to guest memory, and fails if those values differ; the WASM smoke
+  compares emitted, cached-only, and interpreter status, exit code, output, errors, and retired
+  count, while Windows also runs the fixture natively.
   This checks the fixture-observed MOV state and memory only; a full final-state differential remains
   open. This is a
   mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
-  memory MOVs, NOP, LEA, arithmetic,
+  memory MOVs, LEA, arithmetic,
   SIMD, or control flow are not emitted. Full JIT/interpreter state differential and real-game
   performance remain open. Module-cache pressure and emitted-path CSP checks have passed in Node,
   Chromium, Firefox, and WebKit; generated-module page/worker checks pass in the same browser set.

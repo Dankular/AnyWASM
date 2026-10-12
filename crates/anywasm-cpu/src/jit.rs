@@ -66,6 +66,12 @@ struct MovInstruction {
     len: u8,
 }
 
+#[derive(Clone, Copy)]
+enum JitInstruction {
+    Nop { len: u8 },
+    Mov(MovInstruction),
+}
+
 /// A generated straight-line prefix and its process-local cache key.
 #[allow(dead_code)]
 pub struct EmittedBlock {
@@ -111,7 +117,7 @@ impl EmittedBlock {
     }
 }
 
-/// Emit a module for the leading immediate and register-register MOV instructions in a block.
+/// Emit a module for the leading NOP and immediate/register-register MOV instructions in a block.
 ///
 /// Only 32-bit and 64-bit GPR operands are included. All other encodings and instructions stop
 /// the emitted prefix and remain on the interpreter path.
@@ -127,32 +133,41 @@ pub fn emit_mov_block(
     }
     let prefix_len = instructions
         .iter()
-        .take_while(|inst| translate_mov(**inst).is_some())
+        .take_while(|inst| translate_instruction(**inst).is_some())
         .count();
     if prefix_len < min_prefix {
         return None;
     }
-    let moves: Vec<_> = instructions[..prefix_len]
+    let emitted: Vec<_> = instructions[..prefix_len]
         .iter()
         .copied()
-        .map(|inst| translate_mov(inst).unwrap())
+        .map(|inst| translate_instruction(inst).unwrap())
         .collect();
-    let first_register_register = moves
+    let first_register_register = emitted
         .iter()
-        .position(|mov| matches!(mov.source, MovSource::Register { .. }))
+        .position(|instruction| {
+            matches!(instruction, JitInstruction::Mov(mov) if matches!(mov.source, MovSource::Register { .. }))
+        })
         .map(|index| index as u32);
     Some(EmittedBlock {
         id,
-        wasm: emit_module(start, &moves),
-        instructions: moves.len(),
+        wasm: emit_module(start, &emitted),
+        instructions: emitted.len(),
         first_register_register,
     })
 }
 
-fn translate_mov(inst: Inst) -> Option<MovInstruction> {
+fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
     if inst.lock || inst.len == 0 {
         return None;
     }
+    if inst.op == Op::Nop {
+        return Some(JitInstruction::Nop { len: inst.len });
+    }
+    translate_mov(inst).map(JitInstruction::Mov)
+}
+
+fn translate_mov(inst: Inst) -> Option<MovInstruction> {
     let (dst, source) = match (inst.op, inst.ops[0], inst.ops[1], inst.osz) {
         (Op::Mov, Opnd::Gpr(dst), Opnd::Imm, 4) => {
             (dst, MovSource::Immediate((inst.imm as u32) as u64))
@@ -184,43 +199,49 @@ fn translate_mov(inst: Inst) -> Option<MovInstruction> {
     })
 }
 
-fn emit_module(start: u64, moves: &[MovInstruction]) -> Vec<u8> {
+fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
     let mut code = Vec::new();
     // One i32 local: the number of retired guest instructions.
     code.extend_from_slice(&[0x01, 0x01, 0x7f]);
     let mut rip = start;
-    for mov in moves {
-        rip = rip.wrapping_add(mov.len as u64);
+    for instruction in instructions {
+        let len = match instruction {
+            JitInstruction::Nop { len } => *len,
+            JitInstruction::Mov(mov) => mov.len,
+        };
+        rip = rip.wrapping_add(len as u64);
         // if (executed >= budget) return executed;
         code.extend_from_slice(&[
             0x20, 0x02, 0x20, 0x01, 0x4f, 0x04, 0x40, 0x20, 0x02, 0x0f, 0x0b,
         ]);
 
-        // Store an immediate or load the source GPR. MOV r32 zero-extends the low dword.
-        code.push(0x20);
-        uleb(0, &mut code);
-        match mov.source {
-            MovSource::Immediate(value) => {
-                code.push(0x42);
-                sleb(value as i64, &mut code);
-            }
-            MovSource::Register { index, zero_extend } => {
-                code.push(0x20);
-                uleb(0, &mut code);
-                code.push(0x29); // i64.load source GPR
-                uleb(3, &mut code);
-                uleb(GPR_OFFSET + index as u32 * 8, &mut code);
-                if zero_extend {
-                    code.push(0xa7); // i32.wrap_i64
-                    code.push(0xad); // i64.extend_i32_u
+        if let JitInstruction::Mov(mov) = instruction {
+            // Store an immediate or load the source GPR. MOV r32 zero-extends the low dword.
+            code.push(0x20);
+            uleb(0, &mut code);
+            match mov.source {
+                MovSource::Immediate(value) => {
+                    code.push(0x42);
+                    sleb(value as i64, &mut code);
+                }
+                MovSource::Register { index, zero_extend } => {
+                    code.push(0x20);
+                    uleb(0, &mut code);
+                    code.push(0x29); // i64.load source GPR
+                    uleb(3, &mut code);
+                    uleb(GPR_OFFSET + index as u32 * 8, &mut code);
+                    if zero_extend {
+                        code.push(0xa7); // i32.wrap_i64
+                        code.push(0xad); // i64.extend_i32_u
+                    }
                 }
             }
+            code.push(0x37); // i64.store
+            uleb(3, &mut code);
+            uleb(GPR_OFFSET + mov.dst as u32 * 8, &mut code);
         }
-        code.push(0x37); // i64.store
-        uleb(3, &mut code);
-        uleb(GPR_OFFSET + mov.dst as u32 * 8, &mut code);
 
-        // RIP points at the next guest instruction after each emitted MOV.
+        // RIP points at the next guest instruction after each emitted instruction.
         code.push(0x20);
         uleb(0, &mut code);
         code.push(0x42);
@@ -329,13 +350,24 @@ mod tests {
     use crate::decode::decode;
 
     #[test]
-    fn emits_only_a_leading_register_immediate_mov_prefix() {
+    fn emits_supported_mov_and_nop_prefix_then_stops_at_partial_width_mov() {
         let mov_rax = decode(&[0x48, 0xb8, 1, 0, 0, 0, 0, 0, 0, 0], 0x1000).unwrap();
         let nop = decode(&[0x90], 0x100a).unwrap();
-        let emitted = emit_mov_block(7, 0x1000, &[mov_rax, nop], 1).unwrap();
-        assert_eq!(emitted.instruction_count(), 1);
+        let mov_ax = decode(&[0x66, 0xb8, 1, 0], 0x100b).unwrap();
+        let emitted = emit_mov_block(7, 0x1000, &[mov_rax, nop, mov_ax], 1).unwrap();
+        assert_eq!(emitted.instruction_count(), 2);
         assert!(emitted.wasm.starts_with(b"\0asm\x01\0\0\0"));
         assert!(emitted.wasm.windows(7).any(|window| window == b"anywasm"));
+    }
+
+    #[test]
+    fn emits_a_leading_nop_and_continues_through_following_movs() {
+        let nop = decode(&[0x90], 0x1800).unwrap();
+        let mov_rax_rax = decode(&[0x48, 0x89, 0xc0], 0x1801).unwrap();
+        let emitted = emit_mov_block(70, 0x1800, &[nop, mov_rax_rax], 1).unwrap();
+
+        assert_eq!(emitted.instruction_count(), 2);
+        assert_eq!(emitted.first_register_register, Some(1));
     }
 
     #[test]

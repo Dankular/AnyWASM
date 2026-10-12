@@ -254,7 +254,6 @@ pub struct Process {
     pub rng: u64,
     pub trace_imports: bool,
     pub trace_modules_only: bool,
-    trace_export_returns: Vec<(u64, u64, u64)>,
     pub nested: u32,
     /// Set by an HLE function that has rewritten RSP/RIP itself (longjmp): skip the normal return.
     pub skip_ret: bool,
@@ -272,6 +271,11 @@ fn align_up(v: u64, a: u64) -> u64 {
 /// Number of stack argument bytes removed by an x86 Win32 callee. CRT and Vorbis C APIs use
 /// caller cleanup. Keep this table explicit so an unknown signature cannot silently corrupt ESP.
 fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
+    if group == "com" {
+        if let Some(bytes) = hle::directinput8::stdcall_stack_bytes(name) {
+            return bytes;
+        }
+    }
     if group == "crt" || group == "vorbisfile" || name == "wsprintfA" {
         return 0;
     }
@@ -480,7 +484,6 @@ impl Process {
             rng: 0x2545_F491_4F6C_DD1D,
             trace_imports: false,
             trace_modules_only: false,
-            trace_export_returns: Vec::new(),
             nested: 0,
             skip_ret: false,
             yield_request: None,
@@ -1668,6 +1671,9 @@ impl Process {
         if let Some(i) = self.module_by_name(dll) {
             return Ok(i);
         }
+        if canonical_dll(&base_name(dll)) == "dinput8" {
+            return Ok(self.register_hle_module(dll, "dinput8"));
+        }
         // Bundled DLL?
         let relative = crate::vfs::absolute(dll, &self.current_directory);
         let file = if self.vfs.exists(&relative) {
@@ -1941,69 +1947,6 @@ impl Process {
     /// Execute one instruction or one HLE call. `Ok(Some(stop))` only for terminal conditions.
     fn step_once(&mut self) -> Result<Option<Stop>, Stop> {
         let rip = self.cpu.rip;
-        let opcode = self.mem.read_u8(rip).unwrap_or(0);
-        let trace_api_boundary = self.trace_modules_only
-            && self.cpu.mode == CpuMode::X86_32
-            && matches!(opcode, 0xe8 | 0xff | 0xc2 | 0xc3);
-        let from_module = trace_api_boundary
-            .then(|| self.module_for(rip).map(str::to_owned))
-            .flatten();
-        let stack_args = if trace_api_boundary && matches!(opcode, 0xe8 | 0xff) {
-            let sp = self.cpu.gpr[RSP] as u32 as u64;
-            (0..6)
-                .map(|index| self.rd32(sp + index * 4).unwrap_or(0))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        if self.trace_modules_only && self.cpu.mode == CpuMode::X86_32 {
-            let rip32 = rip as u32 as u64;
-            let sp = self.cpu.gpr[RSP] as u32 as u64;
-            if let Some(index) = self
-                .trace_export_returns
-                .iter()
-                .position(|(return_address, entry_sp, _)| {
-                    *return_address == rip32 && sp > *entry_sp
-                })
-            {
-                let (_, _, output_address) = self.trace_export_returns.remove(index);
-                let output = self.rd32(output_address).unwrap_or(0);
-                self.stderr.extend_from_slice(
-                    format!(
-                        "[guest-export] DirectInput8Create return eax={:#x} out@{:#x}={:#x} esp={sp:#x}\n",
-                        self.cpu.gpr[RAX] as u32,
-                        output_address,
-                        output
-                    )
-                    .as_bytes(),
-                );
-            }
-            let export_entry = self
-                .modules
-                .iter()
-                .find(|module| {
-                    module.name.eq_ignore_ascii_case("dinput8.dll")
-                        && module.exports.get("DirectInput8Create") == Some(&rip32)
-                })
-                .is_some();
-            if export_entry {
-                let return_address = self.rd32(sp).unwrap_or(0) as u64;
-                let hinstance = self.rd32(sp + 4).unwrap_or(0);
-                let version = self.rd32(sp + 8).unwrap_or(0);
-                let riid = self.rd32(sp + 12).unwrap_or(0);
-                let output_address = self.rd32(sp + 16).unwrap_or(0) as u64;
-                let outer = self.rd32(sp + 20).unwrap_or(0);
-                let prior_output = self.rd32(output_address).unwrap_or(0);
-                self.stderr.extend_from_slice(
-                    format!(
-                        "[guest-export] DirectInput8Create entry rip={rip32:#x} esp={sp:#x} ret={return_address:#x} hinst={hinstance:#x} version={version:#x} riid={riid:#x} ppv={output_address:#x} prior={prior_output:#x} outer={outer:#x}\n"
-                    )
-                    .as_bytes(),
-                );
-                self.trace_export_returns
-                    .push((return_address, sp, output_address));
-            }
-        }
         if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
             self.charge_retired(1)?;
             self.dispatch_thunk(rip)?;
@@ -2011,29 +1954,6 @@ impl Process {
         }
         match self.dcache.step(&mut self.cpu, &mut self.mem) {
             Ok(()) => {
-                if trace_api_boundary {
-                    let target = self.cpu.rip as u32 as u64;
-                    let to_module = self.module_for(target).map(str::to_owned);
-                    let crosses_dinput = from_module
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case("dinput8.dll"))
-                        || to_module
-                            .as_deref()
-                            .is_some_and(|name| name.eq_ignore_ascii_case("dinput8.dll"));
-                    if crosses_dinput && from_module != to_module {
-                        self.stderr.extend_from_slice(
-                            format!(
-                                "[module-call] {}+{rip:#x} -> {}+{target:#x} eax={:#x} ecx={:#x} edx={:#x} stack={stack_args:?}\n",
-                                from_module.as_deref().unwrap_or("?"),
-                                to_module.as_deref().unwrap_or("?"),
-                                self.cpu.gpr[RAX] as u32,
-                                self.cpu.gpr[RCX] as u32,
-                                self.cpu.gpr[RDX] as u32
-                            )
-                            .as_bytes(),
-                        );
-                    }
-                }
                 self.charge_retired(1)?;
                 Ok(None)
             }

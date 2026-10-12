@@ -8,6 +8,7 @@ pub mod com;
 pub mod crt;
 pub mod d3d11;
 pub mod ddraw;
+pub mod directinput8;
 pub mod dsound;
 pub mod dxgi;
 pub mod gdi;
@@ -87,6 +88,7 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         // supplied until a guest call demonstrates that the game needs one.
         "dpnhpast" => Some("dpnhpast"),
         "d3d9" => Some("d3d9"),
+        "dinput8" => Some("dinput8"),
         "ddraw" => Some("ddraw"),
         "dxgi" => Some("dxgi"),
         "gdi32" => Some("gdi32"),
@@ -114,6 +116,7 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "d3d11" => d3d11::lookup(name),
         "dsound" => dsound::lookup(name),
         "ddraw" => ddraw::lookup(name),
+        "dinput8" => directinput8::lookup(name),
         "dxgi" => dxgi::lookup(name),
         "com" => com::lookup(name),
         _ => None,

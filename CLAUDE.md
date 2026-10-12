@@ -78,8 +78,8 @@ emission remains disabled by default. The 10–50x figure in `STATUS.md` is stil
 none of these results sets a product performance target. See `docs/TARGETS.md` for exact commands,
 counts, and limits.
 
-Design (partial implementation; the verified dynamic-emission scope is a leading run of 32-bit or
-64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
+Design (partial implementation; the verified dynamic-emission scope is a leading sequence of NOPs
+and 32-bit or 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [~] **Representative-target demand**: corrected cached-only and forced-emission runs each reached
@@ -107,9 +107,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [ ] **Exits**: direct block chaining for known targets; indirect jumps via hash lookup;
       `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`,
       `yield_request`, step limit/icount accounting must all keep working.
-- [x] **Fallback**: only 32-bit and 64-bit GPR-immediate or GPR-to-GPR MOVs at a block's beginning
-      are emitted. Partial-width and memory MOVs and all remaining instructions use the interpreter.
-      32-bit register moves zero-extend; self-moves still advance RIP/count/TSC. Compile/trap/
+- [x] **Fallback**: leading NOPs and 32-bit or 64-bit GPR-immediate or GPR-to-GPR MOVs are emitted.
+      Partial-width and memory MOVs and all remaining instructions use the interpreter. 32-bit
+      register moves zero-extend; NOPs and self-moves still advance RIP/count/TSC. Compile/trap/
       invalid-count failures retry from the untouched live CPU snapshot.
 - [~] **Correctness checks**: Rust emitter tests cover prefix limits, 32-bit zero-extension,
       64-bit copies, self-move retirement, and that prefixes below the configured gate are skipped.
@@ -122,9 +122,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       and compares the same bundle with the default cached-only path and `{ jit: false }` for status,
       exit code, stdout/stderr, and retired count. A forced host compile failure also falls back
       safely. The Chrome suite also explicitly runs the emitted path and compares its compute output
-      and retired count with cached-only execution. A dedicated `jit_state.exe` starts with six
-      emitted GPR MOVs, stores their values through guest memory, and checks those values; the WASM
-      smoke compares emitted, cached-only, and interpreter status, exit code, output, and retired
+      and retired count with cached-only execution. A dedicated `jit_state.exe` starts with a NOP
+      followed by six emitted GPR MOVs. Its forced seven-instruction prefix stores their values
+      through guest memory and checks them; the WASM smoke compares emitted, cached-only, and
+      interpreter status, exit code, output, and retired
       count, while Windows also runs the same fixture natively. This verifies those MOV-produced
       registers and checked memory values, but not arbitrary final process state or a full
       JIT/interpreter/host differential.
@@ -197,8 +198,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       open.
 - [~] **32-bit PE (WoW64-style)**: x86-32 decode/execution, PE32 image mapping, 32-bit TEB/PEB
       setup, and stdcall stack cleanup are in place. A synthetic PE32 entry plus `SetLastError`
-      thunk test covers only that narrow path; import-heavy DLLs, broad Win32 API coverage, and a
-      real 32-bit program remain unverified. This is still a large target-compatibility task.
+      import-table call now verifies IAT binding, guest execution, and TEB last-error state;
+      import-heavy DLLs, broad Win32 API coverage, and a real 32-bit program remain unverified.
+      This is still a large target-compatibility task.
 - [~] **DLL loading**: the selected Diligent target maps and executes code from
       `GraphicsEngineD3D11_64r.dll` and `D3Dcompiler_47.dll`; their nonzero entry points ran through
       `DllMain` successfully in the bounded target trace. `Archiver_64r.dll` has an entry point but

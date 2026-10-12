@@ -120,14 +120,14 @@ check('JIT opt-out uses interpreter fallback without compiling modules',
   JSON.stringify(interpreted.jitStats));
 
 const jitStateBundle = pack('fixtures/jit_state.exe');
-const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 1 });
+const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 7 });
 const cachedState = await runBundle(jitStateBundle);
 const interpretedState = await runBundle(jitStateBundle, { jit: false, jitMinPrefix: 1 });
 const sameJitState = (a, b) => a.status === b.status && a.exitCode === b.exitCode &&
-  a.out === b.out && a.err === b.err && a.instr === b.instr;
-check('JIT state fixture validates emitted GPR values after interpreter memory stores',
-  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.executions > 0 &&
-    emittedState.jitStats.registerRegisterHits > 0,
+  a.out === b.out && a.err === b.err && a.instr === b.instr && a.retiredInstr === b.retiredInstr;
+check('JIT state fixture emits a branch-target NOP and six MOVs as one prefix',
+  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.compilations === 1 &&
+    emittedState.jitStats.executions === 1 && emittedState.jitStats.registerRegisterHits === 1 && emittedState.jitStats.fallbacks === 0,
   JSON.stringify({ status: emittedState.status, exitCode: emittedState.exitCode, jitStats: emittedState.jitStats }));
 check('emitted, cached-only, and interpreter paths agree on JIT register and memory state',
   sameJitState(emittedState, cachedState) && sameJitState(emittedState, interpretedState),

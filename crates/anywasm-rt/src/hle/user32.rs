@@ -145,6 +145,10 @@ pub struct WinState {
     next_atom: u16,
     pub keys: Vec<u8>,
     pub cursor: (i32, i32),
+    pub mouse_position_valid: bool,
+    pub mouse_dx: i32,
+    pub mouse_dy: i32,
+    pub mouse_wheel: i32,
     pub mouse_tracking: HashSet<u64>,
     pub focus: u64,
     pub capture: u64,
@@ -1396,7 +1400,12 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result
             }
         }
         3 => {
+            if p.extra.win.mouse_position_valid {
+                p.extra.win.mouse_dx = p.extra.win.mouse_dx.saturating_add(a as i32 - p.extra.win.cursor.0);
+                p.extra.win.mouse_dy = p.extra.win.mouse_dy.saturating_add(b as i32 - p.extra.win.cursor.1);
+            }
             p.extra.win.cursor = (a as i32, b as i32);
+            p.extra.win.mouse_position_valid = true;
             if !invoke_low_level_hooks(p, 14, WM_MOUSEMOVE, (a as i32, b as i32), 0, 0)? && h != 0 {
                 post(p, h, WM_MOUSEMOVE, 0, packed(a, b));
             }
@@ -1418,6 +1427,7 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result
             }
         }
         6 => {
+            p.extra.win.mouse_wheel = p.extra.win.mouse_wheel.saturating_add(a as i32);
             let mouse_data = (a as i32 as u32) << 16;
             if !invoke_low_level_hooks(p, 14, WM_MOUSEWHEEL, (b as i32, c as i32), mouse_data, 0)? && h != 0 {
                 post(p, h, WM_MOUSEWHEEL, ((a as u64) & 0xffff) << 16, packed(b, c));
@@ -1436,6 +1446,10 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result
         9 if h != 0 => post(p, h, WM_CLOSE, 0, 0),
         10 if h != 0 && p.extra.win.mouse_tracking.remove(&h) => post(p, h, WM_MOUSELEAVE, 0, 0),
         10 => {}
+        11 => {
+            p.extra.win.mouse_dx = p.extra.win.mouse_dx.saturating_add(a as i32);
+            p.extra.win.mouse_dy = p.extra.win.mouse_dy.saturating_add(b as i32);
+        }
         _ => {}
     }
     Ok(())

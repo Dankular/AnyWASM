@@ -12,10 +12,12 @@ const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-browser-'));
 const unimplBundle = join(tempDir, 'unimpl.awb');
 const computeBundle = join(tempDir, 'compute.awb');
+const jitStateBundle = join(tempDir, 'jit_state.awb');
 const systemRandomBundle = join(tempDir, 'system_random.awb');
 const cliPath = join(repoRoot, 'target', 'debug', `anywasm${process.platform === 'win32' ? '.exe' : ''}`);
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'unimpl.exe'), '-o', unimplBundle], { cwd: repoRoot, stdio: 'ignore' });
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'compute.exe'), '-o', computeBundle], { cwd: repoRoot, stdio: 'ignore' });
+execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'jit_state.exe'), '-o', jitStateBundle], { cwd: repoRoot, stdio: 'ignore' });
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'system_random_test.exe'), '-o', systemRandomBundle], { cwd: repoRoot, stdio: 'ignore' });
 
 const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
@@ -181,6 +183,34 @@ try {
     workerJit.out === jitBrowser.emitted.out && workerJit.err === jitBrowser.emitted.err &&
       workerJit.instructions === jitBrowser.emitted.instr,
     JSON.stringify({ worker: workerJit, page: jitBrowser.emitted }));
+
+  const jitStateBrowser = await page.evaluate(async (bundle) => {
+    const { AnyWasm, Status } = await import('/anywasm.js');
+    const wasm = await (await fetch('/anywasm_wasm.wasm')).arrayBuffer();
+    const run = async (options) => {
+      const runtime = await AnyWasm.create(wasm, options);
+      runtime.load(new Uint8Array(bundle));
+      const result = runtime.runToEnd();
+      return { ...result, instructions: runtime.instructions(), retired: runtime.retiredInstructions(), jitStats: runtime.jitStats };
+    };
+    return {
+      emitted: await run({ jitMinPrefix: 7 }),
+      cached: await run({}),
+      exited: Status.EXITED,
+    };
+  }, Array.from(readFileSync(jitStateBundle)));
+  check('Chrome emits a branch-target NOP and six MOVs as one seven-instruction prefix',
+    jitStateBrowser.emitted.status === jitStateBrowser.exited && jitStateBrowser.emitted.exitCode === 0 &&
+      jitStateBrowser.emitted.jitStats.compilations === 1 && jitStateBrowser.emitted.jitStats.executions === 1 &&
+      jitStateBrowser.emitted.jitStats.registerRegisterHits === 1 && jitStateBrowser.emitted.jitStats.fallbacks === 0,
+    JSON.stringify(jitStateBrowser.emitted));
+  check('Chrome NOP/MOV prefix matches cached-only status and retired count',
+    jitStateBrowser.cached.status === jitStateBrowser.emitted.status &&
+      jitStateBrowser.cached.exitCode === jitStateBrowser.emitted.exitCode &&
+      jitStateBrowser.cached.instructions === jitStateBrowser.emitted.instructions &&
+      jitStateBrowser.cached.retired === jitStateBrowser.emitted.retired &&
+      jitStateBrowser.cached.jitStats.executions === 0,
+    JSON.stringify(jitStateBrowser));
 
   await page.goto('http://localhost:8099/index.html?run=crt_test');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 30000 });
