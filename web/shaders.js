@@ -119,6 +119,7 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
   const uavs = descriptors.filter((d) => d.type === D.UAV);
   if (uavs.length !== 1) return spirv;
   const formats = {
+    2: { dataType: 5, spirvFormat: 1 }, // R32G32B32A32_FLOAT
     28: { dataType: 5, spirvFormat: 4 }, // R8G8B8A8_UNORM
     41: { dataType: 5, spirvFormat: 3 }, // R32_FLOAT
     42: { dataType: 4, spirvFormat: 33 }, // R32_UINT

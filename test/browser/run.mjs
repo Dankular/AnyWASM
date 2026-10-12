@@ -961,6 +961,11 @@ try {
         [numthreads(1, 1, 1)]
         void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = float4(0.25, 0.5, 0.75, 1.0); }
       `, 'main', 'cs_5_0');
+      const rgba32Compute = tool.compileHlsl(`
+        RWTexture2D<float4> dst : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = float4(0.25, 0.5, 0.75, 1.0); }
+      `, 'main', 'cs_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -995,12 +1000,19 @@ try {
       command(17, words(2, 8));
       command(43, words(0, 1, 24, 0xffffffff));
       command(42, words(4, 4, 1));
+      command(4, words(33, 4, 4, 1, 1, 2, 0x88, 0, 1, 0)); // RGBA32_FLOAT SRV + UAV texture
+      command(12, words(34, 3, 33, 2, 4, 0, 1, 0, 1)); // RGBA32_FLOAT UAV
+      shader(9, rgba32Compute);
+      command(17, words(2, 9));
+      command(43, words(0, 1, 34, 0xffffffff));
+      command(42, words(4, 4, 1));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
       const readback = await gpu.readBackTexture(4);
       const signedReadback = await gpu.readBackTexture(14);
       const rgbaReadback = await gpu.readBackTexture(24);
+      const rgba32Readback = await gpu.readBackTexture(34);
       const result = {
         width: readback.width,
         height: readback.height,
@@ -1010,6 +1022,8 @@ try {
         signedValues: Array.from(signedReadback.data),
         rgbaFormat: rgbaReadback.format,
         rgbaValues: Array.from(rgbaReadback.data),
+        rgba32Format: rgba32Readback.format,
+        rgba32Values: Array.from(rgba32Readback.data),
         dispatches: gpu.stats.dispatches,
         errors: gpu.stats.errors,
         logs,
@@ -1020,15 +1034,18 @@ try {
       return { error: String(error), logs };
     }
   });
-  check('R32 integer and RGBA8 UAV dispatches and readback preserve typed values',
+  check('typed R32 and RGBA UAV dispatches and readback preserve values',
     typedTextureUavResult.width === 4 && typedTextureUavResult.height === 4
       && typedTextureUavResult.format === 'r32uint'
-      && typedTextureUavResult.dispatches === 3 && typedTextureUavResult.errors.length === 0
+      && typedTextureUavResult.dispatches === 4 && typedTextureUavResult.errors.length === 0
       && typedTextureUavResult.values.every((value, i) => value === i)
       && typedTextureUavResult.signedFormat === 'r32sint'
       && typedTextureUavResult.signedValues.every((value, i) => value === i - 8)
       && typedTextureUavResult.rgbaFormat === 'rgba8unorm'
-      && typedTextureUavResult.rgbaValues.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
+      && typedTextureUavResult.rgbaValues.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1)
+      && typedTextureUavResult.rgba32Format === 'rgba32float'
+      && typedTextureUavResult.rgba32Values.length === 64
+      && typedTextureUavResult.rgba32Values.every((value, i) => value === [0.25, 0.5, 0.75, 1.0][i % 4]),
     JSON.stringify(typedTextureUavResult));
 
   const structuredBufferUavResult = await page.evaluate(async () => {

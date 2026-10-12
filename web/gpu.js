@@ -39,7 +39,7 @@ const TEX = {
   94: 'bc6h-rgb-ufloat', 95: 'bc6h-rgb-ufloat', 96: 'bc6h-rgb-float',
   97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
 };
-const TYPED_UAV_DATA_TYPES = { 28: 5, 41: 5, 42: 4, 43: 3 };
+const TYPED_UAV_DATA_TYPES = { 2: 5, 28: 5, 41: 5, 42: 4, 43: 3 };
 
 // DXGI_FORMAT -> GPUVertexFormat
 const VTX = {
@@ -1445,13 +1445,15 @@ export class GpuExecutor {
     const format = view ? this.viewFormat(view.format, texture) : texture.format;
     const scalar32 = ['r32float', 'r32uint', 'r32sint'].includes(format);
     const scalarArray = format === 'r32uint' ? Uint32Array : format === 'r32sint' ? Int32Array : Float32Array;
+    const rgba32float = format === 'rgba32float';
     const rgba8 = ['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb'].includes(format);
-    if (!scalar32 && !rgba8) {
-      throw new Error(`texture readback supports R32_FLOAT/R32_UINT/R32_SINT and RGBA8/BGRA8 only (got ${format})`);
+    if (!scalar32 && !rgba32float && !rgba8) {
+      throw new Error(`texture readback supports R32 scalar, RGBA32_FLOAT, and RGBA8/BGRA8 formats (got ${format})`);
     }
     const width = Math.max(1, texture.width >> mip);
     const height = Math.max(1, texture.height >> mip);
-    const bytesPerRow = (width * 4 + 255) & ~255;
+    const bytesPerTexel = rgba32float ? 16 : 4;
+    const bytesPerRow = (width * bytesPerTexel + 255) & ~255;
     const buffer = this.device.createBuffer({
       size: bytesPerRow * height,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -1467,7 +1469,12 @@ export class GpuExecutor {
     await buffer.mapAsync(GPUMapMode.READ);
     const bytes = new Uint8Array(buffer.getMappedRange());
     let data;
-    if (scalar32) {
+    if (rgba32float) {
+      data = new Float32Array(width * height * 4);
+      for (let row = 0; row < height; row++) {
+        data.set(new Float32Array(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width * 4), row * width * 4);
+      }
+    } else if (scalar32) {
       data = new scalarArray(width * height);
       for (let row = 0; row < height; row++) {
         data.set(new scalarArray(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
