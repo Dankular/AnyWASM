@@ -99,11 +99,20 @@ lower nibble. Texture dispatch/readback checks every typed UAV format currently 
 HLE: R32 and RG32 float/uint/sint, RGBA8 unorm/snorm/uint/sint, RGBA16 float/uint/sint, and RGBA32
 float/uint/sint.
 
+A follow-up full Chromium suite on 2026-10-12 also passed visible swapchain checks at 32x24 and
+96x64 after `ResizeBuffers`, with backing and CSS dimensions updated, expected clear pixels at both
+canvas edges, two presents, and no WebGPU validation errors. A non-test-mode D3D11 triangle run at
+DPR 2 kept its guest backing store at 640x480, presented three frames, and matched the expected
+clear and interpolated triangle pixels in the 1280-pixel-wide screenshot with no page or WebGPU
+errors. When `depth32float-stencil8` is available, D32_FLOAT_S8X24 readback also preserves the
+little-endian depth value, stencil byte, and zeroed 24-bit padding for all four texels in a 2x2
+texture. D24_UNORM_S8 and legacy packed 16-bit staging formats remain open.
+
 | Browser or feature | Evidence and current status |
 |---|---|
 | Chromium, headless | **Partial, exercised by the browser suite.** It drives the real page and worker; checks load progress and accessible unimplemented-import diagnostics; verifies keyboard input, CSS-to-guest mouse scaling, `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`, and compares opt-in emitted execution with cached execution. The selected maze replay checks W/S/A/D, cursor-aimed movement in all four directions, and a flashlight response for one seed. |
 | Content Security Policy | **Partial, exercised in Chromium, Firefox, and WebKit.** A same-origin policy allowing `wasm-unsafe-eval` permits the page and worker to run hello and the emitted-module cache-pressure probe. Other deployment policies and directives remain untested. |
-| WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are checked by reading back the GPU back buffer in `?test=1` mode. The selected Diligent maze replay also reads its 128x128 R32_FLOAT SDF UAV in test mode. A separate non-test-mode run captures the visible 640x480 triangle canvas and checks its clear colour and interpolated centre pixel. Other rendering paths and browser engines remain unverified. |
+| WebGPU through Chromium | **Partial, exercised by the browser suite.** D3D11 triangle and textured fixtures are checked by reading back the GPU back buffer in `?test=1` mode. The selected Diligent maze replay also reads its 128x128 R32_FLOAT SDF UAV in test mode. Non-test-mode runs check visible triangle pixels at 640x480 and DPR 2, plus visible swapchain pixels and backing/CSS sizes before and after resize from 32x24 to 96x64. Other rendering paths and browser engines remain unverified. |
 | Firefox | **Partial, pixel verified for the D3D11 triangle on 141.0.** The cross-engine check verifies clean WebGPU validation, 640x480 back-buffer clear/center pixels, and visible-canvas clear/center pixels. A separate Windows Firefox 140.0.2 run exited hello but reported WebGPU unavailable and stopped graphics with an explicit status. Other graphics paths and browser builds remain unverified. |
 | Safari / WebKit | **Partial, smoke tested with Playwright WebKit 18.2.** Hello exits successfully. The installed engine lacks WebGPU and OffscreenCanvas worker transfer; graphics programs stop with an explicit limitation. This does not establish native Safari behavior. |
 | Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The build target is `wasm32-unknown-unknown`. The browser buffers the complete `.awb` as an `ArrayBuffer`, copies it into WASM linear memory, then `Bundle::from_bytes` copies each file into the in-memory VFS. No 4 GB pressure test, memory64 build, or large-asset streaming test has run; this is a source-level assessment, not a browser measurement. |

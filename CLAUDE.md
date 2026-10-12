@@ -243,7 +243,8 @@ register-stack subset):
       reverse-subtract, add, subtract, min, and max blend operations;
       texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture
       `CopySubresourceRegion` and `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
-      fractional-LOD linear filtering; repeat/clamp sampler address pixels and an 8x anisotropic
+      fractional-LOD linear filtering; repeat/mirror/clamp sampler address pixels (BORDER and
+      MIRROR_ONCE remain open) and an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
       for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. Staging `Map(READ)`
@@ -256,15 +257,18 @@ register-stack subset):
       raw BGRA8_UNORM bytes; R10G10B10A2_UNORM/UINT and R11G11B10_FLOAT packed words,
       encoded RGBA8_SRGB and BGRA8_SRGB bytes; RGBA8_UNORM and R8/RG8/RGBA8 SNORM/UINT/SINT plus
       A8_UNORM raw bytes; R8G8_UNORM two-channel texels; odd-width R8_UNORM row packing plus
-      mip/array subresource selection; depth-only D16_UNORM and D32_FLOAT values; and Texture3D
+      mip/array subresource selection; depth-only D16_UNORM and D32_FLOAT values; D32_FLOAT_S8X24
+      depth/stencil/padding bytes when the optional WebGPU format is available; and Texture3D
       R32_FLOAT row/depth
-      pitches. Comparison
-      samplers pixel-test all eight
+      pitches. D24_UNORM_S8 depth and legacy packed 16-bit staging formats remain open; WebGPU's
+      depth24plus representation is implementation-defined ([format rules](https://www.w3.org/TR/webgpu/#depth-stencil-formats)).
+      Comparison samplers pixel-test all eight
       comparison functions against depth values on both sides of the reference; depth-state
       comparisons pixel-test all eight functions at equality. Stencil comparisons cover all eight
       functions with stored values below, equal to, and above the reference. Stencil pass operations
       cover keep, zero, replace, both saturating operations, invert, and both wrapping operations,
-      including 8-bit boundaries. Other staging formats and subresource layouts, other format/resolve
+      including 8-bit boundaries. D24_UNORM_S8 and legacy packed 16-bit staging formats, other
+      subresource layouts, other format/resolve
       combinations, and more render-state combinations remain open.
 - [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
@@ -304,8 +308,9 @@ register-stack subset):
       stalls remain open.
 - [~] **Canvas blit pixels**: Chromium and Firefox screenshots verify the visible D3D11 triangle's
       clear colour and interpolated centre pixel. Chromium also checks the textured fixture's
-      blended quad and sampled texture colours. Other render paths, canvas sizes, and browser engines
-      still need coverage.
+      blended quad and sampled texture colours. Chromium additionally verifies visible swapchain
+      pixels at 32x24 and 96x64 after ResizeBuffers, plus DPR 2 presentation with a 640x480 guest
+      backing store. Other render paths and browser engines still need coverage.
 - [~] **Additional graphics APIs**: D3D9 has pixel-tested stage-0 fixed-function operations for
       selected FVF layouts, SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD/SUBTRACT/ADDSMOOTH,
       signed-add and modulate-add, DOTPRODUCT3, MULTIPLYADD/LERP with COLORARG0/ALPHAARG0, and
@@ -319,7 +324,7 @@ register-stack subset):
       measured time spent waiting for browser `requestAnimationFrame`, converting elapsed 100 ns
       units to internal 10 ns ticks. A process regression and the selected target's movement replay
       verify this scale against its 10 MHz `QueryPerformanceCounter`. `Present` interval semantics,
-      scheduling under JIT, offscreen canvas resize, and HiDPI remain open.
+      scheduling under JIT and offscreen canvas resize after transfer remain open.
 
 ## 4. CPU correctness
 - [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
