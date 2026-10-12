@@ -17,6 +17,8 @@ behavior.
   cycles, and invokes each handler with the exception record, registration node, context record,
   and a null fourth argument. It currently treats nested/collided dispositions as unimplemented and
   does not consume `GuestUnwind`.
+- `Process::run` treats an escaped `GuestUnwind` as a crash. The x86 exception dispatcher must
+  consume its own nonlocal transfers before returning to the main run loop.
 - `msvc_eh.rs` implements relative-pointer x64 EH3/EH4 metadata and `_CxxThrowException`; its throw
   entry explicitly rejects PE32.
 - The installed MSVC 14.44 `ehdata.h` defines the i386 registration node as `pNext`, `frameHandler`,
@@ -55,14 +57,18 @@ all function metadata.
 
 The first-pass handler searches active try blocks in compiler order, matches typed catches and
 catch-all only for native C++ exceptions, and records a target catch together with its registration
-frame. Extend the PE32 dispatcher with a bounded second-pass unwind over the frames it searched.
-That pass sets `EXCEPTION_UNWINDING` on the record and adds `EXCEPTION_TARGET_UNWIND` for the target
-registration node, invokes frame handlers while walking toward that node, and runs C++ state actions
-in reverse construction order. Remove registrations above the target from the TEB chain, keep the
-target node linked, update its state to the selected catch scope, construct the catch object, and
-transfer the guest context to the selected catch funclet. Keep the existing SEH disposition rules
-and vectored-handler ordering. Any nested exception raised by a guest copy constructor, destructor,
-or catch funclet must go back through normal guest exception dispatch.
+frame. The dispatcher records the ordered registration frames and exception context, validates that
+the requested target appears in that search, and consumes the transfer internally. Extend the PE32
+dispatcher with a bounded second-pass unwind over the frames it searched. That pass sets
+`EXCEPTION_UNWINDING` on the record and adds `EXCEPTION_TARGET_UNWIND` for the target registration
+node, invokes frame handlers while walking toward that node, and runs C++ state actions in reverse
+construction order. Because `Process::call_guest` restores its caller CPU context when it propagates
+`GuestUnwind`, the dispatcher must install the saved x86 transfer context explicitly after cleanup.
+Remove registrations above the target from the TEB chain, keep the target node linked, update its
+state to the selected catch scope, construct the catch object, and transfer the guest context to the
+selected catch funclet. Keep the existing SEH disposition rules and vectored-handler ordering. Any
+nested exception raised by a guest copy constructor, destructor, or catch funclet must go back through
+normal guest exception dispatch; an unwind transfer must not escape to `Process::run`.
 
 All metadata reads use checked 32-bit guest addresses, image ownership checks, bounded table counts,
 and checked arithmetic. Validate registration nodes against TEB stack bounds and the saved chain,
