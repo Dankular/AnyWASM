@@ -266,7 +266,8 @@ register-stack subset):
       flashlight probe now selects an unobstructed SDF ray to a wall within the light range and
       checks local pixels; two fresh Release-bundle launches passed. Target-driven Tab
       map reset is pixel-checked after adding D3D11 `Flush1` event signaling and event-query
-      completion; unsupported query and predicate types now return `E_NOTIMPL`, while invalid types
+      completion; `Begin` does not reset an event query. Unsupported query and predicate types now
+      return `E_NOTIMPL`, while invalid types
       return `E_INVALIDARG`. GPU counters and predication remain unsupported. Browser fixtures also
       cover typed R32/RGBA textures, structured/raw/typed buffer UAV ranges, and a 3D texture UAV.
       Other UAV formats, geometry/hull/domain shaders, general staging read-back, deferred

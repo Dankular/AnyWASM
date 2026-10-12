@@ -335,8 +335,8 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             }
             Ok(0)
         },
-        "Begin" => |p| set_query_complete(p, false),
-        "End" => |p| set_query_complete(p, true),
+        "Begin" => |_| Ok(0), // D3D11_QUERY_EVENT is End-only; other query types are rejected.
+        "End" => set_query_complete,
         "GetData" => get_query_data,
         "ResolveSubresource" => resolve_subresource,
         "Flush" | "ClearState" | "SetPredication" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
@@ -395,7 +395,7 @@ fn create_query(p: &mut Process, predicate: bool) -> R {
     Ok(S_OK)
 }
 
-fn set_query_complete(p: &mut Process, complete: bool) -> R {
+fn set_query_complete(p: &mut Process) -> R {
     let query = p.arg(1);
     if let Some(Kind::Query {
         query_type: D3D11_QUERY_EVENT,
@@ -407,7 +407,7 @@ fn set_query_complete(p: &mut Process, complete: bool) -> R {
         .get_mut(&query)
         .map(|obj| &mut obj.kind)
     {
-        *state = complete;
+        *state = true;
     }
     Ok(0)
 }
@@ -1330,6 +1330,28 @@ mod tests {
         p.cpu.gpr[R9] = 4;
         assert_eq!(get_data(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
+    }
+
+    #[test]
+    fn begin_does_not_clear_a_completed_event_query() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const DATA: u64 = 0x12000;
+        let (mut p, result) = call_create_query("CreateQuery", D3D11_QUERY_EVENT);
+        assert_eq!(result, S_OK);
+        assert!(p.mem.map(DATA, PAGE_SIZE, PROT_RW));
+        let query = p.rd64(0x11000).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = query;
+
+        method("ID3D11DeviceContext3", "End").unwrap()(&mut p).unwrap();
+        method("ID3D11DeviceContext3", "Begin").unwrap()(&mut p).unwrap();
+        p.cpu.gpr[R8] = DATA;
+        p.cpu.gpr[R9] = 4;
+        let get_data = method("ID3D11DeviceContext3", "GetData").unwrap();
+        assert_eq!(get_data(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(DATA).unwrap(), 1);
     }
 
     #[test]
