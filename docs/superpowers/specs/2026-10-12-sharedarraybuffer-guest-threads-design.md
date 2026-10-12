@@ -46,10 +46,17 @@ sample rendering path. Those remain in the parent runtime goal.
   with sequence-matched publish/claim/complete transitions. The CPU context is 784 bytes and
   16-byte aligned. Header validation checks bounds, alignment, region overlap, context offsets, and
   frame mappings; failed worker slots become disabled after their completion is consumed.
+- `SharedGuestMemory` validates the page snapshot and routes permission-checked guest accesses
+  through shared frames. Byte operations use atomic byte accesses, naturally aligned 1/2/4/8-byte
+  operations use width-matched atomics, and cross-page or unaligned scalar accesses use byte
+  operations. Host-side accesses use sequentially consistent atomics, which are stronger than the
+  x86 ordering model. Compare-exchange supports naturally aligned 1/2/4/8-byte operands; misaligned
+  or cross-page locked operations return an explicit unsupported-alignment fault. The view requires
+  an immutable map and atomic access by every concurrent participant.
 - The ABI crate is not loaded by `web/worker.js`; the current runtime still runs cooperatively and
   keeps guest frame bytes in `Memory`'s `Vec<u8>`. CPU instruction execution, the JIT, and guest
-  memory access still live in the `std` crate. The worker control protocol has not yet been exercised
-  between browser workers.
+  memory access still live in the `std` crate. The worker control protocol and shared-frame view
+  have not yet been exercised between browser workers.
 
 ## Feasibility spike result (2026-10-12)
 
@@ -91,9 +98,9 @@ starts with the interpreter; JIT integration requires a later design step.
 The first boundary now extracts the architectural `Cpu` context and decoder into
 `anywasm-cpu-state`; instruction execution and the `Memory` implementation still use `std`, heap
 collections, a Rust-owned frame `Vec<u8>`, and generated JIT state. No production CPU worker has
-been integrated. The next steps are to extract a no-allocation interpreter core, implement the
-atomic shared guest-frame access backend and mapping-generation protocol, then connect the ABI to
-browser workers before target replay.
+been integrated. The next steps are to extract a no-allocation instruction-execution core, connect it
+to the shared-frame view, add the remaining locked-memory operations and mapping-generation
+protocol, then exercise the ABI in browser workers before target replay.
 
 ## Success criteria
 

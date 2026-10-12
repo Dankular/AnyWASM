@@ -7,6 +7,7 @@
 //! duration of a dispatch; the slot's release/acquire transitions define that ownership boundary.
 
 pub mod shared;
+pub mod guest_memory;
 
 // Keep the decoder's existing import path while it is shared with the std interpreter crate.
 pub mod cpu {

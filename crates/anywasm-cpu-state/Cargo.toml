@@ -3,7 +3,7 @@ name = "anywasm-cpu-state"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "no_std x86-64 CPU context and shared worker ABI"
+description = "no_std x86-64 CPU state, decoder, and shared-memory worker primitives"
 
 [lib]
 path = "src/lib.rs"
