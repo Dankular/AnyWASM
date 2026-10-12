@@ -1723,6 +1723,92 @@ try {
       && near(cubeTextureResult.pixel, [255, 0, 0, 255], 1),
     JSON.stringify(cubeTextureResult));
 
+  const constantRangeResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        cbuffer Params : register(b0) { float4 tint; };
+        float4 main() : SV_Target { return tint; }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      const buffer = (id, colorOffset, color) => {
+        command(2, words(id, 512, 4, 0, 0, 16));
+        const bytes = new Uint8Array(512), view = new DataView(bytes.buffer);
+        color.forEach((value, i) => view.setFloat32(colorOffset + i * 4, value, true));
+        const payload = new Uint8Array(12 + bytes.length);
+        payload.set(words(id, 0, bytes.length)); payload.set(bytes, 12); command(3, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      buffer(11, 16, [0.25, 0.5, 0.75, 1]);
+      buffer(12, 256, [1, 1, 0, 1]);
+      const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
+      rasterView.setUint32(0, 13, true); rasterView.setUint32(4, 3, true);
+      rasterView.setUint32(8, 1, true); rasterView.setUint32(28, 1, true); rasterView.setUint32(32, 1, true);
+      command(10, raster);
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
+      command(21, words(1, 2, 0)); command(25, words(13));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true); clearView.setFloat32(16, 1, true); command(27, clear);
+      command(44, words(1, 0, 1, 11, 1, 4)); // firstConstant=1, copied from misaligned offset 16
+      command(23, words(1, 0, 0, 32, 64)); command(29, words(3, 0));
+      command(44, words(1, 0, 1, 12, 16, 4)); // firstConstant=16, directly bound at offset 256
+      command(23, words(1, 32, 0, 64, 64)); command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x) => {
+        const i = (32 * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = { packed: at(16), aligned: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11.1 constant-buffer ranges pack misaligned offsets and bind 256-byte offsets directly',
+    constantRangeResult.draws === 2 && constantRangeResult.errors.length === 0
+      && near(constantRangeResult.packed, [64, 128, 191, 255], 1)
+      && near(constantRangeResult.aligned, [255, 255, 0, 255], 1),
+    JSON.stringify(constantRangeResult));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {
