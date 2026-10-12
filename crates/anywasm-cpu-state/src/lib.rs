@@ -13,10 +13,10 @@ pub mod exec_core;
 pub mod guest_memory;
 pub mod memory;
 pub mod shared;
+pub mod x87_format;
 pub mod exec {
     pub use crate::exec_core::*;
 }
-#[cfg(feature = "std")]
 #[path = "../../anywasm-cpu/src/sse.rs"]
 pub mod sse;
 #[cfg(feature = "std")]

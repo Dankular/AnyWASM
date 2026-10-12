@@ -171,13 +171,117 @@ fn store_x<M: GuestMemory>(
 
 // ── rounding / conversion ────────────────────────────────────────────────────
 
+#[cfg(feature = "std")]
+fn trunc_f64(x: f64) -> f64 {
+    x.trunc()
+}
+
+#[cfg(not(feature = "std"))]
+fn trunc_f64(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    if exponent < 0 {
+        return f64::from_bits(bits & (1u64 << 63));
+    }
+    if exponent >= 52 {
+        return x;
+    }
+    let fractional_mask = (1u64 << (52 - exponent)) - 1;
+    f64::from_bits(bits & !fractional_mask)
+}
+
+#[cfg(feature = "std")]
+fn floor_f64(x: f64) -> f64 {
+    x.floor()
+}
+
+#[cfg(not(feature = "std"))]
+fn floor_f64(x: f64) -> f64 {
+    let truncated = trunc_f64(x);
+    if x < truncated {
+        truncated - 1.0
+    } else {
+        truncated
+    }
+}
+
+#[cfg(feature = "std")]
+fn ceil_f64(x: f64) -> f64 {
+    x.ceil()
+}
+
+#[cfg(not(feature = "std"))]
+fn ceil_f64(x: f64) -> f64 {
+    let truncated = trunc_f64(x);
+    if x > truncated {
+        truncated + 1.0
+    } else {
+        truncated
+    }
+}
+
+#[cfg(feature = "std")]
+fn round_ties_even_f64(x: f64) -> f64 {
+    x.round_ties_even()
+}
+
+#[cfg(not(feature = "std"))]
+fn round_ties_even_f64(x: f64) -> f64 {
+    let truncated = trunc_f64(x);
+    let fraction = (x - truncated).abs();
+    if fraction < 0.5 || fraction.is_nan() {
+        truncated
+    } else if fraction > 0.5 || (truncated as i64).abs() & 1 != 0 {
+        truncated + if x.is_sign_negative() { -1.0 } else { 1.0 }
+    } else {
+        truncated
+    }
+}
+
 fn rnd(x: f64, mode: u32) -> f64 {
     match mode & 3 {
-        0 => x.round_ties_even(),
-        1 => x.floor(),
-        2 => x.ceil(),
-        _ => x.trunc(),
+        0 => round_ties_even_f64(x),
+        1 => floor_f64(x),
+        2 => ceil_f64(x),
+        _ => trunc_f64(x),
     }
+}
+
+#[cfg(feature = "std")]
+fn sqrt_f64(x: f64) -> f64 {
+    x.sqrt()
+}
+
+#[cfg(not(feature = "std"))]
+fn sqrt_f64(x: f64) -> f64 {
+    if x.is_nan() || x == 0.0 {
+        return x;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x.is_infinite() {
+        return x;
+    }
+    let mut estimate = f64::from_bits((x.to_bits() >> 1) + 0x1ff8_0000_0000_0000);
+    for _ in 0..32 {
+        let next = (estimate + x / estimate) * 0.5;
+        if next == estimate {
+            break;
+        }
+        estimate = next;
+    }
+    estimate
+}
+
+#[cfg(feature = "std")]
+fn sqrt_f32(x: f32) -> f32 {
+    x.sqrt()
+}
+
+#[cfg(not(feature = "std"))]
+fn sqrt_f32(x: f32) -> f32 {
+    sqrt_f64(x as f64) as f32
 }
 fn rc(cpu: &Cpu) -> u32 {
     (cpu.mxcsr >> 13) & 3
@@ -225,9 +329,9 @@ fn fp32(k: FpK, a: f32, b: f32) -> f32 {
                 b
             }
         }
-        FpK::Sqrt => b.sqrt(),
+        FpK::Sqrt => sqrt_f32(b),
         FpK::Rcp => 1.0 / b,
-        FpK::Rsqrt => 1.0 / b.sqrt(),
+        FpK::Rsqrt => 1.0 / sqrt_f32(b),
         _ => unreachable!(),
     }
 }
@@ -251,9 +355,9 @@ fn fp64(k: FpK, a: f64, b: f64) -> f64 {
                 b
             }
         }
-        FpK::Sqrt => b.sqrt(),
+        FpK::Sqrt => sqrt_f64(b),
         FpK::Rcp => 1.0 / b,
-        FpK::Rsqrt => 1.0 / b.sqrt(),
+        FpK::Rsqrt => 1.0 / sqrt_f64(b),
         _ => unreachable!(),
     }
 }
@@ -1790,7 +1894,7 @@ pub fn fxsave_restore<M: GuestMemory>(
         buf[24..28].copy_from_slice(&cpu.mxcsr.to_le_bytes());
         buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes());
         for k in 0..8 {
-            let st = crate::x87::f64_to_f80(cpu.fpu_st[(cpu.fpu_top as usize + k) & 7]);
+            let st = crate::x87_format::f64_to_f80(cpu.fpu_st[(cpu.fpu_top as usize + k) & 7]);
             buf[32 + 16 * k..32 + 16 * k + 10].copy_from_slice(&st);
         }
         for k in 0..16 {
@@ -1807,7 +1911,7 @@ pub fn fxsave_restore<M: GuestMemory>(
         for k in 0..8 {
             let mut raw = [0u8; 10];
             raw.copy_from_slice(&buf[32 + 16 * k..32 + 16 * k + 10]);
-            cpu.fpu_st[(cpu.fpu_top as usize + k) & 7] = crate::x87::f80_to_f64(&raw);
+            cpu.fpu_st[(cpu.fpu_top as usize + k) & 7] = crate::x87_format::f80_to_f64(&raw);
         }
         for k in 0..16 {
             cpu.xmm[k] = u128::from_le_bytes(buf[160 + 16 * k..176 + 16 * k].try_into().unwrap());

@@ -1,9 +1,9 @@
 # Shared WebAssembly Memory for Parallel Guest Threads
 
-**Status:** feasibility spike complete; the first no-std worker slice is implemented. Production
-integration remains unimplemented. The worker can execute integer/control-flow instructions over
-the shared-frame view, but the browser host and process coordinator do not publish process state to
-it yet.
+**Status:** feasibility spike complete; the no-std worker executes integer/control-flow and SSE
+instructions over the shared-frame view. Production integration remains unimplemented: the browser
+host and process coordinator do not publish process state to it yet, and x87 execution remains
+std-only.
 
 ## Goal and scope
 
@@ -60,9 +60,11 @@ sample rendering path. Those remain in the parent runtime goal.
 - The ABI and `anywasm-cpu-worker` crates are not loaded by `web/worker.js`; the current runtime
   still runs cooperatively and keeps guest frame bytes in `Memory`'s `Vec<u8>`. The generic
   instruction executor is now in `anywasm-cpu-state`, and both the paged memory and shared-frame
-  view implement its no-allocation memory interface. The worker's no-std build currently supports
-  integer/control-flow instructions; SSE and x87 remain behind the ordinary std feature. The worker
-  control protocol and shared-frame view have not yet been exercised between browser workers.
+  view implement its no-allocation memory interface. The worker's no-std build supports
+  integer/control-flow and SSE instructions; x87 execution remains behind the ordinary std feature.
+  No-std SSE rounding is implemented in core, and scalar square root uses an iterative f64
+  approximation. The worker control protocol and shared-frame view have not yet been exercised
+  between browser workers.
 
 ## Feasibility spike result (2026-10-12)
 
@@ -82,8 +84,9 @@ sample rendering path. Those remain in the parent runtime goal.
   bypasses the metadata check and still emits Rust's unstable-target-feature warning. The module
   compiles, but its shared-memory execution has not yet been exercised in a browser.
 - Result: the full-runtime-per-worker layout remains blocked. The separate CPU-worker boundary now
-  executes a bounded integer/control-flow slice over validated shared guest frames, but does not
-  yet share the process's live page backing, SIMD/x87 path, or coordinator scheduling state.
+  executes bounded integer/control-flow and SSE slices over validated shared guest frames, but does
+  not yet share the process's live page backing or coordinator scheduling state; x87 execution
+  remains std-only.
 
 ### Revised candidate architecture
 
@@ -101,13 +104,15 @@ Workers return complete contexts at slice boundaries, so the coordinator can ser
 publish changed pages before resuming them. Asyncify remains coordinator-only. The worker runtime
 starts with the interpreter; JIT integration requires a later design step.
 
-The no-std boundary now includes the architectural `Cpu` context, decoder, integer/control-flow
-instruction executor, shared-frame memory interface, and `anywasm-cpu-worker` slot runner. The
-ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and uses the same executor over
-its paged `Memory`. `Memory` can now export and import a validated sorted mapping/frame snapshot for
-a quiescent handoff. `anywasm-wasm` now exposes page-count, snapshot-export, and snapshot-import C-ABI
-functions; `AnyWasm` provides host methods that copy those snapshots through caller-owned buffers.
-Neither path is wired into `web/worker.js` yet. Production integration still needs no-std SSE/x87
+The no-std boundary now includes the architectural `Cpu` context, decoder, integer/control-flow and
+SSE instruction executor, shared-frame memory interface, and `anywasm-cpu-worker` slot runner.
+No-std scalar square root uses an iterative f64 approximation; the x87 executor stays behind the
+ordinary std feature. The ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and
+uses the same executor over its paged `Memory`. `Memory` can now export and import a validated sorted
+mapping/frame snapshot for a quiescent handoff. `anywasm-wasm` now exposes page-count, snapshot-export,
+and snapshot-import C-ABI functions; `AnyWasm` provides host methods that copy those snapshots through
+caller-owned buffers.
+Neither path is wired into `web/worker.js` yet. Production integration still needs no-std x87
 execution, shared-memory allocation and snapshot publication around worker slices, HLE return
 handling, worker-stack reservation, browser worker creation, and a target replay after the ABI has
 been exercised between browser workers.

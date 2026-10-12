@@ -9,6 +9,7 @@ pub mod jit;
 pub mod mem;
 pub mod sse;
 pub mod x87;
+pub use anywasm_cpu_state::x87_format;
 
 pub use cpu::{Cpu, CpuMode};
 pub use decode::{decode, decode_mode, DecodeError, Inst, Op, Opnd};

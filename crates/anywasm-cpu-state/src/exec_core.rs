@@ -1347,14 +1347,12 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             };
             mem.write_u32(ea(cpu, &m), cpu.mxcsr)?;
         }
-        #[cfg(feature = "std")]
         Op::Fxsave | Op::Fxrstor => return crate::sse::fxsave_restore(cpu, mem, i, next),
         #[cfg(feature = "std")]
         Op::X87 => return crate::x87::exec(cpu, mem, i, next),
-        #[cfg(feature = "std")]
-        _ => return crate::sse::exec(cpu, mem, i, next),
         #[cfg(not(feature = "std"))]
-        _ => return Err(Exit::Unimplemented(i.op)),
+        Op::X87 => return Err(Exit::Unimplemented(Op::X87)),
+        _ => return crate::sse::exec(cpu, mem, i, next),
     }
     cpu.rip = next;
     cpu.icount += 1;

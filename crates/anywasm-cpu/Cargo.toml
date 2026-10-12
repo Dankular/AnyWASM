@@ -6,7 +6,9 @@ license.workspace = true
 description = "x86-64 user-mode CPU core (decoder + interpreter) with paged, permission-checked guest memory"
 
 [features]
-jit-test-api = []
+default = ["std"]
+std = []
+jit-test-api = ["std"]
 
 [dependencies]
 anywasm-cpu-state = { workspace = true, features = ["std"] }

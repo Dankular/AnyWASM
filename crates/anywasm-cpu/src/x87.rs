@@ -5,61 +5,7 @@ use crate::cpu::*;
 use crate::decode::*;
 use crate::exec::*;
 use crate::memory::{Access, GuestMemory};
-
-pub fn f64_to_f80(x: f64) -> [u8; 10] {
-    let bits = x.to_bits();
-    let sign = (bits >> 63) as u16;
-    let exp = ((bits >> 52) & 0x7ff) as i32;
-    let frac = bits & ((1u64 << 52) - 1);
-    let (e, m): (u16, u64) = if exp == 0 {
-        if frac == 0 {
-            (0, 0)
-        } else {
-            // subnormal f64 -> normalised f80
-            let lz = frac.leading_zeros() as i32 - 11; // shift to put leading 1 at bit 52
-            let m = frac << (lz + 11); // leading one to bit 63
-            let e = 1 - 1023 - lz + 16383;
-            (e as u16, m)
-        }
-    } else if exp == 0x7ff {
-        (0x7fff, (1u64 << 63) | (frac << 11))
-    } else {
-        ((exp - 1023 + 16383) as u16, (1u64 << 63) | (frac << 11))
-    };
-    let mut out = [0u8; 10];
-    out[..8].copy_from_slice(&m.to_le_bytes());
-    out[8..].copy_from_slice(&(e | sign << 15).to_le_bytes());
-    out
-}
-
-pub fn f80_to_f64(b: &[u8; 10]) -> f64 {
-    let m = u64::from_le_bytes(b[..8].try_into().unwrap());
-    let se = u16::from_le_bytes([b[8], b[9]]);
-    let sign = (se >> 15) as u64;
-    let e = (se & 0x7fff) as i32;
-    if e == 0 && m == 0 {
-        return f64::from_bits(sign << 63);
-    }
-    if e == 0x7fff {
-        let frac = (m << 1) >> 12;
-        let nan = (m << 1) != 0;
-        return f64::from_bits(sign << 63 | 0x7ff << 52 | if nan { frac | 1 << 51 } else { 0 });
-    }
-    // value = m * 2^(e - 16383 - 63); apply the exponent in chunks so no intermediate
-    // power of two overflows or underflows (powi(-1059) alone would flush to zero).
-    let mut v = m as f64;
-    let mut k = e - 16383 - 63;
-    while k != 0 {
-        let step = k.clamp(-1000, 1000);
-        v *= 2f64.powi(step);
-        k -= step;
-    }
-    if sign != 0 {
-        -v
-    } else {
-        v
-    }
-}
+pub use crate::x87_format::{f64_to_f80, f80_to_f64};
 
 const C0: u16 = 1 << 8;
 const C2: u16 = 1 << 10;
