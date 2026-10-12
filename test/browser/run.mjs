@@ -1088,6 +1088,12 @@ try {
       command(29, words(3, 0));
       command(4, words(35, 8, 8, 1, 1, 91, 0x20, 0, 1, 0)); // single-sample BGRA8 sRGB resolve target
       command(47, words(35, 0, 33, 0, 91)); // ResolveSubresource(dst, 0, src, 0, BGRA8_UNORM_SRGB)
+      command(4, words(40, 8, 8, 1, 1, 24, 0x20, 0, 4, 0)); // 4x R10G10B10A2 render target
+      command(12, words(41, 0, 40, 24, 4, 0, 1, 0, 1));
+      command(21, words(1, 41, 0));
+      command(29, words(3, 0));
+      command(4, words(42, 8, 8, 1, 1, 24, 0x20, 0, 1, 0)); // single-sample R10G10B10A2 resolve target
+      command(47, words(42, 0, 40, 0, 24)); // ResolveSubresource(dst, 0, src, 0, R10G10B10A2_UNORM)
       command(4, words(23, 8, 8, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 alpha-to-coverage target
       command(12, words(24, 0, 23, 28, 4, 0, 1, 0, 1));
       command(27, words(24, 0, 0, 0x3f800000, 0x3f800000)); // clear to blue
@@ -1121,6 +1127,11 @@ try {
       const coveragePixels = await gpu.readBackTexture(22);
       const rgbaSrgbPixels = await gpu.readBackTexture(32);
       const bgraSrgbPixels = await gpu.readBackTexture(35);
+      const rgb10Pixels = await gpu.readBackResource(42);
+      const rgb10View = new DataView(rgb10Pixels.buffer, rgb10Pixels.byteOffset, rgb10Pixels.byteLength);
+      const rgb10Word = rgb10View.getUint32((4 * 8 + 4) * 4, true);
+      const rgb10Pixel = [rgb10Word & 0x3ff, (rgb10Word >>> 10) & 0x3ff, (rgb10Word >>> 20) & 0x3ff, rgb10Word >>> 30]
+        .map((value, channel) => value / (channel === 3 ? 3 : 1023));
       const alphaCoveragePixels = await gpu.readBackTexture(25);
       const alphaCoverageIndex = (4 * alphaCoveragePixels.width + 4) * 4;
       const sampleMaskPixels = await gpu.readBackTexture(28);
@@ -1153,6 +1164,10 @@ try {
         bgraSrgbSamples: gpu.res.get(33)?.samples,
         bgraSrgbFormat: bgraSrgbPixels.format,
         bgraSrgbPixelsMatch: bgraSrgbPixels.data.every((value, i) => Math.abs(value - [137, 188, 225, 255][i % 4]) <= 1),
+        rgb10Format: gpu.res.get(40)?.format,
+        rgb10Samples: gpu.res.get(40)?.samples,
+        rgb10ResolveFormat: gpu.res.get(42)?.format,
+        rgb10Pixel,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
         logs,
@@ -1166,7 +1181,7 @@ try {
     drawMapVertexBytes: Array.from(readFileSync(join(repoRoot, 'fixtures', 'diligent_glfwdemo_drawmap_vs.dxbc'))),
     drawMapPixelBytes: Array.from(readFileSync(join(repoRoot, 'fixtures', 'diligent_glfwdemo_drawmap_ps.dxbc'))),
   });
-  check('4x multisampled render target draws and resolves into a single-sample texture',
+  check('4x D3D11 RGBA8/BGRA8/RGBA16F/sRGB/R10G10B10A2 render targets resolve into single-sample textures',
     msaaResolveResult.samples === 4 && msaaResolveResult.width === 8 && msaaResolveResult.height === 8
       && msaaResolveResult.format === 'rgba8unorm' && msaaResolveResult.allPixelsMatch
       && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
@@ -1175,7 +1190,10 @@ try {
       && msaaResolveResult.coveragePixelsMatch && msaaResolveResult.rgbaSrgbSamples === 4
       && msaaResolveResult.rgbaSrgbFormat === 'rgba8unorm-srgb' && msaaResolveResult.rgbaSrgbPixelsMatch
       && msaaResolveResult.bgraSrgbSamples === 4 && msaaResolveResult.bgraSrgbFormat === 'bgra8unorm-srgb'
-      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.draws === 8 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.rgb10Format === 'rgb10a2unorm'
+      && msaaResolveResult.rgb10Samples === 4 && msaaResolveResult.rgb10ResolveFormat === 'rgb10a2unorm'
+      && msaaResolveResult.rgb10Pixel?.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75, 1][i]) <= 0.0015)
+      && msaaResolveResult.draws === 9 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('D3D11 OMSetBlendState sample mask restricts 4x MSAA coverage',
     msaaResolveResult.sampleMaskSamples === 4

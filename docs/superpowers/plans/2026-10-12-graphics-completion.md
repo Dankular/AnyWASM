@@ -57,7 +57,7 @@
 - [ ] Implement only the failing HLE/executor behavior and rerun the affected browser checks plus the full Chromium suite.
 - [x] Forward D3D11 alpha-to-coverage into multisampled WebGPU pipelines; the 4x RGBA8 resolve regression verifies partial red/blue sample coverage from a half-alpha draw in Chromium.
 - [x] Forward the `OMSetBlendState` sample mask into WebGPU multisample state and its pipeline cache key; the 4x RGBA8 resolve regression verifies that mask `0x5` preserves two of four samples.
-- [x] Pixel-check 4x resolve output for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, and BGRA8_SRGB render targets; alpha-to-coverage and sample-mask resolves also preserve the untouched blue background.
+- [x] Pixel-check 4x resolve output for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, and R10G10B10A2_UNORM render targets; the packed 10-bit resolve channels match the fractional shader output, and alpha-to-coverage and sample-mask resolves preserve the untouched blue background.
 - [x] Report 4x quality levels for D32_FLOAT, D24S8, and D16; accept typeless D24S8 4x depth-resource creation; and pixel-check near/far depth testing with a 4x D24S8 attachment plus RGBA8 color resolve.
 - [x] Verify `IndependentBlendEnable` with two render targets: target 0 adds red to its blue clear while target 1 overwrites green with blue.
 - [x] Implement D3D11 `SRC1_COLOR`, `INV_SRC1_COLOR`, `SRC1_ALPHA`, and `INV_SRC1_ALPHA` blend factors using the second pixel-shader output; browser pixels verify each factor.
