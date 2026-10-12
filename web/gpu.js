@@ -655,6 +655,7 @@ export class GpuExecutor {
         : colorOp === 6 ? `((${colorA} * ${colorB}) * 4.0)`
         : colorOp === 7 ? `(${colorA} + ${colorB})`
         : colorOp === 10 ? `(${colorA} - ${colorB})`
+        : colorOp === 13 ? `((${colorA} * texel.a) + (${colorB} * (1.0 - texel.a)))`
         : 'input.color.rgb';
       const alphaExpr = alphaOp === 2 ? alphaA
         : alphaOp === 3 ? alphaB

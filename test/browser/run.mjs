@@ -1534,7 +1534,7 @@ try {
       command(4, words(13, 2, 2, 1, 1, 28, 8, 0, 1, 0)); // 2x2 RGBA8 D3D9 texture
       const texel = new Uint8Array(52);
       texel.set(words(13, 0, 0, 0, 0, 2, 2, 8, 16));
-      texel.set([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255], 36);
+      texel.set([255, 0, 0, 128, 0, 255, 0, 128, 0, 0, 255, 128, 255, 255, 255, 128], 36);
       command(5, texel);
       command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1)); // texture SRV
       command(19, words(1, 0, 1, 14));
@@ -1581,6 +1581,7 @@ try {
       const modulated2xPixel = await renderOperation(5);
       const addedPixel = await renderOperation(7);
       const subtractedPixel = await renderOperation(10);
+      const blendedTextureAlphaPixel = await renderOperation(13);
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
         modulatedPixel,
@@ -1588,6 +1589,7 @@ try {
         modulated2xPixel,
         addedPixel,
         subtractedPixel,
+        blendedTextureAlphaPixel,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -1598,17 +1600,19 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 6 && d3d9TextureResult.errors.length === 0
-      && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 255], 2),
+    d3d9TextureResult.draws === 7 && d3d9TextureResult.errors.length === 0
+      && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
-    near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 255], 2), JSON.stringify(d3d9TextureResult));
+    near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 6 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 255], 2)
-      && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 255], 2)
-      && near(d3d9TextureResult.addedPixel, [255, 127, 127, 255], 2)
-      && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 255], 2),
+    d3d9TextureResult.draws === 7 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+      && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
+      && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
+      && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
+  check('D3D9 stage-0 BLENDTEXTUREALPHA mixes texture colour and diffuse colour',
+    near(d3d9TextureResult.blendedTextureAlphaPixel, [191, 64, 64, 128], 2), JSON.stringify(d3d9TextureResult.blendedTextureAlphaPixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
