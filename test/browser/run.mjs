@@ -1540,12 +1540,17 @@ try {
         SamplerState wrapSampler : register(s0);
         SamplerState clampSampler : register(s1);
         SamplerState mirrorSampler : register(s2);
+        SamplerState mirrorOnceSampler : register(s3);
         float4 main(float4 position : SV_Position) : SV_Target {
-          return position.x < 22.0
+          return position.x < 16.0
             ? image.SampleLevel(wrapSampler, float2(1.25, 0.5), 0.0)
-            : position.x < 43.0
+            : position.x < 32.0
               ? image.SampleLevel(mirrorSampler, float2(1.75, 0.5), 0.0)
-              : image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0);
+              : position.x < 48.0
+                ? image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0)
+                : position.x < 56.0
+                  ? image.SampleLevel(mirrorOnceSampler, float2(2.75, 0.5), 0.0)
+                : image.SampleLevel(mirrorOnceSampler, float2(-0.75, 0.5), 0.0);
         }
       `, 'main', 'ps_5_0');
       const linearPixel = tool.compileHlsl(`
@@ -1589,10 +1594,11 @@ try {
       command(8, sampler(16, 3)); // clamp U
       command(8, sampler(17, 3, 0x15)); // linear min/mag/mip, clamp U
       command(8, sampler(18, 2)); // mirror U
+      command(8, sampler(19, 5, 0x15)); // mirror once U with linear filtering
       shader(7, 0, vertex); shader(8, 1, pixel); shader(9, 1, linearPixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(21, words(1, 2, 0)); command(16, words(4));
-      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 3, 15, 16, 18));
+      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 4, 15, 16, 18, 19));
       command(29, words(3, 0));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
@@ -1607,18 +1613,20 @@ try {
       gpu.execute(secondCommands);
       const linearPixels = await gpu.readBackbuffer(1);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
-      const result = { wrap: at(pixels, 10), mirror: at(pixels, 32), clamp: at(pixels, 48), linear: at(linearPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const result = { wrap: at(pixels, 8), mirror: at(pixels, 24), clamp: at(pixels, 40), mirrorOncePositive: at(pixels, 52), mirrorOnceNegative: at(pixels, 60), linear: at(linearPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler repeat/mirror/clamp modes and linear filtering match sampled texels',
+  check('D3D11 sampler repeat/mirror/clamp/MIRROR_ONCE modes and linear filtering match sampled texels',
     samplerAddressResult.draws === 2 && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
+      && near(samplerAddressResult.mirrorOncePositive || [], [0, 255, 0, 255], 1)
+      && near(samplerAddressResult.mirrorOnceNegative || [], [0, 255, 0, 255], 1)
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
@@ -2176,6 +2184,17 @@ try {
       const lerpPixel = await renderOperation(26, setupSignedArgs, 2, 0xffffffff, 1);
       const alphaMultiplyAddPixel = await renderOperation(2, setupSignedAlphaArgs, 25, 0xffffffff, 1, 2);
       const alphaLerpPixel = await renderOperation(2, setupSignedAlphaArgs, 26, 0xffffffff, 1, 2);
+      const mirrorOnceSampler = sampler.slice();
+      new DataView(mirrorOnceSampler.buffer).setUint32(8, 5, true);
+      const mirrorOnceVertices = vertices.slice(), mirrorOnceView = new DataView(mirrorOnceVertices.buffer);
+      for (let i = 0; i < 3; i++) mirrorOnceView.setFloat32(i * 28 + 20, -0.75, true);
+      const mirrorOnceUpload = new Uint8Array(12 + mirrorOnceVertices.length);
+      mirrorOnceUpload.set(words(11, 0, mirrorOnceVertices.length)); mirrorOnceUpload.set(mirrorOnceVertices, 12);
+      const mirrorOncePixel = await renderOperation(2, () => {
+        command(5, texel);
+        command(8, mirrorOnceSampler);
+        command(3, mirrorOnceUpload);
+      });
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
         modulatedPixel,
@@ -2207,6 +2226,7 @@ try {
         lerpPixel,
         alphaMultiplyAddPixel,
         alphaLerpPixel,
+        mirrorOncePixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
@@ -2223,13 +2243,15 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 36 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 37 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
+  check('D3D9 fixed-function MIRROR_ONCE mirrors negative UVs before linear filtering',
+    near(d3d9TextureResult.mirrorOncePixel, [127, 255, 127, 128], 2), JSON.stringify(d3d9TextureResult.mirrorOncePixel));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 36 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 37 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),

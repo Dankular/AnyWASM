@@ -218,8 +218,96 @@ function dualSourceFragmentWgsl(wgsl) {
     .replace('@location(1)', '@location(0) @blend_src(1)');
   return `enable dual_source_blending;\n${wgsl.slice(0, bodyStart)}${dualBody}${wgsl.slice(structEnd)}`;
 }
-const ADDRESS = { 1: 'repeat', 2: 'mirror-repeat', 3: 'clamp-to-edge', 4: 'clamp-to-edge', 5: 'mirror-repeat' };
+const ADDRESS = { 1: 'repeat', 2: 'mirror-repeat', 3: 'clamp-to-edge', 4: 'clamp-to-edge', 5: 'clamp-to-edge' };
 const TOPOLOGY = { 1: 'point-list', 2: 'line-list', 3: 'line-strip', 4: 'triangle-list', 5: 'triangle-strip' };
+
+function splitWgslArguments(text) {
+  const args = [];
+  let start = 0, parentheses = 0, brackets = 0, braces = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(') parentheses++;
+    else if (c === ')') parentheses--;
+    else if (c === '[') brackets++;
+    else if (c === ']') brackets--;
+    else if (c === '{') braces++;
+    else if (c === '}') braces--;
+    else if (c === ',' && parentheses === 0 && brackets === 0 && braces === 0) {
+      args.push({ text: text.slice(start, i), start, end: i });
+      start = i + 1;
+    }
+  }
+  args.push({ text: text.slice(start), start, end: text.length });
+  return args;
+}
+
+function mirrorOnceHelper(dimension) {
+  const coordType = dimension === 1 ? 'f32' : `vec${dimension}<f32>`;
+  const maskType = dimension === 1 ? 'bool' : `vec${dimension}<bool>`;
+  const zero = dimension === 1 ? '0.0' : `vec${dimension}<f32>(0.0)`;
+  const one = dimension === 1 ? '1.0' : `vec${dimension}<f32>(1.0)`;
+  return `fn mirror_once_${dimension}(coord: ${coordType}, mask: ${maskType}) -> ${coordType} {
+  let zero = ${zero};
+  let one = ${one};
+  let mirroredOnce = abs(coord);
+  return select(coord, clamp(mirroredOnce, zero, one), mask);
+}
+`;
+}
+
+function mirrorOnceSampleWgsl(wgsl, samplerAddressModes) {
+  const textureTypes = new Map();
+  const texturePattern = /\bvar\s+(\w+)\s*:\s*(texture_(?:1d|2d|2d_array|3d|cube|cube_array|depth_2d|depth_2d_array|depth_cube|depth_cube_array))(?:\s*<[^;]*>)?\s*;/g;
+  for (const match of wgsl.matchAll(texturePattern)) textureTypes.set(match[1], match[2]);
+
+  const callPattern = /\b(textureSample(?:BaseClampToEdge|CompareLevel|Compare|Level|Grad|Bias)?|textureGather(?:Compare)?)\s*\(/g;
+  let result = '', cursor = 0, changed = false;
+  const unsupported = new Set();
+  const dimensions = new Set();
+  for (const match of wgsl.matchAll(callPattern)) {
+    const open = match.index + match[0].lastIndexOf('(');
+    let depth = 1, close = open + 1;
+    for (; close < wgsl.length && depth; close++) {
+      if (wgsl[close] === '(') depth++;
+      else if (wgsl[close] === ')') depth--;
+    }
+    if (depth) continue;
+    close--;
+    const args = splitWgslArguments(wgsl.slice(open + 1, close));
+    if (args.length < 3) continue;
+    const textureName = args[0].text.trim(), samplerName = args[1].text.trim();
+    const samplerRegister = /^s(\d+)_$/.exec(samplerName);
+    const samplerIndex = samplerRegister ? Number(samplerRegister[1]) : samplerName === 'd3d9Sampler' ? 0 : null;
+    const addressModes = samplerIndex === null ? undefined : samplerAddressModes.get(samplerIndex);
+    if (!addressModes?.includes(5)) continue;
+
+    const textureType = textureTypes.get(textureName);
+    const dimension = textureType === 'texture_1d' ? 1
+      : ['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(textureType) ? 2
+        : textureType === 'texture_3d' ? 3 : 0;
+    if (!dimension) {
+      unsupported.add(samplerName);
+      continue;
+    }
+
+    const spatialAxes = dimension === 1 ? 1 : dimension === 2 ? 2 : 3;
+    const mask = addressModes.slice(0, spatialAxes).map((mode) => mode === 5);
+    if (!mask.some(Boolean)) continue;
+    const maskExpr = dimension === 1 ? String(mask[0]) : `vec${spatialAxes}<bool>(${mask.join(', ')})`;
+    const coord = args[2];
+    const coordStart = open + 1 + coord.start;
+    const coordEnd = open + 1 + coord.end;
+    result += wgsl.slice(cursor, coordStart) + `mirror_once_${dimension}(${coord.text.trim()}, ${maskExpr})`;
+    cursor = coordEnd;
+    changed = true;
+    dimensions.add(dimension);
+  }
+  if (!changed) return { wgsl, changed: false, unsupported };
+  result += wgsl.slice(cursor);
+  const helpers = [...dimensions].sort().map(mirrorOnceHelper).join('\n');
+  return { wgsl: `${helpers}\n${result}`, changed: true, unsupported };
+}
+
 const defaultPipelineState = () => ({
   vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
   cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
@@ -269,6 +357,7 @@ export class GpuExecutor {
     this.swapchains = new Map();
     this.pipelines = new Map();
     this.dualSourceShaderVariants = new WeakMap();
+    this.samplerAddressVariants = new WeakMap();
     this.computePipelines = new Map();
     this.depth24ReadbackPipeline = null;
     this.bglCache = new Map();
@@ -622,7 +711,7 @@ export class GpuExecutor {
     if (isAniso) { d.minFilter = d.magFilter = d.mipmapFilter = 'linear'; d.maxAnisotropy = Math.max(1, Math.min(16, aniso)); }
     if (comparison) d.compare = CMP[cmp] || 'always';
     void bias;
-    return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1 };
+    return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1, addressModes: [au, av, aw] };
   }
 
   shaderInfo(dxbc, uavFormat) {
@@ -664,6 +753,37 @@ export class GpuExecutor {
       shader.variants.set(dxgiFormat, variant);
     }
     return { ...shader, ...variant };
+  }
+
+  samplerAddressVariant(shader, samplerAddressModes) {
+    if (!shader) return shader;
+    const key = JSON.stringify([...samplerAddressModes]
+      .filter(([, modes]) => modes?.includes(5))
+      .sort(([a], [b]) => a - b));
+    if (key === '[]') return shader;
+    let variants = this.samplerAddressVariants.get(shader);
+    if (!variants) {
+      variants = new Map();
+      this.samplerAddressVariants.set(shader, variants);
+    }
+    let variant = variants.get(key);
+    if (variant) return variant;
+
+    const source = shader.wgsl || shader.fixedFunction?.source;
+    if (!source) return shader;
+    const transformed = mirrorOnceSampleWgsl(source, new Map(samplerAddressModes));
+    for (const sampler of transformed.unsupported) {
+      this.log(`MIRROR_ONCE sampler ${sampler} has no supported sampled-texture dimension`);
+    }
+    if (!transformed.changed) return shader;
+    variant = {
+      ...shader,
+      ...(shader.fixedFunction ? { fixedFunction: { ...shader.fixedFunction, source: transformed.wgsl } } : {}),
+      wgsl: transformed.wgsl,
+      module: this.device.createShaderModule({ code: transformed.wgsl }),
+    };
+    variants.set(key, variant);
+    return variant;
   }
 
   dualSourceShaderVariant(shader) {
@@ -1077,7 +1197,7 @@ export class GpuExecutor {
 
   draw(indexed, count, instances, first, baseVertex, firstInstance) {
     const st = this.st;
-    const vs = this.shaders.get(st.shader[0]);
+    let vs = this.shaders.get(st.shader[0]);
     let psId = st.shader[1];
     let ps = this.shaders.get(psId);
     if (ps?.texturedVariant && st.srv[1][0]) {
@@ -1150,13 +1270,20 @@ export class GpuExecutor {
       resolved[0].push({ binding: reg, resource: this.uniformBinding(stages, reg, declared) });
     }
     const samplerComparison = [];
+    const samplerAddressModes = new Map();
     for (const [reg, { d, vis }] of groups[2]) {
       const sid = this.st.smp[(vis & GPUShaderStage.VERTEX) ? 0 : 1][reg] || this.st.smp[1][reg] || this.st.smp[0][reg] || 0;
       const s = this.samplers.get(sid);
       samplerComparison[reg] = !!s?.comparison;
+      if (s?.addressModes) samplerAddressModes.set(reg, s.addressModes);
       layoutEntries[2].push({ binding: reg, visibility: vis, sampler: { type: s?.comparison ? 'comparison' : 'filtering' } });
       resolved[2].push({ binding: reg, resource: s ? s.gpu : this.defaultSampler });
     }
+    const samplerAddressKey = JSON.stringify([...samplerAddressModes]
+      .filter(([, modes]) => modes.includes(5))
+      .sort(([a], [b]) => a - b));
+    vs = this.samplerAddressVariant(vs, samplerAddressModes);
+    ps = this.samplerAddressVariant(ps, samplerAddressModes);
     for (const [reg, { d, vis }] of groups[1]) {
       const vid = this.st.srv[(vis & GPUShaderStage.FRAGMENT) ? 1 : 0][reg] || this.st.srv[1][reg] || this.st.srv[0][reg] || 0;
       const view = this.getView(vid);
@@ -1219,7 +1346,7 @@ export class GpuExecutor {
     const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
     const d3d9PipelineStates = [8, 7, 14, 23, 22, 15, 24, 25, 27, 19, 20, 171, 206, 207, 208, 209, 168]
       .map((state) => st.d3d9RenderStates.get(state) ?? null);
-    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.blend.mask, st.raster, st.depth.id, d3d9PipelineStates, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
+    const key = JSON.stringify([st.shader[0], psId, samplerAddressKey, st.layout, strides, topology, st.blend.id, st.blend.mask, st.raster, st.depth.id, d3d9PipelineStates, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);
     if (!pipe) {
       pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed, topology);
