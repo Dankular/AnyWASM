@@ -1735,6 +1735,24 @@ try {
       let r565Offset = 0; for (const part of stream) { r565Commands.set(part, r565Offset); r565Offset += part.length; }
       gpu.execute(r565Commands);
       const r565Pixels = await gpu.readBackbuffer(1);
+      const bcSkipped = !gpu.features.has('texture-compression-bc');
+      let bcPixels = null;
+      if (!bcSkipped) {
+        stream.length = 0;
+        command(4, words(27, 4, 4, 1, 1, 71, 8, 0, 1, 0)); // opaque red BC1 texture
+        const bcUpload = new Uint8Array(44);
+        bcUpload.set(words(27, 0, 0, 0, 0, 4, 4, 8, 8));
+        bcUpload[37] = 0xf8; // BC1 endpoint 0 is red; all indices select endpoint 0
+        command(5, bcUpload);
+        command(12, words(28, 2, 27, 71, 4, 0, 1, 0, 1));
+        command(8, sampler(24, 4, 0x15, [1, 0.25, 0.5, 0.25]));
+        command(19, words(1, 0, 1, 28)); command(20, words(1, 0, 1, 24));
+        command(29, words(3, 0));
+        const bcSize = stream.reduce((total, part) => total + part.length, 0), bcCommands = new Uint8Array(bcSize);
+        let bcOffset = 0; for (const part of stream) { bcCommands.set(part, bcOffset); bcOffset += part.length; }
+        gpu.execute(bcCommands);
+        bcPixels = await gpu.readBackbuffer(1);
+      }
       const result = {
         wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35),
         mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
@@ -1742,6 +1760,7 @@ try {
         r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48),
         rg8BorderEdge: at(rg8Pixels, 16), rg8BorderOutside: at(rg8Pixels, 48),
         rgbBorderEdge: at(r565Pixels, 16), rgbBorderOutside: at(r565Pixels, 48),
+        bcSkipped, bcBorderEdge: bcPixels && at(bcPixels, 16), bcBorderOutside: bcPixels && at(bcPixels, 48),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -1751,7 +1770,7 @@ try {
     }
   });
   check('D3D11 sampler modes match pixels and BORDER defaults follow R8/RG8/RGB SRV formats',
-    samplerAddressResult.draws === 7 && samplerAddressResult.errors.length === 0
+    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 7 : 8) && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1767,7 +1786,13 @@ try {
       && near(samplerAddressResult.rg8BorderOutside || [], [255, 64, 0, 255], 1)
       && near(samplerAddressResult.rgbBorderEdge || [], [255, 32, 64, 255], 2)
       && near(samplerAddressResult.rgbBorderOutside || [], [255, 64, 128, 255], 1)
+      && (samplerAddressResult.bcSkipped || near(samplerAddressResult.bcBorderEdge || [], [255, 32, 64, 159], 2)
+        && near(samplerAddressResult.bcBorderOutside || [], [255, 64, 128, 64], 1))
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
+    JSON.stringify(samplerAddressResult));
+  check(`D3D11 BC1 BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'edge and outside pixels'}`,
+    samplerAddressResult.bcSkipped || near(samplerAddressResult.bcBorderEdge || [], [255, 32, 64, 159], 2)
+      && near(samplerAddressResult.bcBorderOutside || [], [255, 64, 128, 64], 1),
     JSON.stringify(samplerAddressResult));
 
   const comparisonSamplerResult = await page.evaluate(async () => {
