@@ -1814,7 +1814,7 @@ fn set_texture_stage_state(p: &mut Process) -> R {
     let valid = match state {
         1 => matches!(value, 1..=13 | 15..=16), // selected add, subtract, and alpha-blend ops
         2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
-        4 => (2..=4).contains(&value), // select or modulate alpha
+        4 => matches!(value, 2..=4 | 8..=9), // selected and signed-add alpha operations
         _ => false,
     };
     if !valid {
@@ -2346,6 +2346,18 @@ mod tests {
                 .expect("SetTextureStageState should update the fixed-function shader state");
             let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
             assert_eq!(words, [0x144, 64, 64, color_op, 2, 1, 2, 2, 1]);
+        }
+        for alpha_op in [8, 9] {
+            for (offset, value) in [(4, device as u32), (8, 0), (12, 4), (16, alpha_op)] {
+                p.wr32(STACK + offset, value).unwrap();
+            }
+            assert_eq!(set_texture_stage_state(&mut p).unwrap(), S_OK, "alpha op {alpha_op}");
+
+            let commands = gpu::decode(&p.extra.gpu.buf);
+            let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
+                .expect("SetTextureStageState should update the fixed-function shader state");
+            let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
+            assert_eq!(words, [0x144, 64, 64, 16, 2, 1, alpha_op, 2, 1]);
         }
     }
 
