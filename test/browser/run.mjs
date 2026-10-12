@@ -635,6 +635,88 @@ try {
   const scaledCentroidY = Math.round(1 + 288.5 / 480 * (scaledCanvasPixels.h - 2));
   check('scaled canvas blit preserves the interpolated triangle', near(atScaledCanvas(160, scaledCentroidY), [85, 85, 85, 255], 6), JSON.stringify(atScaledCanvas(160, scaledCentroidY)));
 
+  const resizeProbe = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.id = 'swapchain-resize-probe';
+    canvas.style.cssText = 'display:block;width:32px;height:24px;max-width:none;aspect-ratio:auto;border:0;border-radius:0;margin:0';
+    document.body.append(canvas);
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {});
+      await gpu.init();
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const data = new Uint8Array(8 + payload.length), view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, payload.length, true); data.set(payload, 8);
+        return data;
+      };
+      const colorPayload = (viewId, color) => {
+        const payload = new Uint8Array(20), view = new DataView(payload.buffer);
+        view.setUint32(0, viewId, true);
+        color.forEach((value, i) => view.setFloat32(4 + 4 * i, value, true));
+        return payload;
+      };
+      const execute = (parts) => {
+        const size = parts.reduce((n, part) => n + part.length, 0), stream = new Uint8Array(size);
+        let offset = 0;
+        for (const part of parts) { stream.set(part, offset); offset += part.length; }
+        gpu.execute(stream);
+      };
+      execute([
+        command(38, words(1, 0, 9, 32, 24, 28)),
+        command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1)),
+        command(27, colorPayload(2, [0.2, 0.4, 0.8, 1])),
+        command(35, words(1, 9, 0)),
+      ]);
+      window.__swapchainResizeProbe = { canvas, gpu, command, words, colorPayload, execute };
+      const rect = canvas.getBoundingClientRect();
+      return { width: canvas.width, height: canvas.height, cssWidth: rect.width, cssHeight: rect.height,
+        presents: gpu.stats.presents, errors: gpu.stats.errors };
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('swapchain initially presents a 32x24 visible canvas',
+    resizeProbe.width === 32 && resizeProbe.height === 24 && resizeProbe.cssWidth === 32 && resizeProbe.cssHeight === 24
+      && resizeProbe.presents === 1 && resizeProbe.errors?.length === 0,
+    JSON.stringify(resizeProbe));
+  const resizeCanvasFirst = decodePng(await page.locator('#swapchain-resize-probe').screenshot());
+  const resizeCanvasFirstAt = (x, y) => Array.from(resizeCanvasFirst.data.slice((y * resizeCanvasFirst.w + x) * 4, (y * resizeCanvasFirst.w + x) * 4 + 4));
+  check('32x24 swapchain blit presents the expected clear pixels',
+    near(resizeCanvasFirstAt(0, 0), [51, 102, 204, 255], 1)
+      && near(resizeCanvasFirstAt(31, 23), [51, 102, 204, 255], 1),
+    JSON.stringify({ size: [resizeCanvasFirst.w, resizeCanvasFirst.h], pixels: [resizeCanvasFirstAt(0, 0), resizeCanvasFirstAt(31, 23)] }));
+  const resizeProbeAfter = await page.evaluate(() => {
+    const probe = window.__swapchainResizeProbe;
+    const { gpu, canvas, command, words, colorPayload, execute } = probe;
+    canvas.style.width = '96px'; canvas.style.height = '64px';
+    execute([
+      command(41, words(1, 9, 96, 64, 28)),
+      command(27, colorPayload(2, [0, 1, 0, 1])),
+      command(35, words(1, 9, 0)),
+    ]);
+    return { width: canvas.width, height: canvas.height, cssWidth: canvas.getBoundingClientRect().width,
+      cssHeight: canvas.getBoundingClientRect().height, presents: gpu.stats.presents, errors: gpu.stats.errors };
+  });
+  check('ResizeBuffers updates the canvas backing store and presents again at 96x64',
+    resizeProbeAfter.width === 96 && resizeProbeAfter.height === 64 && resizeProbeAfter.cssWidth === 96
+      && resizeProbeAfter.cssHeight === 64 && resizeProbeAfter.presents === 2 && resizeProbeAfter.errors?.length === 0,
+    JSON.stringify(resizeProbeAfter));
+  const resizeCanvasSecond = decodePng(await page.locator('#swapchain-resize-probe').screenshot());
+  const resizeCanvasSecondAt = (x, y) => Array.from(resizeCanvasSecond.data.slice((y * resizeCanvasSecond.w + x) * 4, (y * resizeCanvasSecond.w + x) * 4 + 4));
+  check('96x64 swapchain blit replaces the old clear pixels across the resized canvas',
+    near(resizeCanvasSecondAt(0, 0), [0, 255, 0, 255], 1)
+      && near(resizeCanvasSecondAt(95, 63), [0, 255, 0, 255], 1),
+    JSON.stringify({ size: [resizeCanvasSecond.w, resizeCanvasSecond.h], pixels: [resizeCanvasSecondAt(0, 0), resizeCanvasSecondAt(95, 63)] }));
+  await page.evaluate(() => { window.__swapchainResizeProbe?.gpu.device.destroy(); document.getElementById('swapchain-resize-probe')?.remove(); });
+
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
   // Verify multisampled D3D11 render targets and ResolveSubresource in the WebGPU executor.
   const msaaResolveResult = await page.evaluate(async ({ drawMapVertexBytes, drawMapPixelBytes }) => {
