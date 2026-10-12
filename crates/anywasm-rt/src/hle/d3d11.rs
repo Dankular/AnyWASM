@@ -642,6 +642,12 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
             }
+            (ViewKind::Uav, 1) => {
+                a = p.rd32(desc + 8)?; // FirstElement
+                b = p.rd32(desc + 12)?; // NumElements
+                c = p.rd32(desc + 16)?; // Flags
+                d = 0;
+            }
             (ViewKind::Rtv, 5) | (ViewKind::Dsv, 4) => {
                 a = p.rd32(desc + 8)?;
                 b = 1;

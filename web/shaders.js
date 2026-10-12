@@ -277,7 +277,7 @@ function lowerBufferImagesToStorageBuffers(spirv) {
     if ([43, 44, 45, 61, 80, 81, 83].includes(opcode) && inst.length >= 3) valueTypes.set(inst[2], inst[1]);
   }
   const emittedTypeDeclarations = new Set();
-  const output = [];
+  const output = Array.from({ length: 5 }, (_, i) => input.getUint32(i * 4, true));
   let annotationsEmitted = false, constantsEmitted = false;
   const pushInst = (inst) => output.push(...inst);
   const accessChain = (info, variableId, coordinateId) => {

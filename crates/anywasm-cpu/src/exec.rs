@@ -1334,6 +1334,22 @@ impl BlockCache {
         mem: &mut Memory,
         max_instructions: u64,
     ) -> (u64, ExecResult<()>) {
+        self.execute_counted_with_hook(cpu, mem, max_instructions, |_, _| {})
+    }
+
+    /// Execute a block and call `before_instruction` with the live guest state immediately before
+    /// each interpreted or cached instruction. This preserves normal block boundaries while
+    /// allowing the runtime's fault trace to observe execution without single-stepping it.
+    pub fn execute_counted_with_hook<F>(
+        &mut self,
+        cpu: &mut Cpu,
+        mem: &mut Memory,
+        max_instructions: u64,
+        mut before_instruction: F,
+    ) -> (u64, ExecResult<()>)
+    where
+        F: FnMut(&Cpu, &Memory),
+    {
         if max_instructions == 0 {
             return (0, Ok(()));
         }
@@ -1358,6 +1374,7 @@ impl BlockCache {
             if executed == max_instructions {
                 break;
             }
+            before_instruction(cpu, mem);
             let before_rip = cpu.rip;
             let before_epoch = mem.code_epoch;
             if interpreter_only {

@@ -26,6 +26,46 @@ pub const HLE_MODULE_BASE: u64 = 0x6000_0000;
 const CALLBACK_BUDGET_EXHAUSTED: &str =
     "synchronous guest callback exhausted the run budget; its continuation cannot be resumed";
 
+fn trace_guest_instruction(cpu: &Cpu, mem: &Memory) -> String {
+    let rip = if cpu.mode == CpuMode::X86_32 {
+        cpu.rip as u32 as u64
+    } else {
+        cpu.rip
+    };
+    let bytes = (0..8)
+        .map(|offset| mem.read_u8(rip.wrapping_add(offset)).ok())
+        .take_while(Option::is_some)
+        .flatten()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cpu.mode == CpuMode::X86_32 {
+        format!(
+            "  rip={rip:#010x} rsp={:#010x} ebp={:#010x} eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} code=[{bytes}]",
+            cpu.gpr[RSP] as u32,
+            cpu.gpr[RBP] as u32,
+            cpu.gpr[RAX] as u32,
+            cpu.gpr[RBX] as u32,
+            cpu.gpr[RCX] as u32,
+            cpu.gpr[RDX] as u32,
+            cpu.gpr[RSI] as u32,
+            cpu.gpr[RDI] as u32
+        )
+    } else {
+        let names = [
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10",
+            "r11", "r12", "r13", "r14", "r15",
+        ];
+        let regs = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!("{name}={:#x}", cpu.gpr[index]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("  rip={rip:#018x} {regs} code=[{bytes}]")
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "anywasm")]
 extern "C" {
@@ -1948,37 +1988,24 @@ impl Process {
                 }
                 return Err(stop);
             }
-            if self.trace_imports && self.cpu.mode == CpuMode::X86_32 {
-                let rip = self.cpu.rip as u32 as u64;
-                let bytes = (0..8)
-                    .map(|offset| self.mem.read_u8(rip.wrapping_add(offset)).ok())
-                    .take_while(Option::is_some)
-                    .flatten()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+            if self.trace_imports {
                 if recent.len() == 128 {
                     recent.pop_front();
                 }
-                recent.push_back(format!(
-                    "  rip={rip:#010x} rsp={:#010x} ebp={:#010x} eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} code=[{bytes}]",
-                    self.cpu.gpr[RSP] as u32,
-                    self.cpu.gpr[RBP] as u32,
-                    self.cpu.gpr[RAX] as u32,
-                    self.cpu.gpr[RBX] as u32,
-                    self.cpu.gpr[RCX] as u32,
-                    self.cpu.gpr[RDX] as u32,
-                    self.cpu.gpr[RSI] as u32,
-                    self.cpu.gpr[RDI] as u32
-                ));
+                recent.push_back(trace_guest_instruction(&self.cpu, &self.mem));
             }
             match self.step_once() {
                 Ok(None) => {}
                 Ok(Some(stop)) => return Err(stop),
                 Err(Stop::Crash(message)) if !recent.is_empty() => {
                     let trace = recent.into_iter().collect::<Vec<_>>().join("\n");
+                    let arch = if self.cpu.mode == CpuMode::X86_32 {
+                        "x86"
+                    } else {
+                        "x64"
+                    };
                     return Err(Stop::Crash(format!(
-                        "{message}\nrecent x86 instructions:\n{trace}"
+                        "{message}\nrecent {arch} instructions:\n{trace}"
                     )));
                 }
                 Err(stop) => return Err(stop),
@@ -2031,6 +2058,45 @@ impl Process {
             self.dispatch_thunk(rip)?;
             return Ok((1, self.yield_request.take()));
         }
+        let gta_format_trace = self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && (((0x4cc5c0..=0x4cc949).contains(&(rip as u32 as u64)))
+                || ((0x4cce60..=0x4cd025).contains(&(rip as u32 as u64))));
+        if gta_format_trace {
+            let current = rip as u32 as u64;
+            let bytes = (0..8)
+                .map(|offset| self.mem.read_u8(current + offset).ok())
+                .take_while(Option::is_some)
+                .flatten()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let stack = (0..6)
+                .map(|index| {
+                    self.mem
+                        .read_u32(self.cpu.gpr[RSP].wrapping_add(index * 4))
+                        .unwrap_or(0)
+                })
+                .collect::<Vec<_>>();
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-format-step] rip={current:#x} eax={:#x} ebx={:#x} ecx={:#x} edx={:#x} esi={:#x} edi={:#x} flags={:#x} stack={stack:08x?} code=[{bytes}]\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RBX] as u32,
+                    self.cpu.gpr[RCX] as u32,
+                    self.cpu.gpr[RDX] as u32,
+                    self.cpu.gpr[RSI] as u32,
+                    self.cpu.gpr[RDI] as u32,
+                    self.cpu.rflags as u32,
+                )
+                .as_bytes(),
+            );
+            return match self.step_once() {
+                Ok(Some(stop)) => Ok((1, Some(stop))),
+                Ok(None) => Ok((1, None)),
+                Err(stop) => Err(stop),
+            };
+        }
         if self.trace_modules_only
             && self.cpu.mode == CpuMode::X86_32
             && matches!(rip as u32 as u64, 0x7fb230 | 0x7fb261 | 0x7fb297)
@@ -2050,6 +2116,31 @@ impl Process {
                     self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(8)).unwrap_or(0),
                     self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(12)).unwrap_or(0),
                     self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(16)).unwrap_or(0),
+                    self.mem.read_u32(self.cpu.gpr[RSP]).unwrap_or(0),
+                )
+                .as_bytes(),
+            );
+        }
+        if self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && matches!(
+                rip as u32 as u64,
+                0x4cce60 | 0x4ccd70 | 0x4ccf21 | 0x4ccf39 | 0x4ccfc4 | 0x4cce48
+                    | 0x4cc5c0 | 0x4cc945 | 0x4cc79a | 0x4cc85c | 0x4cc88a | 0x4cc8b9 | 0x4cc91f | 0x4cc943
+            )
+        {
+            let object = self.cpu.gpr[RDI] as u32 as u64;
+            let fields = [0xc, 0x10, 0x14, 0x18, 0x20, 0x21]
+                .map(|offset| self.mem.read_u32(object.wrapping_add(offset)).unwrap_or(0));
+            let caps = [0xc9bef4, 0xc9befc, 0xc9c048, 0xc9c050, 0xc9c054]
+                .map(|address| self.mem.read_u32(address).unwrap_or(0));
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-surface-callback] rip={rip:#x} eax={:#x} ebx={:#x} ecx={:#x} esi={:#x} edi={object:#x} fields={fields:08x?} caps={caps:08x?} stackret={:#x}\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RBX] as u32,
+                    self.cpu.gpr[RCX] as u32,
+                    self.cpu.gpr[RSI] as u32,
                     self.mem.read_u32(self.cpu.gpr[RSP]).unwrap_or(0),
                 )
                 .as_bytes(),
@@ -2123,32 +2214,77 @@ impl Process {
                 .as_bytes(),
             );
         }
+        if self.trace_imports && self.cpu.mode == CpuMode::X86_64 {
+            let mut recent = VecDeque::with_capacity(128);
+            let (executed, result) = self.block_cache.execute_counted_with_hook(
+                &mut self.cpu,
+                &mut self.mem,
+                max_instructions,
+                |cpu, mem| {
+                    if recent.len() == 128 {
+                        recent.pop_front();
+                    }
+                    recent.push_back(trace_guest_instruction(cpu, mem));
+                },
+            );
+            self.charge_retired(executed)?;
+            return match result {
+                Ok(()) => Ok((executed, None)),
+                Err(error) => {
+                    match self.describe_exit(error) {
+                        Stop::Crash(message) => {
+                            let trace = recent.into_iter().collect::<Vec<_>>().join("\n");
+                            Err(Stop::Crash(format!(
+                                "{message}\nrecent x64 instructions:\n{trace}"
+                            )))
+                        }
+                        stop => Err(stop),
+                    }
+                }
+            };
+        }
         if self.trace_imports && self.cpu.mode == CpuMode::X86_32 {
             let mut recent = VecDeque::with_capacity(128);
             let mut executed = 0;
             while executed < max_instructions {
-                let rip = self.cpu.rip as u32 as u64;
-                let bytes = (0..8)
-                    .map(|offset| self.mem.read_u8(rip.wrapping_add(offset)).ok())
-                    .take_while(Option::is_some)
-                    .flatten()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let current_rip = self.cpu.rip as u32 as u64;
+                if self.trace_modules_only
+                    && self.cpu.mode == CpuMode::X86_32
+                    && ((0x4cc5c0..=0x4cc949).contains(&current_rip)
+                        || (0x4cce60..=0x4cd025).contains(&current_rip))
+                {
+                    let bytes = (0..8)
+                        .map(|offset| self.mem.read_u8(current_rip + offset).ok())
+                        .take_while(Option::is_some)
+                        .flatten()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let stack = (0..6)
+                        .map(|index| {
+                            self.mem
+                                .read_u32(self.cpu.gpr[RSP].wrapping_add(index * 4))
+                                .unwrap_or(0)
+                        })
+                        .collect::<Vec<_>>();
+                    self.stderr.extend_from_slice(
+                        format!(
+                            "[gta-format-step] rip={current_rip:#x} eax={:#x} ebx={:#x} ecx={:#x} edx={:#x} esi={:#x} edi={:#x} flags={:#x} stack={stack:08x?} code=[{bytes}]\n",
+                            self.cpu.gpr[RAX] as u32,
+                            self.cpu.gpr[RBX] as u32,
+                            self.cpu.gpr[RCX] as u32,
+                            self.cpu.gpr[RDX] as u32,
+                            self.cpu.gpr[RSI] as u32,
+                            self.cpu.gpr[RDI] as u32,
+                            self.cpu.rflags as u32,
+                        )
+                        .as_bytes(),
+                    );
+                }
                 if recent.len() == 128 {
                     recent.pop_front();
                 }
-                recent.push_back(format!(
-                    "  rip={rip:#010x} rsp={:#010x} ebp={:#010x} eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} code=[{bytes}]",
-                    self.cpu.gpr[RSP] as u32,
-                    self.cpu.gpr[RBP] as u32,
-                    self.cpu.gpr[RAX] as u32,
-                    self.cpu.gpr[RBX] as u32,
-                    self.cpu.gpr[RCX] as u32,
-                    self.cpu.gpr[RDX] as u32,
-                    self.cpu.gpr[RSI] as u32,
-                    self.cpu.gpr[RDI] as u32
-                ));
+                recent.push_back(trace_guest_instruction(&self.cpu, &self.mem));
                 match self.step_once() {
                     Ok(Some(stop)) => return Ok((executed + 1, Some(stop))),
                     Ok(None) => executed += 1,

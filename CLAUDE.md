@@ -73,13 +73,11 @@ The cached-only eight-frame sample retired 580.8M guest instructions, with 580.8
 frame; forcing the current MOV emitter was about 60.5% slower on that cold pass. The benchmark uses
 one 1B-instruction run slice because synchronous callbacks cannot yet suspend at a smaller slice
 boundary. These are guest/HLE timings: AnyWASM did not execute this target's command stream in the
-browser renderer. A later six-round fixture sweep found no reliable emitter improvement, so dynamic
-emission remains disabled by default. The 10–50x figure in `STATUS.md` is still only an estimate;
-none of these results sets a product performance target. See `docs/TARGETS.md` for exact commands,
-counts, and limits.
+browser renderer. A six-round fixture sweep showed higher throughput on SSE-float and lower throughput on the other four workloads, so dynamic emission remains disabled by default. These results do not establish a product performance target. See docs/TARGETS.md for exact commands, counts, and limits.
 
-Design (partial implementation; the verified dynamic-emission scope is a leading sequence of NOPs
-and 32-bit or 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
+Design (partial implementation; the verified dynamic-emission scope includes leading NOPs,
+32-bit or 64-bit GPR-immediate and GPR-to-GPR MOVs, selected TLB-resident memory MOVs, 32-bit ADD,
+direct JMP/Jcc exits, and guarded packed-double SSE operations):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [~] **Representative-target demand**: corrected cached-only and forced-emission runs each reached
@@ -91,57 +89,56 @@ and 32-bit or 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block en
       not host-rendered frame time or a product performance target.
 - [x] **Block discovery**: decode and cache basic blocks keyed by guest RIP. `code_epoch` invalidates
       cached blocks on executable-memory writes and protection changes.
-- [~] **WASM emission (MVP prototype, opt-in)**: Rust can emit a separate module for the supported
-      MOV prefix; JS compiles
-      and instantiates it through the `anywasm.run_emitted_block` import. Generated modules import
-      the runtime's exported memory. The JS side caches up to 256 modules and checks bytes when a
-      process-local module ID is reused. `{ jitMinPrefix: 1 }` explicitly opts in; the default
-      threshold is 65, above the 64-instruction block limit, so short blocks avoid host compile and
-      execute overhead. No throughput win is established; module batching and performance remain open.
-- [~] **State model (MVP)**: generated code receives a 160-byte `repr(C)` snapshot containing GPRs,
-      RIP, RFLAGS, retired count, and TSC. It writes GPRs, RIP, count, and TSC; RFLAGS pass through
-      unchanged. Rust commits the snapshot only when the returned retired count matches the budget
-      and emitted prefix. Register-local allocation and lazy flags remain open.
-- [ ] **Memory access**: fast path through the existing 3-level page table/TLB, with an inline TLB
-      probe in generated code and a slow-path call for misses/faults.
-- [ ] **Exits**: direct block chaining for known targets; indirect jumps via hash lookup;
-      `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`,
-      `yield_request`, step limit/icount accounting must all keep working.
-- [x] **Fallback**: leading NOPs and 32-bit or 64-bit GPR-immediate or GPR-to-GPR MOVs are emitted.
-      Partial-width and memory MOVs and all remaining instructions use the interpreter. 32-bit
-      register moves zero-extend; NOPs and self-moves still advance RIP/count/TSC. Compile/trap/
-      invalid-count failures retry from the untouched live CPU snapshot.
-- [~] **Correctness checks**: Rust emitter tests cover prefix limits, 32-bit zero-extension,
-      64-bit copies, self-move retirement, and that prefixes below the configured gate are skipped.
-      Process accounting now includes nested guest callbacks, yielding HLE calls, and successful
-      instructions before a later block fault; regressions also confirm synchronous callbacks stop
-      at the active run budget. A callback that consumes the remaining slice fails loudly because
-      its host-stack continuation cannot be resumed, including when an atexit handler exhausts it.
-      The WASM smoke explicitly forces threshold 1 and confirms generated
-      register-register MOV execution, checks `compute.exe` output and `run(1)` retirement limits,
-      and compares the same bundle with the default cached-only path and `{ jit: false }` for status,
-      exit code, stdout/stderr, and retired count. A forced host compile failure also falls back
-      safely. The Chrome suite also explicitly runs the emitted path and compares its compute output
-      and retired count with cached-only execution. A dedicated `jit_state.exe` starts with a NOP
-      followed by six emitted GPR MOVs. Its forced seven-instruction prefix stores their values
-      through guest memory and checks them; the WASM smoke compares emitted, cached-only, and
-      interpreter status, exit code, output, and retired
-      count, while Windows also runs the same fixture natively. This verifies those MOV-produced
-      registers and checked memory values, but not arbitrary final process state or a full
-      JIT/interpreter/host differential.
-- [ ] SSE/x87 in the JIT: SSE via WASM SIMD where semantics match (verify per instruction —
-      MXCSR rounding/denormal behaviour and NaN payloads differ); x87 may stay interpreter-only at first.
-- [~] **Browser check**: the rebuilt runtime passes the headless Chromium worker, input, and WebGPU
-      suite; page-realm and worker checks force the opt-in emitter and compare results with the
-      cached-only path. The page-realm check grows WASM memory by one page after emitted execution
-      begins and verifies the cached generated module resumes without fallback. A cache-pressure
-      probe compiles 300 unique emitted modules, revisits entries, and confirms eviction/recompile
-      and retained-module hits in Node, Firefox, and WebKit. Firefox 141.0 runs the hello and D3D11
-      triangle fixtures through its page and worker, but validation errors leave the triangle black;
-      Playwright WebKit 18.2 runs hello and reports
-      graphics unavailable when OffscreenCanvas transfer is missing. Chromium, Firefox, and WebKit
-      also pass the emitted path under a same-origin CSP that permits `wasm-unsafe-eval`. Full
-      graphics validation on other engines remains open.
+- [~] **WASM emission (opt-in prototype)**: Rust emits a supported prefix and JS compiles and
+      instantiates it through `anywasm.run_emitted_block`. Generated modules import the runtime's
+      exported memory. The JS side caches up to 256 modules and checks bytes when a process-local
+      module ID is reused. `{ jitMinPrefix: 1 }` explicitly opts in; the default threshold is 65,
+      above the 64-instruction block limit. There is no general throughput win; the current local
+      benchmark is faster on SSE-float and slower on the other four fixtures.
+- [~] **State model (MVP)**: generated code receives a 624-byte `repr(C)` state with the integer
+      CPU snapshot, memory/TLB pointers, counters, scratch, XMM registers, and MXCSR. GPR/XMM values
+      are block-local and flushed at block exit. 32-bit ADD writes arithmetic flags. Rust commits
+      state only when the returned retired count matches the budget and emitted prefix. Lazy flags
+      and complete arbitrary-state differential checks remain open.
+- [~] **Memory access**: selected 32-bit/64-bit MOV and full-width XMM memory moves use inline probes
+      of the one-entry read/write TLBs for plain, unsegmented 64-bit addresses. Accesses must stay
+      within one mapped page with compatible permissions; misses, faults, and page crossings retry
+      through the interpreter. A direct store ends an emitted prefix.
+- [~] **Exits**: immediate JMP/Jcc update generated RIP and end the block. The JS trampoline can
+      chain among registered emitted block starts through a balanced RIP lookup tree. Indirect jumps,
+      `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`, and
+      `yield_request` integration remain open.
+- [~] **Fallback**: leading NOPs, 32-bit/64-bit GPR MOVs, 32-bit ADD immediate/register forms,
+      selected TLB-resident memory MOVs, direct JMP/Jcc, full-width vector moves, and packed-double
+      ADD/MUL are emitted. Packed-double arithmetic falls back for non-default MXCSR
+      rounding/DAZ/FTZ controls and zero, subnormal, infinite, or NaN operands. Other instructions
+      use the interpreter. 32-bit moves zero-extend; self-moves still advance RIP/count/TSC.
+      Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
+- [~] **Correctness checks**: Rust tests cover prefix limits, block-local register reads/writeback,
+      32-bit ADD/Jcc emission, full-width vector moves, and packed-double operations. WASM smoke
+      compares compute output and retired count across emitted, cached-only, and interpreter paths;
+      jit_sse.exe and bench_sse.exe verify packed result lanes and chained ADD/JNE loop behavior.
+      jit_state.exe checks selected GPRs and memory plus direct and conditional exits in emitted,
+      cached-only, interpreter, and native runs. Process-accounting tests cover nested guest callbacks,
+      yielding HLE calls, and instructions retired before a later block fault; callbacks that exhaust
+      their active slice fail with a diagnostic. The full browser JIT check compares page and worker
+      output/counts, and grows WASM memory after emission starts. This still does not compare all
+      final CPU state for arbitrary programs.
+- [~] **SSE/x87 in the JIT**: full-width XMM moves and packed-double ADD/MUL are emitted for
+      guarded normal finite operands with default MXCSR rounding/DAZ/FTZ controls; unsupported or
+      exceptional operands fall back. x87 and the rest of SSE remain interpreter-only.
+- [x] **Browser JIT check**: headless Chromium page-realm and worker checks force the opt-in emitter
+      and compare output and retired counts with cached-only execution. The page check grows WASM
+      memory by one page after emission starts; the cached module resumes without another fallback.
+      This JIT check passes in test/browser/run.mjs.
+- [~] **Cross-browser and graphics check**: the cache-pressure probe compiles 300 unique modules,
+      revisits entries, and confirms eviction/recompile and retained-module hits in Node, Chromium,
+      Firefox, and WebKit. Firefox 141.0 runs hello and D3D11 triangle fixtures, but validation
+      errors leave the triangle black; Playwright WebKit 18.2 runs hello and reports graphics
+      unavailable when OffscreenCanvas transfer is missing. Chromium, Firefox, and WebKit also pass
+      the emitted path under a same-origin CSP that permits wasm-unsafe-eval. Full graphics
+      validation on other engines remains open. The current Chromium browser-suite run has one
+      separate D3D11 structured-buffer UAV shader-validation failure; the JIT browser checks pass.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: a deterministic FIFO cooperative scheduler now saves full CPU state, private

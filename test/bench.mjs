@@ -23,7 +23,7 @@ try {
     ['block-chain', 'jit_state.exe'],
   ];
 
-  console.log(`minimum emitted MOV prefix: ${jitMinPrefix}; rounds: ${rounds}`);
+  console.log(`minimum emitted prefix length: ${jitMinPrefix}; rounds: ${rounds}`);
   for (const [name, executable] of workloads) {
     const bundlePath = join(bundleDir, `${name}.awb`);
     const fixturePath = fileURLToPath(new URL(`../fixtures/${executable}`, import.meta.url));
