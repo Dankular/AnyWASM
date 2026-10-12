@@ -506,14 +506,23 @@ try {
       command(4, words(6, 8, 8, 1, 1, 87, 0x20, 0, 1, 0));
       command(47, words(3, 0, 1, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
       command(47, words(6, 0, 4, 0, 87)); // ResolveSubresource(dst, 0, src, 0, BGRA8_UNORM)
+      command(4, words(7, 8, 8, 1, 1, 10, 0x20, 0, 4, 0)); // 4x RGBA16_FLOAT render target
+      command(12, words(8, 0, 7, 10, 4, 0, 1, 0, 1));
+      command(27, words(8, 0, 0, 0, 0x3f800000));
+      command(21, words(1, 8, 0));
+      command(29, words(3, 0));
+      command(4, words(9, 8, 8, 1, 1, 10, 0x20, 0, 1, 0)); // single-sample RGBA16_FLOAT resolve target
+      command(47, words(9, 0, 7, 0, 10)); // ResolveSubresource(dst, 0, src, 0, R16G16B16A16_FLOAT)
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackTexture(3);
       const bgraPixels = await gpu.readBackTexture(6);
+      const float16Pixels = await gpu.readBackTexture(9);
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
+        float16Samples: gpu.res.get(7)?.samples,
         width: pixels.width,
         height: pixels.height,
         format: pixels.format,
@@ -525,6 +534,8 @@ try {
         drawMapRenderError,
         bgraFormat: bgraPixels.format,
         bgraPixelsMatch: bgraPixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
+        float16Format: float16Pixels.format,
+        float16PixelsMatch: float16Pixels.data.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75, 1.0][i % 4]) <= 0.001),
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
         logs,
@@ -542,7 +553,9 @@ try {
     msaaResolveResult.samples === 4 && msaaResolveResult.width === 8 && msaaResolveResult.height === 8
       && msaaResolveResult.format === 'rgba8unorm' && msaaResolveResult.allPixelsMatch
       && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
-      && msaaResolveResult.bgraPixelsMatch && msaaResolveResult.draws === 2 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.bgraPixelsMatch && msaaResolveResult.float16Samples === 4
+      && msaaResolveResult.float16Format === 'rgba16float' && msaaResolveResult.float16PixelsMatch
+      && msaaResolveResult.draws === 3 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));
