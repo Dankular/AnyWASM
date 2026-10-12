@@ -260,6 +260,12 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "GetDeviceRemovedReason" => |_| Ok(S_OK),
         "SetExceptionMode" => |_| Ok(S_OK),
         "GetExceptionMode" => |_| Ok(0),
+        "ClearState" => |p| {
+            p.extra.com.bound_rtv.clear();
+            p.extra.com.bound_dsv = 0;
+            p.extra.gpu.emit(op::CLEAR_STATE, Pk::new());
+            Ok(0)
+        },
         // ── ID3D11DeviceContext: pipeline state ──
         "IASetInputLayout" => |p| {
             let id = obj_id(p, p.arg(1));
@@ -401,7 +407,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "End" => set_query_complete,
         "GetData" => get_query_data,
         "ResolveSubresource" => resolve_subresource,
-        "Flush" | "ClearState" | "SetPredication" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
+        "Flush" | "SetPredication" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
         "OMGetRenderTargets" => |p| {
             let (n, rtvs, dsv) = (p.arg(1) as usize, p.arg(2), p.arg(3));
             let bound = p.extra.com.bound_rtv.clone();
@@ -1402,6 +1408,29 @@ mod tests {
         assert_eq!(p.rd32(OUT + 8).unwrap(), 8); // 2 RGBA8 texels per row
         assert_eq!(p.rd32(OUT + 12).unwrap(), 16); // two rows per depth slice
         assert_eq!(p.read_bytes(mapped, expected.len()).unwrap(), expected);
+    }
+
+    #[test]
+    fn clear_state_unbinds_render_targets_and_emits_a_gpu_state_reset() {
+        use anywasm_cpu::cpu::RCX;
+        use crate::vfs::Vfs;
+
+        let mut p = Process::new(Vfs::new());
+        let context = create(&mut p, "ID3D11DeviceContext1", Kind::Context);
+        p.extra.com.bound_rtv = vec![0x1234];
+        p.extra.com.bound_dsv = 0x5678;
+        p.extra.gpu.emit(op::DRAW, Pk::new().u32(3).u32(0));
+        p.cpu.gpr[RCX] = context;
+
+        let clear_state = method("ID3D11DeviceContext1", "ClearState").unwrap();
+        assert_eq!(clear_state(&mut p).unwrap(), 0);
+
+        assert!(p.extra.com.bound_rtv.is_empty());
+        assert_eq!(p.extra.com.bound_dsv, 0);
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].0, op::DRAW);
+        assert_eq!(commands[1], (op::CLEAR_STATE, Vec::new()));
     }
 
     #[test]

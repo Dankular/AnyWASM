@@ -2555,6 +2555,73 @@ try {
       && near(scissorResult.outside, [0, 0, 0, 255], 1),
     JSON.stringify(scissorResult));
 
+  const clearStateResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const logs = [];
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl('float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const data = new Uint8Array(8 + payload.length), view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, payload.length, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      shader(3, 0, vertex); shader(4, 1, pixel);
+      command(17, words(0, 3)); command(17, words(1, 4));
+      command(16, words(4)); command(21, words(1, 2, 0));
+      command(29, words(3, 0));
+      command(49, words()); // D3D11 ClearState
+      command(21, words(1, 2, 0)); // bind a render target after ClearState
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true);
+      clearView.setFloat32(4, 0.0, true); clearView.setFloat32(8, 0.0, true);
+      clearView.setFloat32(12, 1.0, true); clearView.setFloat32(16, 1.0, true);
+      command(27, clear);
+      command(29, words(3, 0)); // cleared shaders leave the blue clear visible
+      const bytes = stream.reduce((size, part) => size + part.length, 0);
+      const commands = new Uint8Array(bytes);
+      let offset = 0;
+      for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const index = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(index, index + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors, logs };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message, logs };
+    }
+  });
+  check('D3D11 ClearState resets shaders before the next draw',
+    clearStateResult.draws === 1 && clearStateResult.errors.length === 0
+      && near(clearStateResult.pixel, [0, 0, 255, 255], 1),
+    JSON.stringify(clearStateResult));
+
   const cullResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');

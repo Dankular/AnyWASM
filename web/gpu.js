@@ -14,7 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
-  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48,
+  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -80,6 +80,12 @@ const BLEND_FACTOR = { 1: 'zero', 2: 'one', 3: 'src', 4: 'one-minus-src', 5: 'sr
 const BLEND_OP = { 1: 'add', 2: 'subtract', 3: 'reverse-subtract', 4: 'min', 5: 'max' };
 const ADDRESS = { 1: 'repeat', 2: 'mirror-repeat', 3: 'clamp-to-edge', 4: 'clamp-to-edge', 5: 'mirror-repeat' };
 const TOPOLOGY = { 1: 'point-list', 2: 'line-list', 3: 'line-strip', 4: 'triangle-list', 5: 'triangle-strip' };
+const defaultPipelineState = () => ({
+  vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
+  cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
+  viewports: [], scissors: [], blend: { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }, raster: 0, depth: { id: 0, ref: 0 },
+  d3d9RenderStates: new Map(),
+});
 
 const BLIT_WGSL = `
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -134,12 +140,12 @@ export class GpuExecutor {
     this.ring = null;
     this.ringOff = 0;
     this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, lastComputeUavs: [], errors: [] };
-    this.st = {
-      vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
-      cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
-      viewports: [], scissors: [], blend: { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }, raster: 0, depth: { id: 0, ref: 0 },
-      d3d9RenderStates: new Map(),
-    };
+    this.st = defaultPipelineState();
+  }
+
+  clearState() {
+    this.endPass();
+    this.st = defaultPipelineState();
   }
 
   async init() {
@@ -298,6 +304,7 @@ export class GpuExecutor {
       case OP.SET_INPUT_LAYOUT: st.layout = u(0); break;
       case OP.SET_TOPOLOGY: st.topology = u(0); break;
       case OP.D3D9_RENDER_STATE: st.d3d9RenderStates.set(u(0), u(1)); break;
+      case OP.CLEAR_STATE: this.clearState(); break;
       case OP.SET_FIXED_FUNCTION:
         this.setFixedFunction(
           u(0), u(1), u(2),
