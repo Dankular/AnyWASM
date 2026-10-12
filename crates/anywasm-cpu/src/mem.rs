@@ -6,6 +6,7 @@
 //! compare and an index.
 
 use anywasm_cpu_state::memory::GuestMemory;
+use anywasm_cpu_state::shared::{MappingEntry, GUEST_PAGE_SIZE};
 use std::cell::Cell;
 
 pub use anywasm_cpu_state::memory::{Access, Fault, MemResult};
@@ -20,6 +21,13 @@ pub const PROT_W: u8 = 2;
 pub const PROT_X: u8 = 4;
 pub const PROT_RW: u8 = PROT_R | PROT_W;
 pub const PROT_RWX: u8 = PROT_R | PROT_W | PROT_X;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedSnapshotError {
+    BufferTooSmall,
+    AddressOverflow,
+    MappingMismatch,
+}
 
 const L_BITS: u32 = 12;
 const L_SIZE: usize = 1 << L_BITS;
@@ -109,6 +117,141 @@ impl Memory {
 
     pub fn pages_mapped(&self) -> u64 {
         self.pages_mapped
+    }
+
+    /// Copy the authoritative page table and frames into coordinator-owned buffers suitable for
+    /// publication to a shared worker memory. `frame_base` is the shared-memory offset where the
+    /// packed frame region begins; each mapping's frame offset is absolute from that base memory.
+    pub fn export_shared_snapshot(
+        &self,
+        frame_base: u32,
+        mappings: &mut [MappingEntry],
+        frame_bytes: &mut [u8],
+    ) -> Result<(), SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        let required_frame_bytes = page_count
+            .checked_mul(PAGE_SIZE as usize)
+            .ok_or(SharedSnapshotError::AddressOverflow)?;
+        if mappings.len() < page_count || frame_bytes.len() < required_frame_bytes {
+            return Err(SharedSnapshotError::BufferTooSmall);
+        }
+        if frame_base % GUEST_PAGE_SIZE != 0 {
+            return Err(SharedSnapshotError::AddressOverflow);
+        }
+
+        let mut output_index = 0usize;
+        for (top_index, mid) in self.top.iter().enumerate() {
+            let Some(mid) = mid else { continue };
+            for (mid_index, leaf) in mid.0.iter().enumerate() {
+                let Some(leaf) = leaf else { continue };
+                for (leaf_index, slot) in leaf.0.iter().copied().enumerate() {
+                    if slot & PRESENT == 0 {
+                        continue;
+                    }
+                    let guest_page = ((top_index as u64) << (2 * L_BITS))
+                        | ((mid_index as u64) << L_BITS)
+                        | leaf_index as u64;
+                    let frame_offset = frame_base
+                        .checked_add(
+                            u32::try_from(output_index)
+                                .map_err(|_| SharedSnapshotError::AddressOverflow)?
+                                .checked_mul(GUEST_PAGE_SIZE)
+                                .ok_or(SharedSnapshotError::AddressOverflow)?,
+                        )
+                        .ok_or(SharedSnapshotError::AddressOverflow)?;
+                    mappings[output_index] = MappingEntry {
+                        guest_page,
+                        frame_offset,
+                        protection: ((slot >> 1) & 7) as u8,
+                        reserved: [0; 3],
+                    };
+                    let frame_index = (slot >> 32) as usize;
+                    let source_start = frame_index
+                        .checked_mul(PAGE_SIZE as usize)
+                        .ok_or(SharedSnapshotError::AddressOverflow)?;
+                    let source_end = source_start + PAGE_SIZE as usize;
+                    let destination_start = output_index * PAGE_SIZE as usize;
+                    let destination_end = destination_start + PAGE_SIZE as usize;
+                    let Some(source) = self.frames.get(source_start..source_end) else {
+                        return Err(SharedSnapshotError::MappingMismatch);
+                    };
+                    frame_bytes[destination_start..destination_end].copy_from_slice(source);
+                    output_index += 1;
+                }
+            }
+        }
+        if output_index != page_count {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Import worker-written frame bytes after every worker has reached a safe point. Mappings
+    /// must match the current coordinator page table exactly; topology and permission changes are
+    /// performed by the coordinator and require a newly published snapshot.
+    pub fn import_shared_snapshot(
+        &mut self,
+        frame_base: u32,
+        mappings: &[MappingEntry],
+        frame_bytes: &[u8],
+    ) -> Result<(), SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        let required_frame_bytes = page_count
+            .checked_mul(PAGE_SIZE as usize)
+            .ok_or(SharedSnapshotError::AddressOverflow)?;
+        if mappings.len() != page_count || frame_bytes.len() < required_frame_bytes {
+            return Err(SharedSnapshotError::BufferTooSmall);
+        }
+        if frame_base % GUEST_PAGE_SIZE != 0 {
+            return Err(SharedSnapshotError::AddressOverflow);
+        }
+
+        let mut executable_page_written = false;
+        let mut previous_page = None;
+        for (index, mapping) in mappings.iter().enumerate() {
+            let expected_offset = frame_base
+                .checked_add(
+                    u32::try_from(index)
+                        .map_err(|_| SharedSnapshotError::AddressOverflow)?
+                        .checked_mul(GUEST_PAGE_SIZE)
+                        .ok_or(SharedSnapshotError::AddressOverflow)?,
+                )
+                .ok_or(SharedSnapshotError::AddressOverflow)?;
+            if mapping.frame_offset != expected_offset
+                || mapping.reserved != [0; 3]
+                || mapping.guest_page >= (1u64 << (3 * L_BITS))
+                || previous_page.is_some_and(|page| page >= mapping.guest_page)
+            {
+                return Err(SharedSnapshotError::MappingMismatch);
+            }
+            previous_page = Some(mapping.guest_page);
+            let Some(slot) = self.slot(mapping.guest_page) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            let protection = ((slot >> 1) & 7) as u8;
+            if protection != mapping.protection {
+                return Err(SharedSnapshotError::MappingMismatch);
+            }
+            let frame_index = (slot >> 32) as usize;
+            let destination_start = frame_index
+                .checked_mul(PAGE_SIZE as usize)
+                .ok_or(SharedSnapshotError::AddressOverflow)?;
+            let destination_end = destination_start + PAGE_SIZE as usize;
+            let source_start = index * PAGE_SIZE as usize;
+            let source_end = source_start + PAGE_SIZE as usize;
+            let Some(destination) = self.frames.get_mut(destination_start..destination_end) else {
+                return Err(SharedSnapshotError::MappingMismatch);
+            };
+            destination.copy_from_slice(&frame_bytes[source_start..source_end]);
+            executable_page_written |= protection & PROT_X != 0;
+        }
+        if executable_page_written {
+            self.code_epoch = self.code_epoch.wrapping_add(1);
+        }
+        self.flush_tlb();
+        Ok(())
     }
 
     fn flush_tlb(&self) {

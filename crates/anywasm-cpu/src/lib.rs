@@ -13,4 +13,4 @@ pub mod x87;
 pub use cpu::{Cpu, CpuMode};
 pub use decode::{decode, decode_mode, DecodeError, Inst, Op, Opnd};
 pub use exec::{exec, step, BlockCache, DecodeCache, DecodedBlock, Exit};
-pub use mem::{Access, Fault, Memory};
+pub use mem::{Access, Fault, Memory, SharedSnapshotError};

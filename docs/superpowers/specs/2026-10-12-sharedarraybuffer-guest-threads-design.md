@@ -101,9 +101,11 @@ starts with the interpreter; JIT integration requires a later design step.
 The no-std boundary now includes the architectural `Cpu` context, decoder, integer/control-flow
 instruction executor, shared-frame memory interface, and `anywasm-cpu-worker` slot runner. The
 ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and uses the same executor over
-its paged `Memory`. Production integration still needs no-std SSE/x87 execution, atomic locked
-guest operations, coordinator snapshots and HLE return handling, worker-stack reservation, browser
-worker creation, and a target replay after the ABI has been exercised between browser workers.
+its paged `Memory`. `Memory` can now export and import a validated sorted mapping/frame snapshot for
+a quiescent handoff. Production integration still needs no-std SSE/x87 execution, atomic locked
+guest operations, the process-level snapshot C ABI and browser copy-back, HLE return handling,
+worker-stack reservation, browser worker creation, and a target replay after the ABI has been
+exercised between browser workers.
 
 ## Success criteria
 
