@@ -130,6 +130,7 @@ function specializeSingleTypedUavImage(spirv, descriptors, dxgiFormat) {
     18: { dataType: 3, spirvFormat: 25 }, // R32G32_SINT
     28: { dataType: 5, spirvFormat: 4 }, // R8G8B8A8_UNORM
     30: { dataType: 4, spirvFormat: 32 }, // R8G8B8A8_UINT
+    31: { dataType: 5, spirvFormat: 5 }, // R8G8B8A8_SNORM
     32: { dataType: 3, spirvFormat: 23 }, // R8G8B8A8_SINT
     41: { dataType: 5, spirvFormat: 3 }, // R32_FLOAT
     42: { dataType: 4, spirvFormat: 33 }, // R32_UINT

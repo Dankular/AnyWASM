@@ -63,6 +63,7 @@ const DXGI_FORMAT_R32G32_FLOAT: u32 = 16;
 const DXGI_FORMAT_R32G32_UINT: u32 = 17;
 const DXGI_FORMAT_R32G32_SINT: u32 = 18;
 const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
+const DXGI_FORMAT_R8G8B8A8_SNORM: u32 = 31;
 const DXGI_FORMAT_R8G8B8A8_UINT: u32 = 30;
 const DXGI_FORMAT_R8G8B8A8_SINT: u32 = 32;
 const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
@@ -99,6 +100,7 @@ fn format_support_flags(format: u32) -> u32 {
     if matches!(
         format,
         DXGI_FORMAT_R8G8B8A8_UNORM
+            | DXGI_FORMAT_R8G8B8A8_SNORM
             | DXGI_FORMAT_R8G8B8A8_UINT
             | DXGI_FORMAT_R8G8B8A8_SINT
             | DXGI_FORMAT_R16G16B16A16_FLOAT
@@ -1647,6 +1649,7 @@ mod tests {
         assert_ne!(format_support_flags(14) & TYPED_UAV, 0); // DXGI_FORMAT_R16G16B16A16_SINT
         assert_ne!(format_support_flags(10) & TYPED_UAV, 0); // DXGI_FORMAT_R16G16B16A16_FLOAT
         assert_ne!(format_support_flags(28) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UNORM
+        assert_ne!(format_support_flags(31) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_SNORM
         assert_ne!(format_support_flags(30) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UINT
         assert_ne!(format_support_flags(32) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_SINT
         assert_ne!(format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE, 0);
