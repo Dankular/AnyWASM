@@ -1581,6 +1581,7 @@ try {
       const modulated2xPixel = await renderOperation(5);
       const addedPixel = await renderOperation(7);
       const subtractedPixel = await renderOperation(10);
+      const addSmoothPixel = await renderOperation(11);
       const blendedDiffuseAlphaPixel = await renderOperation(12);
       const blendedTextureAlphaPixel = await renderOperation(13);
       const blendedTextureAlphaPmPixel = await renderOperation(15);
@@ -1592,6 +1593,7 @@ try {
         modulated2xPixel,
         addedPixel,
         subtractedPixel,
+        addSmoothPixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
@@ -1606,13 +1608,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 10 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 11 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 10 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 11 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1625,6 +1627,8 @@ try {
     near(d3d9TextureResult.blendedCurrentAlphaPixel, [223, 32, 32, 128], 2), JSON.stringify(d3d9TextureResult.blendedCurrentAlphaPixel));
   check('D3D9 stage-0 BLENDTEXTUREALPHAPM handles premultiplied texture alpha',
     near(d3d9TextureResult.blendedTextureAlphaPmPixel, [255, 127, 127, 128], 2), JSON.stringify(d3d9TextureResult.blendedTextureAlphaPmPixel));
+  check('D3D9 stage-0 ADDSMOOTH adds both arguments and subtracts their product',
+    near(d3d9TextureResult.addSmoothPixel, [255, 127, 127, 128], 2), JSON.stringify(d3d9TextureResult.addSmoothPixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

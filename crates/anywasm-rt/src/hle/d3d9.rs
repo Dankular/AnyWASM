@@ -1812,7 +1812,7 @@ fn set_texture_stage_state(p: &mut Process) -> R {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
-        1 => matches!(value, 1..=7 | 10 | 12..=13 | 15..=16), // selected add, subtract, and alpha-blend ops
+        1 => matches!(value, 1..=7 | 10..=13 | 15..=16), // selected add, subtract, and alpha-blend ops
         2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
         4 => (2..=4).contains(&value), // select or modulate alpha
         _ => false,
@@ -2335,7 +2335,7 @@ mod tests {
         }
         assert_eq!(method("IDirect3DDevice9", "SetFVF").unwrap()(&mut p).unwrap(), S_OK);
         let set_texture_stage_state = method("IDirect3DDevice9", "SetTextureStageState").unwrap();
-        for color_op in [12, 13, 15, 16] {
+        for color_op in [11, 12, 13, 15, 16] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, color_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }
