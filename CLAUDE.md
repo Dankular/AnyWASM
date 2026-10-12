@@ -304,10 +304,12 @@ register-stack subset):
       clear colour and interpolated centre pixel. Chromium also checks the textured fixture's
       blended quad and sampled texture colours. Other render paths, canvas sizes, and browser engines
       still need coverage.
-- [~] **Additional graphics APIs**: D3D9 has a pixel-tested fixed-function subset for selected
-      FVF layouts, stage-0 SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD, and SUBTRACT, triangle
-      fans, alpha blending, and every alpha compare function at its equality boundary; general D3D9
-      device, shader, and state coverage remains incomplete. D3D12,
+- [~] **Additional graphics APIs**: D3D9 has pixel-tested stage-0 fixed-function operations for
+      selected FVF layouts, SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD/SUBTRACT/ADDSMOOTH,
+      signed-add and modulate-add, DOTPRODUCT3, MULTIPLYADD/LERP with COLORARG0/ALPHAARG0, and
+      color/alpha blend operations. Triangle fans, alpha blending, and every alpha compare function
+      at equality are also checked. PREMODULATE, bump-environment mapping, multi-stage texture
+      cascades, programmable shaders, and broad device/state coverage remain open. D3D12,
       DXGI flip-model/fullscreen/resize/vsync
       semantics, OpenGL (WGL), and Vulkan remain open. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
