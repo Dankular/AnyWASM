@@ -326,6 +326,8 @@ try {
     triText.includes('staging R8_UNORM subresource3=61 row_pitch=1'), triText);
   check('D3D11 staging D32_FLOAT Map(READ) copies depth-only texels',
     triText.includes('staging D32_FLOAT readback=0.375,0.375,0.375,0.375 row_pitch=8'), triText);
+  check('D3D11 staging Texture3D Map(READ) preserves row and depth pitches',
+    triText.includes('staging Texture3D R32_FLOAT readback=0.125,0.250,0.375,0.500,0.625,0.750,0.875,1.000 row_pitch=8 depth_pitch=16'), triText);
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));

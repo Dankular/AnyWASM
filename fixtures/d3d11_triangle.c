@@ -139,6 +139,33 @@ static void check_staging_d32_float(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     ID3D11Texture2D_Release(source);
 }
 
+static void check_staging_texture3d(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const float expected[8] = { 0.125f, 0.25f, 0.375f, 0.5f, 0.625f, 0.75f, 0.875f, 1.0f };
+    D3D11_TEXTURE3D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.Depth = 2; desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R32_FLOAT; desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init = { expected, 2 * sizeof(float), 4 * sizeof(float) };
+    ID3D11Texture3D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture3D(dev, &desc, &init, &source);
+    if (FAILED(hr)) { printf("staging Texture3D R32_FLOAT source hr=%08lx\n", (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture3D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const float *values = (const float *)mapped.pData;
+            printf("staging Texture3D R32_FLOAT readback=%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f row_pitch=%u depth_pitch=%u\n",
+                values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
+                mapped.RowPitch, mapped.DepthPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging Texture3D R32_FLOAT Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture3D_Release(staging);
+    } else printf("staging Texture3D R32_FLOAT staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture3D_Release(source);
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
@@ -251,6 +278,7 @@ int main(void) {
             check_staging_rgba16_float(dev, ctx);
             check_staging_r8_subresources(dev, ctx);
             check_staging_d32_float(dev, ctx);
+            check_staging_texture3d(dev, ctx);
         }
         D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
