@@ -1445,19 +1445,19 @@ try {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
     const canvas = document.createElement('canvas');
-    canvas.width = 64; canvas.height = 64;
+    canvas.width = 192; canvas.height = 64;
     try {
       const tool = new ShaderTool(new URL('/shaders/', location.href));
       await tool.init();
       const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
       await gpu.init();
-      const vertex = tool.compileHlsl(`
+      const vertices = [0.25, 0.5, 0.75].map((depth) => tool.compileHlsl(`
         float4 main(uint vertexId : SV_VertexID) : SV_Position {
           float x = vertexId == 2 ? 3.0 : -1.0;
           float y = vertexId == 1 ? 3.0 : -1.0;
-          return float4(x, y, 0.5, 1.0);
+          return float4(x, y, ${depth.toFixed(2)}, 1.0);
         }
-      `, 'main', 'vs_5_0');
+      `, 'main', 'vs_5_0'));
       const pixel = tool.compileHlsl('float4 main() : SV_Target { return 1.0; }', 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
@@ -1475,41 +1475,45 @@ try {
         const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
         payload.set(head); payload.set(dxbc, head.length); command(6, payload);
       };
-      command(38, words(1, 0, 9, 64, 64, 28));
+      command(38, words(1, 0, 9, 192, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
-      command(4, words(20, 64, 64, 1, 1, 40, 0x48, 0, 1, 0));
+      command(4, words(20, 192, 64, 1, 1, 40, 0x48, 0, 1, 0));
       command(12, words(21, 1, 20, 40, 3, 0, 1, 0, 1));
       command(21, words(1, 2, 21));
       command(27, words(2, 0, 0, 0, 0x3f800000));
       command(28, words(21, 1, 0x3f000000, 0));
-      shader(7, 0, vertex); shader(8, 1, pixel);
+      shader(7, 0, vertices[0]); shader(8, 1, pixel); shader(9, 0, vertices[1]); shader(10, 0, vertices[2]);
       command(17, words(0, 7)); command(17, words(1, 8)); command(16, words(4));
       for (let compare = 1; compare <= 8; compare++) {
         const state = new Uint8Array(56), view = new DataView(state.buffer);
         view.setUint32(0, 30 + compare, true);
         view.setUint32(4, 1, true); // depth enabled
-        view.setUint32(8, 1, true); // write all depth
+        view.setUint32(8, 0, true); // preserve the cleared reference depth
         view.setUint32(12, compare, true); // D3D11_COMPARISON_FUNC
         command(11, state);
       }
       for (let compare = 1; compare <= 8; compare++) {
-        const viewport = new Uint8Array(28), view = new DataView(viewport.buffer);
-        view.setUint32(0, 1, true);
-        view.setFloat32(4, (compare - 1) * 8, true);
-        view.setFloat32(8, 0, true);
-        view.setFloat32(12, 8, true);
-        view.setFloat32(16, 64, true);
-        view.setFloat32(20, 0, true);
-        view.setFloat32(24, 1, true);
-        command(22, viewport);
         command(26, words(30 + compare, 0));
-        command(29, words(3, 0));
+        for (let value = 0; value < 3; value++) {
+          const viewport = new Uint8Array(28), view = new DataView(viewport.buffer);
+          view.setUint32(0, 1, true);
+          view.setFloat32(4, (compare - 1) * 24 + value * 8, true);
+          view.setFloat32(8, 0, true);
+          view.setFloat32(12, 8, true);
+          view.setFloat32(16, 64, true);
+          view.setFloat32(20, 0, true);
+          view.setFloat32(24, 1, true);
+          command(22, viewport);
+          command(17, words(0, [7, 9, 10][value]));
+          command(29, words(3, 0));
+        }
       }
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
-      const bands = Array.from({ length: 8 }, (_, i) => pixels.data[(32 * pixels.width + i * 8 + 4) * 4]);
+      const bands = Array.from({ length: 8 }, (_, compare) => Array.from({ length: 3 }, (_, value) =>
+        pixels.data[(32 * pixels.width + compare * 24 + value * 8 + 4) * 4]));
       const result = { bands, draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
@@ -1517,9 +1521,14 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 depth state implements all eight compare functions at equal depth',
-    depthCompareResult.draws === 8 && depthCompareResult.errors.length === 0
-      && depthCompareResult.bands?.every((v, i) => v === [0, 0, 255, 255, 0, 0, 255, 255][i]),
+  const depthComparePixels = [
+    [0, 0, 0], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+    [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+  ];
+  check('D3D11 depth state implements all eight compare functions below, at, and above equal depth',
+    depthCompareResult.draws === 24 && depthCompareResult.errors.length === 0
+      && depthCompareResult.bands?.every((row, compare) => row.length === 3
+        && row.every((pixel, value) => pixel === depthComparePixels[compare][value])),
     JSON.stringify(depthCompareResult));
 
   const depthWriteMaskResult = await page.evaluate(async () => {

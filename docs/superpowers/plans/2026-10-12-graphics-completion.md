@@ -63,6 +63,7 @@
 - [x] Verify a D3D11 render-target write mask of `0x5` updates red/blue while preserving green/alpha from the clear.
 - [x] Verify independent D3D11 RGB and alpha blend factors/operations with separate pixel expectations.
 - [x] Verify D3D11 depth write mask `ZERO` allows a later farther draw through, while `ALL` preserves the nearer result.
+- [x] Pixel-check all eight D3D11 depth comparisons with incoming depth below, equal to, and above the cleared reference value.
 - [x] Verify stencil write mask `0x0f` preserves upper bits and stencil read mask `0x0f` compares only lower bits.
 - [x] Verify D3D11 stencil fail and depth-fail paths for KEEP, ZERO, REPLACE, saturating increment/decrement, invert, wrapping increment/decrement, and masked replace; all boundary pixels pass in the full Chromium suite with no WebGPU validation errors.
 - [x] Pixel-check D3D11 WRAP, MIRROR, and CLAMP sampler address modes with out-of-range coordinates and verify linear filtering; BORDER and MIRROR_ONCE remain open.
