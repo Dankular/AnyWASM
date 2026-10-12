@@ -271,7 +271,8 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
       : kind === 'texture_3d' ? 3 : 0;
   const depthTexture = kind.startsWith('texture_depth_');
   const componentType = depthTexture ? 'f32' : textureType.component;
-  if (!dimension || !['f32', 'i32', 'u32'].includes(componentType) || settings?.comparison || settings?.anisotropic) return null;
+  const comparison = !!settings?.comparison;
+  if (!dimension || !['f32', 'i32', 'u32'].includes(componentType) || settings?.anisotropic || (comparison && !depthTexture)) return null;
   if (arrayTexture !== (kind === 'texture_2d_array' || kind === 'texture_depth_2d_array')) return null;
 
   const name = `border_sample_${textureName}_${samplerIndex}`;
@@ -285,6 +286,17 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
   const borderValue = depthTexture
     ? floatLiteral(borderColor[0])
     : `vec4<${componentType}>(${borderColor.map((value) => componentType === 'f32' ? floatLiteral(value) : `${componentType}(${floatLiteral(value)})`).join(', ')})`;
+  const compareOperator = {
+    never: null,
+    less: '<',
+    equal: '==',
+    'less-equal': '<=',
+    greater: '>',
+    'not-equal': '!=',
+    'greater-equal': '>=',
+    always: null,
+  }[settings?.compare];
+  const compareAlways = settings?.compare === 'always';
   const axes = ['x', 'y', 'z'].slice(0, dimension);
   const levelSize = dimension === 1
     ? `i32(textureDimensions(${textureName}, level))`
@@ -353,8 +365,18 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
     if (linear) lines.push(`let _weight_${tap} = ${weights.join(' * ')};`);
     const loaded = `textureLoad(${sampleArgs(indices, 'level')})`;
     const value = borderTerms.length ? `select(${loaded}, ${borderValue}, ${borderTerms.join(' || ')})` : loaded;
-    if (linear) lines.push(`_sum = _sum + (${value}) * _weight_${tap};`);
-    else lines.push(`return ${value};`);
+    let sampleValue = value;
+    if (comparison) {
+      const valueName = `_cmp_depth_${tap}`;
+      const resultName = `_cmp_result_${tap}`;
+      lines.push(`let ${valueName} = ${value};`);
+      const expression = compareAlways ? 'true'
+        : compareOperator ? `reference ${compareOperator} ${valueName}` : 'false';
+      lines.push(`let ${resultName} = select(0.0, 1.0, ${expression});`);
+      sampleValue = resultName;
+    }
+    if (linear) lines.push(`_sum = _sum + (${sampleValue}) * _weight_${tap};`);
+    else lines.push(`return ${sampleValue};`);
     return lines;
   };
   const linearSampling = componentType === 'f32';
@@ -374,9 +396,10 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
   atLevelBody.push(`let _base = ${dimension === 1 ? 'i32(floor(coord * f32(_size)))' : `vec${dimension}<i32>(floor(coord * ${asFloatSize}))`};`);
   atLevelBody.push(...makeTap('point', axes.map(() => 0), false));
 
-  const params = `${coordParams}, level: i32, linear: bool`;
+  const compareParam = comparison ? ', reference: f32' : '';
+  const params = `${coordParams}, level: i32, linear: bool${compareParam}`;
   const atLevel = `fn ${levelFunction}(${params}) -> ${resultType} {\n${atLevelBody.map((line) => `  ${line}`).join('\n')}\n}`;
-  const mainParams = `${coordParams}, requestedLod: f32`;
+  const mainParams = `${coordParams}, requestedLod: f32${compareParam}`;
   const mainBody = [
     `let _maxLevel = f32(textureNumLevels(${textureName}) - 1u);`,
     `let _lod = clamp(requestedLod + ${floatLiteral(lodBias)}, ${floatLiteral(minLod)}, min(${floatLiteral(maxLod)}, _maxLevel));`,
@@ -387,11 +410,11 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
     mainBody.push(`let _mip0 = i32(floor(_sampleLod));`);
     mainBody.push(`let _mip1 = min(_mip0 + 1, i32(textureNumLevels(${textureName})) - 1);`);
     mainBody.push(`let _mipWeight = fract(_sampleLod);`);
-    const atArgs = (mip) => `${arrayTexture ? 'coord, layer' : 'coord'}, ${mip}, _linear`;
+    const atArgs = (mip) => `${arrayTexture ? 'coord, layer' : 'coord'}, ${mip}, _linear${comparison ? ', reference' : ''}`;
     mainBody.push(`return mix(${levelFunction}(${atArgs('_mip0')}), ${levelFunction}(${atArgs('_mip1')}), _mipWeight);`);
   } else {
     mainBody.push(`let _mip = i32(floor(_sampleLod + 0.5));`);
-    mainBody.push(`return ${levelFunction}(${arrayTexture ? 'coord, layer' : 'coord'}, _mip, _linear);`);
+    mainBody.push(`return ${levelFunction}(${arrayTexture ? 'coord, layer' : 'coord'}, _mip, _linear${comparison ? ', reference' : ''});`);
   }
   return { name, source: `${atLevel}\nfn ${name}(${mainParams}) -> ${resultType} {\n${mainBody.map((line) => `  ${line}`).join('\n')}\n}` };
 }
@@ -481,10 +504,11 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
       const mode = ({
         textureSample: 'implicit',
         textureSampleLevel: 'level',
+        textureSampleCompareLevel: 'compareLevel',
         textureSampleGrad: 'grad',
         textureSampleBias: 'bias',
       })[match[1]];
-      const expectedArgs = mode === 'level' ? (arrayTexture ? 5 : 4)
+      const expectedArgs = mode === 'level' || mode === 'compareLevel' ? (arrayTexture ? 5 : 4)
         : mode === 'grad' ? (arrayTexture ? 6 : 5)
           : mode === 'bias' ? (arrayTexture ? 5 : 4)
             : mode === 'implicit' ? (arrayTexture ? 4 : 3) : 0;
@@ -497,7 +521,10 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
         const sampleArgs = [coord.text.trim()];
         if (arrayTexture) sampleArgs.push(args[3].text.trim());
         let helperCall;
-        if (mode === 'level') {
+        if (mode === 'compareLevel') {
+          sampleArgs.push('0.0', args[arrayTexture ? 4 : 3].text.trim());
+          helperCall = `${helper.name}(${sampleArgs.join(', ')})`;
+        } else if (mode === 'level') {
           sampleArgs.push(args[arrayTexture ? 4 : 3].text.trim());
           helperCall = `${helper.name}(${sampleArgs.join(', ')})`;
         } else {
@@ -948,7 +975,7 @@ export class GpuExecutor {
     const sampling = {
       minFilter: d.minFilter, magFilter: d.magFilter, mipmapFilter: d.mipmapFilter,
       mipBias: bias, lodMinClamp: d.lodMinClamp, lodMaxClamp: d.lodMaxClamp,
-      anisotropic: isAniso, comparison,
+      anisotropic: isAniso, comparison, compare: d.compare,
     };
     return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1, addressModes: [au, av, aw], borderColor, sampling };
   }
