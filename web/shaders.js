@@ -158,13 +158,15 @@ function lowerBufferImagesToStorageBuffers(spirv) {
   const instructions = [];
   const imageTypes = new Map(), pointerTypes = new Map(), variables = new Map();
   const scalarTypes = new Map(), vectorTypes = new Map(), constants = new Map();
+  let hasFormatlessNonBufferStorageImage = false;
   for (let at = 20; at < bytes.byteLength;) {
     const first = input.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
     if (wordCount === 0 || at + wordCount * 4 > bytes.byteLength) return spirv;
     const inst = Array.from({ length: wordCount }, (_, i) => input.getUint32(at + 4 * i, true));
     instructions.push(inst);
-    if (opcode === 25 && wordCount >= 9 && inst[3] === 5) {
-      imageTypes.set(inst[1], { id: inst[1], sampledType: inst[2], format: inst[8] });
+    if (opcode === 25 && wordCount >= 9) {
+      if (inst[3] === 5) imageTypes.set(inst[1], { id: inst[1], sampledType: inst[2], format: inst[8] });
+      else if (inst[7] === 2 && inst[8] === 0) hasFormatlessNonBufferStorageImage = true;
     }
     if (opcode === 21 && wordCount === 4) scalarTypes.set(inst[1], { kind: 'int', width: inst[2], signed: inst[3] });
     if (opcode === 22 && wordCount === 3) scalarTypes.set(inst[1], { kind: 'float', width: inst[2] });
@@ -314,7 +316,8 @@ function lowerBufferImagesToStorageBuffers(spirv) {
       for (const decoration of newDecorations) pushInst(decoration);
       annotationsEmitted = true;
     }
-    if (opcode === 17 && (inst[1] === 46 || inst[1] === 47)) continue; // Remove SampledBuffer/ImageBuffer.
+    if (opcode === 17 && (inst[1] === 46 || inst[1] === 47
+        || (inst[1] === 55 || inst[1] === 56) && !hasFormatlessNonBufferStorageImage)) continue;
     if (opcode === 25 && infoByType.has(inst[1])) continue; // Remove the unsupported OpTypeImage.
     if (opcode === 71 && infoByVariable.has(inst[1]) && inst[2] === 25) continue; // WGSL storage buffers have no write-only access mode.
     if (opcode === 5 && infoByType.has(inst[1])) inst[1] = infoByType.get(inst[1]).structType; // OpName.
