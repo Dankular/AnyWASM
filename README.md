@@ -70,6 +70,8 @@ ready to execute the guest.
 ```sh
 cargo test                       # unit, differential-vs-hardware, end-to-end .exe runs
 node test/wasm_smoke.mjs         # the same executables through the WASM build (needs web/build.sh)
+node test/wasm_asset_stream_smoke.mjs # Asyncify cache-miss / range-fetch / resume regression
+node --test test/assets.test.mjs # HTTP range server and browser cache regressions
 node test/browser/run.mjs        # real page in headless Chromium (npm install in test/browser first)
 ```
 

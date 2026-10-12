@@ -277,6 +277,51 @@ pub unsafe extern "C" fn aw_test_memory_snapshot(ptr: *mut u8, capacity: usize) 
     snapshot.len()
 }
 
+/// Read a VFS asset range into a linear-memory buffer to exercise Asyncify-backed host I/O.
+/// This export exists only in builds using the `jit-test-api` feature.
+///
+/// # Safety
+/// `path_ptr` must point to `path_len` readable bytes and `destination` must point to `len`
+/// writable bytes.
+#[cfg(feature = "jit-test-api")]
+#[no_mangle]
+pub unsafe extern "C" fn aw_test_asset_read(
+    path_ptr: *const u8,
+    path_len: u32,
+    offset: u64,
+    len: u32,
+    destination: *mut u8,
+) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if (path_ptr.is_null() && path_len != 0) || (destination.is_null() && len != 0) {
+        s.message = b"invalid asset read test buffer".to_vec();
+        return 1;
+    }
+    let path_bytes = if path_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(path_ptr, path_len as usize)
+    };
+    let path = match std::str::from_utf8(path_bytes) {
+        Ok(path) => path,
+        Err(_) => {
+            s.message = b"asset read test path is not UTF-8".to_vec();
+            return 1;
+        }
+    };
+    let bytes = match s.p.vfs.read_range(path, offset, len as usize) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            s.message = format!("asset read test failed: {error:?}").into_bytes();
+            return 1;
+        }
+    };
+    if !bytes.is_empty() {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
+    }
+    0
+}
+
 macro_rules! buf_api {
     ($ptr:ident, $len:ident, $clear:ident, $field:ident) => {
         #[no_mangle]
