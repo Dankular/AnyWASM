@@ -8,6 +8,8 @@ export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, C
 const MAX_JIT_MODULES = 256;
 const DEFAULT_JIT_MIN_PREFIX = 65; // decoded blocks are capped at 64 instructions
 const ASYNCIFY_STACK_BYTES = 1024 * 1024;
+const SHARED_CPU_CONTEXT_BYTES = 784;
+const SHARED_CPU_CONTEXT_ALIGN = 16;
 
 function bytesEqual(a, b) {
   if (a.length !== b.length) return false;
@@ -537,6 +539,51 @@ export class AnyWasm {
       if (rc !== 0) throw new Error(this.message() || `shared snapshot import failed (${rc})`);
     } finally {
       this.x.aw_free(ptr, totalBytes);
+    }
+  }
+
+  /** Copy one quiescent guest thread's architectural CPU state for a shared worker slot. */
+  exportSharedCpuContext(threadId) {
+    if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
+      throw new RangeError('threadId must be a u32');
+    }
+    if (typeof this.x.aw_shared_context_export !== 'function') {
+      throw new Error('WASM runtime is missing the shared CPU context ABI; rebuild the runtime');
+    }
+    const allocationBytes = SHARED_CPU_CONTEXT_BYTES + SHARED_CPU_CONTEXT_ALIGN - 1;
+    const allocation = this.x.aw_alloc(allocationBytes) >>> 0;
+    const ptr = ((allocation + SHARED_CPU_CONTEXT_ALIGN - 1) & ~(SHARED_CPU_CONTEXT_ALIGN - 1)) >>> 0;
+    try {
+      const size = this.x.aw_shared_context_export(threadId >>> 0, ptr, SHARED_CPU_CONTEXT_BYTES);
+      if (size !== SHARED_CPU_CONTEXT_BYTES) {
+        throw new Error(this.message() || `shared CPU context export failed for thread ${threadId}`);
+      }
+      return new Uint8Array(this.x.memory.buffer, ptr, size).slice();
+    } finally {
+      this.x.aw_free(allocation, allocationBytes);
+    }
+  }
+
+  /** Import a worker-completed CPU context after that thread has reached a safe point. */
+  importSharedCpuContext(threadId, context) {
+    if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
+      throw new RangeError('threadId must be a u32');
+    }
+    if (!(context instanceof Uint8Array) || context.byteLength !== SHARED_CPU_CONTEXT_BYTES) {
+      throw new TypeError(`context must be a ${SHARED_CPU_CONTEXT_BYTES}-byte Uint8Array`);
+    }
+    if (typeof this.x.aw_shared_context_import !== 'function') {
+      throw new Error('WASM runtime is missing the shared CPU context ABI; rebuild the runtime');
+    }
+    const allocationBytes = SHARED_CPU_CONTEXT_BYTES + SHARED_CPU_CONTEXT_ALIGN - 1;
+    const allocation = this.x.aw_alloc(allocationBytes) >>> 0;
+    const ptr = ((allocation + SHARED_CPU_CONTEXT_ALIGN - 1) & ~(SHARED_CPU_CONTEXT_ALIGN - 1)) >>> 0;
+    try {
+      new Uint8Array(this.x.memory.buffer, ptr, SHARED_CPU_CONTEXT_BYTES).set(context);
+      const rc = this.x.aw_shared_context_import(threadId >>> 0, ptr, SHARED_CPU_CONTEXT_BYTES);
+      if (rc !== 0) throw new Error(this.message() || `shared CPU context import failed (${rc})`);
+    } finally {
+      this.x.aw_free(allocation, allocationBytes);
     }
   }
 

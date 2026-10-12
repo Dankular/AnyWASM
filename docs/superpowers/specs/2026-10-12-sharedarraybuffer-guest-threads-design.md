@@ -110,8 +110,10 @@ No-std scalar square root uses an iterative f64 approximation; the x87 executor 
 ordinary std feature. The ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and
 uses the same executor over its paged `Memory`. `Memory` can now export and import a validated sorted
 mapping/frame snapshot for a quiescent handoff. `anywasm-wasm` now exposes page-count, snapshot-export,
-and snapshot-import C-ABI functions; `AnyWasm` provides host methods that copy those snapshots through
-caller-owned buffers.
+and snapshot-import C-ABI functions, plus per-thread `Cpu` context export/import using the worker ABI's
+784-byte aligned layout. Import accounts newly retired worker instructions in the coordinator's
+process counter, and advances the scheduler quantum when the imported context is the active thread.
+`AnyWasm` provides host methods that copy page and CPU snapshots through caller-owned buffers.
 Neither path is wired into `web/worker.js` yet. Production integration still needs no-std x87
 execution, shared-memory allocation and snapshot publication around worker slices, HLE return
 handling, worker-stack reservation, browser worker creation, and a target replay after the ABI has

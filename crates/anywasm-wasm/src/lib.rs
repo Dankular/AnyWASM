@@ -11,6 +11,7 @@
 //! again), 5 the guest is idle waiting for window input (push input, then call again). Details via `aw_message_*` and `aw_exit_code`.
 
 use anywasm_rt::{Bundle, Process, Stop};
+mod shared_context;
 mod shared_snapshot;
 
 struct State {
