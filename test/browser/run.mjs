@@ -2516,6 +2516,75 @@ try {
       && near(cullResult.pixel, [255, 0, 0, 255], 1),
     JSON.stringify(cullResult));
 
+  const frontFacingResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          uint triangleId = vertexId / 3;
+          uint local = vertexId % 3;
+          if (triangleId != 0) local = local == 1 ? 2 : local == 2 ? 1 : local;
+          float center = triangleId == 0 ? -0.5 : 0.5;
+          float x = local == 0 ? center - 0.4 : local == 1 ? center + 0.4 : center;
+          float y = local == 2 ? 0.65 : -0.75;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        float4 main(bool frontFace : SV_IsFrontFace) : SV_Target {
+          return frontFace ? float4(0.0, 1.0, 0.0, 1.0) : float4(1.0, 0.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
+      rasterView.setUint32(0, 13, true); rasterView.setUint32(4, 3, true); rasterView.setUint32(8, 1, true);
+      rasterView.setUint32(28, 1, true);
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(10, raster); command(25, words(13));
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(16, words(4)); command(21, words(1, 2, 0)); command(29, words(6, 0));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const atPixel = (x, y) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      const result = { backFace: atPixel(16, 32), frontFace: atPixel(48, 32), errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('SV_IsFrontFace distinguishes opposite triangle windings',
+    !frontFacingResult.error && frontFacingResult.errors?.length === 0
+      && near(frontFacingResult.backFace, [255, 0, 0, 255], 1)
+      && near(frontFacingResult.frontFace, [0, 255, 0, 255], 1),
+    JSON.stringify(frontFacingResult));
+
   const wireframeResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
