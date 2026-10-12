@@ -450,6 +450,96 @@ export class AnyWasm {
     this.x.aw_jit_set_min_prefix?.(this.jitMinPrefix);
   }
 
+  /** Number of guest pages in the current quiescent process snapshot. */
+  sharedSnapshotPageCount() {
+    if (typeof this.x.aw_shared_snapshot_page_count !== 'function') {
+      throw new Error('WASM runtime is missing the shared-memory snapshot ABI; rebuild the runtime');
+    }
+    const count = this.x.aw_shared_snapshot_page_count();
+    if (count === 0xffff_ffff_ffff_ffffn) throw new Error('no process is loaded');
+    return count;
+  }
+
+  /**
+   * Copy the process page map and packed guest frames into host-owned byte arrays. Call only
+   * between guest run slices. `frameBase` is the aligned offset where the caller will publish the
+   * packed frames in shared Wasm memory; this method does not create or mutate that memory.
+   */
+  exportSharedSnapshot(frameBase) {
+    if (!Number.isInteger(frameBase) || frameBase < 0 || frameBase > 0xffff_ffff || frameBase % 4096 !== 0) {
+      throw new RangeError('frameBase must be a 4096-byte-aligned u32');
+    }
+    const pageCount = this.sharedSnapshotPageCount();
+    const mappingBytesBig = pageCount * 16n;
+    const frameBytesBig = pageCount * 4096n;
+    const totalBytesBig = mappingBytesBig + frameBytesBig;
+    if (totalBytesBig > 0x7fff_ffffn) throw new RangeError('shared snapshot is too large for the Wasm32 bridge');
+    const mappingBytes = Number(mappingBytesBig);
+    const frameBytes = Number(frameBytesBig);
+    const totalBytes = Number(totalBytesBig);
+    const ptr = this.x.aw_alloc(totalBytes) >>> 0;
+    try {
+      const rc = this.x.aw_shared_snapshot_export(
+        frameBase >>> 0,
+        ptr,
+        mappingBytes,
+        (ptr + mappingBytes) >>> 0,
+        frameBytes,
+      );
+      if (rc !== 0) throw new Error(this.message() || `shared snapshot export failed (${rc})`);
+      const memory = this.x.memory.buffer;
+      return {
+        frameBase: frameBase >>> 0,
+        pageCount,
+        mappings: new Uint8Array(memory, ptr, mappingBytes).slice(),
+        frames: new Uint8Array(memory, (ptr + mappingBytes) >>> 0, frameBytes).slice(),
+      };
+    } finally {
+      this.x.aw_free(ptr, totalBytes);
+    }
+  }
+
+  /**
+   * Copy worker-written frames back into the coordinator after all workers are quiescent. The
+   * mapping bytes must come from the matching `exportSharedSnapshot` call; the frame bytes may be
+   * copied from a SharedArrayBuffer view before this method is called.
+   */
+  importSharedSnapshot(snapshot) {
+    if (!snapshot || !Number.isInteger(snapshot.frameBase) || snapshot.frameBase < 0 ||
+        snapshot.frameBase > 0xffff_ffff || snapshot.frameBase % 4096 !== 0 ||
+        !(snapshot.mappings instanceof Uint8Array) || !(snapshot.frames instanceof Uint8Array)) {
+      throw new TypeError('invalid shared snapshot');
+    }
+    const pageCount = this.sharedSnapshotPageCount();
+    const mappingBytesBig = pageCount * 16n;
+    const frameBytesBig = pageCount * 4096n;
+    const totalBytesBig = mappingBytesBig + frameBytesBig;
+    if (totalBytesBig > 0x7fff_ffffn) throw new RangeError('shared snapshot is too large for the Wasm32 bridge');
+    const mappingBytes = Number(mappingBytesBig);
+    const frameBytes = Number(frameBytesBig);
+    const totalBytes = Number(totalBytesBig);
+    if (BigInt(snapshot.mappings.byteLength) !== mappingBytesBig || snapshot.frames.byteLength !== frameBytes) {
+      throw new RangeError('shared snapshot buffers do not match the current process mapping');
+    }
+
+    const ptr = this.x.aw_alloc(totalBytes) >>> 0;
+    try {
+      const memory = new Uint8Array(this.x.memory.buffer, ptr, totalBytes);
+      memory.set(snapshot.mappings, 0);
+      memory.set(snapshot.frames, mappingBytes);
+      const rc = this.x.aw_shared_snapshot_import(
+        snapshot.frameBase >>> 0,
+        ptr,
+        mappingBytes,
+        (ptr + mappingBytes) >>> 0,
+        frameBytes,
+      );
+      if (rc !== 0) throw new Error(this.message() || `shared snapshot import failed (${rc})`);
+    } finally {
+      this.x.aw_free(ptr, totalBytes);
+    }
+  }
+
   /** Attach the `AGP1` index; payload chunks remain in the HTTP-backed host cache. */
   async attachAssets(url, onProgress = () => {}) {
     if (typeof url !== 'string' || !url) throw new TypeError('asset package URL must be a nonempty string');

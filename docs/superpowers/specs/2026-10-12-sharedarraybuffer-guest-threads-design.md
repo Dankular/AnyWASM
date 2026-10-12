@@ -105,9 +105,12 @@ The no-std boundary now includes the architectural `Cpu` context, decoder, integ
 instruction executor, shared-frame memory interface, and `anywasm-cpu-worker` slot runner. The
 ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and uses the same executor over
 its paged `Memory`. `Memory` can now export and import a validated sorted mapping/frame snapshot for
-a quiescent handoff. Production integration still needs no-std SSE/x87 execution, the process-level
-snapshot C ABI and browser copy-back, HLE return handling, worker-stack reservation, browser worker
-creation, and a target replay after the ABI has been exercised between browser workers.
+a quiescent handoff. `anywasm-wasm` now exposes page-count, snapshot-export, and snapshot-import C-ABI
+functions; `AnyWasm` provides host methods that copy those snapshots through caller-owned buffers.
+Neither path is wired into `web/worker.js` yet. Production integration still needs no-std SSE/x87
+execution, shared-memory allocation and snapshot publication around worker slices, HLE return
+handling, worker-stack reservation, browser worker creation, and a target replay after the ABI has
+been exercised between browser workers.
 
 ## Success criteria
 

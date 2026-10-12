@@ -13,3 +13,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anywasm-rt.workspace = true
+anywasm-cpu-state.workspace = true

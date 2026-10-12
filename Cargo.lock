@@ -45,6 +45,7 @@ dependencies = [
 name = "anywasm-wasm"
 version = "0.1.0"
 dependencies = [
+ "anywasm-cpu-state",
  "anywasm-rt",
 ]
 
