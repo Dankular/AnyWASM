@@ -1,9 +1,9 @@
 # Shared WebAssembly Memory for Parallel Guest Threads
 
 **Status:** feasibility spike complete; the no-std worker executes integer/control-flow and SSE
-instructions over the shared-frame view. Production integration remains unimplemented: the browser
-host and process coordinator do not publish process state to it yet, and x87 execution remains
-std-only.
+instructions over the shared-frame view. A browser worker-pool helper now allocates its shared memory,
+publishes snapshots and CPU contexts, and dispatches bounded slices. The existing process loop does
+not use the helper yet, and x87 execution remains std-only.
 
 ## Goal and scope
 
@@ -114,10 +114,11 @@ and snapshot-import C-ABI functions, plus per-thread `Cpu` context export/import
 784-byte aligned layout. Import accounts newly retired worker instructions in the coordinator's
 process counter, and advances the scheduler quantum when the imported context is the active thread.
 `AnyWasm` provides host methods that copy page and CPU snapshots through caller-owned buffers.
-Neither path is wired into `web/worker.js` yet. Production integration still needs no-std x87
-execution, shared-memory allocation and snapshot publication around worker slices, HLE return
-handling, worker-stack reservation, browser worker creation, and a target replay after the ABI has
-been exercised between browser workers.
+`web/shared-cpu-pool.js` and `web/shared-cpu-worker.js` now construct the matching shared ABI,
+reserve disjoint Wasm stacks, and claim/collect worker slots; `web/build.sh` emits the separate worker
+module with its stack pointer export. Neither helper is wired into `web/worker.js` yet. Production
+integration still needs no-std x87 execution, coordinator scheduling around worker slices, HLE return
+handling, and a target replay after the ABI has been exercised between browser workers.
 
 ## Success criteria
 

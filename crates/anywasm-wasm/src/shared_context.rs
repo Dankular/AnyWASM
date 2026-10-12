@@ -7,6 +7,50 @@ const CPU_CONTEXT_ALIGN: usize = 16;
 const _: [(); CPU_CONTEXT_BYTES] = [(); core::mem::size_of::<Cpu>()];
 const _: [(); CPU_CONTEXT_ALIGN] = [(); core::mem::align_of::<Cpu>()];
 
+/// Number of active and saved guest CPU contexts in the loaded process.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_count() -> u32 {
+    super::state()
+        .map(|s| s.p.guest_threads.len() as u32 + u32::from(!s.p.current_thread_saved))
+        .unwrap_or(0)
+}
+
+/// Thread ID at an enumeration index. The active context comes first, then saved IDs sorted
+/// ascending. Returns zero when the index is outside the process's context table.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_thread_id(index: u32) -> u32 {
+    let Some(s) = super::state() else { return 0 };
+    let p = &s.p;
+    if !p.current_thread_saved {
+        if index == 0 {
+            return p.current_thread_id;
+        }
+        let mut ids: Vec<u32> = p
+            .guest_threads
+            .keys()
+            .copied()
+            .filter(|id| *id != p.current_thread_id)
+            .collect();
+        ids.sort_unstable();
+        return ids.get((index - 1) as usize).copied().unwrap_or(0);
+    }
+    let mut ids: Vec<u32> = p.guest_threads.keys().copied().collect();
+    ids.sort_unstable();
+    ids.get(index as usize).copied().unwrap_or(0)
+}
+
+/// Start address of the coordinator-owned HLE thunk range.
+#[no_mangle]
+pub extern "C" fn aw_shared_hle_range_start() -> u64 {
+    anywasm_rt::process::THUNK_BASE
+}
+
+/// Exclusive end address of the coordinator-owned HLE thunk range.
+#[no_mangle]
+pub extern "C" fn aw_shared_hle_range_end() -> u64 {
+    anywasm_rt::process::THUNK_BASE + anywasm_rt::process::THUNK_BYTES
+}
+
 /// Copy one guest thread's architectural context to a buffer for a shared CPU worker.
 ///
 /// The buffer uses the `Cpu` ABI from `anywasm-cpu-state`, including its 16-byte alignment.

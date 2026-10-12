@@ -542,6 +542,28 @@ export class AnyWasm {
     }
   }
 
+  /** Stable thread IDs for every active or saved CPU context in the loaded process. */
+  sharedCpuContextThreadIds() {
+    if (typeof this.x.aw_shared_context_count !== 'function' ||
+        typeof this.x.aw_shared_context_thread_id !== 'function') {
+      throw new Error('WASM runtime is missing shared CPU context enumeration; rebuild the runtime');
+    }
+    const count = this.x.aw_shared_context_count() >>> 0;
+    return Array.from({ length: count }, (_, index) => this.x.aw_shared_context_thread_id(index) >>> 0);
+  }
+
+  /** HLE thunk range at which shared CPU workers must return to the coordinator. */
+  sharedCpuTrapRange() {
+    if (typeof this.x.aw_shared_hle_range_start !== 'function' ||
+        typeof this.x.aw_shared_hle_range_end !== 'function') {
+      throw new Error('WASM runtime is missing the shared HLE range ABI; rebuild the runtime');
+    }
+    return {
+      trapStart: this.x.aw_shared_hle_range_start(),
+      trapEnd: this.x.aw_shared_hle_range_end(),
+    };
+  }
+
   /** Copy one quiescent guest thread's architectural CPU state for a shared worker slot. */
   exportSharedCpuContext(threadId) {
     if (!Number.isInteger(threadId) || threadId < 0 || threadId > 0xffff_ffff) {
