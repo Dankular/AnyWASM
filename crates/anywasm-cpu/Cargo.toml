@@ -9,7 +9,7 @@ description = "x86-64 user-mode CPU core (decoder + interpreter) with paged, per
 jit-test-api = []
 
 [dependencies]
-anywasm-cpu-state.workspace = true
+anywasm-cpu-state = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 libc = "0.2"

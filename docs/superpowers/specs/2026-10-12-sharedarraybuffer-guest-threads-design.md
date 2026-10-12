@@ -1,8 +1,9 @@
 # Shared WebAssembly Memory for Parallel Guest Threads
 
-**Status:** feasibility spike complete; revised architecture documented for review. Production
-integration remains unimplemented. A `no_std` CPU-state crate and version-1 worker ABI skeleton are
-implemented, but the ABI is not yet connected to worker execution or shared guest memory.
+**Status:** feasibility spike complete; the first no-std worker slice is implemented. Production
+integration remains unimplemented. The worker can execute integer/control-flow instructions over
+the shared-frame view, but the browser host and process coordinator do not publish process state to
+it yet.
 
 ## Goal and scope
 
@@ -53,10 +54,12 @@ sample rendering path. Those remain in the parent runtime goal.
   x86 ordering model. Compare-exchange supports naturally aligned 1/2/4/8-byte operands; misaligned
   or cross-page locked operations return an explicit unsupported-alignment fault. The view requires
   an immutable map and atomic access by every concurrent participant.
-- The ABI crate is not loaded by `web/worker.js`; the current runtime still runs cooperatively and
-  keeps guest frame bytes in `Memory`'s `Vec<u8>`. CPU instruction execution, the JIT, and guest
-  memory access still live in the `std` crate. The worker control protocol and shared-frame view
-  have not yet been exercised between browser workers.
+- The ABI and `anywasm-cpu-worker` crates are not loaded by `web/worker.js`; the current runtime
+  still runs cooperatively and keeps guest frame bytes in `Memory`'s `Vec<u8>`. The generic
+  instruction executor is now in `anywasm-cpu-state`, and both the paged memory and shared-frame
+  view implement its no-allocation memory interface. The worker's no-std build currently supports
+  integer/control-flow instructions; SSE and x87 remain behind the ordinary std feature. The worker
+  control protocol and shared-frame view have not yet been exercised between browser workers.
 
 ## Feasibility spike result (2026-10-12)
 
@@ -70,14 +73,14 @@ sample rendering path. Those remain in the parent runtime goal.
 - A full-runtime-shaped probe proved that separate Wasm instances share mutable Rust static data
   and a stand-in cursor value when they import the same linear memory. It did not exercise or
   establish the behavior of `std`'s allocator.
-- Building `anywasm-wasm` with shared-memory linker flags failed before Asyncify. `rust-lld` reported
-  that the prebuilt `std` object was not compiled with `atomics` or `bulk-memory`. The installed
-  `wasm32-unknown-unknown` standard library therefore cannot be linked as a shared-memory runtime
-  with the current toolchain configuration. Rust also warned that `-Ctarget-feature=+atomics` is
-  unstable on this toolchain.
-- Result: the full-runtime-per-worker layout is blocked. The no-std CPU-worker boundary is viable
-  as a prototype, but it does not yet execute the emulator's CPU or share the process's guest page
-  backing store.
+- Building `anywasm-wasm` with shared-memory linker flags failed because the installed prebuilt
+  `std` objects lack `atomics`/`bulk-memory` feature metadata. The standalone no-std worker module
+  now links with `+atomics,+bulk-memory,+mutable-globals` and LLD's `--no-check-features`; this
+  bypasses the metadata check and still emits Rust's unstable-target-feature warning. The module
+  compiles, but its shared-memory execution has not yet been exercised in a browser.
+- Result: the full-runtime-per-worker layout remains blocked. The separate CPU-worker boundary now
+  executes a bounded integer/control-flow slice over validated shared guest frames, but does not
+  yet share the process's live page backing, SIMD/x87 path, or coordinator scheduling state.
 
 ### Revised candidate architecture
 
@@ -95,12 +98,12 @@ Workers return complete contexts at slice boundaries, so the coordinator can ser
 publish changed pages before resuming them. Asyncify remains coordinator-only. The worker runtime
 starts with the interpreter; JIT integration requires a later design step.
 
-The first boundary now extracts the architectural `Cpu` context and decoder into
-`anywasm-cpu-state`; instruction execution and the `Memory` implementation still use `std`, heap
-collections, a Rust-owned frame `Vec<u8>`, and generated JIT state. No production CPU worker has
-been integrated. The next steps are to extract a no-allocation instruction-execution core, connect it
-to the shared-frame view, add the remaining locked-memory operations and mapping-generation
-protocol, then exercise the ABI in browser workers before target replay.
+The no-std boundary now includes the architectural `Cpu` context, decoder, integer/control-flow
+instruction executor, shared-frame memory interface, and `anywasm-cpu-worker` slot runner. The
+ordinary `anywasm-cpu` crate retains its std-backed decode/JIT caches and uses the same executor over
+its paged `Memory`. Production integration still needs no-std SSE/x87 execution, atomic locked
+guest operations, coordinator snapshots and HLE return handling, worker-stack reservation, browser
+worker creation, and a target replay after the ABI has been exercised between browser workers.
 
 ## Success criteria
 

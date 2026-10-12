@@ -12,6 +12,7 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicU8, Ordering};
 
+use crate::memory::{Access as CpuAccess, Fault as CpuFault, GuestMemory, MemResult};
 use crate::shared::{LayoutError, MappingEntry, Region, SharedHeader, GUEST_PAGE_SIZE};
 
 const PAGE_MASK: u64 = GUEST_PAGE_SIZE as u64 - 1;
@@ -466,5 +467,80 @@ impl<'a> SharedGuestMemory<'a> {
             access,
             kind: FaultKind::UnsupportedAtomicWidth,
         }
+    }
+}
+
+impl GuestMemory for SharedGuestMemory<'_> {
+    fn read_u8(&self, address: u64) -> MemResult<u8> {
+        SharedGuestMemory::read_u8(self, address).map_err(to_cpu_fault)
+    }
+    fn read_u16(&self, address: u64) -> MemResult<u16> {
+        SharedGuestMemory::read_u16(self, address).map_err(to_cpu_fault)
+    }
+    fn read_u32(&self, address: u64) -> MemResult<u32> {
+        SharedGuestMemory::read_u32(self, address).map_err(to_cpu_fault)
+    }
+    fn read_u64(&self, address: u64) -> MemResult<u64> {
+        SharedGuestMemory::read_u64(self, address).map_err(to_cpu_fault)
+    }
+    fn read_u128(&self, address: u64) -> MemResult<u128> {
+        SharedGuestMemory::read_u128(self, address).map_err(to_cpu_fault)
+    }
+    fn write_u8(&mut self, address: u64, value: u8) -> MemResult<()> {
+        SharedGuestMemory::write_u8(self, address, value).map_err(to_cpu_fault)
+    }
+    fn write_u16(&mut self, address: u64, value: u16) -> MemResult<()> {
+        SharedGuestMemory::write_u16(self, address, value).map_err(to_cpu_fault)
+    }
+    fn write_u32(&mut self, address: u64, value: u32) -> MemResult<()> {
+        SharedGuestMemory::write_u32(self, address, value).map_err(to_cpu_fault)
+    }
+    fn write_u64(&mut self, address: u64, value: u64) -> MemResult<()> {
+        SharedGuestMemory::write_u64(self, address, value).map_err(to_cpu_fault)
+    }
+    fn write_u128(&mut self, address: u64, value: u128) -> MemResult<()> {
+        SharedGuestMemory::write_u128(self, address, value).map_err(to_cpu_fault)
+    }
+    fn read_into(&self, address: u64, output: &mut [u8], access: CpuAccess) -> MemResult<()> {
+        SharedGuestMemory::read_bytes(self, address, output, from_cpu_access(access))
+            .map_err(to_cpu_fault)
+    }
+    fn write_from(&mut self, address: u64, input: &[u8]) -> MemResult<()> {
+        SharedGuestMemory::write_bytes(self, address, input).map_err(to_cpu_fault)
+    }
+    fn fetch(&self, address: u64, output: &mut [u8; 15]) -> MemResult<usize> {
+        let mut fetched = 0;
+        while fetched < output.len() {
+            match self.read_bytes(
+                address.wrapping_add(fetched as u64),
+                &mut output[fetched..fetched + 1],
+                Access::Execute,
+            ) {
+                Ok(()) => fetched += 1,
+                Err(error) if fetched == 0 => return Err(to_cpu_fault(error)),
+                Err(_) => break,
+            }
+        }
+        Ok(fetched)
+    }
+}
+
+fn from_cpu_access(access: CpuAccess) -> Access {
+    match access {
+        CpuAccess::Read => Access::Read,
+        CpuAccess::Write => Access::Write,
+        CpuAccess::Exec => Access::Execute,
+    }
+}
+
+fn to_cpu_fault(fault: Fault) -> CpuFault {
+    CpuFault {
+        addr: fault.address,
+        access: match fault.access {
+            Access::Read => CpuAccess::Read,
+            Access::Write => CpuAccess::Write,
+            Access::Execute => CpuAccess::Exec,
+        },
+        protection: fault.kind == FaultKind::Protection,
     }
 }

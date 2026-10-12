@@ -1,0 +1,12 @@
+[package]
+name = "anywasm-cpu-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "No-std shared-memory guest CPU worker module"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anywasm-cpu-state = { workspace = true, default-features = false }

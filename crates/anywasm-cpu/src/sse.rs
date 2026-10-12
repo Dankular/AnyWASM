@@ -8,7 +8,7 @@
 use crate::cpu::*;
 use crate::decode::*;
 use crate::exec::*;
-use crate::mem::Memory;
+use crate::memory::{Access, GuestMemory};
 
 // ── lane helpers ─────────────────────────────────────────────────────────────
 
@@ -86,7 +86,7 @@ fn from_f64x2(a: [f64; 2]) -> u128 {
 }
 
 /// Read an XMM-or-memory source of `bytes` bytes, zero-extended to 128 bits.
-fn src_x(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<u128> {
+fn src_x<M: GuestMemory>(cpu: &Cpu, mem: &M, o: &Opnd, bytes: u8) -> ExecResult<u128> {
     Ok(match o {
         Opnd::Xmm(n) => {
             let v = cpu.xmm[*n as usize];
@@ -110,7 +110,7 @@ fn src_x(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<u128> {
     })
 }
 
-fn src_ymm(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<(u128, u128)> {
+fn src_ymm<M: GuestMemory>(cpu: &Cpu, mem: &M, o: &Opnd, bytes: u8) -> ExecResult<(u128, u128)> {
     Ok(match o {
         Opnd::Xmm(n) => (
             cpu.xmm[*n as usize],
@@ -121,7 +121,8 @@ fn src_ymm(cpu: &Cpu, mem: &Memory, o: &Opnd, bytes: u8) -> ExecResult<(u128, u1
             },
         ),
         Opnd::Mem(m) => {
-            let raw = mem.read_vec(ea(cpu, m), bytes as usize)?;
+            let mut raw = [0u8; 32];
+            mem.read_into(ea(cpu, m), &mut raw[..bytes as usize], Access::Read)?;
             let mut low = [0; 16];
             low.copy_from_slice(&raw[..16]);
             let low = u128::from_le_bytes(low);
@@ -146,7 +147,13 @@ fn dst_n(o: &Opnd) -> ExecResult<usize> {
 }
 
 /// Store `bytes` low bytes of `v` into an XMM (full replace when 16, else merge) or memory.
-fn store_x(cpu: &mut Cpu, mem: &mut Memory, o: &Opnd, v: u128, bytes: u8) -> ExecResult<()> {
+fn store_x<M: GuestMemory>(
+    cpu: &mut Cpu,
+    mem: &mut M,
+    o: &Opnd,
+    v: u128,
+    bytes: u8,
+) -> ExecResult<()> {
     match o {
         Opnd::Xmm(n) => cpu.xmm[*n as usize] = v,
         Opnd::Mem(m) => {
@@ -691,7 +698,7 @@ fn pcmpstr(cpu: &mut Cpu, d: u128, s: u128, imm: u8, explicit: bool, want_mask: 
 
 // ── main dispatcher ──────────────────────────────────────────────────────────
 
-pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
+pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst, next: u64) -> ExecResult<()> {
     let imm8 = i.imm as u8;
     match i.op {
         Op::Vextractf128 => {
@@ -761,7 +768,8 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 cpu.ymm_hi[d] = hi;
             }
             (Opnd::Xmm(d), Opnd::Mem(m)) => {
-                let bytes = mem.read_vec(ea(cpu, m), i.osz as usize)?;
+                let mut bytes = [0u8; 32];
+                mem.read_into(ea(cpu, m), &mut bytes[..i.osz as usize], Access::Read)?;
                 let mut lo = [0; 16];
                 lo.copy_from_slice(&bytes[..16]);
                 cpu.xmm[*d as usize] = u128::from_le_bytes(lo);
@@ -774,11 +782,12 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 };
             }
             (Opnd::Mem(m), Opnd::Xmm(s)) => {
-                let mut bytes = cpu.xmm[*s as usize].to_le_bytes().to_vec();
+                let mut bytes = [0u8; 32];
+                bytes[..16].copy_from_slice(&cpu.xmm[*s as usize].to_le_bytes());
                 if i.osz == 32 {
-                    bytes.extend_from_slice(&cpu.ymm_hi[*s as usize].to_le_bytes());
+                    bytes[16..32].copy_from_slice(&cpu.ymm_hi[*s as usize].to_le_bytes());
                 }
-                mem.write_from(ea(cpu, m), &bytes)?;
+                mem.write_from(ea(cpu, m), &bytes[..i.osz as usize])?;
             }
             _ => return Err(Exit::Undefined),
         },
@@ -1042,7 +1051,12 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     get(source_hi, 8, lane - 2)
                 };
                 let value = f64::from_bits(source).to_bits() as u64;
-                put(&mut result, 4, lane, (f64::from_bits(value) as f32).to_bits() as u64);
+                put(
+                    &mut result,
+                    4,
+                    lane,
+                    (f64::from_bits(value) as f32).to_bits() as u64,
+                );
             }
             cpu.xmm[d] = result;
             cpu.ymm_hi[d] = 0;
@@ -1246,8 +1260,58 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 r
             };
             cpu.xmm[d] = shuffle(a_lo, b_lo);
+            cpu.ymm_hi[d] = if i.osz == 32 { shuffle(a_hi, b_hi) } else { 0 };
+        }
+        Op::Vpermilps { variable } => {
+            let d = dst_n(&i.ops[0])?;
+            let (source_lo, source_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (control_lo, control_hi) = if variable {
+                src_ymm(cpu, mem, &i.ops[2], i.osz)?
+            } else {
+                (0, 0)
+            };
+            let permute = |source: u128, control: u128| {
+                let mut result = 0;
+                for lane in 0..4 {
+                    let index = if variable {
+                        (get(control, 4, lane) & 3) as usize
+                    } else {
+                        ((imm8 >> (lane * 2)) & 3) as usize
+                    };
+                    put(&mut result, 4, lane, get(source, 4, index));
+                }
+                result
+            };
+            cpu.xmm[d] = permute(source_lo, control_lo);
             cpu.ymm_hi[d] = if i.osz == 32 {
-                shuffle(a_hi, b_hi)
+                permute(source_hi, control_hi)
+            } else {
+                0
+            };
+        }
+        Op::Vpermilpd { variable } => {
+            let d = dst_n(&i.ops[0])?;
+            let (source_lo, source_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (control_lo, control_hi) = if variable {
+                src_ymm(cpu, mem, &i.ops[2], i.osz)?
+            } else {
+                (0, 0)
+            };
+            let permute = |source: u128, control: u128| {
+                let mut result = 0;
+                for lane in 0..2 {
+                    let index = if variable {
+                        (get(control, 8, lane) & 1) as usize
+                    } else {
+                        ((imm8 >> lane) & 1) as usize
+                    };
+                    put(&mut result, 8, lane, get(source, 8, index));
+                }
+                result
+            };
+            cpu.xmm[d] = permute(source_lo, control_lo);
+            cpu.ymm_hi[d] = if i.osz == 32 {
+                permute(source_hi, control_hi)
             } else {
                 0
             };
@@ -1612,7 +1676,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
     Ok(())
 }
 
-fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()> {
+fn exec_cvt<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst, k: CvtK) -> ExecResult<()> {
     use CvtK::*;
     let mode = rc(cpu);
     let osz = if i.rexw { 8 } else { 4 };
@@ -1701,7 +1765,12 @@ fn exec_cvt(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, k: CvtK) -> ExecResult<()
 }
 
 /// FXSAVE / FXRSTOR (512-byte legacy layout; x87 registers go through f64 <-> f80 conversion).
-pub fn fxsave_restore(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
+pub fn fxsave_restore<M: GuestMemory>(
+    cpu: &mut Cpu,
+    mem: &mut M,
+    i: &Inst,
+    next: u64,
+) -> ExecResult<()> {
     let Opnd::Mem(m) = i.ops[0] else {
         return Err(Exit::Undefined);
     };
@@ -1729,7 +1798,8 @@ pub fn fxsave_restore(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> E
         }
         mem.write_from(a, &buf)?;
     } else {
-        let buf = mem.read_vec(a, 512)?;
+        let mut buf = [0u8; 512];
+        mem.read_into(a, &mut buf, Access::Read)?;
         cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
         cpu.fpu_sw = u16::from_le_bytes([buf[2], buf[3]]);
         cpu.fpu_top = ((cpu.fpu_sw >> 11) & 7) as u8;

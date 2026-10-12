@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/anywasm-pe",
     "crates/anywasm-cpu-state",
+    "crates/anywasm-cpu-worker",
     "crates/anywasm-cpu",
     "crates/anywasm-rt",
     "crates/anywasm-cli",
@@ -16,7 +17,7 @@ license = "GPL-2.0-only"
 
 [workspace.dependencies]
 anywasm-cpu   = { path = "crates/anywasm-cpu" }
-anywasm-cpu-state = { path = "crates/anywasm-cpu-state" }
+anywasm-cpu-state = { path = "crates/anywasm-cpu-state", default-features = false }
 anywasm-pe    = { path = "crates/anywasm-pe" }
 anywasm-rt    = { path = "crates/anywasm-rt" }
 

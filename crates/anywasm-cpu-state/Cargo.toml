@@ -7,3 +7,6 @@ description = "no_std x86-64 CPU state, decoder, and shared-memory worker primit
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+std = []

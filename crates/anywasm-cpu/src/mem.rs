@@ -5,7 +5,10 @@
 //! live in one growing `Vec<u8>`. A one-entry software TLB per access kind keeps the hot path to a
 //! compare and an index.
 
+use anywasm_cpu_state::memory::GuestMemory;
 use std::cell::Cell;
+
+pub use anywasm_cpu_state::memory::{Access, Fault, MemResult};
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_MASK: u64 = PAGE_SIZE - 1;
@@ -17,24 +20,6 @@ pub const PROT_W: u8 = 2;
 pub const PROT_X: u8 = 4;
 pub const PROT_RW: u8 = PROT_R | PROT_W;
 pub const PROT_RWX: u8 = PROT_R | PROT_W | PROT_X;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Access {
-    Read,
-    Write,
-    Exec,
-}
-
-/// A guest memory fault: access to an unmapped page or a permission violation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Fault {
-    pub addr: u64,
-    pub access: Access,
-    /// `true` when the page exists but lacks the permission (as opposed to being unmapped).
-    pub protection: bool,
-}
-
-pub type MemResult<T> = Result<T, Fault>;
 
 const L_BITS: u32 = 12;
 const L_SIZE: usize = 1 << L_BITS;
@@ -529,6 +514,48 @@ impl Memory {
             }
             Err(_) => Ok(first),
         }
+    }
+}
+
+impl GuestMemory for Memory {
+    fn read_u8(&self, address: u64) -> MemResult<u8> {
+        Memory::read_u8(self, address)
+    }
+    fn read_u16(&self, address: u64) -> MemResult<u16> {
+        Memory::read_u16(self, address)
+    }
+    fn read_u32(&self, address: u64) -> MemResult<u32> {
+        Memory::read_u32(self, address)
+    }
+    fn read_u64(&self, address: u64) -> MemResult<u64> {
+        Memory::read_u64(self, address)
+    }
+    fn read_u128(&self, address: u64) -> MemResult<u128> {
+        Memory::read_u128(self, address)
+    }
+    fn write_u8(&mut self, address: u64, value: u8) -> MemResult<()> {
+        Memory::write_u8(self, address, value)
+    }
+    fn write_u16(&mut self, address: u64, value: u16) -> MemResult<()> {
+        Memory::write_u16(self, address, value)
+    }
+    fn write_u32(&mut self, address: u64, value: u32) -> MemResult<()> {
+        Memory::write_u32(self, address, value)
+    }
+    fn write_u64(&mut self, address: u64, value: u64) -> MemResult<()> {
+        Memory::write_u64(self, address, value)
+    }
+    fn write_u128(&mut self, address: u64, value: u128) -> MemResult<()> {
+        Memory::write_u128(self, address, value)
+    }
+    fn read_into(&self, address: u64, output: &mut [u8], access: Access) -> MemResult<()> {
+        Memory::read_into(self, address, output, access)
+    }
+    fn write_from(&mut self, address: u64, input: &[u8]) -> MemResult<()> {
+        Memory::write_from(self, address, input)
+    }
+    fn fetch(&self, address: u64, output: &mut [u8; 15]) -> MemResult<usize> {
+        Memory::fetch(self, address, output)
     }
 }
 

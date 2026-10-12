@@ -6,12 +6,31 @@
 //! modules can exchange it through a shared memory region. A worker must own its context for the
 //! duration of a dispatch; the slot's release/acquire transitions define that ownership boundary.
 
-pub mod shared;
+#[cfg(feature = "std")]
+extern crate std;
+
+pub mod exec_core;
 pub mod guest_memory;
+pub mod memory;
+pub mod shared;
+pub mod exec {
+    pub use crate::exec_core::*;
+}
+#[cfg(feature = "std")]
+#[path = "../../anywasm-cpu/src/sse.rs"]
+pub mod sse;
+#[cfg(feature = "std")]
+#[path = "../../anywasm-cpu/src/x87.rs"]
+pub mod x87;
+
+pub use memory::{Access, Fault, GuestMemory, MemResult};
 
 // Keep the decoder's existing import path while it is shared with the std interpreter crate.
 pub mod cpu {
-    pub use crate::CpuMode;
+    pub use crate::{
+        Access, Cpu, CpuMode, AF, ARITH_FLAGS, CF, DF, IF, OF, PF, R10, R11, R8, R9, RAX, RBP, RBX,
+        RCX, RDI, RDX, RSI, RSP, SF, TF, USER_FLAGS, ZF,
+    };
 }
 
 #[path = "../../anywasm-cpu/src/decode.rs"]

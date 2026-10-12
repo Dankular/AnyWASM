@@ -4,7 +4,7 @@
 use crate::cpu::*;
 use crate::decode::*;
 use crate::exec::*;
-use crate::mem::Memory;
+use crate::memory::{Access, GuestMemory};
 
 pub fn f64_to_f80(x: f64) -> [u8; 10] {
     let bits = x.to_bits();
@@ -147,17 +147,24 @@ fn to_int(x: f64, bits: u32, trunc: bool, cpu: &Cpu) -> u64 {
     if x.is_nan() || r >= lim || r < -lim {
         1u64 << (bits - 1) // integer indefinite
     } else {
-        (r as i64 as u64) & if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 }
+        (r as i64 as u64)
+            & if bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            }
     }
 }
 
-pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<()> {
+pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst, next: u64) -> ExecResult<()> {
     let opc = i.cc; // low 3 bits of D8..DF
     let md = (i.imm >> 6) as u8 & 3;
     let reg = (i.imm >> 3) as u8 & 7;
     let rm = i.imm as u8 & 7;
     if md != 3 {
-        let Opnd::Mem(m) = i.ops[0] else { return Err(Exit::Undefined) };
+        let Opnd::Mem(m) = i.ops[0] else {
+            return Err(Exit::Undefined);
+        };
         let a = ea(cpu, &m);
         match opc {
             0 | 2 | 4 | 6 => {
@@ -197,7 +204,8 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     mem.write_from(a, &b)?;
                 }
                 4 => {
-                    let b = mem.read_vec(a, 28)?;
+                    let mut b = [0u8; 28];
+                    mem.read_into(a, &mut b, Access::Read)?;
                     cpu.fpu_cw = u16::from_le_bytes([b[0], b[1]]);
                     cpu.fpu_sw = u16::from_le_bytes([b[4], b[5]]);
                     cpu.fpu_top = ((cpu.fpu_sw >> 11) & 7) as u8;
@@ -216,7 +224,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 }
                 5 => {
                     let mut raw = [0u8; 10];
-                    mem.read_into(a, &mut raw, crate::mem::Access::Read)?;
+                    mem.read_into(a, &mut raw, Access::Read)?;
                     push(cpu, f80_to_f64(&raw));
                 }
                 7 => {
@@ -320,10 +328,10 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                     let v = match rm {
                         0 => 1.0,
                         1 => 10f64.log2(),
-                        2 => std::f64::consts::LOG2_E,
-                        3 => std::f64::consts::PI,
+                        2 => core::f64::consts::LOG2_E,
+                        3 => core::f64::consts::PI,
                         4 => 2f64.log10(),
-                        5 => std::f64::consts::LN_2,
+                        5 => core::f64::consts::LN_2,
                         6 => 0.0,
                         _ => return Err(Exit::Undefined),
                     };
@@ -564,10 +572,22 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
 mod tests {
     use super::*;
     use crate::decode::decode;
+    use crate::mem::Memory;
 
     #[test]
     fn f80_roundtrip() {
-        for x in [0.0, -0.0, 1.0, -1.5, 3.141592653589793, 1e300, -1e-300, 5e-324, f64::INFINITY, f64::NEG_INFINITY] {
+        for x in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.5,
+            3.141592653589793,
+            1e300,
+            -1e-300,
+            5e-324,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
             let b = f64_to_f80(x);
             let y = f80_to_f64(&b);
             assert_eq!(x.to_bits(), y.to_bits(), "{x}");
