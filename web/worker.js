@@ -49,6 +49,7 @@ async function start({ wasm, bundle, assetUrl, canvas, testMode: requestedTestMo
       exec = new GpuExecutor(canvas, tool, log, { noPresent: testMode });
       exec.onWindow = (win) => postMessage({ type: 'window', ...win });
       await exec.init();
+      w.hostIo.gpuExecutor = exec;
       postMessage({ type: 'gpuinfo', info: { ...exec.adapterInfo }, features: [...exec.features] });
     } catch (e) {
       graphicsUnavailableReason = `WebGPU unavailable: ${e.message}`;

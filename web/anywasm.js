@@ -249,8 +249,42 @@ export class AnyWasm {
       jitStats.chainCompilations++;
       return chainRunner;
     };
+    const gpuReadback = (commandsPtr, commandsLength, resourceId, subresource, destination, length) => {
+      const exports = instance?.exports;
+      const memory = exports?.memory;
+      const state = exports?.asyncify_get_state ? exports.asyncify_get_state() : 0;
+      const n = Number(length) >>> 0;
+      const dst = Number(destination) >>> 0;
+      if (state === 2) {
+        exports.asyncify_stop_rewind();
+        asyncifyControl.resumes++;
+        const result = hostIo.gpuReadbackResult;
+        hostIo.gpuReadbackResult = null;
+        if (!result?.bytes || result.bytes.byteLength !== n) return -1;
+        new Uint8Array(memory.buffer, dst, n).set(result.bytes);
+        return 1;
+      }
+      if (state !== 0 || !exports?.asyncify_get_state || !asyncifyData || !hostIo.gpuExecutor) return 0;
+      if (hostIo.pending) return 0;
+      try {
+        const commands = new Uint8Array(memory.buffer, Number(commandsPtr) >>> 0, Number(commandsLength) >>> 0);
+        if (commands.length) hostIo.gpuExecutor.execute(commands);
+        const readback = hostIo.gpuExecutor.readBackResource(Number(resourceId) >>> 0, Number(subresource) >>> 0);
+        hostIo.pending = Promise.resolve(readback).then(
+          (bytes) => { hostIo.gpuReadbackResult = { bytes }; },
+          (error) => { hostIo.gpuReadbackResult = { error: error?.message || String(error) }; },
+        );
+        exports.asyncify_start_unwind(asyncifyData);
+        asyncifyControl.yields++;
+        return 0;
+      } catch (error) {
+        hostIo.gpuReadbackResult = { error: error?.message || String(error) };
+        return -1;
+      }
+    };
     const imports = {
       anywasm: {
+        gpu_readback: gpuReadback,
         random_fill(pointer, length) {
           try {
             return fillCryptoRandom(instance.exports.memory, pointer, length);

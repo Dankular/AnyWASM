@@ -308,6 +308,14 @@ try {
   const triStat = await page.textContent('#stat');
   console.log('triangle status:', triStat);
   check('d3d11 program ran to completion', /exited \(exit code 0\)/.test(triStat) && triText.includes('frames=3'), triText + triStat);
+  const stagedPixels = triText.match(/staging readback corner=(\d+),(\d+),(\d+),(\d+) center=(\d+),(\d+),(\d+),(\d+)/);
+  check('D3D11 staging Map(READ) returns rendered backbuffer pixels',
+    !!stagedPixels && stagedPixels.slice(1, 5).join(',') === '0,0,51,255'
+      && stagedPixels.slice(5, 8).every((v) => Number(v) >= 70 && Number(v) <= 100)
+      && Number(stagedPixels[8]) === 255,
+    stagedPixels?.[0] || triText);
+  check('D3D11 staging buffer Map(READ) returns the copied constant-buffer values',
+    triText.includes('staging buffer readback=1,1,1,1'), triText);
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));

@@ -41,6 +41,17 @@ int main(void) {
     hr = ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource *)back, NULL, &rtv);
     printf("rtv hr=%08lx\n", (unsigned long)hr);
 
+    D3D11_TEXTURE2D_DESC readDesc = {0};
+    readDesc.Width = 640; readDesc.Height = 480;
+    readDesc.MipLevels = 1; readDesc.ArraySize = 1;
+    readDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    readDesc.SampleDesc.Count = 1;
+    readDesc.Usage = D3D11_USAGE_STAGING;
+    readDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D *readback = NULL;
+    hr = ID3D11Device_CreateTexture2D(dev, &readDesc, NULL, &readback);
+    printf("staging texture hr=%08lx\n", (unsigned long)hr);
+
     Vertex verts[3] = {
         {  0.0f,  0.6f, 0.0f, 1, 0, 0, 1 },
         {  0.6f, -0.6f, 0.0f, 0, 1, 0, 1 },
@@ -57,6 +68,11 @@ int main(void) {
     D3D11_SUBRESOURCE_DATA cinit = { tint, 0, 0 };
     ID3D11Buffer *cb = NULL;
     ID3D11Device_CreateBuffer(dev, &cbd, &cinit, &cb);
+
+    D3D11_BUFFER_DESC readbackBufferDesc = { sizeof tint, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0 };
+    ID3D11Buffer *readbackBuffer = NULL;
+    hr = ID3D11Device_CreateBuffer(dev, &readbackBufferDesc, NULL, &readbackBuffer);
+    printf("staging buffer hr=%08lx\n", (unsigned long)hr);
 
     ID3D11VertexShader *vs = NULL; ID3D11PixelShader *ps = NULL;
     hr = ID3D11Device_CreateVertexShader(dev, tri_vs, sizeof tri_vs, NULL, &vs);
@@ -88,6 +104,18 @@ int main(void) {
             memcpy(ms.pData, t, sizeof t);
             ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)cb, 0);
         }
+        if (frames == 0 && readbackBuffer) {
+            ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)readbackBuffer, (ID3D11Resource *)cb);
+            D3D11_MAPPED_SUBRESOURCE mappedBuffer;
+            hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)readbackBuffer, 0, D3D11_MAP_READ, 0, &mappedBuffer);
+            if (SUCCEEDED(hr)) {
+                const float *values = (const float *)mappedBuffer.pData;
+                printf("staging buffer readback=%.0f,%.0f,%.0f,%.0f\n", values[0], values[1], values[2], values[3]);
+                ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)readbackBuffer, 0);
+            } else {
+                printf("staging buffer Map hr=%08lx\n", (unsigned long)hr);
+            }
+        }
         D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
         ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, NULL);
@@ -101,11 +129,29 @@ int main(void) {
         ID3D11DeviceContext_PSSetShader(ctx, ps, NULL, 0);
         ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cb);
         ID3D11DeviceContext_Draw(ctx, 3, 0);
+        if (frames == 0 && readback) {
+            ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)readback, (ID3D11Resource *)back);
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)readback, 0, D3D11_MAP_READ, 0, &mapped);
+            if (SUCCEEDED(hr)) {
+                const BYTE *pixels = (const BYTE *)mapped.pData;
+                const BYTE *corner = pixels;
+                const BYTE *center = pixels + ((size_t)288 * 640 + 320) * 4;
+                printf("staging readback corner=%u,%u,%u,%u center=%u,%u,%u,%u\n",
+                    corner[0], corner[1], corner[2], corner[3],
+                    center[0], center[1], center[2], center[3]);
+                ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)readback, 0);
+            } else {
+                printf("staging readback Map hr=%08lx\n", (unsigned long)hr);
+            }
+        }
         IDXGISwapChain_Present(sc, 1, 0);
         if (++frames == 3) PostQuitMessage(0);
     }
     printf("frames=%d\n", frames);
     ID3D11Buffer_Release(vb);
+    if (readbackBuffer) ID3D11Buffer_Release(readbackBuffer);
+    if (readback) ID3D11Texture2D_Release(readback);
     ID3D11RenderTargetView_Release(rtv);
     return 0;
 }

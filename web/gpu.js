@@ -1598,6 +1598,84 @@ export class GpuExecutor {
     return { width: t.width, height: t.height, data: out };
   }
 
+  /** Read the raw bytes of a D3D11 resource subresource for guest Map(READ). */
+  async readBackResource(id, subresource = 0) {
+    const resource = this.res.get(id);
+    if (!resource) throw new Error(`resource ${id} is unavailable`);
+    if (resource.kind === 'buffer') {
+      const byteLength = resource.d3dSize ?? resource.size;
+      if (!byteLength) throw new Error(`buffer ${id} has no readable bytes`);
+      const copyLength = (byteLength + 3) & ~3;
+      const buffer = this.device.createBuffer({
+        size: copyLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      try {
+        this.flush();
+        const encoder = this.device.createCommandEncoder();
+        encoder.copyBufferToBuffer(resource.gpu, 0, buffer, 0, copyLength);
+        this.device.queue.submit([encoder.finish()]);
+        await buffer.mapAsync(GPUMapMode.READ);
+        return new Uint8Array(buffer.getMappedRange()).slice(0, byteLength);
+      } finally {
+        if (buffer.mapState === 'mapped') buffer.unmap();
+        buffer.destroy();
+      }
+    }
+    if (resource.kind !== 'texture') throw new Error(`resource ${id} has an unsupported kind`);
+    if (resource.samples !== 1) throw new Error(`resource ${id} is multisampled and cannot be mapped for read`);
+    if (hasStencil(resource.format)) throw new Error(`stencil texture readback is unsupported for ${resource.format}`);
+
+    const mip = resource.dimension === '3d' ? subresource : subresource % resource.mips;
+    const slice = resource.dimension === '3d' ? 0 : Math.floor(subresource / resource.mips);
+    if (mip < 0 || mip >= resource.mips || slice >= resource.array) {
+      throw new Error(`texture ${id} subresource ${subresource} is out of range`);
+    }
+    const width = Math.max(1, resource.width >> mip);
+    const height = Math.max(1, resource.height >> mip);
+    const depth = resource.dimension === '3d' ? Math.max(1, resource.depth >> mip) : 1;
+    const block = BLOCK(resource.format) || [1, 1, BYTES(resource.format)];
+    const rowBytes = Math.ceil(width / block[0]) * block[2];
+    const rows = Math.ceil(height / block[1]);
+    const bytesPerRow = (rowBytes + 255) & ~255;
+    const readback = this.device.createBuffer({
+      size: bytesPerRow * rows * depth,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      this.flush();
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyTextureToBuffer(
+        {
+          texture: resource.gpu,
+          mipLevel: mip,
+          origin: { x: 0, y: 0, z: slice },
+          ...(isDepth(resource.format) ? { aspect: 'depth-only' } : {}),
+        },
+        { buffer: readback, bytesPerRow, rowsPerImage: rows },
+        { width, height, depthOrArrayLayers: depth },
+      );
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const mapped = new Uint8Array(readback.getMappedRange());
+      const output = new Uint8Array(rowBytes * rows * depth);
+      const sourceImagePitch = bytesPerRow * rows;
+      const outputImagePitch = rowBytes * rows;
+      for (let z = 0; z < depth; z++) {
+        for (let y = 0; y < rows; y++) {
+          output.set(
+            mapped.subarray(z * sourceImagePitch + y * bytesPerRow, z * sourceImagePitch + y * bytesPerRow + rowBytes),
+            z * outputImagePitch + y * rowBytes,
+          );
+        }
+      }
+      return output;
+    } finally {
+      if (readback.mapState === 'mapped') readback.unmap();
+      readback.destroy();
+    }
+  }
+
   /** Read a supported typed texture, optionally through a D3D11 view. */
   async readBackTexture(id) {
     const view = this.views.get(id);

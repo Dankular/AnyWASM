@@ -10,7 +10,7 @@ const inputBytes = readFileSync(inputPath);
 const module = binaryen.readBinary(inputBytes);
 
 try {
-  binaryen.setPassArgument('asyncify-imports', 'anywasm.yield_slice,anywasm.read_asset_range');
+  binaryen.setPassArgument('asyncify-imports', 'anywasm.yield_slice,anywasm.read_asset_range,anywasm.gpu_readback');
   module.runPasses(['asyncify']);
   binaryen.setPassArgument('asyncify-imports', null);
 
@@ -33,6 +33,9 @@ try {
   }
   if (!imports.some((entry) => entry.module === 'anywasm' && entry.name === 'read_asset_range')) {
     throw new Error('WASM module does not import anywasm.read_asset_range');
+  }
+  if (!imports.some((entry) => entry.module === 'anywasm' && entry.name === 'gpu_readback')) {
+    throw new Error('WASM module does not import anywasm.gpu_readback');
   }
 
   writeFileSync(outputPath, outputBytes);

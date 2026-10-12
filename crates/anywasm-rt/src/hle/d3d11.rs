@@ -10,6 +10,39 @@ use super::gpu::{op, Pk};
 use super::*;
 use crate::process::*;
 
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "anywasm")]
+extern "C" {
+    fn gpu_readback(
+        commands: *const u8,
+        commands_len: u32,
+        resource: u32,
+        subresource: u32,
+        destination: *mut u8,
+        destination_len: u32,
+    ) -> i32;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn request_gpu_readback(commands: &[u8], id: u32, sub: u32, destination: &mut [u8]) -> i32 {
+    // SAFETY: the imported host function only reads `commands` and writes exactly `destination`.
+    unsafe {
+        gpu_readback(
+            commands.as_ptr(),
+            commands.len() as u32,
+            id,
+            sub,
+            destination.as_mut_ptr(),
+            destination.len() as u32,
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn request_gpu_readback(_commands: &[u8], _id: u32, _sub: u32, _destination: &mut [u8]) -> i32 {
+    0
+}
+
 pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
         "D3D11CreateDevice" => |p| create_device(p, false),
@@ -1077,7 +1110,19 @@ fn map(p: &mut Process) -> R {
     // MAP_READ=1, WRITE=2, READ_WRITE=3, WRITE_DISCARD=4, WRITE_NO_OVERWRITE=5
     let reads = ty == 1 || ty == 3;
     let writes = ty != 1;
-    if reads || ty == 5 || (ty == 2) {
+    let cpu_readable_staging = reads && info.usage == 3 && info.cpu & 0x0002_0000 != 0;
+    if cpu_readable_staging {
+        let commands = std::mem::take(&mut p.extra.gpu.buf);
+        let mut bytes = vec![0; len as usize];
+        match request_gpu_readback(&commands, id, sub, &mut bytes) {
+            1 => p.write_bytes(addr, &bytes)?,
+            0 => {
+                p.extra.gpu.buf = commands;
+                return Ok(E_NOTIMPL);
+            }
+            _ => return Ok(E_FAIL),
+        }
+    } else if reads || ty == 5 || ty == 2 {
         let sh = info.shadow.clone();
         let n = sh.len().min(len as usize);
         p.write_bytes(addr, &sh[..n])?;
