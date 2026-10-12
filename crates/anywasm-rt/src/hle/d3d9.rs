@@ -1733,6 +1733,7 @@ fn set_render_state(p: &mut Process) -> R {
         return Ok(D3DERR_INVALIDCALL);
     }
     p.extra.com.d3d9_render_states.insert((device, state), value);
+    p.extra.gpu.emit(op::D3D9_RENDER_STATE, Pk::new().u32(state).u32(value));
     Ok(S_OK)
 }
 
@@ -2340,6 +2341,40 @@ mod tests {
             .expect("SetTextureStageState should update the fixed-function shader state");
         let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
         assert_eq!(words, [0x144, 64, 64, 2, 2, 1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn set_render_state_emits_the_state_for_the_webgpu_executor() {
+        const STACK: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 64,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [(4, device as u32), (8, 7), (12, 0)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+
+        assert_eq!(method("IDirect3DDevice9", "SetRenderState").unwrap()(&mut p).unwrap(), S_OK);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands.last().expect("SetRenderState should reach the renderer");
+        assert_eq!(*opcode, 48);
+        assert_eq!(payload, &[7u32.to_le_bytes(), 0u32.to_le_bytes()].concat());
     }
 
     #[test]

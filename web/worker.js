@@ -31,6 +31,7 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
     postMessage({ type: 'status', status: Status.CRASHED, exitCode: -1, message: e.message, instructions: 0, mips: 0 });
     return;
   }
+  bundle = null;
   if (canvas) {
     try {
       const tool = new ShaderTool(new URL('./shaders/', import.meta.url));

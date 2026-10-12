@@ -262,8 +262,9 @@ try {
     // Input delivery is independent of WebGPU; expose the canvas in browsers without a GPU adapter.
     await page.locator('#screen').evaluate((canvas) => {
       canvas.hidden = false;
-      canvas.style.width = '320px';
-      canvas.style.height = '240px';
+      // Keep a 256x192 content box so integer browser pointer coordinates map exactly at 4x scale.
+      canvas.style.width = '258px';
+      canvas.style.height = '194px';
     });
     await page.locator('#screen').focus();
     await page.keyboard.press('a');
@@ -275,6 +276,11 @@ try {
       };
     });
     await page.mouse.click(inputCenter.x, inputCenter.y);
+    const inputMove = await page.locator('#screen').evaluate((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: rect.left + canvas.clientLeft + 130, y: rect.top + canvas.clientTop + 101 };
+    });
+    await page.mouse.move(inputMove.x, inputMove.y);
     await page.mouse.move(inputCenter.x + 500, inputCenter.y + 300);
     await page.waitForFunction(() => {
       const term = document.querySelector('#term')?.textContent || '';
@@ -285,10 +291,10 @@ try {
   const inputStat = await page.textContent('#stat');
   const inputTrace = await page.evaluate(() => ({ trace: window.__inputTrace, aspectRatio: document.querySelector('#screen')?.style.aspectRatio }));
   check('guest observed WM_KEYDOWN(A)', inputText.includes('guest saw keydown A'), inputText);
-  check('guest mouse coordinates scale from the 320x240 canvas to the 1040x807 window',
+  check('guest mouse coordinates scale from the canvas to the 1024x768 Win32 client area',
     inputText.includes('guest saw scaled mousemove (520,404)') &&
       inputTrace.trace.some((event) => event.kind === 3 && event.a === 520 && event.b === 404) &&
-      inputTrace.aspectRatio === '1040 / 807', JSON.stringify({ inputText, inputTrace }));
+      inputTrace.aspectRatio === '1024 / 768', JSON.stringify({ inputText, inputTrace }));
   check('guest TrackMouseEvent(TME_LEAVE) succeeds', inputText.includes('guest TrackMouseEvent(TME_LEAVE) succeeded'), inputText + inputStat);
   check('guest receives WM_MOUSELEAVE after the pointer leaves the canvas', inputText.includes('guest saw WM_MOUSELEAVE'), inputText + inputStat);
   check('guest observed WM_LBUTTONDOWN', inputText.includes('guest saw left-down'), inputText);
@@ -342,11 +348,18 @@ try {
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
   const canvasStats = await page.evaluate(() => window.__gpuStats);
   check('canvas presentation completed without WebGPU validation errors', canvasStats && canvasStats.presents === 3 && canvasStats.errors.length === 0, JSON.stringify(canvasStats));
+  const canvasLayout = await page.locator('#screen').evaluate((canvas) => {
+    const [width, height] = canvas.style.aspectRatio.split('/').map(Number);
+    return { aspectWidth: width, aspectHeight: height };
+  });
   const canvasPixels = decodePng(await page.locator('#screen').screenshot());
   const atCanvas = (x, y) => { const i = (y * canvasPixels.w + x) * 4; return Array.from(canvasPixels.data.slice(i, i + 4)); };
-  check('canvas screenshot is 640x480', canvasPixels.w === 640 && canvasPixels.h === 480, `${canvasPixels.w}x${canvasPixels.h}`);
+  check('canvas screenshot preserves the guest window aspect ratio',
+    canvasPixels.w === 640 && Math.abs(canvasPixels.h - canvasPixels.w * canvasLayout.aspectHeight / canvasLayout.aspectWidth) < 1,
+    `${canvasPixels.w}x${canvasPixels.h} at ${canvasLayout.aspectWidth}/${canvasLayout.aspectHeight}`);
   check('canvas blit preserves the clear colour', near(atCanvas(10, 10), [0, 0, 51, 255], 2), JSON.stringify(atCanvas(10, 10)));
-  check('canvas blit presents the interpolated triangle', near(atCanvas(320, 288), [85, 85, 85, 255], 6), JSON.stringify(atCanvas(320, 288)));
+  const centroidY = Math.round(1 + 288.5 / 480 * (canvasPixels.h - 2));
+  check('canvas blit presents the interpolated triangle', near(atCanvas(320, centroidY), [85, 85, 85, 255], 6), JSON.stringify(atCanvas(320, centroidY)));
 
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
   // Verify multisampled D3D11 render targets and ResolveSubresource in the WebGPU executor.
@@ -725,7 +738,10 @@ try {
       };
       command(38, words(1, 0, 9, 64, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
-      command(21, words(1, 2, 0));
+      command(4, words(12, 64, 64, 1, 1, 40, 0x40, 0, 1, 0)); // D3D9 depth surface
+      command(12, words(3, 1, 12, 40, 3, 0, 1, 0, 1)); // DSV
+      command(21, words(1, 2, 3));
+      command(28, words(3, 1, 0, 0)); // Clear depth to zero so default LESS rejects the fan.
       const viewport = new Uint8Array(28), viewportView = new DataView(viewport.buffer);
       viewportView.setUint32(0, 1, true);
       [0, 0, 64, 64, 0, 1].forEach((value, i) => viewportView.setFloat32(4 + i * 4, value, true));
@@ -750,6 +766,8 @@ try {
       write.set(words(11, 0, vertexData.length)); write.set(vertexData, 12); command(3, write);
       command(13, words(0, 1, 11, 20, 0));
       command(16, words(6)); // D3D9 triangle fan
+      command(48, words(7, 0)); // D3DRS_ZENABLE = FALSE
+      command(48, words(22, 1)); // D3DRS_CULLMODE = D3DCULL_NONE
       command(29, words(4, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);

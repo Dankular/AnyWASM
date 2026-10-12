@@ -369,10 +369,10 @@ export class AnyWasm {
     if (typeof x.asyncify_start_unwind === 'function' && typeof x.asyncify_stop_unwind === 'function' &&
         typeof x.asyncify_start_rewind === 'function' && typeof x.asyncify_stop_rewind === 'function' &&
         typeof x.asyncify_get_state === 'function') {
-      asyncifyData = x.aw_alloc(ASYNCIFY_STACK_BYTES + 8);
+      asyncifyData = x.aw_alloc(ASYNCIFY_STACK_BYTES + 8) >>> 0;
       const view = new DataView(x.memory.buffer);
-      view.setUint32(asyncifyData, asyncifyData + 8, true);
-      view.setUint32(asyncifyData + 4, asyncifyData + ASYNCIFY_STACK_BYTES + 8, true);
+      view.setUint32(asyncifyData, (asyncifyData + 8) >>> 0, true);
+      view.setUint32((asyncifyData + 4) >>> 0, (asyncifyData + ASYNCIFY_STACK_BYTES + 8) >>> 0, true);
     }
     return new AnyWasm(instance, jitStats, jitMinPrefix, asyncifyData, asyncifyControl);
   }
@@ -380,7 +380,7 @@ export class AnyWasm {
   /** Load an .awb bundle. Throws with the loader's message on failure. */
   load(bundle) {
     const n = bundle.byteLength;
-    const ptr = this.x.aw_alloc(n);
+    const ptr = this.x.aw_alloc(n) >>> 0;
     new Uint8Array(this.x.memory.buffer, ptr, n).set(bundle);
     const rc = this.x.aw_load(ptr, n);
     this.x.aw_free(ptr, n);
@@ -417,7 +417,7 @@ export class AnyWasm {
     if (this.callbackSuspended) return new Uint8Array(0);
     const len = lenFn();
     if (!len) return new Uint8Array(0);
-    const out = new Uint8Array(this.x.memory.buffer, ptrFn(), len).slice();
+    const out = new Uint8Array(this.x.memory.buffer, ptrFn() >>> 0, len).slice();
     clearFn();
     return out;
   }
@@ -441,7 +441,7 @@ export class AnyWasm {
   takeStderr() { return this._take(this.x.aw_stderr_ptr, this.x.aw_stderr_len, this.x.aw_stderr_clear); }
   message() {
     const len = this.x.aw_message_len();
-    return len ? this.dec.decode(new Uint8Array(this.x.memory.buffer, this.x.aw_message_ptr(), len)) : '';
+    return len ? this.dec.decode(new Uint8Array(this.x.memory.buffer, this.x.aw_message_ptr() >>> 0, len)) : '';
   }
   exitCode() { return this.x.aw_exit_code(); }
   instructions() { return Number(this.x.aw_icount()); }
@@ -464,7 +464,7 @@ export class AnyWasm {
 
   _pushStdin(bytes) {
     const n = bytes.byteLength;
-    const ptr = this.x.aw_alloc(n);
+    const ptr = this.x.aw_alloc(n) >>> 0;
     new Uint8Array(this.x.memory.buffer, ptr, n).set(bytes);
     this.x.aw_stdin_push(ptr, n);
     this.x.aw_free(ptr, n);

@@ -14,7 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
-  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47,
+  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -137,6 +137,7 @@ export class GpuExecutor {
       vb: [], ib: { buf: 0, format: 57, offset: 0 }, layout: 0, topology: 4, shader: [0, 0, 0],
       cb: [[], [], []], cbRange: [[], [], []], srv: [[], [], []], smp: [[], [], []], uav: [], rtvs: [], dsv: 0,
       viewports: [], scissors: [], blend: { id: 0, factor: [1, 1, 1, 1], mask: 0xffffffff }, raster: 0, depth: { id: 0, ref: 0 },
+      d3d9RenderStates: new Map(),
     };
   }
 
@@ -295,6 +296,7 @@ export class GpuExecutor {
       case OP.SET_INDEX_BUFFER: st.ib = { buf: u(0), format: u(1), offset: u(2) }; break;
       case OP.SET_INPUT_LAYOUT: st.layout = u(0); break;
       case OP.SET_TOPOLOGY: st.topology = u(0); break;
+      case OP.D3D9_RENDER_STATE: st.d3d9RenderStates.set(u(0), u(1)); break;
       case OP.SET_FIXED_FUNCTION:
         this.setFixedFunction(
           u(0), u(1), u(2),
@@ -494,6 +496,12 @@ export class GpuExecutor {
 
   // ── views ────────────────────────────────────────────────────────────────
   setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1) {
+    if (fvf === 0) {
+      this.st.shader[0] = 0;
+      this.st.shader[1] = 0;
+      this.st.layout = 0;
+      return;
+    }
     if (![0x42, 0x44, 0x142, 0x144, 0x152].includes(fvf)) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
@@ -755,20 +763,36 @@ export class GpuExecutor {
     }
     if (!vs) return;
     let topology = st.topology;
-    let wireframeIndexBuffer = null;
+    let transientIndexBuffer = null;
     const rasterState = this.rasters.get(st.raster);
-    if (rasterState?.getUint32(0, true) === 2 && (topology === 4 || topology === 5)) {
+    const d3d9FillMode = st.d3d9RenderStates.get(8);
+    const wireframe = d3d9FillMode === undefined
+      ? rasterState?.getUint32(0, true) === 2
+      : d3d9FillMode === 2;
+    if (wireframe && (topology === 4 || topology === 5 || topology === 6)) {
       const indices = this.wireframeIndices(indexed, count, first, baseVertex);
       if (!indices) return;
       if (indices.length === 0) return;
-      wireframeIndexBuffer = this.device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
-      this.device.queue.writeBuffer(wireframeIndexBuffer, 0, indices);
-      this.transientBuffers.push(wireframeIndexBuffer);
+      transientIndexBuffer = this.device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(transientIndexBuffer, 0, indices);
+      this.transientBuffers.push(transientIndexBuffer);
       indexed = true;
       count = indices.length;
       first = 0;
       baseVertex = 0;
       topology = 2; // D3D11 triangle wireframe -> WebGPU line-list
+    } else if (topology === 6) {
+      const indices = this.triangleFanIndices(indexed, count, first, baseVertex);
+      if (!indices) return;
+      if (indices.length === 0) return;
+      transientIndexBuffer = this.device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(transientIndexBuffer, 0, indices);
+      this.transientBuffers.push(transientIndexBuffer);
+      indexed = true;
+      count = indices.length;
+      first = 0;
+      baseVertex = 0;
+      topology = 4; // WebGPU has no triangle-fan topology; expand it to triangle-list indices.
     }
     const att = this.attachments();
     if (!att.colors.some(Boolean) && !att.depth) return;
@@ -867,7 +891,9 @@ export class GpuExecutor {
     }
     const rtFormats = att.colors.map((c) => c?.format || null);
     const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
-    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
+    const d3d9PipelineStates = [8, 7, 14, 23, 22, 27, 19, 20, 171, 206, 207, 208, 209, 168]
+      .map((state) => st.d3d9RenderStates.get(state) ?? null);
+    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, d3d9PipelineStates, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);
     if (!pipe) {
       pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed, topology);
@@ -888,8 +914,8 @@ export class GpuExecutor {
       pass.setVertexBuffer(slot, buffer.gpu, buffer.offset);
     }
     if (indexed) {
-      if (wireframeIndexBuffer) {
-        pass.setIndexBuffer(wireframeIndexBuffer, 'uint32', 0);
+      if (transientIndexBuffer) {
+        pass.setIndexBuffer(transientIndexBuffer, 'uint32', 0);
       } else {
         const r = this.res.get(st.ib.buf);
         if (!r) return;
@@ -904,7 +930,8 @@ export class GpuExecutor {
     const vp = st.viewports[0] || [0, 0, mipW, mipH, 0, 1];
     pass.setViewport(vp[0], vp[1], Math.min(vp[2], mipW - vp[0]), Math.min(vp[3], mipH - vp[1]), vp[4], vp[5]);
     const raster = this.rasters.get(st.raster);
-    if (raster && raster.getUint32(28, true)) {
+    const d3d9Scissor = st.d3d9RenderStates.get(174);
+    if (d3d9Scissor === undefined ? !!raster?.getUint32(28, true) : !!d3d9Scissor) {
       const sc = st.scissors[0] || [0, 0, mipW, mipH];
       const l = Math.max(0, sc[0]), t = Math.max(0, sc[1]);
       pass.setScissorRect(l, t, Math.max(0, Math.min(sc[2], mipW) - l), Math.max(0, Math.min(sc[3], mipH) - t));
@@ -964,10 +991,43 @@ export class GpuExecutor {
         else strip.push(index);
       }
       flush();
+    } else if (st.topology === 6) {
+      for (let i = 1; i + 1 < source.length; i++) {
+        triangles.push([source[0], source[i], source[i + 1]]);
+      }
     }
     const edges = [];
     for (const [a, b, c] of triangles) edges.push(a, b, b, c, c, a);
     return new Uint32Array(edges);
+  }
+
+  triangleFanIndices(indexed, count, first, baseVertex) {
+    const st = this.st;
+    const source = [];
+    if (indexed) {
+      const buffer = this.res.get(st.ib.buf);
+      const indexBytes = st.ib.format === 42 ? 4 : 2;
+      const start = st.ib.offset + first * indexBytes;
+      if (!buffer?.shadow || start + count * indexBytes > buffer.shadow.length) {
+        this.log('triangle-fan draw skipped: index data is not available on the CPU');
+        return null;
+      }
+      const view = new DataView(buffer.shadow.buffer, buffer.shadow.byteOffset, buffer.shadow.byteLength);
+      for (let i = 0; i < count; i++) {
+        const raw = indexBytes === 4 ? view.getUint32(start + i * indexBytes, true) : view.getUint16(start + i * indexBytes, true);
+        const index = raw + baseVertex;
+        if (index < 0 || index > 0xffffffff) {
+          this.log('triangle-fan draw skipped: base vertex produces an invalid index');
+          return null;
+        }
+        source.push(index);
+      }
+    } else {
+      for (let i = 0; i < count; i++) source.push(first + i);
+    }
+    const triangles = [];
+    for (let i = 1; i + 1 < source.length; i++) triangles.push(source[0], source[i], source[i + 1]);
+    return new Uint32Array(triangles);
   }
 
   expandInstanceBuffer(source, sourceOffset, stride, stepRate, requiredInstances) {
@@ -1238,10 +1298,28 @@ export class GpuExecutor {
 
     // Output merger.
     const blend = this.blends.get(st.blend.id);
+    const d3d9States = st.d3d9RenderStates;
+    const d3d9BlendEnabled = d3d9States.has(27);
     const targets = att.colors.map((c, i) => {
       if (!c) return null;
       const t = { format: c.format, writeMask: 0xf };
-      if (blend) {
+      if (d3d9States.has(168)) t.writeMask = d3d9States.get(168) & 0xf;
+      if (d3d9BlendEnabled) {
+        if (d3d9States.get(27)) {
+          const src = d3d9States.get(19) ?? 2, dst = d3d9States.get(20) ?? 1;
+          const op = d3d9States.get(171) ?? 1;
+          const separate = !!d3d9States.get(206);
+          const srcAlpha = separate ? (d3d9States.get(207) ?? 2) : src;
+          const dstAlpha = separate ? (d3d9States.get(208) ?? 1) : dst;
+          const opAlpha = separate ? (d3d9States.get(209) ?? 1) : op;
+          const factor = (n) => BLEND_FACTOR[n] || 'one';
+          const operation = (n) => BLEND_OP[n] || 'add';
+          const color = { srcFactor: factor(src), dstFactor: factor(dst), operation: operation(op) };
+          const alpha = { srcFactor: factor(srcAlpha), dstFactor: factor(dstAlpha), operation: operation(opAlpha) };
+          for (const channel of [color, alpha]) if (channel.operation === 'min' || channel.operation === 'max') { channel.srcFactor = 'one'; channel.dstFactor = 'one'; }
+          t.blend = { color, alpha };
+        }
+      } else if (blend) {
         const o = 8 + 32 * (blend.getUint32(4, true) ? i : 0);
         if (blend.getUint32(o, true)) {
           const fac = (n) => BLEND_FACTOR[n] || 'one';
@@ -1265,7 +1343,14 @@ export class GpuExecutor {
     else if (targets.some(Boolean)) desc.fragment = undefined;
     if (indexed && (topology === 3 || topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';
     const r = this.rasters.get(st.raster);
-    if (r) {
+    if (st.d3d9RenderStates.has(22)) {
+      const cull = st.d3d9RenderStates.get(22);
+      if (cull === 1) desc.primitive.cullMode = 'none';
+      else if (cull === 2 || cull === 3) {
+        desc.primitive.cullMode = 'front';
+        desc.primitive.frontFace = cull === 2 ? 'cw' : 'ccw';
+      }
+    } else if (r) {
       desc.primitive.cullMode = ({ 1: 'none', 2: 'front', 3: 'back' })[r.getUint32(4, true)] || 'back';
       desc.primitive.frontFace = r.getUint32(8, true) ? 'ccw' : 'cw';
     } else { desc.primitive.cullMode = 'back'; desc.primitive.frontFace = 'cw'; }
@@ -1273,9 +1358,16 @@ export class GpuExecutor {
     if (att.depth) {
       const fmt = att.depth.format;
       const d = { format: fmt };
-      const enable = dsd ? dsd.getUint32(0, true) : 1;
-      d.depthWriteEnabled = dsd ? !!(enable && dsd.getUint32(4, true)) : true;
-      d.depthCompare = enable ? CMP[dsd ? dsd.getUint32(8, true) : 2] || 'less' : 'always';
+      const hasD3d9DepthState = st.d3d9RenderStates.has(7) || st.d3d9RenderStates.has(14) || st.d3d9RenderStates.has(23);
+      const enable = hasD3d9DepthState ? (st.d3d9RenderStates.get(7) ?? 1) : dsd ? dsd.getUint32(0, true) : 1;
+      const write = hasD3d9DepthState
+        ? (st.d3d9RenderStates.get(14) ?? 1)
+        : dsd ? dsd.getUint32(4, true) : 1;
+      const compare = hasD3d9DepthState
+        ? (st.d3d9RenderStates.get(23) ?? 2)
+        : dsd ? dsd.getUint32(8, true) : 2;
+      d.depthWriteEnabled = !!(enable && write);
+      d.depthCompare = enable ? CMP[compare] || 'less' : 'always';
       if (r) { d.depthBias = r.getInt32(12, true); d.depthBiasSlopeScale = r.getFloat32(20, true); d.depthBiasClamp = r.getFloat32(16, true); }
       if (dsd && dsd.getUint32(12, true) && hasStencil(fmt)) {
         const face = (o) => ({ failOp: STENCIL_OP[dsd.getUint32(o, true)] || 'keep', depthFailOp: STENCIL_OP[dsd.getUint32(o + 4, true)] || 'keep', passOp: STENCIL_OP[dsd.getUint32(o + 8, true)] || 'keep', compare: CMP[dsd.getUint32(o + 12, true)] || 'always' });

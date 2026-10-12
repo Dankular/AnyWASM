@@ -125,7 +125,7 @@ async function run(bundleBytes, label) {
   const testMode = new URLSearchParams(location.search).has('test');
   showLoading('Starting guest program…');
   const message = { type: 'start', wasm, bundle: bundleBytes, testMode };
-  const transfer = [wasm];
+  const transfer = [wasm, bundleBytes.buffer];
   if (off) {
     message.canvas = off;
     transfer.push(off);
