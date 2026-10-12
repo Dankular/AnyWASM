@@ -123,6 +123,8 @@ export class GpuExecutor {
     this.computePipelines = new Map();
     this.bglCache = new Map();
     this.dummyBuffers = new Map();
+    this.transientBuffers = [];
+    this.instanceExpansionPipeline = null;
     this.enc = null;
     this.pass = null;
     this.passKey = '';
@@ -186,7 +188,12 @@ export class GpuExecutor {
   }
   flush() {
     this.endPass();
-    if (this.enc) { this.device.queue.submit([this.enc.finish()]); this.enc = null; }
+    if (this.enc) {
+      this.device.queue.submit([this.enc.finish()]);
+      this.enc = null;
+    }
+    for (const buffer of this.transientBuffers) buffer.destroy();
+    this.transientBuffers = [];
   }
 
   /** Copy `bytes` into the staging ring; returns {buffer, offset}. */
@@ -643,6 +650,30 @@ export class GpuExecutor {
     // Pipeline.
     const layoutDesc = this.layouts.get(st.layout) || [];
     const strides = layoutDesc.map((e) => st.vb[e.slot]?.stride || 0);
+    const stepRates = new Map();
+    for (const e of layoutDesc) {
+      if (e.cls !== 1 || e.step <= 1) continue;
+      const prior = stepRates.get(e.slot);
+      if (prior !== undefined && prior !== e.step) {
+        this.log(`draw skipped: input slot ${e.slot} has conflicting instance step rates`);
+        return;
+      }
+      stepRates.set(e.slot, e.step);
+    }
+    const boundVertexBuffers = new Map();
+    for (const slot of new Set(layoutDesc.map((e) => e.slot))) {
+      const binding = st.vb[slot];
+      const resource = binding && this.res.get(binding.buf);
+      if (!resource) continue;
+      let gpu = resource.gpu, offset = binding.offset;
+      const stepRate = stepRates.get(slot) || 1;
+      if (stepRate > 1) {
+        gpu = this.expandInstanceBuffer(resource, binding.offset, binding.stride, stepRate, firstInstance + instances);
+        if (!gpu) return;
+        offset = 0;
+      }
+      boundVertexBuffers.set(slot, { gpu, offset });
+    }
     const rtFormats = att.colors.map((c) => c?.format || null);
     const key = JSON.stringify([st.shader[0], st.shader[1], st.layout, strides, st.topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, layoutEntries, indexed && (st.topology === 3 || st.topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);
@@ -660,10 +691,8 @@ export class GpuExecutor {
       if (resolved[g].length) pass.setBindGroup(g, this.device.createBindGroup({ layout: pipe.bgls[g], entries: resolved[g] }));
     }
     // Vertex buffers.
-    for (const slot of new Set(layoutDesc.map((e) => e.slot))) {
-      const b = st.vb[slot];
-      const r = b && this.res.get(b.buf);
-      if (r) pass.setVertexBuffer(slot, r.gpu, b.offset);
+    for (const [slot, buffer] of boundVertexBuffers) {
+      pass.setVertexBuffer(slot, buffer.gpu, buffer.offset);
     }
     if (indexed) {
       const r = this.res.get(st.ib.buf);
@@ -689,6 +718,94 @@ export class GpuExecutor {
     if (indexed) pass.drawIndexed(count, instances, first, baseVertex, firstInstance);
     else pass.draw(count, instances, first, firstInstance);
     this.stats.draws++;
+  }
+
+  expandInstanceBuffer(source, sourceOffset, stride, stepRate, requiredInstances) {
+    if (stride <= 0 || stride % 4 !== 0 || sourceOffset % 4 !== 0 || requiredInstances <= 0) {
+      this.log('draw skipped: instance step-rate expansion requires aligned nonempty vertex data');
+      return null;
+    }
+    const strideWords = stride / 4;
+    const outputWords = requiredInstances * strideWords;
+    const outputBytes = outputWords * 4;
+    const storageAlignment = this.device.limits.minStorageBufferOffsetAlignment || 256;
+    const sourceBindingOffset = Math.floor(sourceOffset / storageAlignment) * storageAlignment;
+    const sourceOffsetWords = (sourceOffset - sourceBindingOffset) / 4;
+    const sourceAvailableWords = Math.floor((source.size - sourceBindingOffset) / 4);
+    const sourceRequiredWords = sourceOffsetWords + Math.ceil(requiredInstances / stepRate) * strideWords;
+    const sourceWords = Math.min(
+      sourceAvailableWords,
+      sourceRequiredWords,
+      Math.floor(this.device.limits.maxStorageBufferBindingSize / 4),
+    );
+    if (!Number.isSafeInteger(outputWords) || outputWords <= 0 || outputBytes > this.device.limits.maxStorageBufferBindingSize
+        || outputBytes > this.device.limits.maxBufferSize || sourceOffsetWords >= sourceWords) {
+      this.log('draw skipped: instance step-rate expansion exceeds WebGPU buffer limits');
+      return null;
+    }
+    if (!this.instanceExpansionPipeline) {
+      const module = this.device.createShaderModule({ code: `
+        struct Params {
+          sourceWords: u32,
+          strideWords: u32,
+          stepRate: u32,
+          sourceOffsetWords: u32,
+          outputWords: u32,
+          baseWord: u32,
+          _pad0: u32,
+          _pad1: u32,
+        };
+        @group(0) @binding(0) var<storage, read> source: array<u32>;
+        @group(0) @binding(1) var<storage, read_write> expanded: array<u32>;
+        @group(0) @binding(2) var<uniform> params: Params;
+        @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+          let word = params.baseWord + id.x;
+          if (word >= params.outputWords) { return; }
+          let row = word / params.strideWords;
+          let field = word % params.strideWords;
+          let sourceWord = params.sourceOffsetWords + (row / params.stepRate) * params.strideWords + field;
+          if (sourceWord < params.sourceWords) {
+            expanded[word] = source[sourceWord];
+          } else {
+            expanded[word] = 0u;
+          }
+        }
+      ` });
+      this.instanceExpansionPipeline = this.device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+    }
+    const expanded = this.device.createBuffer({
+      size: outputBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX,
+    });
+    this.transientBuffers.push(expanded);
+    this.endPass();
+    const pass = this.encoder().beginComputePass();
+    pass.setPipeline(this.instanceExpansionPipeline);
+    const maxGroups = Math.max(1, this.device.limits.maxComputeWorkgroupsPerDimension || 65535);
+    const wordsPerDispatch = maxGroups * 64;
+    for (let baseWord = 0; baseWord < outputWords; baseWord += wordsPerDispatch) {
+      const params = this.device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.transientBuffers.push(params);
+      this.device.queue.writeBuffer(params, 0, new Uint32Array([
+        sourceWords, strideWords, stepRate, sourceOffsetWords, outputWords, baseWord, 0, 0,
+      ]));
+      const bindGroup = this.device.createBindGroup({
+        layout: this.instanceExpansionPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: source.gpu, offset: sourceBindingOffset, size: sourceWords * 4 } },
+          { binding: 1, resource: { buffer: expanded } },
+          { binding: 2, resource: { buffer: params, size: 32 } },
+        ],
+      });
+      const chunkWords = Math.min(wordsPerDispatch, outputWords - baseWord);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(chunkWords / 64));
+    }
+    pass.end();
+    return expanded;
   }
 
   dispatchCompute(x, y, z) {

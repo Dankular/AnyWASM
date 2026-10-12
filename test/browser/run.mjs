@@ -777,6 +777,95 @@ try {
     drawParamsResult.pixel?.every((value, i) => Math.abs(value - [0, 255, 0, 255][i]) <= 1),
     JSON.stringify(drawParamsResult));
 
+  const instanceStepResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(float2 position : POSITION, float2 offset : TEXCOORD0) : SV_Position {
+          return float4(position + offset, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        float4 main(float4 position : SV_Position) : SV_Target {
+          return position.x < 32.0 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 1.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      const bufferWrite = (id, bytes) => {
+        const payload = new Uint8Array(12 + bytes.length);
+        payload.set(words(id, 0, bytes.length)); payload.set(bytes, 12); command(3, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(2, words(11, 24, 1, 0, 0, 8));
+      command(2, words(12, 16, 1, 0, 0, 8));
+      const vertices = new Uint8Array(24), vertexData = new DataView(vertices.buffer);
+      [[-0.22, -0.4], [-0.22, 0.4], [0.22, 0]].forEach(([x, y], i) => {
+        vertexData.setFloat32(i * 8, x, true); vertexData.setFloat32(i * 8 + 4, y, true);
+      });
+      bufferWrite(11, vertices);
+      const instances = new Uint8Array(16), instanceData = new DataView(instances.buffer);
+      instanceData.setFloat32(0, -0.48, true); instanceData.setFloat32(4, 0, true);
+      instanceData.setFloat32(8, 0.48, true); instanceData.setFloat32(12, 0, true);
+      bufferWrite(12, instances);
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(7, words(10, 2,
+        0, 16, 0, 0, 0, 0,
+        1, 16, 1, 0, 1, 2)); // step-rate 2 repeats each instance record twice
+      command(13, words(0, 2, 11, 8, 0, 12, 8, 0));
+      command(15, words(10)); command(16, words(4));
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(21, words(1, 2, 0));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true); clearView.setFloat32(16, 1, true); command(27, clear);
+      command(31, words(3, 2, 0, 0));
+      command(31, words(3, 2, 0, 2));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x, y) => {
+        const i = (y * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = { left: at(16, 32), right: at(48, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 instance data step rate repeats records for the requested instance count',
+    instanceStepResult.draws === 2 && instanceStepResult.errors.length === 0
+      && near(instanceStepResult.left, [255, 0, 0, 255], 1)
+      && near(instanceStepResult.right, [0, 255, 0, 255], 1),
+    JSON.stringify(instanceStepResult));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {
