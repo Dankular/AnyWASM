@@ -3451,7 +3451,7 @@ try {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
     const canvas = document.createElement('canvas');
-    canvas.width = 64; canvas.height = 64;
+    canvas.width = 80; canvas.height = 64;
     try {
       const tool = new ShaderTool(new URL('/shaders/', location.href));
       await tool.init();
@@ -3486,7 +3486,7 @@ try {
         let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
         return data;
       };
-      command(38, words(1, 0, 9, 64, 64, 28));
+      command(38, words(1, 0, 9, 80, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
       const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
       rasterView.setUint32(0, 12, true); rasterView.setUint32(4, 3, true);
@@ -3506,6 +3506,10 @@ try {
       blend(20, 3, 4, 1, 0x7); // source-color / inverse-source-color
       blend(21, 9, 10, 1, 0x7); // destination-color / inverse-destination-color
       blend(22, 14, 15, 1, 0x7); // blend-constant / inverse-blend-constant
+      const maskedBlend = new Uint8Array(268), maskedBlendView = new DataView(maskedBlend.buffer);
+      maskedBlendView.setUint32(0, 23, true); // state id
+      maskedBlendView.setUint32(40, 0x5, true); // write red and blue only
+      command(9, maskedBlend);
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
@@ -3529,6 +3533,10 @@ try {
         command(23, words(1, left, top, right, bottom));
         command(29, words(3, 0));
       }
+      command(24, words(23, 0, 0, 0, 0, 0xffffffff));
+      command(22, words(1, 0x42800000, 0, 0x41800000, 0x42000000, 0, 0x3f800000)); // viewport x=64, width=16
+      command(23, words(1, 64, 0, 80, 32));
+      command(29, words(3, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y) => {
@@ -3543,6 +3551,7 @@ try {
         add: at(8, 16), subtract: at(24, 16), min: at(40, 16), max: at(56, 16),
         srcAlpha: factorAt(0), dstAlpha: factorAt(1), srcAlphaSaturate: factorAt(2),
         srcColor: factorAt(3), dstColor: factorAt(4), blendConstant: factorAt(5),
+        channelMask: at(72, 16),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -3552,14 +3561,14 @@ try {
     }
   });
   check('D3D11 ADD, SUBTRACT, MIN, and MAX blend operations match channel-wise pixels',
-    blendModesResult.draws === 10 && blendModesResult.errors.length === 0
+    blendModesResult.draws === 11 && blendModesResult.errors.length === 0
       && near(blendModesResult.add, [191, 153, 128, 255], 1)
       && near(blendModesResult.subtract, [0, 102, 0, 128], 1)
       && near(blendModesResult.min, [64, 26, 26, 77], 1)
       && near(blendModesResult.max, [128, 128, 102, 204], 1),
     JSON.stringify(blendModesResult));
   check('D3D11 blend factors cover alpha, color, saturate, and blend-constant paths',
-    blendModesResult.errors.length === 0
+    blendModesResult.draws === 11 && blendModesResult.errors.length === 0
       && ['srcAlpha', 'dstAlpha', 'srcAlphaSaturate', 'srcColor', 'dstColor', 'blendConstant']
         .every((name) => Array.isArray(blendModesResult[name]))
       && near(blendModesResult.srcAlpha, [77, 107, 41, 77], 1)
@@ -3568,6 +3577,10 @@ try {
       && near(blendModesResult.srcColor, [112, 77, 94, 77], 1)
       && near(blendModesResult.dstColor, [96, 36, 71, 77], 1)
       && near(blendModesResult.blendConstant, [112, 77, 45, 77], 1),
+    JSON.stringify(blendModesResult));
+  check('D3D11 render target write mask preserves disabled color and alpha channels',
+    blendModesResult.draws === 11 && blendModesResult.errors.length === 0
+      && near(blendModesResult.channelMask || [], [64, 26, 26, 77], 1),
     JSON.stringify(blendModesResult));
 
   const mrtResult = await page.evaluate(async () => {

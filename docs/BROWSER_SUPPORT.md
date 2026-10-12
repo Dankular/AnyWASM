@@ -87,7 +87,8 @@ resolve half-alpha red over a blue clear to verify alpha-to-coverage, and verify
 `0x5` preserves two of four samples. A two-target pixel check also verifies independent blend
 descriptors by adding red to target 0 while target 1 overwrites its clear colour.
 The blend fixture also checks all four D3D11 `SRC1_*` color and alpha factors using the
-second pixel-shader output, including inverse factors and a fractional source alpha.
+second pixel-shader output, including inverse factors and a fractional source alpha. A channel
+write-mask check writes red and blue while preserving the cleared green and alpha channels.
 
 | Browser or feature | Evidence and current status |
 |---|---|
