@@ -1,8 +1,8 @@
-//! End-to-end: load real Windows x64 executables (built by fixtures/build.sh) and run them.
+//! End-to-end: load Windows PE executables and run them.
+use anywasm_cpu::cpu::{CpuMode, RAX, RSP};
 use anywasm_cpu::mem::{PAGE_SIZE, PROT_RWX};
-use anywasm_cpu::cpu::{RAX, RSP, CpuMode};
-use anywasm_rt::{Process, Stop, Vfs};
 use anywasm_rt::process::{EXIT_MAGIC, TEB_ADDR};
+use anywasm_rt::{Process, Stop, Vfs};
 
 fn minimal_pe32(code: &[u8]) -> Vec<u8> {
     assert!(code.len() <= 0x200);
@@ -42,6 +42,33 @@ fn minimal_pe32(code: &[u8]) -> Vec<u8> {
     pe
 }
 
+fn pe32_with_set_last_error_import() -> Vec<u8> {
+    let code = [
+        0x68, 123, 0, 0, 0, // push 123
+        0xff, 0x15, 0x50, 0x11, 0x40, 0x00, // call dword ptr [0x00401150]
+        0xc3, // ret to the loader's exit sentinel
+    ];
+    let mut pe = minimal_pe32(&code);
+    let put16 = |b: &mut [u8], at: usize, v: u16| b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    let put32 = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let optional = 0x84 + 20;
+
+    // One IMAGE_IMPORT_DESCRIPTOR and its null terminator, at RVA 0x1100.
+    put32(&mut pe, optional + 96 + 8, 0x1100);
+    put32(&mut pe, optional + 96 + 12, 40);
+    put32(&mut pe, 0x300, 0x1140); // OriginalFirstThunk
+    put32(&mut pe, 0x30c, 0x1128); // DLL name
+    put32(&mut pe, 0x310, 0x1150); // FirstThunk / IAT
+    pe[0x328..0x335].copy_from_slice(b"kernel32.dll\0");
+    put32(&mut pe, 0x340, 0x1160); // Import-by-name RVA
+    put32(&mut pe, 0x344, 0);
+    put32(&mut pe, 0x350, 0x1160);
+    put32(&mut pe, 0x354, 0);
+    put16(&mut pe, 0x360, 0); // Hint
+    pe[0x362..0x36f].copy_from_slice(b"SetLastError\0");
+    pe
+}
+
 #[test]
 fn pe32_x86_entry_executes_and_win32_import_uses_stdcall_stack_cleanup() {
     let mut vfs = Vfs::new();
@@ -62,6 +89,19 @@ fn pe32_x86_entry_executes_and_win32_import_uses_stdcall_stack_cleanup() {
     assert_eq!(process.run_to_end(100), Stop::Exit(0));
     assert_eq!(process.mem.read_u32(TEB_ADDR + 0x34).unwrap(), 123);
     assert_eq!(process.cpu.gpr[RSP], stack + 12);
+}
+
+#[test]
+fn pe32_import_table_binds_and_calls_kernel32_stdcall_thunk() {
+    let mut vfs = Vfs::new();
+    vfs.insert("x86_import_test.exe", pe32_with_set_last_error_import());
+    let mut process = Process::new(vfs);
+    process.load_exe("x86_import_test.exe", None).unwrap();
+
+    let thunk = process.thunk_for("kernel32", "SetLastError", true).unwrap();
+    assert_eq!(process.mem.read_u32(0x0040_1150).unwrap(), thunk as u32);
+    assert_eq!(process.run_to_end(100), Stop::Exit(0));
+    assert_eq!(process.mem.read_u32(TEB_ADDR + 0x34).unwrap(), 123);
 }
 
 fn fixture(name: &str) -> Vec<u8> {
