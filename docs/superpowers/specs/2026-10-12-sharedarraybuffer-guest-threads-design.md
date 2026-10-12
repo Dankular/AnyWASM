@@ -1,7 +1,8 @@
 # Shared WebAssembly Memory for Parallel Guest Threads
 
 **Status:** feasibility spike complete; revised architecture documented for review. Production
-integration remains unimplemented.
+integration remains unimplemented. A `no_std` CPU-state crate and version-1 worker ABI skeleton are
+implemented, but the ABI is not yet connected to worker execution or shared guest memory.
 
 ## Goal and scope
 
@@ -39,6 +40,16 @@ sample rendering path. Those remain in the parent runtime goal.
 - `web/anywasm.js` transfers the Wasm and `.awb` `ArrayBuffer`s to the worker. Game data uses the
   existing range-fetch path. SAB is therefore for shared guest execution state, not a replacement
   for those transfer and streaming paths.
+- `crates/anywasm-cpu-state` now owns `Cpu` with a fixed C layout and no allocator or `std`
+  dependency. Its shared ABI defines a 128-byte bounded-region header, 16-byte sorted page-map
+  entries, and a 64-byte aligned atomic worker slot with sequence-matched
+  publish/claim/complete transitions. The CPU context is 784 bytes and 16-byte aligned. Header
+  validation checks bounds, alignment, region overlap, context offsets, and frame mappings; failed
+  worker slots become disabled after their completion is consumed. `anywasm-cpu` re-exports the
+  context so existing interpreter users keep the same API.
+- The ABI crate is not loaded by `web/worker.js`; the current runtime still runs cooperatively and
+  keeps guest frame bytes in `Memory`'s `Vec<u8>`. The worker control protocol has not yet been
+  exercised between browser workers.
 
 ## Feasibility spike result (2026-10-12)
 
@@ -77,11 +88,12 @@ Workers return complete contexts at slice boundaries, so the coordinator can ser
 publish changed pages before resuming them. Asyncify remains coordinator-only. The worker runtime
 starts with the interpreter; JIT integration requires a later design step.
 
-This candidate needs a new CPU-core boundary: the current `Cpu` and `Memory` implementation uses
-`std`, heap collections, a Rust-owned frame `Vec<u8>`, and generated JIT state. No production CPU
-worker has been integrated. The next implementation plan must extract a no-allocation worker core,
-formalize the host-backed shared guest-memory interface and mapping-generation protocol, then prove
-it with browser workers before target replay.
+The first boundary now extracts the architectural `Cpu` context into `anywasm-cpu-state`; the
+interpreter and `Memory` implementation still use `std`, heap collections, a Rust-owned frame
+`Vec<u8>`, and generated JIT state. No production CPU worker has been integrated. The next steps
+are to extract a no-allocation interpreter core, implement the atomic shared guest-frame access
+backend and mapping-generation protocol, then connect the ABI to browser workers before target
+replay.
 
 ## Success criteria
 

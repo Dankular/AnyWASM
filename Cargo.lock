@@ -14,8 +14,13 @@ dependencies = [
 name = "anywasm-cpu"
 version = "0.1.0"
 dependencies = [
+ "anywasm-cpu-state",
  "libc",
 ]
+
+[[package]]
+name = "anywasm-cpu-state"
+version = "0.1.0"
 
 [[package]]
 name = "anywasm-pe"

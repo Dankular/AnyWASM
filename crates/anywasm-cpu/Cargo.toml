@@ -8,5 +8,8 @@ description = "x86-64 user-mode CPU core (decoder + interpreter) with paged, per
 [features]
 jit-test-api = []
 
+[dependencies]
+anywasm-cpu-state.workspace = true
+
 [dev-dependencies]
 libc = "0.2"

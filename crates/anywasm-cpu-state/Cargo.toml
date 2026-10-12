@@ -1,0 +1,9 @@
+[package]
+name = "anywasm-cpu-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "no_std x86-64 CPU context and shared worker ABI"
+
+[lib]
+path = "src/lib.rs"
