@@ -528,11 +528,13 @@ fn check_feature_support(p: &mut Process) -> R {
     const FEATURE_FORMAT_SUPPORT: u64 = 2;
     const FEATURE_FORMAT_SUPPORT2: u64 = 3;
     const FEATURE_D3D10_X_HARDWARE_OPTIONS: u64 = 4;
+    const FEATURE_D3D11_OPTIONS1: u64 = 10;
 
     let (feature, data, size) = (p.arg(1), p.arg(2), p.arg(3) as u32);
     let expected_size = match feature {
         FEATURE_THREADING | FEATURE_FORMAT_SUPPORT | FEATURE_FORMAT_SUPPORT2 => 8,
         FEATURE_DOUBLES | FEATURE_D3D10_X_HARDWARE_OPTIONS => 4,
+        FEATURE_D3D11_OPTIONS1 => 16,
         _ => return Ok(E_INVALIDARG),
     };
     if data == 0 || size != expected_size {
@@ -541,6 +543,10 @@ fn check_feature_support(p: &mut Process) -> R {
 
     match feature {
         FEATURE_THREADING | FEATURE_DOUBLES => p.write_bytes(data, &vec![0; size as usize])?,
+        // This executor has no tiled resources, min/max filtering, depth-only ClearView, or
+        // mappable default buffers. D3D11_FEATURE_DATA_D3D11_OPTIONS1 is four 32-bit fields;
+        // zero reports TILED_RESOURCES_NOT_SUPPORTED and FALSE for the remaining capabilities.
+        FEATURE_D3D11_OPTIONS1 => p.write_bytes(data, &vec![0; size as usize])?,
         FEATURE_FORMAT_SUPPORT => {
             let format = p.rd32(data)?;
             p.wr32(data + 4, format_support_flags(format))?;
@@ -1822,6 +1828,29 @@ mod tests {
         assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
         p.cpu.gpr[RDX] = 99;
         p.cpu.gpr[R9] = 8;
+        assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
+    }
+
+    #[test]
+    fn check_feature_support_reports_disabled_d3d11_options1_capabilities() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DATA: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DATA, PAGE_SIZE, PROT_RW));
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 10; // D3D11_FEATURE_D3D11_OPTIONS1
+        p.cpu.gpr[R8] = DATA;
+        p.cpu.gpr[R9] = 16; // Four 32-bit fields.
+        p.write_bytes(DATA, &[0xff; 16]).unwrap();
+
+        let check = method("ID3D11Device2", "CheckFeatureSupport").unwrap();
+        assert_eq!(check(&mut p).unwrap(), S_OK);
+        assert_eq!(p.read_bytes(DATA, 16).unwrap(), vec![0; 16]);
+
+        p.cpu.gpr[R9] = 12;
         assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
     }
 

@@ -287,7 +287,8 @@ register-stack subset):
       map reset is pixel-checked after adding D3D11 `Flush1` event signaling and event-query
       completion; `Begin` does not reset an event query. Unsupported query and predicate types now
       return `E_NOTIMPL`, while invalid types
-      return `E_INVALIDARG`. GPU counters and predication remain unsupported. Browser fixtures
+      return `E_INVALIDARG`. D3D11.2 `OPTIONS1` reports tiled-resource tier 0 and false for its
+      other capabilities in a 16-byte regression. GPU counters and predication remain unsupported. Browser fixtures
       cover every typed UAV texture format currently advertised by the HLE across R32, RG32, RGBA8,
       RGBA16, and RGBA32 formats, plus structured/raw/typed buffer UAV ranges and a 3D texture UAV.
       UAV formats outside that advertised set, geometry/hull/domain shaders, general staging read-back, deferred
