@@ -1812,7 +1812,7 @@ fn set_texture_stage_state(p: &mut Process) -> R {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
-        1 => matches!(value, 1..=7 | 10 | 13), // supported color-stage ops, including texture-alpha blend
+        1 => matches!(value, 1..=7 | 10 | 12..=13 | 15..=16), // selected add, subtract, and alpha-blend ops
         2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
         4 => (2..=4).contains(&value), // select or modulate alpha
         _ => false,
@@ -2334,16 +2334,19 @@ mod tests {
             p.wr32(STACK + offset, value).unwrap();
         }
         assert_eq!(method("IDirect3DDevice9", "SetFVF").unwrap()(&mut p).unwrap(), S_OK);
-        for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, 13)] {
-            p.wr32(STACK + offset, value).unwrap();
-        }
-        assert_eq!(method("IDirect3DDevice9", "SetTextureStageState").unwrap()(&mut p).unwrap(), S_OK);
+        let set_texture_stage_state = method("IDirect3DDevice9", "SetTextureStageState").unwrap();
+        for color_op in [12, 13, 15, 16] {
+            for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, color_op)] {
+                p.wr32(STACK + offset, value).unwrap();
+            }
+            assert_eq!(set_texture_stage_state(&mut p).unwrap(), S_OK, "color op {color_op}");
 
-        let commands = gpu::decode(&p.extra.gpu.buf);
-        let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
-            .expect("SetTextureStageState should update the fixed-function shader state");
-        let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
-        assert_eq!(words, [0x144, 64, 64, 13, 2, 1, 2, 2, 1]);
+            let commands = gpu::decode(&p.extra.gpu.buf);
+            let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
+                .expect("SetTextureStageState should update the fixed-function shader state");
+            let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
+            assert_eq!(words, [0x144, 64, 64, color_op, 2, 1, 2, 2, 1]);
+        }
     }
 
     #[test]
