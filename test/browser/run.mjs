@@ -879,6 +879,11 @@ try {
             : image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0);
         }
       `, 'main', 'ps_5_0');
+      const linearPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState linearSampler : register(s0);
+        float4 main() : SV_Target { return image.SampleLevel(linearSampler, float2(0.5, 0.5), 0.0); }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -903,9 +908,9 @@ try {
       texels.set([255, 0, 0, 255, 0, 255, 0, 255], 36);
       command(5, texels);
       command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1));
-      const sampler = (id, addressU) => {
+      const sampler = (id, addressU, filter = 0) => {
         const data = new Uint8Array(56), view = new DataView(data.buffer);
-        view.setUint32(0, id, true); view.setUint32(4, 0, true); // point min/mag/mip
+        view.setUint32(0, id, true); view.setUint32(4, filter, true);
         view.setUint32(8, addressU, true); view.setUint32(12, 3, true); view.setUint32(16, 3, true);
         view.setUint32(24, 1, true); view.setUint32(28, 1, true);
         view.setFloat32(48, 0, true); view.setFloat32(52, 0, true);
@@ -913,7 +918,8 @@ try {
       };
       command(8, sampler(15, 1)); // wrap U
       command(8, sampler(16, 3)); // clamp U
-      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(8, sampler(17, 3, 0x15)); // linear min/mag/mip, clamp U
+      shader(7, 0, vertex); shader(8, 1, pixel); shader(9, 1, linearPixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(21, words(1, 2, 0)); command(16, words(4));
       command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 2, 15, 16));
@@ -922,18 +928,27 @@ try {
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { wrap: at(16), clamp: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      stream.length = 0;
+      command(17, words(1, 9));
+      command(20, words(1, 0, 1, 17));
+      command(29, words(3, 0));
+      const secondSize = stream.reduce((total, part) => total + part.length, 0), secondCommands = new Uint8Array(secondSize);
+      let secondOffset = 0; for (const part of stream) { secondCommands.set(part, secondOffset); secondOffset += part.length; }
+      gpu.execute(secondCommands);
+      const linearPixels = await gpu.readBackbuffer(1);
+      const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
+      const result = { wrap: at(pixels, 10), clamp: at(pixels, 48), linear: at(linearPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler repeat and clamp address modes select the wrapped and edge texels',
-    samplerAddressResult.draws === 1 && samplerAddressResult.errors.length === 0
+  check('D3D11 sampler repeat/clamp modes and linear filtering match sampled texels',
+    samplerAddressResult.draws === 2 && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
-      && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1),
+      && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
+      && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
   const d3d9FixedResult = await page.evaluate(async () => {
