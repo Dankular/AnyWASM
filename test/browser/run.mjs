@@ -1719,6 +1719,13 @@ try {
           return image.SampleLevel(anisotropicBorderSampler, float2(2.0, 0.5), 0.0);
         }
       `, 'main', 'ps_5_0');
+      const anisotropicBorderEdgePixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState anisotropicBorderSampler : register(s5);
+        float4 main() : SV_Target {
+          return image.SampleGrad(anisotropicBorderSampler, float2(0.95, 0.5), float2(0.2, 0.0), float2(0.0, 0.001));
+        }
+      `, 'main', 'ps_5_0');
       const a8BorderPixel = tool.compileHlsl(`
         Texture2D<float4> image : register(t0);
         SamplerState borderSampler : register(s0);
@@ -1791,6 +1798,15 @@ try {
       let anisotropicOffset = 0; for (const part of stream) { anisotropicCommands.set(part, anisotropicOffset); anisotropicOffset += part.length; }
       gpu.execute(anisotropicCommands);
       const anisotropicPixels = await gpu.readBackbuffer(1);
+
+      stream.length = 0;
+      shader(41, 1, anisotropicBorderEdgePixel);
+      command(8, sampler(27, 4, 0x55, [0.25, 0.5, 0.75, 1], 8)); // 8x anisotropic filter with BORDER U
+      command(17, words(1, 41)); command(20, words(1, 5, 1, 27)); command(29, words(3, 0));
+      const anisotropicEdgeSize = stream.reduce((total, part) => total + part.length, 0), anisotropicEdgeCommands = new Uint8Array(anisotropicEdgeSize);
+      let anisotropicEdgeOffset = 0; for (const part of stream) { anisotropicEdgeCommands.set(part, anisotropicEdgeOffset); anisotropicEdgeOffset += part.length; }
+      gpu.execute(anisotropicEdgeCommands);
+      const anisotropicEdgePixels = await gpu.readBackbuffer(1);
 
       stream.length = 0;
       command(17, words(1, 9));
@@ -1913,6 +1929,7 @@ try {
         wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35),
         mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
         anisotropicBorderOutside: at(anisotropicPixels, 32),
+        anisotropicBorderEdge: at(anisotropicEdgePixels, 32),
         a8BorderOutside: at(a8Pixels, 32),
         linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32),
         r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48),
@@ -1929,7 +1946,7 @@ try {
     }
   });
   check('D3D11 sampler modes, anisotropic BORDER, and R8/RG8/RGB/A8 border defaults match pixels',
-    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 9 : 11) && samplerAddressResult.errors.length === 0
+    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 10 : 12) && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1951,6 +1968,9 @@ try {
         && near(samplerAddressResult.bcBorderOutside || [], [255, 64, 128, 64], 1))
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
+  check('D3D11 anisotropic BORDER includes edge-crossing SampleGrad taps',
+    near(samplerAddressResult.anisotropicBorderEdge || [], [33, 190, 98, 255], 3),
+    JSON.stringify(samplerAddressResult.anisotropicBorderEdge));
   check(`D3D11 BC1 BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'edge and outside pixels'}`,
     samplerAddressResult.bcSkipped || near(samplerAddressResult.bcBorderEdge || [], [255, 32, 64, 159], 2)
       && near(samplerAddressResult.bcBorderOutside || [], [255, 64, 128, 64], 1),

@@ -294,7 +294,7 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
   const depthTexture = kind.startsWith('texture_depth_');
   const componentType = depthTexture ? 'f32' : textureType.component;
   const comparison = !!settings?.comparison;
-  if (!dimension || !['f32', 'i32', 'u32'].includes(componentType) || settings?.anisotropic || (comparison && !depthTexture)) return null;
+  if (!dimension || !['f32', 'i32', 'u32'].includes(componentType) || (comparison && !depthTexture)) return null;
   if (arrayTexture !== (kind === 'texture_2d_array' || kind === 'texture_depth_2d_array')) return null;
 
   const name = `border_sample_${textureName}_${samplerIndex}`;
@@ -478,6 +478,48 @@ function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode)
   return ${name}(${callArgs('_lod')});
 }`;
   return { name: `${name}_${mode}`, source };
+}
+
+function anisotropicBorderSampleWgsl(sampleName, textureName, textureType, samplerIndex,
+  addressModes, borderColor, settings, arrayTexture, textureFormat) {
+  if (!['texture_2d', 'texture_2d_array'].includes(textureType.kind)
+      || textureType.component !== 'f32' || settings?.comparison) return null;
+  const maxAnisotropy = Math.max(1, Math.min(16, settings?.maxAnisotropy || 1));
+  if (maxAnisotropy <= 1) return null;
+  const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+  const borderValues = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
+    ? borderColor[index]
+    : index === 3 ? 1 : 0);
+  const floatLiteral = (value) => Number.isInteger(value) ? `${value}.0` : String(value);
+  const borderValue = `vec4<f32>(${borderValues.map(floatLiteral).join(', ')})`;
+  const outside = addressModes.slice(0, 2).flatMap((mode, axis) => mode === 4
+    ? [`(_tapCoord.${axis === 0 ? 'x' : 'y'} < 0.0)`, `(_tapCoord.${axis === 0 ? 'x' : 'y'} > 1.0)`]
+    : []);
+  const outsideExpr = outside.length ? outside.join(' || ') : 'false';
+  const arrayParams = arrayTexture ? ', layer: i32' : '';
+  const arrayArgs = arrayTexture ? ', layer' : '';
+  const name = `aniso_border_sample_${textureName}_${samplerIndex}`;
+  const source = `fn ${name}(coord: vec2<f32>${arrayParams}, derivativeX: vec2<f32>, derivativeY: vec2<f32>, sourceBias: f32) -> vec4<f32> {
+  let _size = vec2<f32>(textureDimensions(${textureName}, 0));
+  let _lengthX = length(derivativeX * _size);
+  let _lengthY = length(derivativeY * _size);
+  let _majorLength = max(_lengthX, _lengthY);
+  let _minorLength = min(_lengthX, _lengthY);
+  let _majorGradient = select(derivativeY, derivativeX, _lengthX >= _lengthY);
+  let _tapCount = clamp(i32(ceil(_majorLength / max(_minorLength, 0.000001))), 1, ${maxAnisotropy});
+  let _lod = log2(max(_minorLength, 0.000001)) + sourceBias;
+  var _sum: vec4<f32> = vec4<f32>(0.0);
+  for (var _tap = 0; _tap < ${maxAnisotropy}; _tap = _tap + 1) {
+    if (_tap < _tapCount) {
+      let _offset = (f32(_tap) + 0.5) / f32(_tapCount) - 0.5;
+      let _tapCoord = coord + _majorGradient * _offset;
+      let _sample = ${sampleName}(_tapCoord${arrayArgs}, _lod);
+      _sum = _sum + select(_sample, ${borderValue}, ${outsideExpr});
+    }
+  }
+  return _sum / f32(_tapCount);
+}`;
+  return { name, source };
 }
 
 function borderGatherWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat, component, comparison) {
@@ -676,6 +718,33 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
         ? borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat)
         : null;
       if (helper) {
+        if (settings?.anisotropic && !settings.comparison && ['implicit', 'grad', 'bias'].includes(mode)) {
+          const anisotropicHelper = anisotropicBorderSampleWgsl(helper.name, textureName, textureType,
+            samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat);
+          if (anisotropicHelper) {
+            borderHelpers.set(helper.name, helper.source);
+            borderHelpers.set(anisotropicHelper.name, anisotropicHelper.source);
+            const coordExpression = coord.text.trim();
+            const anisotropicArgs = [coordExpression];
+            if (arrayTexture) anisotropicArgs.push(args[3].text.trim());
+            let derivativeX, derivativeY, sourceBias = '0.0';
+            if (mode === 'grad') {
+              const derivativeStart = arrayTexture ? 4 : 3;
+              derivativeX = args[derivativeStart].text.trim();
+              derivativeY = args[derivativeStart + 1].text.trim();
+            } else {
+              derivativeX = `dpdx(${coordExpression})`;
+              derivativeY = `dpdy(${coordExpression})`;
+              if (mode === 'bias') sourceBias = args[arrayTexture ? 4 : 3].text.trim();
+            }
+            anisotropicArgs.push(derivativeX, derivativeY, sourceBias);
+            const helperCall = `${anisotropicHelper.name}(${anisotropicArgs.join(', ')})`;
+            result += wgsl.slice(cursor, match.index) + helperCall;
+            cursor = close + 1;
+            changed = true;
+            continue;
+          }
+        }
         borderHelpers.set(helper.name, helper.source);
         const sampleArgs = [coord.text.trim()];
         if (arrayTexture) sampleArgs.push(args[3].text.trim());
@@ -1164,6 +1233,7 @@ export class GpuExecutor {
     const sampling = {
       minFilter: d.minFilter, magFilter: d.magFilter, mipmapFilter: d.mipmapFilter,
       mipBias: bias, lodMinClamp: d.lodMinClamp, lodMaxClamp: d.lodMaxClamp,
+      maxAnisotropy: d.maxAnisotropy || 1,
       anisotropic: isAniso, comparison, compare: d.compare,
     };
     return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1, addressModes: [au, av, aw], borderColor, sampling };

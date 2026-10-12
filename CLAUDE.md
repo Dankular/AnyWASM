@@ -248,11 +248,13 @@ register-stack subset):
       SampleGrad, and SampleBias paths, plus 2D-array and 3D RGBA8 SampleLevel paths. D32_FLOAT
       comparison BORDER verifies all eight comparison functions for fully outside point-filtered
       SampleCmpLevelZero taps and for edge-straddling and fully outside linearly filtered SampleCmp
-      footprints; R8_UNORM, RG8_UNORM, B5G6R5_UNORM, BC1, and BC4 BORDER tests verify SRV channel
-      defaults. 2D and 2D-array RGBA8 Gather verify edge-straddling and fully outside taps, including
-      an explicit nonzero offset; D32_FLOAT GatherCmp and R8_UNORM missing-alpha Gather defaults are
-      also pixel-checked. Other sampled dimensions/formats, Shader Model 6.8 bias/gradient comparison
-      methods, cube, and anisotropic BORDER cases remain open;
+      footprints; R8_UNORM, RG8_UNORM, A8_UNORM, B5G6R5_UNORM, BC1, and BC4 BORDER tests verify SRV
+      channel defaults. 2D and 2D-array RGBA8 Gather verify edge-straddling and fully outside taps,
+      including an explicit nonzero offset; D32_FLOAT GatherCmp and R8_UNORM missing-alpha Gather
+      defaults are also pixel-checked. An 8x anisotropic Texture2D SampleLevel outside sample and an
+      in-range SampleGrad footprint crossing the right edge are pixel-checked. Other sampled
+      dimensions/formats, Shader Model 6.8 bias/gradient comparison methods, cube, anisotropic
+      comparison samplers, and anisotropic cases outside these paths remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
