@@ -3922,6 +3922,15 @@ try {
         Texture3D<float4> volume : register(t0);
         float4 main() : SV_Target { return volume.Load(int4(1, 1, 1, 0)); }
       `, 'main', 'ps_5_0');
+      const rgba32_3dCompute = tool.compileHlsl(`
+        RWTexture3D<float4> volume : register(u0);
+        [numthreads(2, 2, 2)]
+        void main(uint3 id : SV_DispatchThreadID) { volume[id] = float4(0.25, 0.5, 0.75, 1.0); }
+      `, 'main', 'cs_5_0');
+      const rgba32_3dPixel = tool.compileHlsl(`
+        Texture3D<float4> volume : register(t0);
+        float4 main() : SV_Target { return volume.Load(int4(1, 1, 1, 0)); }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -3998,12 +4007,28 @@ try {
       const rgbaPixel = Array.from(rgbaBackbuffer.data.slice(center, center + 4));
       const rgbaPixels = await gpu.readBackResource(17);
       const rgbaValues = Array.from(rgbaPixels);
+      stream.length = 0;
+      command(46, words(21, 4, 4, 2, 1, 2, 0x88, 0, 0)); // 4x4x2 RGBA32_FLOAT SRV + UAV volume
+      command(12, words(22, 3, 21, 2, 8, 0, 1, 0, 2)); // 3D UAV covering both W slices
+      command(12, words(23, 2, 21, 2, 8, 0, 1, 0, 1)); // 3D SRV
+      shader(13, 2, rgba32_3dCompute); shader(14, 1, rgba32_3dPixel);
+      command(17, words(2, 13)); command(43, words(0, 1, 22, 0xffffffff));
+      command(42, words(2, 2, 1));
+      command(17, words(1, 14)); command(19, words(1, 0, 1, 23));
+      command(21, words(1, 2, 0)); command(29, words(3, 0));
+      gpu.execute(append());
+      const rgba32Backbuffer = await gpu.readBackbuffer(1);
+      const rgba32Pixel = Array.from(rgba32Backbuffer.data.slice(center, center + 4));
+      const rgba32Pixels = await gpu.readBackResource(21);
+      const rgba32Values = Array.from(new Float32Array(rgba32Pixels.buffer, rgba32Pixels.byteOffset, rgba32Pixels.byteLength / 4));
       const result = {
         pixel: floatPixel,
         uintPixel: uintObservedPixel,
         uintValues,
         rgbaPixel,
         rgbaValues,
+        rgba32Pixel,
+        rgba32Values,
         dispatches: gpu.stats.dispatches,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
@@ -4016,20 +4041,26 @@ try {
     }
   });
   check('D3D11 R32_FLOAT 3D UAV writes remain visible through a Texture3D SRV',
-    texture3dUavResult.dispatches === 3 && texture3dUavResult.draws === 3 && texture3dUavResult.errors.length === 0
+    texture3dUavResult.dispatches === 4 && texture3dUavResult.draws === 4 && texture3dUavResult.errors.length === 0
       && near(texture3dUavResult.pixel, [64, 0, 0, 255], 1),
     JSON.stringify(texture3dUavResult));
   check('D3D11 R32_UINT Texture3D UAV writes reach all voxels and the following draw',
-    texture3dUavResult.dispatches === 3 && texture3dUavResult.draws === 3 && texture3dUavResult.errors.length === 0
+    texture3dUavResult.dispatches === 4 && texture3dUavResult.draws === 4 && texture3dUavResult.errors.length === 0
       && near(texture3dUavResult.uintPixel, [173, 0, 0, 255], 1)
       && texture3dUavResult.uintValues?.length === 32
       && texture3dUavResult.uintValues.every((value, i) => value === i),
     JSON.stringify(texture3dUavResult));
   check('D3D11 RGBA8_UNORM Texture3D UAV writes normalized voxels and samples them in the next draw',
-    texture3dUavResult.dispatches === 3 && texture3dUavResult.draws === 3 && texture3dUavResult.errors.length === 0
+    texture3dUavResult.dispatches === 4 && texture3dUavResult.draws === 4 && texture3dUavResult.errors.length === 0
       && near(texture3dUavResult.rgbaPixel, [64, 128, 191, 255], 1)
       && texture3dUavResult.rgbaValues?.length === 128
       && texture3dUavResult.rgbaValues.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
+    JSON.stringify(texture3dUavResult));
+  check('D3D11 RGBA32_FLOAT Texture3D UAV writes all channels and samples them in the next draw',
+    texture3dUavResult.dispatches === 4 && texture3dUavResult.draws === 4 && texture3dUavResult.errors.length === 0
+      && near(texture3dUavResult.rgba32Pixel, [64, 128, 191, 255], 1)
+      && texture3dUavResult.rgba32Values?.length === 128
+      && texture3dUavResult.rgba32Values.every((value, i) => value === [0.25, 0.5, 0.75, 1.0][i % 4]),
     JSON.stringify(texture3dUavResult));
 
   const caps = await page.textContent('#caps');
