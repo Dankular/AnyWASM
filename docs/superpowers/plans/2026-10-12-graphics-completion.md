@@ -58,6 +58,7 @@
 - [x] Forward D3D11 alpha-to-coverage into multisampled WebGPU pipelines; the 4x RGBA8 resolve regression verifies partial red/blue sample coverage from a half-alpha draw in Chromium.
 - [x] Forward the `OMSetBlendState` sample mask into WebGPU multisample state and its pipeline cache key; the 4x RGBA8 resolve regression verifies that mask `0x5` preserves two of four samples.
 - [x] Verify `IndependentBlendEnable` with two render targets: target 0 adds red to its blue clear while target 1 overwrites green with blue.
+- [x] Implement D3D11 `SRC1_COLOR`, `INV_SRC1_COLOR`, `SRC1_ALPHA`, and `INV_SRC1_ALPHA` blend factors using the second pixel-shader output; browser pixels verify each factor.
 
 **Gate:** Every render-state, copy, resolve, packing, and staging item listed open by the checklist has a named passing regression.
 

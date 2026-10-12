@@ -3592,7 +3592,7 @@ try {
         Output main() {
           Output output;
           output.first = float4(1.0, 0.0, 0.0, 1.0);
-          output.second = float4(0.0, 0.0, 1.0, 1.0);
+          output.second = float4(0.0, 0.0, 1.0, 0.25);
           return output;
         }
       `, 'main', 'ps_5_0');
@@ -3642,13 +3642,44 @@ try {
       command(27, words(5, 0, 0, 0x3f800000, 0x3f800000)); // clear target 0 to blue
       command(27, words(6, 0, 0x3f800000, 0, 0x3f800000)); // clear target 1 to green
       command(29, words(3, 0));
+      command(4, words(9, 64, 64, 1, 1, 28, 0x20, 0, 1, 0));
+      command(12, words(10, 0, 9, 28, 4, 0, 1, 0, 1));
+      for (const [index, factor] of [16, 17, 18, 19].entries()) {
+        const payload = new Uint8Array(268), view = new DataView(payload.buffer);
+        view.setUint32(0, 12 + index, true); // state id
+        view.setUint32(12, 1, true); // RenderTarget[0].BlendEnable
+        view.setUint32(16, factor, true); // SrcBlend = SRC1_COLOR / inverse / alpha / inverse-alpha
+        view.setUint32(20, 2, true); // DestBlend = ONE
+        view.setUint32(24, 1, true); // BlendOp = ADD
+        view.setUint32(28, 2, true); // SrcBlendAlpha = ONE
+        view.setUint32(32, 1, true); // DestBlendAlpha = ZERO
+        view.setUint32(36, 1, true); // BlendOpAlpha = ADD
+        view.setUint32(40, 0xf, true); // RenderTarget[0].WriteMask
+        command(9, payload);
+      }
+      command(21, words(1, 10, 0));
+      command(27, words(10, 0, 0x3f800000, 0, 0x3f800000)); // clear to green
+      const viewportXs = [0, 0x41800000, 0x42000000, 0x42400000];
+      for (let index = 0; index < viewportXs.length; index++) {
+        command(24, words(12 + index, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xffffffff));
+        command(22, words(1, viewportXs[index], 0, 0x41800000, 0x42800000, 0, 0x3f800000));
+        command(29, words(3, 0));
+      }
       gpu.execute(append());
-      const [first, second] = await Promise.all([gpu.readBackTexture(3), gpu.readBackTexture(4)]);
+      const [first, second, dualSource] = await Promise.all([gpu.readBackTexture(3), gpu.readBackTexture(4), gpu.readBackTexture(9)]);
       const pixelAt = (image) => {
         const i = (32 * image.width + 32) * 4;
         return Array.from(image.data.slice(i, i + 4));
       };
-      const result = { first: pixelAt(first), second: pixelAt(second), errors: gpu.stats.errors };
+      const pixelAtXY = (image, x, y) => {
+        const i = (y * image.width + x) * 4;
+        return Array.from(image.data.slice(i, i + 4));
+      };
+      const result = {
+        first: pixelAt(first), second: pixelAt(second),
+        dualSourcePixels: [8, 24, 40, 56].map((x) => pixelAtXY(dualSource, x, 32)),
+        dualSourceFeature: gpu.features.has('dual-source-blending'), errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -3658,7 +3689,15 @@ try {
   check('D3D11 independent blend descriptors apply per render target',
     !mrtResult.error && mrtResult.errors?.length === 0
       && near(mrtResult.first || [], [255, 0, 255, 255], 1)
-      && near(mrtResult.second || [], [0, 0, 255, 255], 1),
+      && near(mrtResult.second || [], [0, 0, 255, 64], 1),
+    JSON.stringify(mrtResult));
+  check('D3D11 SRC1 color and alpha factors read the second pixel shader output',
+    !mrtResult.error && mrtResult.dualSourceFeature
+      && near(mrtResult.dualSourcePixels?.[0] || [], [0, 255, 0, 255], 1)
+      && near(mrtResult.dualSourcePixels?.[1] || [], [255, 255, 0, 255], 1)
+      && near(mrtResult.dualSourcePixels?.[2] || [], [64, 255, 0, 255], 1)
+      && near(mrtResult.dualSourcePixels?.[3] || [], [191, 255, 0, 255], 1)
+      && mrtResult.errors?.length === 0,
     JSON.stringify(mrtResult));
 
   const renderTextureResult = await page.evaluate(async () => {

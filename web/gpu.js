@@ -155,8 +155,25 @@ const hasStencil = (f) => f.includes('stencil');
 
 const CMP = { 1: 'never', 2: 'less', 3: 'equal', 4: 'less-equal', 5: 'greater', 6: 'not-equal', 7: 'greater-equal', 8: 'always' };
 const STENCIL_OP = { 1: 'keep', 2: 'zero', 3: 'replace', 4: 'increment-clamp', 5: 'decrement-clamp', 6: 'invert', 7: 'increment-wrap', 8: 'decrement-wrap' };
-const BLEND_FACTOR = { 1: 'zero', 2: 'one', 3: 'src', 4: 'one-minus-src', 5: 'src-alpha', 6: 'one-minus-src-alpha', 7: 'dst-alpha', 8: 'one-minus-dst-alpha', 9: 'dst', 10: 'one-minus-dst', 11: 'src-alpha-saturated', 14: 'constant', 15: 'one-minus-constant' };
+const BLEND_FACTOR = { 1: 'zero', 2: 'one', 3: 'src', 4: 'one-minus-src', 5: 'src-alpha', 6: 'one-minus-src-alpha', 7: 'dst-alpha', 8: 'one-minus-dst-alpha', 9: 'dst', 10: 'one-minus-dst', 11: 'src-alpha-saturated', 14: 'constant', 15: 'one-minus-constant', 16: 'src1', 17: 'one-minus-src1', 18: 'src1-alpha', 19: 'one-minus-src1-alpha' };
 const BLEND_OP = { 1: 'add', 2: 'subtract', 3: 'reverse-subtract', 4: 'min', 5: 'max' };
+function dualSourceFragmentWgsl(wgsl) {
+  const entry = /@fragment\s+fn\s+\w+\s*\([^)]*\)\s*->\s*(\w+)/.exec(wgsl);
+  if (!entry) return null;
+  const structStart = wgsl.indexOf(`struct ${entry[1]} {`);
+  if (structStart < 0) return null;
+  const structEnd = wgsl.indexOf('\n}', structStart);
+  if (structEnd < 0) return null;
+  const bodyStart = wgsl.indexOf('\n', structStart) + 1;
+  const body = wgsl.slice(bodyStart, structEnd);
+  const locations = [...body.matchAll(/@location\((\d+)\)/g)].map((match) => match[1]);
+  if (locations.length !== 2 || locations.filter((location) => location === '0').length !== 1
+      || locations.filter((location) => location === '1').length !== 1) return null;
+  const dualBody = body
+    .replace('@location(0)', '@location(0) @blend_src(0)')
+    .replace('@location(1)', '@location(0) @blend_src(1)');
+  return `enable dual_source_blending;\n${wgsl.slice(0, bodyStart)}${dualBody}${wgsl.slice(structEnd)}`;
+}
 const ADDRESS = { 1: 'repeat', 2: 'mirror-repeat', 3: 'clamp-to-edge', 4: 'clamp-to-edge', 5: 'mirror-repeat' };
 const TOPOLOGY = { 1: 'point-list', 2: 'line-list', 3: 'line-strip', 4: 'triangle-list', 5: 'triangle-strip' };
 const defaultPipelineState = () => ({
@@ -207,6 +224,7 @@ export class GpuExecutor {
     this.depths = new Map();
     this.swapchains = new Map();
     this.pipelines = new Map();
+    this.dualSourceShaderVariants = new WeakMap();
     this.computePipelines = new Map();
     this.bglCache = new Map();
     this.emptyBindGroupCache = new WeakMap();
@@ -583,6 +601,19 @@ export class GpuExecutor {
       shader.variants.set(dxgiFormat, variant);
     }
     return { ...shader, ...variant };
+  }
+
+  dualSourceShaderVariant(shader) {
+    let variant = this.dualSourceShaderVariants.get(shader);
+    if (variant) return variant;
+    const wgsl = dualSourceFragmentWgsl(shader.wgsl);
+    if (!wgsl) {
+      this.log('draw skipped: dual-source blending requires SV_Target0 and SV_Target1 outputs');
+      return null;
+    }
+    variant = { ...shader, wgsl, module: this.device.createShaderModule({ code: wgsl }) };
+    this.dualSourceShaderVariants.set(shader, variant);
+    return variant;
   }
 
   // ── views ────────────────────────────────────────────────────────────────
@@ -1532,6 +1563,11 @@ export class GpuExecutor {
     const blend = this.blends.get(st.blend.id);
     const d3d9States = st.d3d9RenderStates;
     const d3d9BlendEnabled = d3d9States.has(27);
+    const usesDualSourceBlend = !d3d9BlendEnabled && !!blend?.getUint32(8, true)
+      && [12, 16, 24, 28].some((offset) => {
+        const factor = blend.getUint32(offset, true);
+        return factor >= 16 && factor <= 19;
+      });
     const targets = att.colors.map((c, i) => {
       if (!c) return null;
       const t = { format: c.format, writeMask: 0xf };
@@ -1576,7 +1612,18 @@ export class GpuExecutor {
       mask: st.blend.mask,
       alphaToCoverageEnabled: sampleCount > 1 && !!blend?.getUint32(0, true),
     };
-    if (ps) desc.fragment = { module: ps.module, entryPoint: ps.entry, targets };
+    if (ps) {
+      let fragmentShader = ps;
+      if (usesDualSourceBlend) {
+        if (targets.length !== 1) {
+          this.log('draw skipped: dual-source blending requires exactly one render target');
+          return null;
+        }
+        fragmentShader = this.dualSourceShaderVariant(ps);
+        if (!fragmentShader) return null;
+      }
+      desc.fragment = { module: fragmentShader.module, entryPoint: fragmentShader.entry, targets };
+    }
     else if (targets.some(Boolean)) desc.fragment = undefined;
     if (indexed && (topology === 3 || topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';
     const r = this.rasters.get(st.raster);

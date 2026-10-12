@@ -86,6 +86,8 @@ the full suite passed with no WebGPU validation errors or page errors. Its 4x MS
 resolve half-alpha red over a blue clear to verify alpha-to-coverage, and verify that sample mask
 `0x5` preserves two of four samples. A two-target pixel check also verifies independent blend
 descriptors by adding red to target 0 while target 1 overwrites its clear colour.
+The blend fixture also checks all four D3D11 `SRC1_*` color and alpha factors using the
+second pixel-shader output, including inverse factors and a fractional source alpha.
 
 | Browser or feature | Evidence and current status |
 |---|---|
