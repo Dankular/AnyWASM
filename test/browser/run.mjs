@@ -3624,6 +3624,23 @@ try {
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(16, words(4)); command(21, words(2, 5, 6, 0));
+      const blend = new Uint8Array(268), blendView = new DataView(blend.buffer);
+      blendView.setUint32(0, 11, true); // state id
+      blendView.setUint32(8, 1, true); // IndependentBlendEnable
+      blendView.setUint32(12, 1, true); // RenderTarget[0].BlendEnable
+      blendView.setUint32(16, 2, true); // RenderTarget[0].SrcBlend = ONE
+      blendView.setUint32(20, 2, true); // RenderTarget[0].DestBlend = ONE
+      blendView.setUint32(24, 1, true); // RenderTarget[0].BlendOp = ADD
+      blendView.setUint32(28, 2, true); // RenderTarget[0].SrcBlendAlpha = ONE
+      blendView.setUint32(32, 2, true); // RenderTarget[0].DestBlendAlpha = ONE
+      blendView.setUint32(36, 1, true); // RenderTarget[0].BlendOpAlpha = ADD
+      blendView.setUint32(40, 0xf, true); // RenderTarget[0].WriteMask
+      blendView.setUint32(44, 0, true); // RenderTarget[1].BlendEnable
+      blendView.setUint32(72, 0xf, true); // RenderTarget[1].WriteMask
+      command(9, blend);
+      command(24, words(11, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xffffffff));
+      command(27, words(5, 0, 0, 0x3f800000, 0x3f800000)); // clear target 0 to blue
+      command(27, words(6, 0, 0x3f800000, 0, 0x3f800000)); // clear target 1 to green
       command(29, words(3, 0));
       gpu.execute(append());
       const [first, second] = await Promise.all([gpu.readBackTexture(3), gpu.readBackTexture(4)]);
@@ -3638,9 +3655,9 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 multiple render targets write independent pixel outputs',
+  check('D3D11 independent blend descriptors apply per render target',
     !mrtResult.error && mrtResult.errors?.length === 0
-      && near(mrtResult.first || [], [255, 0, 0, 255], 1)
+      && near(mrtResult.first || [], [255, 0, 255, 255], 1)
       && near(mrtResult.second || [], [0, 0, 255, 255], 1),
     JSON.stringify(mrtResult));
 
