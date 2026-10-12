@@ -989,6 +989,106 @@ try {
       && near(scissorResult.outside, [0, 0, 0, 255], 1),
     JSON.stringify(scissorResult));
 
+  const stencilResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const red = tool.compileHlsl('float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const green = tool.compileHlsl('float4 main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3;
+        const data = new Uint8Array(8 + padded), view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(3, 64, 64, 1, 1, 45, 0x40, 0, 1, 0)); // D24S8 depth-stencil texture
+      command(12, words(4, 1, 3, 45, 3, 0, 1, 0, 1)); // DSV
+      const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
+      rasterView.setUint32(0, 12, true);
+      rasterView.setUint32(4, 3, true); // solid fill
+      rasterView.setUint32(8, 1, true); // no culling
+      rasterView.setUint32(28, 1, true); // depth clip enabled
+      rasterView.setUint32(32, 1, true); // scissor enabled
+      command(10, raster);
+      const stencilState = (id, writeMask, compare, passOp) => {
+        const payload = new Uint8Array(56), view = new DataView(payload.buffer);
+        view.setUint32(0, id, true);
+        view.setUint32(4, 0, true); // depth disabled
+        view.setUint32(8, 0, true);
+        view.setUint32(12, 8, true); // depth compare: always
+        view.setUint32(16, 1, true); // stencil enabled
+        view.setUint8(20, 0xff); view.setUint8(21, writeMask);
+        for (const face of [24, 40]) {
+          view.setUint32(face, 1, true); // fail: keep
+          view.setUint32(face + 4, 1, true); // depth fail: keep
+          view.setUint32(face + 8, passOp, true);
+          view.setUint32(face + 12, compare, true);
+        }
+        command(11, payload);
+      };
+      stencilState(13, 0xff, 8, 3); // always pass and write reference value
+      stencilState(14, 0, 3, 1); // draw only where stored stencil equals reference
+      shader(7, 0, vertex); shader(8, 1, red); shader(9, 1, green);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
+      command(21, words(1, 2, 4)); command(25, words(12));
+      const clearColor = new Uint8Array(20), clearColorView = new DataView(clearColor.buffer);
+      clearColorView.setUint32(0, 2, true); clearColorView.setFloat32(16, 1, true); command(27, clearColor);
+      const clearDepth = new Uint8Array(16), clearDepthView = new DataView(clearDepth.buffer);
+      clearDepthView.setUint32(0, 4, true); clearDepthView.setUint32(4, 3, true);
+      clearDepthView.setFloat32(8, 1, true); command(28, clearDepth);
+      command(26, words(13, 1)); command(23, words(1, 0, 0, 32, 64)); command(29, words(3, 0));
+      command(17, words(1, 9)); command(26, words(14, 1));
+      command(23, words(1, 0, 0, 64, 64)); command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x, y) => {
+        const i = (y * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = { written: at(16, 32), rejected: at(48, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 stencil replace writes the reference value and equal comparison masks the next draw',
+    stencilResult.draws === 2 && stencilResult.errors.length === 0
+      && near(stencilResult.written, [0, 255, 0, 255], 1)
+      && near(stencilResult.rejected, [0, 0, 0, 255], 1),
+    JSON.stringify(stencilResult));
+
   const reverseBlendResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
