@@ -320,6 +320,10 @@ try {
     triText.includes('staging R32_FLOAT readback=0.25,0.50,0.75,1.00 row_pitch=8'), triText);
   check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
     triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
+  check('D3D11 staging BGRA8_UNORM Map(READ) preserves raw channel bytes',
+    triText.includes('staging BGRA8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
+  check('D3D11 staging R16_FLOAT Map(READ) preserves packed half-float rows',
+    triText.includes('staging R16_FLOAT readback=3400,3800,3c00,4000,4200,4400 row_pitch=6'), triText);
   check('D3D11 staging R8_UNORM Map(READ) repacks odd-width rows tightly',
     triText.includes('staging R8_UNORM subresource0=11,12,13,21,22,23 row_pitch=3'), triText);
   check('D3D11 staging R8_UNORM Map(READ) selects the requested mip and array slice',

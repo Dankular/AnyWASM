@@ -110,6 +110,10 @@ try {
           `${item.name} staging D32_FLOAT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging Texture3D R32_FLOAT readback=0\.125,0\.250,0\.375,0\.500,0\.625,0\.750,0\.875,1\.000 row_pitch=8 depth_pitch=16/,
           `${item.name} staging Texture3D Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging BGRA8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8/,
+          `${item.name} staging BGRA8_UNORM Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R16_FLOAT readback=3400,3800,3c00,4000,4200,4400 row_pitch=6/,
+          `${item.name} staging R16_FLOAT Map(READ) output: ${graphics.output}`);
         const screenshot = decodePng(await page.locator('#screen').screenshot());
         const pixel = (x, y) => {
           const index = (y * screenshot.w + x) * 4;
