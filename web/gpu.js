@@ -14,7 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
-  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49,
+  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49, CLEAR_UAV: 50,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -40,6 +40,85 @@ const TEX = {
   97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
 };
 const TYPED_UAV_DATA_TYPES = { 2: 5, 3: 4, 4: 3, 10: 5, 12: 4, 14: 3, 16: 5, 17: 4, 18: 3, 28: 5, 30: 4, 31: 5, 32: 3, 41: 5, 42: 4, 43: 3 };
+const UAV_CLEAR_FORMATS = {
+  2: { channels: 4, bits: 32, type: 'float' }, 3: { channels: 4, bits: 32, type: 'uint' }, 4: { channels: 4, bits: 32, type: 'sint' },
+  10: { channels: 4, bits: 16, type: 'float' }, 12: { channels: 4, bits: 16, type: 'uint' }, 14: { channels: 4, bits: 16, type: 'sint' },
+  16: { channels: 2, bits: 32, type: 'float' }, 17: { channels: 2, bits: 32, type: 'uint' }, 18: { channels: 2, bits: 32, type: 'sint' },
+  28: { channels: 4, bits: 8, type: 'unorm' }, 30: { channels: 4, bits: 8, type: 'uint' },
+  31: { channels: 4, bits: 8, type: 'snorm' }, 32: { channels: 4, bits: 8, type: 'sint' },
+  41: { channels: 1, bits: 32, type: 'float' }, 42: { channels: 1, bits: 32, type: 'uint' }, 43: { channels: 1, bits: 32, type: 'sint' },
+};
+
+const roundToEven = (value) => {
+  const floor = Math.floor(value), fraction = value - floor;
+  return fraction < 0.5 ? floor : fraction > 0.5 ? floor + 1 : floor % 2 === 0 ? floor : floor + 1;
+};
+
+function floatToHalfBits(value) {
+  const bits = new Uint32Array(new Float32Array([value]).buffer)[0];
+  const sign = (bits >>> 16) & 0x8000;
+  const exponent = (bits >>> 23) & 0xff;
+  const fraction = bits & 0x7fffff;
+  if (exponent === 0xff) return sign | (fraction ? 0x7e00 : 0x7c00);
+  let halfExponent = exponent - 127 + 15;
+  if (halfExponent >= 31) return sign | 0x7c00;
+  if (halfExponent <= 0) {
+    if (halfExponent < -10) return sign;
+    const significand = fraction | 0x800000;
+    const shift = 14 - halfExponent;
+    const truncated = significand >>> shift;
+    const remainder = significand & ((1 << shift) - 1);
+    const halfway = 1 << (shift - 1);
+    return sign | (truncated + (remainder > halfway || remainder === halfway && (truncated & 1) ? 1 : 0));
+  }
+  let mantissa = fraction >>> 13;
+  const remainder = fraction & 0x1fff;
+  if (remainder > 0x1000 || remainder === 0x1000 && (mantissa & 1)) {
+    mantissa++;
+    if (mantissa === 0x400) {
+      mantissa = 0;
+      halfExponent++;
+      if (halfExponent >= 31) return sign | 0x7c00;
+    }
+  }
+  return sign | (halfExponent << 10) | mantissa;
+}
+
+function uavClearPattern(format, isFloat, uintValues, floatValues) {
+  const info = UAV_CLEAR_FORMATS[format];
+  if (!info || isFloat && !['float', 'unorm', 'snorm'].includes(info.type)) return null;
+  const pattern = new Uint8Array(info.channels * info.bits / 8);
+  const view = new DataView(pattern.buffer);
+  for (let channel = 0; channel < info.channels; channel++) {
+    const offset = channel * info.bits / 8;
+    if (!isFloat) {
+      const value = uintValues[channel] >>> 0;
+      if (info.bits === 8) view.setUint8(offset, value & 0xff);
+      else if (info.bits === 16) view.setUint16(offset, value & 0xffff, true);
+      else view.setUint32(offset, value, true);
+      continue;
+    }
+    if (info.type === 'float') {
+      if (info.bits === 16) view.setUint16(offset, floatToHalfBits(floatValues[channel]), true);
+      else view.setFloat32(offset, floatValues[channel], true);
+    } else if (info.type === 'unorm') {
+      const value = Number.isNaN(floatValues[channel]) ? 0 : floatValues[channel];
+      const max = (2 ** info.bits) - 1;
+      const normalized = Math.min(1, Math.max(0, value));
+      const packed = roundToEven(normalized * max);
+      if (info.bits === 8) view.setUint8(offset, packed);
+      else view.setUint16(offset, packed, true);
+    } else {
+      const value = Number.isNaN(floatValues[channel]) ? 0 : floatValues[channel];
+      const max = (2 ** (info.bits - 1)) - 1;
+      const normalized = Math.min(1, Math.max(-1, value));
+      const packed = roundToEven(normalized * max);
+      if (info.bits === 8) view.setInt8(offset, packed);
+      else view.setInt16(offset, packed, true);
+    }
+  }
+  return pattern;
+}
 
 // DXGI_FORMAT -> GPUVertexFormat
 const VTX = {
@@ -348,6 +427,7 @@ export class GpuExecutor {
       case OP.SET_DEPTH: st.depth = { id: u(0), ref: u(1) }; break;
       case OP.CLEAR_RTV: this.clearRtv(u(0), [f(1), f(2), f(3), f(4)]); break;
       case OP.CLEAR_DSV: this.clearDsv(u(0), u(1), f(2), u(3)); break;
+      case OP.CLEAR_UAV: this.clearUav(u(0), u(1) !== 0, [u(2), u(3), u(4), u(5)], [f(2), f(3), f(4), f(5)]); break;
       case OP.DRAW: this.draw(false, u(0), 1, u(1), 0, 0, 0); break;
       case OP.DRAW_INDEXED: this.draw(true, u(0), 1, u(1), i32(2), 0, 0); break;
       case OP.DRAW_INSTANCED: this.draw(false, u(0), u(1), u(2), 0, u(3), 0); break;
@@ -710,6 +790,86 @@ export class GpuExecutor {
     const pass = this.encoder().beginRenderPass({ colorAttachments: [], depthStencilAttachment: a });
     pass.end();
     this.stats.passes++;
+  }
+
+  clearUav(id, isFloat, uintValues, floatValues) {
+    const desc = this.views.get(id);
+    if (!desc || desc.kind !== 3) return;
+    const view = this.getView(id);
+    if (!view) { this.log(`clear UAV skipped: view ${id} is unavailable`); return; }
+
+    if (view.dim === 'buffer') {
+      const rawOrStructured = (desc.slice & 1) !== 0 || (view.bufferResource.misc & (0x20 | 0x40)) !== 0;
+      if (rawOrStructured && !isFloat) {
+        const pattern = new Uint8Array(4);
+        new DataView(pattern.buffer).setUint32(0, uintValues[0] >>> 0, true);
+        this.clearUavBuffer(view, pattern);
+        return;
+      }
+      if (rawOrStructured || !desc.format) { this.log(`clear UAV skipped: buffer view ${id} has no supported typed format`); return; }
+      const pattern = uavClearPattern(desc.format, isFloat, uintValues, floatValues);
+      if (!pattern) { this.log(`clear UAV skipped: unsupported buffer format ${desc.format}`); return; }
+      this.clearUavBuffer(view, pattern);
+      return;
+    }
+
+    const pattern = uavClearPattern(desc.format, isFloat, uintValues, floatValues);
+    if (!pattern) { this.log(`clear UAV skipped: unsupported texture format ${desc.format}`); return; }
+    this.clearUavTexture(view, desc, pattern);
+  }
+
+  clearUavBuffer(view, pattern) {
+    const byteCount = view.size;
+    if (byteCount <= 0 || byteCount % pattern.byteLength !== 0 || view.offset % 4 !== 0) {
+      this.log('clear UAV skipped: buffer view range is not aligned to its element format');
+      return;
+    }
+    this.flush();
+    const chunkSize = Math.max(pattern.byteLength, Math.floor((1 << 20) / pattern.byteLength) * pattern.byteLength);
+    for (let offset = 0; offset < byteCount; offset += chunkSize) {
+      const length = Math.min(chunkSize, byteCount - offset);
+      const chunk = new Uint8Array(length);
+      for (let at = 0; at < length; at += pattern.byteLength) chunk.set(pattern, at);
+      this.device.queue.writeBuffer(view.buffer, view.offset + offset, chunk);
+    }
+  }
+
+  clearUavTexture(view, desc, pattern) {
+    const { tex } = view;
+    if (!tex || tex.samples !== 1) { this.log('clear UAV skipped: multisampled textures are unsupported'); return; }
+    const mip = desc.mip;
+    const width = Math.max(1, tex.width >> mip), height = Math.max(1, tex.height >> mip);
+    let firstSlice = 0, sliceCount = 1;
+    if (tex.dimension === '3d') {
+      const depth = Math.max(1, tex.depth >> mip);
+      firstSlice = Math.min(desc.slice, depth);
+      sliceCount = Math.min(desc.slices || depth, depth - firstSlice);
+    } else if (desc.dim === 5) {
+      firstSlice = Math.min(desc.slice, tex.array);
+      sliceCount = Math.min(desc.slices || tex.array, tex.array - firstSlice);
+    }
+    if (!sliceCount) return;
+
+    const rowBytes = width * pattern.byteLength;
+    const bytesPerRow = (rowBytes + 255) & ~255;
+    const chunkRows = Math.max(1, Math.floor((1 << 20) / bytesPerRow));
+    this.flush();
+    for (let slice = 0; slice < sliceCount; slice++) {
+      for (let y = 0; y < height; y += chunkRows) {
+        const rows = Math.min(chunkRows, height - y);
+        const data = new Uint8Array(bytesPerRow * rows);
+        for (let row = 0; row < rows; row++) {
+          const rowStart = row * bytesPerRow;
+          for (let x = 0; x < width; x++) data.set(pattern, rowStart + x * pattern.byteLength);
+        }
+        this.device.queue.writeTexture(
+          { texture: tex.gpu, mipLevel: mip, origin: { x: 0, y, z: firstSlice + slice } },
+          data,
+          { offset: 0, bytesPerRow, rowsPerImage: rows },
+          { width, height: rows, depthOrArrayLayers: 1 },
+        );
+      }
+    }
   }
 
   // ── draws ────────────────────────────────────────────────────────────────

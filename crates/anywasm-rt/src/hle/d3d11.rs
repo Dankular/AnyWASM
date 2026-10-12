@@ -189,6 +189,24 @@ fn requested_feature_level(p: &Process) -> Result<Option<u32>, Stop> {
     Ok(selected)
 }
 
+fn clear_unordered_access_view(p: &mut Process, float_values: bool) -> R {
+    let Some(Kind::View {
+        vk: ViewKind::Uav,
+        id,
+        ..
+    }) = kind_of(p, p.arg(1))
+    else {
+        return Ok(0);
+    };
+    let values = p.arg(2);
+    let mut command = Pk::new().u32(id).u32(u32::from(float_values));
+    for index in 0..4 {
+        command = command.u32(p.rd32(values + 4 * index)?);
+    }
+    p.extra.gpu.emit(op::CLEAR_UAV, command);
+    Ok(0)
+}
+
 pub fn method(iface: &str, m: &str) -> Option<HleFn> {
     let _ = iface;
     Some(match m {
@@ -372,6 +390,8 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             p.extra.gpu.emit(op::CLEAR_RTV, pk);
             Ok(0)
         },
+        "ClearUnorderedAccessViewFloat" => |p| clear_unordered_access_view(p, true),
+        "ClearUnorderedAccessViewUint" => |p| clear_unordered_access_view(p, false),
         "ClearDepthStencilView" => |p| {
             let (v, flags) = (obj_id(p, p.arg(1)), p.arg(2) as u32);
             let depth = f32::from_bits(p.cpu.xmm[3] as u32);
@@ -810,14 +830,30 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     let (res, desc, out) = (p.arg(1), p.arg(2), p.arg(3));
     let Some(rid) = kind_of(p, res).and_then(|k| k.host_id()) else { return Ok(E_INVALIDARG) };
     let info = p.extra.com.res.get(&rid).cloned().unwrap_or_default();
-    let default_dim = if info.is_buffer { 1 } else if info.is_3d { 8 } else { 4 };
+    let default_dim = if info.is_buffer {
+        1
+    } else if info.is_3d {
+        8
+    } else if vk == ViewKind::Uav && info.array > 1 {
+        5
+    } else {
+        4
+    };
     let default_buffer_stride = if info.misc & 0x20 != 0 { 4 } else { info.stride.max(4) };
     let default_count = if info.is_buffer {
         info.size / default_buffer_stride
+    } else if vk == ViewKind::Uav {
+        1
     } else {
         info.mips.max(1)
     };
-    let default_slices = if info.is_buffer { 0 } else { info.array.max(1) };
+    let default_slices = if info.is_buffer {
+        0
+    } else if info.is_3d && vk == ViewKind::Uav {
+        mip_dim(info.depth, 0)
+    } else {
+        info.array.max(1)
+    };
     let (mut format, mut dim, mut a, mut b, mut c, mut d) = (info.format, default_dim, 0u32, default_count, 0u32, default_slices);
     if desc != 0 {
         let f = p.rd32(desc)?;
@@ -2360,5 +2396,140 @@ mod tests {
             copy_words,
             vec![dst_id, 0, 0, 1, 0, src_id, 0, 1, 1, 1, 0, 3, 3, 1]
         );
+    }
+
+    #[test]
+    fn create_default_3d_uav_covers_one_mip_and_the_full_depth() {
+        use anywasm_cpu::cpu::{R9, RCX, RDX, R8};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        const RESOURCE_ID: u32 = 41;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.extra.com.res.insert(
+            RESOURCE_ID,
+            ResInfo {
+                width: 4,
+                height: 4,
+                depth: 3,
+                is_3d: true,
+                mips: 2,
+                format: 2,
+                ..Default::default()
+            },
+        );
+        let texture = create(&mut p, "ID3D11Texture3D", Kind::Texture3D { id: RESOURCE_ID });
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0; // default view descriptor
+        p.cpu.gpr[R9] = OUT;
+        let create_uav = method("ID3D11Device", "CreateUnorderedAccessView").unwrap();
+        assert_eq!(create_uav(&mut p).unwrap(), S_OK);
+
+        let (opcode, payload) = gpu::decode(&p.extra.gpu.buf).pop().unwrap();
+        assert_eq!(opcode, op::CREATE_VIEW);
+        let words = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec![1, 3, RESOURCE_ID, 2, 8, 0, 1, 0, 3]);
+    }
+
+    #[test]
+    fn create_default_array_uav_covers_one_mip_and_every_array_slice() {
+        use anywasm_cpu::cpu::{R9, RCX, RDX, R8};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        const RESOURCE_ID: u32 = 42;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.extra.com.res.insert(
+            RESOURCE_ID,
+            ResInfo {
+                width: 4,
+                height: 4,
+                mips: 2,
+                array: 3,
+                format: 28,
+                ..Default::default()
+            },
+        );
+        let texture = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: RESOURCE_ID });
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0; // default view descriptor
+        p.cpu.gpr[R9] = OUT;
+        let create_uav = method("ID3D11Device", "CreateUnorderedAccessView").unwrap();
+        assert_eq!(create_uav(&mut p).unwrap(), S_OK);
+
+        let (opcode, payload) = gpu::decode(&p.extra.gpu.buf).pop().unwrap();
+        assert_eq!(opcode, op::CREATE_VIEW);
+        let words = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec![1, 3, RESOURCE_ID, 28, 5, 0, 1, 0, 3]);
+    }
+
+    fn call_clear_uav(method_name: &str, value_words: [u32; 4]) -> Process {
+        use anywasm_cpu::cpu::{R8, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const VALUES: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(VALUES, PAGE_SIZE, PROT_RW));
+        let view = create(
+            &mut p,
+            "ID3D11UnorderedAccessView",
+            Kind::View {
+                vk: ViewKind::Uav,
+                id: 73,
+                resource: 41,
+            },
+        );
+        for (index, value) in value_words.into_iter().enumerate() {
+            p.wr32(VALUES + 4 * index as u64, value).unwrap();
+        }
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = view;
+        p.cpu.gpr[R8] = VALUES;
+        method("ID3D11DeviceContext", method_name).unwrap()(&mut p).unwrap();
+        p
+    }
+
+    #[test]
+    fn clear_uav_float_emits_view_and_preserves_float_bits() {
+        let p = call_clear_uav(
+            "ClearUnorderedAccessViewFloat",
+            [1.5f32.to_bits(), (-2.0f32).to_bits(), 0.25f32.to_bits(), 1.0f32.to_bits()],
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, op::CLEAR_UAV);
+        let words = commands[0]
+            .1
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec![73, 1, 1.5f32.to_bits(), (-2.0f32).to_bits(), 0.25f32.to_bits(), 1.0f32.to_bits()]);
+    }
+
+    #[test]
+    fn clear_uav_uint_emits_view_and_preserves_integer_bits() {
+        let p = call_clear_uav("ClearUnorderedAccessViewUint", [0xdead_beef, 2, 3, 4]);
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, op::CLEAR_UAV);
+        let words = commands[0]
+            .1
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec![73, 0, 0xdead_beef, 2, 3, 4]);
     }
 }

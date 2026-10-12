@@ -4130,6 +4130,181 @@ try {
       && texture3dUavResult.rgba32Values.every((value, i) => value === [0.25, 0.5, 0.75, 1.0][i % 4]),
     JSON.stringify(texture3dUavResult));
 
+  const clearUavResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 8; canvas.height = 8;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const data = new Uint8Array(8 + payload.length), view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, payload.length, true); data.set(payload, 8); stream.push(data);
+      };
+      const append = () => {
+        const data = new Uint8Array(stream.reduce((size, part) => size + part.length, 0));
+        let offset = 0; for (const part of stream) { data.set(part, offset); offset += part.length; }
+        stream.length = 0;
+        return data;
+      };
+      const floatBits = (value) => { const bytes = new ArrayBuffer(4); new DataView(bytes).setFloat32(0, value, true); return new DataView(bytes).getUint32(0, true); };
+      command(4, words(3, 2, 2, 1, 1, 28, 0x80, 0, 0, 1));
+      command(12, words(4, 3, 3, 28, 4, 0, 1, 0, 0));
+      const initial = new Uint8Array(16).fill(9), upload = new Uint8Array(36 + initial.length);
+      upload.set(words(3, 0, 0, 0, 0, 2, 2, 8, initial.length)); upload.set(initial, 36); command(5, upload);
+      command(50, words(4, 1, floatBits(0.25), floatBits(0.5), floatBits(0.75), floatBits(1)));
+      gpu.execute(append());
+      const floatClear = await gpu.readBackTexture(4);
+      command(50, words(4, 0, 0xdead_beef, 0x102, 0x203, 0x304));
+      gpu.execute(append());
+      const uintClear = await gpu.readBackTexture(4);
+      command(2, words(6, 16, 0x80, 0, 0, 0));
+      const typedInitial = new Uint32Array([10, 11, 12, 13]);
+      const typedUpload = new Uint8Array(12 + typedInitial.byteLength);
+      typedUpload.set(words(6, 0, typedInitial.byteLength)); typedUpload.set(new Uint8Array(typedInitial.buffer), 12); command(3, typedUpload);
+      command(12, words(5, 3, 6, 42, 1, 1, 2, 0, 0)); // R32_UINT view over elements 1 and 2
+      command(50, words(5, 0, 0xdead_beef, 2, 3, 4));
+      gpu.execute(append());
+      const typedBuffer = await gpu.readBackResource(6);
+      command(2, words(7, 16, 0x80, 0, 0x20, 0)); // raw UAV buffer
+      const rawInitial = new Uint32Array([20, 21, 22, 23]);
+      const rawUpload = new Uint8Array(12 + rawInitial.byteLength);
+      rawUpload.set(words(7, 0, rawInitial.byteLength)); rawUpload.set(new Uint8Array(rawInitial.buffer), 12); command(3, rawUpload);
+      command(12, words(8, 3, 7, 0, 1, 1, 2, 1, 0)); // raw view over dwords 1 and 2
+      command(50, words(8, 0, 0x12345678, 0xaabbccdd, 0xeeeeeeee, 0xffffffff));
+      gpu.execute(append());
+      const rawBuffer = await gpu.readBackResource(7);
+      command(2, words(21, 24, 0x80, 0, 0x40, 8)); // structured buffer with 8-byte elements
+      const structuredInitial = new Uint32Array([30, 31, 32, 33, 34, 35]);
+      const structuredUpload = new Uint8Array(12 + structuredInitial.byteLength);
+      structuredUpload.set(words(21, 0, structuredInitial.byteLength)); structuredUpload.set(new Uint8Array(structuredInitial.buffer), 12); command(3, structuredUpload);
+      command(12, words(22, 3, 21, 0, 1, 1, 1, 0, 0)); // one structured element at FirstElement=1
+      command(50, words(22, 0, 0x55667788, 0xaabbccdd, 0xeeeeeeee, 0xffffffff));
+      gpu.execute(append());
+      const structuredBuffer = await gpu.readBackResource(21);
+      command(46, words(9, 2, 2, 3, 1, 2, 0x80, 0, 0)); // 2x2x3 RGBA32_FLOAT texture
+      command(12, words(10, 3, 9, 2, 8, 0, 1, 1, 1)); // only W slice 1
+      command(50, words(10, 1, floatBits(0.5), floatBits(0.25), floatBits(0.75), floatBits(1)));
+      gpu.execute(append());
+      const volume = await gpu.readBackResource(9);
+      command(4, words(11, 2, 2, 1, 3, 28, 0x80, 0, 0, 1)); // three-layer RGBA8 array
+      command(12, words(12, 3, 11, 28, 5, 0, 1, 1, 1)); // only array layer 1
+      command(50, words(12, 0, 0x11223344, 0x55667788, 0x99aabbcc, 0xddeeff00));
+      gpu.execute(append());
+      const arrayLayers = await Promise.all([0, 1, 2].map((slice) => gpu.readBackResource(11, slice)));
+      command(2, words(13, 24, 0x80, 0, 0, 0));
+      const rgInitial = new Float32Array([1, 2, 3, 4, 5, 6]);
+      const rgUpload = new Uint8Array(12 + rgInitial.byteLength);
+      rgUpload.set(words(13, 0, rgInitial.byteLength)); rgUpload.set(new Uint8Array(rgInitial.buffer), 12); command(3, rgUpload);
+      command(12, words(14, 3, 13, 16, 1, 1, 1, 0, 0)); // one R32G32_FLOAT element at FirstElement=1
+      command(50, words(14, 1, floatBits(0.5), floatBits(1), floatBits(3), floatBits(4)));
+      gpu.execute(append());
+      const rgBuffer = await gpu.readBackResource(13);
+      command(4, words(15, 1, 1, 1, 1, 10, 0x80, 0, 0, 1)); // RGBA16_FLOAT
+      command(12, words(16, 3, 15, 10, 4, 0, 1, 0, 0));
+      command(50, words(16, 1, floatBits(0.5), floatBits(-1), floatBits(1.5), floatBits(1)));
+      gpu.execute(append());
+      const halfFloat = await gpu.readBackResource(15);
+      command(4, words(17, 1, 1, 1, 1, 31, 0x80, 0, 0, 1)); // RGBA8_SNORM
+      command(12, words(18, 3, 17, 31, 4, 0, 1, 0, 0));
+      command(50, words(18, 1, floatBits(0.25), floatBits(-0.25), floatBits(0.5), floatBits(0.75)));
+      gpu.execute(append());
+      const snorm = await gpu.readBackResource(17);
+      command(4, words(19, 1, 1, 1, 1, 12, 0x80, 0, 0, 1)); // RGBA16_UINT
+      command(12, words(20, 3, 19, 12, 4, 0, 1, 0, 0));
+      command(50, words(20, 0, 0x12345678, 0xabcdef01, 0x33335555, 0x9999aaaa));
+      gpu.execute(append());
+      const uint16 = await gpu.readBackResource(19);
+      command(4, words(23, 1, 1, 1, 1, 41, 0x80, 0, 0, 1)); // R32_FLOAT
+      command(12, words(24, 3, 23, 41, 4, 0, 1, 0, 0));
+      command(50, words(24, 1, 0x7fc00000, floatBits(1), floatBits(2), floatBits(3)));
+      gpu.execute(append());
+      const nanFloat = await gpu.readBackResource(23);
+      const result = {
+        float: Array.from(floatClear.data), uint: Array.from(uintClear.data),
+        typed: Array.from(new Uint32Array(typedBuffer.buffer, typedBuffer.byteOffset, typedBuffer.byteLength / 4)),
+        raw: Array.from(new Uint32Array(rawBuffer.buffer, rawBuffer.byteOffset, rawBuffer.byteLength / 4)),
+        structured: Array.from(new Uint32Array(structuredBuffer.buffer, structuredBuffer.byteOffset, structuredBuffer.byteLength / 4)),
+        volume: Array.from(new Float32Array(volume.buffer, volume.byteOffset, volume.byteLength / 4)),
+        array: arrayLayers.map((layer) => Array.from(layer)),
+        rg: Array.from(new Float32Array(rgBuffer.buffer, rgBuffer.byteOffset, rgBuffer.byteLength / 4)),
+        half: Array.from(new Uint16Array(halfFloat.buffer, halfFloat.byteOffset, halfFloat.byteLength / 2)),
+        snorm: Array.from(new Int8Array(snorm.buffer, snorm.byteOffset, snorm.byteLength)),
+        uint16: Array.from(new Uint16Array(uint16.buffer, uint16.byteOffset, uint16.byteLength / 2)),
+        nanFloat: new Float32Array(nanFloat.buffer, nanFloat.byteOffset, nanFloat.byteLength / 4)[0],
+        errors: gpu.stats.errors,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 ClearUnorderedAccessViewFloat converts values into the normalized view and orders after writes',
+    clearUavResult.float?.length === 16
+      && clearUavResult.float.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1)
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewUint writes lower channel bits without format conversion',
+    clearUavResult.uint?.length === 16
+      && clearUavResult.uint.every((value, i) => value === [0xef, 0x02, 0x03, 0x04][i % 4])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewUint respects a typed buffer element range',
+    JSON.stringify(clearUavResult.typed) === JSON.stringify([10, 0xdead_beef, 0xdead_beef, 13])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewUint repeats Values[0] over the selected raw buffer range',
+    JSON.stringify(clearUavResult.raw) === JSON.stringify([20, 0x12345678, 0x12345678, 23])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewUint repeats Values[0] across the selected structured buffer element',
+    JSON.stringify(clearUavResult.structured) === JSON.stringify([30, 31, 0x55667788, 0x55667788, 34, 35])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewFloat limits a Texture3D clear to FirstWSlice and WSize',
+    clearUavResult.volume?.length === 48
+      && clearUavResult.volume.slice(0, 16).every((value) => value === 0)
+      && clearUavResult.volume.slice(16, 32).every((value, i) => value === [0.5, 0.25, 0.75, 1][i % 4])
+      && clearUavResult.volume.slice(32).every((value) => value === 0)
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewUint limits a Texture2DArray clear to the selected layer',
+    clearUavResult.array?.length === 3
+      && clearUavResult.array[0].every((value) => value === 0)
+      && clearUavResult.array[1].every((value, i) => value === [0x44, 0x88, 0xcc, 0x00][i % 4])
+      && clearUavResult.array[2].every((value) => value === 0)
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewFloat respects typed RG32 buffer element size and range',
+    JSON.stringify(clearUavResult.rg) === JSON.stringify([1, 2, 0.5, 1, 5, 6])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewFloat packs values into RGBA16_FLOAT channels',
+    JSON.stringify(clearUavResult.half) === JSON.stringify([0x3800, 0xbc00, 0x3e00, 0x3c00])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewFloat converts signed normalized channels',
+    JSON.stringify(clearUavResult.snorm) === JSON.stringify([32, -32, 64, 95])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewUint truncates each RGBA16_UINT channel to 16 bits',
+    JSON.stringify(clearUavResult.uint16) === JSON.stringify([0x5678, 0xef01, 0x5555, 0xaaaa])
+      && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+  check('D3D11 ClearUnorderedAccessViewFloat preserves NaN in a float UAV',
+    Number.isNaN(clearUavResult.nanFloat) && clearUavResult.errors?.length === 0,
+    JSON.stringify(clearUavResult));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {
