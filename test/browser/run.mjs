@@ -320,6 +320,10 @@ try {
     triText.includes('staging R32_FLOAT readback=0.25,0.50,0.75,1.00 row_pitch=8'), triText);
   check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
     triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
+  check('D3D11 staging R8_UNORM Map(READ) repacks odd-width rows tightly',
+    triText.includes('staging R8_UNORM subresource0=11,12,13,21,22,23 row_pitch=3'), triText);
+  check('D3D11 staging R8_UNORM Map(READ) selects the requested mip and array slice',
+    triText.includes('staging R8_UNORM subresource3=61 row_pitch=1'), triText);
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));

@@ -245,10 +245,11 @@ register-stack subset):
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
       for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels with row
-      pitch, and packed RGBA16_FLOAT values. Comparison samplers pixel-test all eight comparison
-      functions against depth values on both sides of the reference; depth-state comparisons
-      pixel-test all eight functions at equality. Other staging formats and subresource layouts,
-      other format/resolve combinations, and more render-state combinations remain open.
+      pitch, packed RGBA16_FLOAT values, and odd-width R8_UNORM row packing plus mip/array
+      subresource selection. Comparison samplers pixel-test all eight comparison functions against
+      depth values on both sides of the reference; depth-state comparisons pixel-test all eight
+      functions at equality. Other staging formats and subresource layouts, other format/resolve
+      combinations, and more render-state combinations remain open.
 - [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
       buffer ranges, and emits dispatch commands. The WebGPU executor binds the selected

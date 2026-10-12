@@ -102,6 +102,10 @@ try {
           `${item.name} staging R32_FLOAT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16/,
           `${item.name} staging RGBA16_FLOAT Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R8_UNORM subresource0=11,12,13,21,22,23 row_pitch=3/,
+          `${item.name} staging R8_UNORM Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R8_UNORM subresource3=61 row_pitch=1/,
+          `${item.name} staging R8_UNORM subresource Map(READ) output: ${graphics.output}`);
         const screenshot = decodePng(await page.locator('#screen').screenshot());
         const pixel = (x, y) => {
           const index = (y * screenshot.w + x) * 4;

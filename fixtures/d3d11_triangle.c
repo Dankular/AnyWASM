@@ -64,6 +64,46 @@ static void check_staging_rgba16_float(ID3D11Device *dev, ID3D11DeviceContext *c
     ID3D11Texture2D_Release(source);
 }
 
+static void check_staging_r8_subresources(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const BYTE mip0_slice0[6] = { 11, 12, 13, 21, 22, 23 };
+    static const BYTE mip1_slice0[1] = { 31 };
+    static const BYTE mip0_slice1[6] = { 41, 42, 43, 51, 52, 53 };
+    static const BYTE mip1_slice1[1] = { 61 };
+    D3D11_SUBRESOURCE_DATA init[4] = {0};
+    init[0].pSysMem = mip0_slice0; init[0].SysMemPitch = 3; init[0].SysMemSlicePitch = 6;
+    init[1].pSysMem = mip1_slice0; init[1].SysMemPitch = 1; init[1].SysMemSlicePitch = 1;
+    init[2].pSysMem = mip0_slice1; init[2].SysMemPitch = 3; init[2].SysMemSlicePitch = 6;
+    init[3].pSysMem = mip1_slice1; init[3].SysMemPitch = 1; init[3].SysMemSlicePitch = 1;
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 3; desc.Height = 2; desc.MipLevels = 2; desc.ArraySize = 2;
+    desc.Format = DXGI_FORMAT_R8_UNORM; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, init, &source);
+    if (FAILED(hr)) { printf("staging R8_UNORM source hr=%08lx\n", (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const BYTE *values = (const BYTE *)mapped.pData;
+            printf("staging R8_UNORM subresource0=%u,%u,%u,%u,%u,%u row_pitch=%u\n",
+                values[0], values[1], values[2], values[3], values[4], values[5], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging R8_UNORM subresource0 Map hr=%08lx\n", (unsigned long)hr);
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 3, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const BYTE *value = (const BYTE *)mapped.pData;
+            printf("staging R8_UNORM subresource3=%u row_pitch=%u\n", value[0], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 3);
+        } else printf("staging R8_UNORM subresource3 Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging R8_UNORM staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
@@ -174,6 +214,7 @@ int main(void) {
         if (frames == 0) {
             check_staging_r32_float(dev, ctx);
             check_staging_rgba16_float(dev, ctx);
+            check_staging_r8_subresources(dev, ctx);
         }
         D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
