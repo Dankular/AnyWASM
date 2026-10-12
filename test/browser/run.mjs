@@ -631,6 +631,15 @@ try {
       const pixelShader = tool.compileHlsl(`
         float4 main() : SV_Target { return float4(0.25, 0.5, 0.75, 1.0); }
       `, 'main', 'ps_5_0');
+      const coveragePixelShader = tool.compileHlsl(`
+        struct PsOut { float4 color : SV_Target; uint coverage : SV_Coverage; };
+        PsOut main() {
+          PsOut output;
+          output.color = float4(1.0, 0.0, 0.0, 1.0);
+          output.coverage = 5;
+          return output;
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -672,12 +681,22 @@ try {
       command(29, words(3, 0));
       command(4, words(9, 8, 8, 1, 1, 10, 0x20, 0, 1, 0)); // single-sample RGBA16_FLOAT resolve target
       command(47, words(9, 0, 7, 0, 10)); // ResolveSubresource(dst, 0, src, 0, R16G16B16A16_FLOAT)
+      command(4, words(20, 8, 8, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 coverage-mask target
+      command(12, words(21, 0, 20, 28, 4, 0, 1, 0, 1));
+      command(27, words(21, 0, 0, 0, 0x3f800000)); // clear to black
+      shader(12, 1, coveragePixelShader);
+      command(17, words(1, 12));
+      command(21, words(1, 21, 0));
+      command(29, words(3, 0));
+      command(4, words(22, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample coverage resolve target
+      command(47, words(22, 0, 20, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackTexture(3);
       const bgraPixels = await gpu.readBackTexture(6);
       const float16Pixels = await gpu.readBackTexture(9);
+      const coveragePixels = await gpu.readBackTexture(22);
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
@@ -695,6 +714,7 @@ try {
         bgraPixelsMatch: bgraPixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
         float16Format: float16Pixels.format,
         float16PixelsMatch: float16Pixels.data.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75, 1.0][i % 4]) <= 0.001),
+        coveragePixelsMatch: coveragePixels.data.every((value, i) => Math.abs(value - [128, 0, 0, 255][i % 4]) <= 1),
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
         logs,
@@ -714,7 +734,7 @@ try {
       && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
       && msaaResolveResult.bgraPixelsMatch && msaaResolveResult.float16Samples === 4
       && msaaResolveResult.float16Format === 'rgba16float' && msaaResolveResult.float16PixelsMatch
-      && msaaResolveResult.draws === 3 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.coveragePixelsMatch && msaaResolveResult.draws === 4 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));

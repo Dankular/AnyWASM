@@ -38,6 +38,17 @@ const depthPs = t.translate(t.compileHlsl(`
 `, 'main', 'ps_5_0'));
 check('SV_Depth translates to the WGSL fragment-depth builtin',
   /@builtin\(frag_depth\)\s+\w+:\s*f32/.test(depthPs.wgsl), depthPs.wgsl);
+const coveragePs = t.translate(t.compileHlsl(`
+  struct PsOut { float4 color : SV_Target; uint coverage : SV_Coverage; };
+  PsOut main() {
+    PsOut output;
+    output.color = float4(1.0, 0.0, 0.0, 1.0);
+    output.coverage = 5;
+    return output;
+  }
+`, 'main', 'ps_5_0'));
+check('SV_Coverage translates to the WGSL sample-mask builtin',
+  /@builtin\(sample_mask\)\s+\w+:\s*u32/.test(coveragePs.wgsl), coveragePs.wgsl);
 const drawParamsVs = t.translate(t.compileHlsl(`
   float4 main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) : SV_Position {
     return float4(float(vertexId + instanceId), 0.0, 0.0, 1.0);

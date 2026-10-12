@@ -112,6 +112,117 @@ function deferNonFiniteF32StoreConstants(spirv) {
   return out;
 }
 
+// vkd3d represents the fragment SV_Coverage output as a one-element array,
+// while SPIR-V and WGSL define SampleMask as a scalar u32 output. Naga rejects
+// the array-shaped BuiltIn variable, so lower its single element access to the
+// scalar variable expected by the target. Leave unfamiliar shapes untouched.
+function lowerArraySampleMaskOutput(spirv) {
+  const bytes = new Uint8Array(spirv);
+  if (bytes.byteLength < 20 || bytes.byteLength % 4 !== 0) return spirv;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== 0x07230203) return spirv;
+
+  const words = Array.from({ length: bytes.byteLength / 4 }, (_, i) => view.getUint32(i * 4, true));
+  const instructions = [], instructionOffsets = new Map(), intTypes = new Map(), constants = new Map();
+  const arrayTypes = new Map(), pointerTypes = new Map(), builtins = new Set(), variables = new Map();
+  let functionId = 0;
+  for (let at = 5; at < words.length;) {
+    const first = words[at], wordCount = first >>> 16, opcode = first & 0xffff;
+    if (wordCount === 0 || at + wordCount > words.length) return spirv;
+    const inst = words.slice(at, at + wordCount);
+    instructions.push(inst);
+    instructionOffsets.set(inst, at);
+    if (opcode === 21 && wordCount === 4) intTypes.set(inst[1], { width: inst[2], signed: inst[3] }); // OpTypeInt
+    if (opcode === 43 && wordCount === 4) constants.set(inst[2], { id: inst[2], type: inst[1], value: inst[3] }); // OpConstant
+    if (opcode === 28 && wordCount === 4) arrayTypes.set(inst[1], { element: inst[2], length: inst[3] }); // OpTypeArray
+    if (opcode === 32 && wordCount === 4) pointerTypes.set(inst[1], { storage: inst[2], pointee: inst[3] }); // OpTypePointer
+    if (opcode === 71 && wordCount === 4 && inst[2] === 11 && inst[3] === 20) builtins.add(inst[1]); // BuiltIn SampleMask
+    if (opcode === 54 && wordCount >= 3) functionId = inst[2]; // OpFunction
+    if (opcode === 59 && wordCount >= 4) {
+      variables.set(inst[2], { at, pointerType: inst[1], storage: inst[3], functionId });
+    }
+    if (opcode === 56) functionId = 0; // OpFunctionEnd
+    at += wordCount;
+  }
+
+  const maskVariables = [...builtins].filter((id) => {
+    const variable = variables.get(id), pointer = variable && pointerTypes.get(variable.pointerType);
+    return variable?.storage === 3 && pointer && arrayTypes.has(pointer.pointee);
+  });
+  if (!maskVariables.length) return spirv;
+
+  let nextId = words[3], changed = false;
+  const rewrites = new Map(), removed = new Set(), newPointerTypes = new Map();
+  const scalarPointers = new Map();
+  for (const variableId of maskVariables) {
+    const variable = variables.get(variableId), arrayPointer = pointerTypes.get(variable.pointerType);
+    const array = arrayTypes.get(arrayPointer.pointee), length = constants.get(array.length);
+    const integer = intTypes.get(length?.type);
+    if (!array || !length || length.value !== 1 || integer?.width !== 32 || integer.signed !== 0
+        || !intTypes.has(array.element) || intTypes.get(array.element).width !== 32
+        || intTypes.get(array.element).signed !== 0) return spirv;
+
+    const scalarTypeInst = instructions.find((inst) => (inst[0] & 0xffff) === 21 && inst[1] === array.element);
+    if (!scalarTypeInst) return spirv;
+    const insertionAt = instructionOffsets.get(scalarTypeInst) + scalarTypeInst.length;
+    let scalarPointerId = scalarPointers.get(array.element);
+    if (!scalarPointerId) {
+      scalarPointerId = nextId++;
+      scalarPointers.set(array.element, scalarPointerId);
+      let declarations = newPointerTypes.get(insertionAt);
+      if (!declarations) { declarations = []; newPointerTypes.set(insertionAt, declarations); }
+      declarations.push([(4 << 16) | 32, scalarPointerId, 3, array.element]); // OpTypePointer Output u32
+    }
+    const variableInst = instructions.find((inst) => (inst[0] & 0xffff) === 59 && inst[2] === variableId);
+    if (!variableInst || variableInst.length < 4 || variableInst[3] !== 3) return spirv;
+    variableInst[1] = scalarPointerId;
+
+    let foundAccess = false;
+    for (const inst of instructions) {
+      const opcode = inst[0] & 0xffff;
+      if ((opcode !== 65 && opcode !== 66) || inst[3] !== variableId) continue; // AccessChain / InBoundsAccessChain
+      const index = constants.get(inst[4]), indexType = intTypes.get(index?.type);
+      if (inst.length !== 5 || index?.value !== 0 || indexType?.width !== 32) return spirv;
+      const resultPointer = pointerTypes.get(inst[1]);
+      if (!resultPointer || resultPointer.storage !== 3 || resultPointer.pointee !== array.element) return spirv;
+      rewrites.set(inst[2], variableId);
+      removed.add(inst);
+      foundAccess = true;
+    }
+    if (!foundAccess) return spirv;
+    changed = true;
+  }
+  if (!changed) return spirv;
+
+  for (const inst of instructions) {
+    if (removed.has(inst)) continue;
+    const opcode = inst[0] & 0xffff;
+    for (const [alias, variableId] of rewrites) {
+      if (!inst.slice(1).includes(alias)) continue;
+      if (opcode === 61 && inst[3] === alias) inst[3] = variableId; // OpLoad pointer
+      else if (opcode === 62 && inst[1] === alias) inst[1] = variableId; // OpStore pointer
+      else if ((opcode === 63 || opcode === 64) && (inst[1] === alias || inst[2] === alias)) {
+        if (inst[1] === alias) inst[1] = variableId;
+        if (inst[2] === alias) inst[2] = variableId;
+      } else return spirv; // Unknown use: preserve the original module.
+    }
+  }
+
+  // Insert the new pointer type immediately after its scalar pointee type,
+  // which can appear after unrelated globals in vkd3d's declaration order.
+  const output = words.slice(0, 5);
+  let offset = 5;
+  for (const inst of instructions) {
+    if (!removed.has(inst)) output.push(...inst);
+    offset += inst.length;
+    for (const type of newPointerTypes.get(offset) || []) output.push(...type);
+  }
+  output[3] = nextId;
+  const out = new Uint8Array(output.length * 4), outView = new DataView(out.buffer);
+  output.forEach((word, i) => outView.setUint32(i * 4, word, true));
+  return out;
+}
+
 // D3D11 typed UAV declarations do not carry their DXGI format in the scanned binding. The
 // supported formats are inferred from the resource return type or supplied by the bound view, then
 // specialized before Naga validates the formatless SPIR-V storage image for WebGPU.
@@ -544,7 +655,7 @@ export class ShaderTool {
         return this._result();
       } finally { if (tbl) this.vk._free(tbl); this.vk._wb_clear(); }
     });
-    const normalizedSpirv = deferNonFiniteF32StoreConstants(spirv);
+    const normalizedSpirv = lowerArraySampleMaskOutput(deferNonFiniteF32StoreConstants(spirv));
     const bufferImageSpirv = lowerBufferImagesToStorageBuffers(normalizedSpirv);
     const wgsl = this.naga.spirv_to_wgsl(specializeSingleTypedUavImage(bufferImageSpirv, descriptors, uavFormat));
     return { spirv, wgsl, descriptors };
