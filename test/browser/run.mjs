@@ -324,6 +324,8 @@ try {
     triText.includes('staging R8_UNORM subresource0=11,12,13,21,22,23 row_pitch=3'), triText);
   check('D3D11 staging R8_UNORM Map(READ) selects the requested mip and array slice',
     triText.includes('staging R8_UNORM subresource3=61 row_pitch=1'), triText);
+  check('D3D11 staging D32_FLOAT Map(READ) copies depth-only texels',
+    triText.includes('staging D32_FLOAT readback=0.375,0.375,0.375,0.375 row_pitch=8'), triText);
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));

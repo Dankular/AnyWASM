@@ -106,6 +106,8 @@ try {
           `${item.name} staging R8_UNORM Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R8_UNORM subresource3=61 row_pitch=1/,
           `${item.name} staging R8_UNORM subresource Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging D32_FLOAT readback=0\.375,0\.375,0\.375,0\.375 row_pitch=8/,
+          `${item.name} staging D32_FLOAT Map(READ) output: ${graphics.output}`);
         const screenshot = decodePng(await page.locator('#screen').screenshot());
         const pixel = (x, y) => {
           const index = (y * screenshot.w + x) * 4;

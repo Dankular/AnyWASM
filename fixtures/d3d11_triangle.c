@@ -104,6 +104,41 @@ static void check_staging_r8_subresources(ID3D11Device *dev, ID3D11DeviceContext
     ID3D11Texture2D_Release(source);
 }
 
+static void check_staging_d32_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_D32_FLOAT; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    ID3D11DepthStencilView *dsv = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &source);
+    if (FAILED(hr)) { printf("staging D32_FLOAT source hr=%08lx\n", (unsigned long)hr); return; }
+    hr = ID3D11Device_CreateDepthStencilView(dev, (ID3D11Resource *)source, NULL, &dsv);
+    if (FAILED(hr)) {
+        printf("staging D32_FLOAT DSV hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(source);
+        return;
+    }
+    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_ClearDepthStencilView(ctx, dsv, D3D11_CLEAR_DEPTH, 0.375f, 0);
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const float *values = (const float *)mapped.pData;
+            const float *secondRow = (const float *)((const BYTE *)mapped.pData + mapped.RowPitch);
+            printf("staging D32_FLOAT readback=%.3f,%.3f,%.3f,%.3f row_pitch=%u\n",
+                values[0], values[1], secondRow[0], secondRow[1], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging D32_FLOAT Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging D32_FLOAT staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11DepthStencilView_Release(dsv);
+    ID3D11Texture2D_Release(source);
+}
+
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcA(h, m, w, l);
@@ -215,6 +250,7 @@ int main(void) {
             check_staging_r32_float(dev, ctx);
             check_staging_rgba16_float(dev, ctx);
             check_staging_r8_subresources(dev, ctx);
+            check_staging_d32_float(dev, ctx);
         }
         D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
