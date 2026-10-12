@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { buildPlaythroughPlan } from './target-playthrough.mjs';
+import { mapFlashlightOrigin, selectClearFlashlightDirection } from './target-flashlight.mjs';
 
 const bundlePath = resolve(process.argv[2] || '');
 const options = process.argv.slice(3);
@@ -410,12 +411,31 @@ try {
   }
   let flashlight;
   if (checkFlashlight) {
+    await page.locator('#screen').focus();
     const bounds = await page.locator('#screen').boundingBox();
     assert.ok(bounds, 'the target canvas should be visible for flashlight input');
+    const liveGpuStats = await page.evaluate(() => window.__gpuStats);
+    const sdfViewId = liveGpuStats?.lastComputeUavs?.[0];
+    assert.ok(sdfViewId, 'the latest compute dispatch should report the SDF UAV');
+    await page.evaluate((id) => {
+      window.__textureReadback = null;
+      window.__worker?.postMessage({ type: 'readback-texture', id });
+    }, sdfViewId);
+    await page.waitForFunction(() => window.__textureReadback, null, { timeout: 30_000 });
+    const sdf = await page.evaluate(() => {
+      const result = window.__textureReadback;
+      return { error: result.error, width: result.width, height: result.height, format: result.format, values: Array.from(result.data || []) };
+    });
+    assert.equal(sdf.error, undefined, `target SDF readback should succeed: ${JSON.stringify({ ...sdf, values: undefined })}`);
+    assert.equal(sdf.format, 'r32float', 'the target SDF should use R32_FLOAT');
     const before = await capturePixels();
     const marker = before.greenMarker || result.greenMarker;
-    const x = bounds.x + marker.x * bounds.width / result.width + bounds.width * 0.2;
-    const y = bounds.y + marker.y * bounds.height / result.height;
+    assert.ok(marker, 'the current frame should show the player marker for SDF ray selection');
+    const origin = mapFlashlightOrigin(marker, result.width, result.height, sdf.width, sdf.height);
+    const direction = selectClearFlashlightDirection(sdf.values, sdf.width, sdf.height, origin);
+    const offset = Math.min(bounds.width, bounds.height) * 0.2;
+    const x = bounds.x + marker.x * bounds.width / result.width + direction.dx * offset;
+    const y = bounds.y + marker.y * bounds.height / result.height + direction.dy * offset;
     await page.mouse.move(x, y);
     await page.waitForTimeout(100);
     const dark = await capturePixels();
@@ -424,6 +444,11 @@ try {
     const lit = await capturePixels();
     await page.mouse.up({ button: 'left' });
     flashlight = {
+      direction: direction.direction,
+      sdfOrigin: origin,
+      playerMarker: marker,
+      clearTexels: direction.clearTexels,
+      minimumClearance: direction.minimumClearance,
       before: { meanLuminance: dark.meanLuminance, brightPixels: dark.brightPixels },
       after: { meanLuminance: lit.meanLuminance, brightPixels: lit.brightPixels },
       meanLuminanceDelta: lit.meanLuminance - dark.meanLuminance,
