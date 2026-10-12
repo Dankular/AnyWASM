@@ -30,9 +30,14 @@ const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
 const DXGI_FORMAT_R32G32B32A32_FLOAT: u32 = 2;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
 const D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE: u32 = 0x80;
+const D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE: u32 = 0x0004_0000;
+const D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET: u32 = 0x0020_0000;
 
 fn format_support_flags(format: u32) -> u32 {
     let mut flags = 0x0003_ffff; // common sampling, render-target and texture capabilities
+    if format == DXGI_FORMAT_R8G8B8A8_UNORM {
+        flags |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE | D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+    }
     if matches!(
         format,
         DXGI_FORMAT_R8G8B8A8_UNORM
@@ -160,8 +165,8 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             Ok(S_OK)
         },
         "CheckMultisampleQualityLevels" => |p| {
-            let (samples, out) = (p.arg(2), p.arg(3));
-            p.wr32(out, if samples == 1 || samples == 4 { 1 } else { 0 })?;
+            let (format, samples, out) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3));
+            p.wr32(out, if format == DXGI_FORMAT_R8G8B8A8_UNORM && matches!(samples, 1 | 4) { 1 } else { 0 })?;
             Ok(S_OK)
         },
         "CheckFeatureSupport" => check_feature_support,
@@ -310,7 +315,8 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "Begin" => |p| set_query_complete(p, false),
         "End" => |p| set_query_complete(p, true),
         "GetData" => get_query_data,
-        "Flush" | "ClearState" | "SetPredication" | "ResolveSubresource" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
+        "ResolveSubresource" => resolve_subresource,
+        "Flush" | "ClearState" | "SetPredication" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
         "OMGetRenderTargets" => |p| {
             let (n, rtvs, dsv) = (p.arg(1) as usize, p.arg(2), p.arg(3));
             let bound = p.extra.com.bound_rtv.clone();
@@ -566,15 +572,24 @@ fn create_texture2d(p: &mut Process) -> R {
         return Ok(E_INVALIDARG);
     }
     let (w, h, mut mips, array, format) = (p.rd32(desc)?, p.rd32(desc + 4)?, p.rd32(desc + 8)?, p.rd32(desc + 12)?, p.rd32(desc + 16)?);
-    let (samples, usage, bind, cpu, misc) = (p.rd32(desc + 20)?, p.rd32(desc + 28)?, p.rd32(desc + 32)?, p.rd32(desc + 36)?, p.rd32(desc + 40)?);
+    let (samples, sample_quality, usage, bind, cpu, misc) = (
+        p.rd32(desc + 20)?, p.rd32(desc + 24)?, p.rd32(desc + 28)?, p.rd32(desc + 32)?, p.rd32(desc + 36)?, p.rd32(desc + 40)?,
+    );
     if mips == 0 {
         mips = mip_count(w, h);
     }
     let array = array.max(1);
+    let sample_count = samples.max(1);
+    if w == 0 || h == 0
+        || sample_count > 1
+            && (sample_count != 4 || sample_quality != 0 || format != DXGI_FORMAT_R8G8B8A8_UNORM || mips != 1 || array != 1 || init != 0 || usage != 0 || bind != 0x20 || cpu != 0 || misc != 0)
+    {
+        return Ok(E_INVALIDARG);
+    }
     let keep_shadow = cpu != 0;
     let size = row_bytes(format, w) * rows(format, h);
-    let id = new_res(p, ResInfo { width: w, height: h, mips, array, format, samples: samples.max(1), usage, bind, cpu, misc, size, shadow: if keep_shadow { vec![0u8; size as usize] } else { Vec::new() }, ..Default::default() });
-    p.extra.gpu.emit(op::CREATE_TEXTURE2D, Pk::new().u32(id).u32(w).u32(h).u32(mips).u32(array).u32(format).u32(bind).u32(usage).u32(samples.max(1)).u32(misc));
+    let id = new_res(p, ResInfo { width: w, height: h, mips, array, format, samples: sample_count, usage, bind, cpu, misc, size, shadow: if keep_shadow { vec![0u8; size as usize] } else { Vec::new() }, ..Default::default() });
+    p.extra.gpu.emit(op::CREATE_TEXTURE2D, Pk::new().u32(id).u32(w).u32(h).u32(mips).u32(array).u32(format).u32(bind).u32(usage).u32(sample_count).u32(misc));
     if init != 0 {
         for slice in 0..array {
             for mip in 0..mips {
@@ -898,6 +913,24 @@ fn copy_subresource_region(p: &mut Process) -> R {
         }
     }
     p.extra.gpu.emit(op::COPY_REGION, pk);
+    Ok(0)
+}
+
+fn resolve_subresource(p: &mut Process) -> R {
+    let (dst, dst_sub, src, src_sub, format) = (
+        obj_id(p, p.arg(1)),
+        p.arg(2) as u32,
+        obj_id(p, p.arg(3)),
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+    );
+    let dst_info = p.extra.com.res.get(&dst);
+    let src_info = p.extra.com.res.get(&src);
+    if let (Some(dst_info), Some(src_info)) = (dst_info, src_info) {
+        if src_info.samples > 1 && dst_info.samples == 1 && src_info.format == format && dst_info.format == format {
+            p.extra.gpu.emit(op::RESOLVE_TEXTURE, Pk::new().u32(dst).u32(dst_sub).u32(src).u32(src_sub).u32(format));
+        }
+    }
     Ok(0)
 }
 
@@ -1316,6 +1349,9 @@ mod tests {
         assert_ne!(format_support_flags(28) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UNORM
         assert_ne!(format_support_flags(30) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_UINT
         assert_ne!(format_support_flags(32) & TYPED_UAV, 0); // DXGI_FORMAT_R8G8B8A8_SINT
+        assert_ne!(format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE, 0);
+        assert_ne!(format_support_flags(28) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
+        assert_eq!(format_support_flags(54) & D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET, 0);
         assert_eq!(format_support_flags(54) & TYPED_UAV, 0); // DXGI_FORMAT_R16_FLOAT
         assert_eq!(format_support_flags(61) & TYPED_UAV, 0); // DXGI_FORMAT_R8_UNORM
     }
@@ -1353,6 +1389,95 @@ mod tests {
         p.cpu.gpr[RDX] = 99;
         p.cpu.gpr[R9] = 8;
         assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
+    }
+
+    #[test]
+    fn multisample_quality_levels_match_the_supported_resolve_path() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM as u64;
+        p.cpu.gpr[R8] = 4;
+        p.cpu.gpr[R9] = OUT;
+
+        let query = method("ID3D11Device", "CheckMultisampleQualityLevels").unwrap();
+        assert_eq!(query(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 1);
+
+        p.cpu.gpr[RDX] = 54; // DXGI_FORMAT_R16_FLOAT has no typed 4x path.
+        assert_eq!(query(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 0);
+
+        p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM as u64;
+        p.cpu.gpr[R8] = 2;
+        assert_eq!(query(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_texture2d_forwards_supported_sample_count() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let mut desc = Vec::new();
+        for value in [8u32, 8, 1, 1, 28, 4, 0, 0, 0x20, 0, 0] {
+            desc.extend(value.to_le_bytes());
+        }
+        p.write_bytes(DESC, &desc).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = OUT;
+
+        assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
+        assert_ne!(p.rd64(OUT).unwrap(), 0);
+        let stream = &p.extra.gpu.buf;
+        assert_eq!(u32::from_le_bytes(stream[0..4].try_into().unwrap()), op::CREATE_TEXTURE2D);
+        assert_eq!(u32::from_le_bytes(stream[40..44].try_into().unwrap()), 4);
+    }
+
+    #[test]
+    fn resolve_subresource_emits_the_source_and_destination_resources() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const STACK: u64 = 0x20000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let dst_id = p.extra.gpu.new_id();
+        let src_id = p.extra.gpu.new_id();
+        p.extra.com.res.insert(dst_id, ResInfo { width: 8, height: 8, format: 28, samples: 1, ..Default::default() });
+        p.extra.com.res.insert(src_id, ResInfo { width: 8, height: 8, format: 28, samples: 4, ..Default::default() });
+        let dst = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: dst_id });
+        let src = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: src_id });
+
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = dst;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = src;
+        p.cpu.gpr[RSP] = STACK;
+        p.wr64(STACK + 40, 0).unwrap(); // SrcSubresource
+        p.wr64(STACK + 48, 28).unwrap(); // DXGI_FORMAT_R8G8B8A8_UNORM
+
+        let resolve = method("ID3D11DeviceContext", "ResolveSubresource").unwrap();
+        assert_eq!(resolve(&mut p).unwrap(), 0);
+        let stream = &p.extra.gpu.buf;
+        assert_eq!(u32::from_le_bytes(stream[0..4].try_into().unwrap()), op::RESOLVE_TEXTURE);
+        let payload = &stream[8..28];
+        let fields = payload.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+        assert_eq!(fields, vec![dst_id, 0, src_id, 0, 28]);
     }
 
     #[test]

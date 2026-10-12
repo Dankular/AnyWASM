@@ -14,7 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
-  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46,
+  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -276,7 +276,7 @@ export class GpuExecutor {
         this.encoder().copyBufferToBuffer(s.buffer, s.offset, r.gpu, aligned, Math.min(s.size, r.size - aligned));
         break;
       }
-      case OP.CREATE_TEXTURE2D: this.createTexture(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(9)); break;
+      case OP.CREATE_TEXTURE2D: this.createTexture(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(9), '2d', u(8)); break;
       case OP.CREATE_TEXTURE3D: this.createTexture(u(0), u(1), u(2), u(4), u(3), u(5), u(6), u(7), u(8), '3d'); break;
       case OP.TEXTURE_WRITE: this.textureWrite(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(8), bytes.subarray(36, 36 + u(8))); break;
       case OP.CREATE_SHADER: this.createShader(u(0), u(1), bytes.slice(12, 12 + u(2))); break;
@@ -344,6 +344,7 @@ export class GpuExecutor {
       case OP.DRAW_INDEXED_INSTANCED: this.draw(true, u(0), u(1), u(2), i32(3), u(4), 0); break;
       case OP.COPY_RESOURCE: this.copyResource(u(0), u(1)); break;
       case OP.COPY_REGION: this.copyRegion(dv); break;
+      case OP.RESOLVE_TEXTURE: this.resolveTexture(u(0), u(1), u(2), u(3), u(4)); break;
       case OP.SWAPCHAIN: this.createSwapchain(u(0), u(2), u(3), u(4), u(5)); break;
       case OP.RESIZE_SWAPCHAIN: this.resizeSwapchain(u(0), u(1), u(2), u(3), u(4)); break;
       case OP.PRESENT: this.present(u(0), u(1)); break;
@@ -362,21 +363,59 @@ export class GpuExecutor {
   }
 
   // ── resources ────────────────────────────────────────────────────────────
-  createTexture(id, w, h, mips, array, dxgi, bind, usage, misc, dimension = '2d') {
+  createTexture(id, w, h, mips, array, dxgi, bind, usage, misc, dimension = '2d', sampleCount = 1) {
     let format = this.texFormat(dxgi, bind);
     const viewFormats = [];
     if (SRGB_PAIR[format] && !format.startsWith('bc')) viewFormats.push(SRGB_PAIR[format]);
     else if (UNSRGB[format] && !format.startsWith('bc')) viewFormats.push(UNSRGB[format]);
-    let u = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
+    sampleCount = Math.max(1, sampleCount);
+    const multisampled = sampleCount > 1;
+    let u = multisampled ? 0 : GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     if (bind & (0x20 | 0x40)) u |= GPUTextureUsage.RENDER_ATTACHMENT;
     if (bind & 0x80) u |= GPUTextureUsage.STORAGE_BINDING;
     if (dimension === '3d' && (format === 'rgba8unorm' || format === 'r32float')) u |= GPUTextureUsage.STORAGE_BINDING;
     if (!BLOCK(format) && !isDepth(format)) u |= GPUTextureUsage.RENDER_ATTACHMENT; // allows mip generation and clears of any colour texture
     const cube = dimension === '2d' && (misc & 0x4) !== 0;
-    const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], dimension, mipLevelCount: Math.max(1, mips), format, usage: u, viewFormats });
+    const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], dimension, mipLevelCount: Math.max(1, mips), sampleCount, format, usage: u, viewFormats });
     this.res.set(id, {
       kind: 'texture', gpu, width: w, height: h, depth: dimension === '3d' ? Math.max(1, array) : 1,
-      mips: Math.max(1, mips), array: dimension === '3d' ? 1 : Math.max(1, array), format, dxgi, bind, cube, dimension,
+      mips: Math.max(1, mips), array: dimension === '3d' ? 1 : Math.max(1, array), samples: sampleCount, format, dxgi, bind, cube, dimension,
+    });
+  }
+
+  resolveTexture(dstId, dstSub, srcId, srcSub, dxgiFormat) {
+    const dst = this.res.get(dstId), src = this.res.get(srcId);
+    if (!dst || !src || dst.kind !== 'texture' || src.kind !== 'texture'
+      || src.samples <= 1 || dst.samples !== 1 || src.dimension !== '2d' || dst.dimension !== '2d'
+      || src.format !== dst.format || (dxgiFormat && dxgiFormat !== src.dxgi) || isDepth(src.format)) {
+      this.log(`ResolveSubresource skipped: source ${srcId} and destination ${dstId} are incompatible`);
+      return;
+    }
+    const srcMip = srcSub % src.mips, srcSlice = Math.floor(srcSub / src.mips);
+    const dstMip = dstSub % dst.mips, dstSlice = Math.floor(dstSub / dst.mips);
+    if (src.width >> srcMip !== dst.width >> dstMip || src.height >> srcMip !== dst.height >> dstMip
+      || srcSlice >= src.array || dstSlice >= dst.array) {
+      this.log(`ResolveSubresource skipped: source ${srcId} and destination ${dstId} extents differ`);
+      return;
+    }
+    this.endPass();
+    this.device.pushErrorScope('validation');
+    try {
+      const srcView = src.gpu.createView({ dimension: '2d', baseMipLevel: srcMip, mipLevelCount: 1, baseArrayLayer: srcSlice, arrayLayerCount: 1 });
+      const dstView = dst.gpu.createView({ dimension: '2d', baseMipLevel: dstMip, mipLevelCount: 1, baseArrayLayer: dstSlice, arrayLayerCount: 1 });
+      const pass = this.encoder().beginRenderPass({ colorAttachments: [{
+        view: srcView, resolveTarget: dstView, loadOp: 'load', storeOp: 'discard',
+      }] });
+      pass.end();
+    } catch (error) {
+      this.stats.errors.push(`ResolveSubresource: ${error.message}`);
+      this.log(`ResolveSubresource: ${error.message}`);
+    }
+    this.device.popErrorScope().then((error) => {
+      if (error) {
+        this.stats.errors.push(`ResolveSubresource: ${error.message}`);
+        this.log(`ResolveSubresource: ${error.message}`);
+      }
     });
   }
 
@@ -827,7 +866,8 @@ export class GpuExecutor {
       boundVertexBuffers.set(slot, { gpu, offset });
     }
     const rtFormats = att.colors.map((c) => c?.format || null);
-    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
+    const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
+    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, sampleCount, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);
     if (!pipe) {
       pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed, topology);
@@ -1220,6 +1260,7 @@ export class GpuExecutor {
       vertex: { module: vs.module, entryPoint: vs.entry, buffers },
       primitive: { topology: TOPOLOGY[topology] || 'triangle-list' },
     };
+    desc.multisample = { count: att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1 };
     if (ps) desc.fragment = { module: ps.module, entryPoint: ps.entry, targets };
     else if (targets.some(Boolean)) desc.fragment = undefined;
     if (indexed && (topology === 3 || topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';

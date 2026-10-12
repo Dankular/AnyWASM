@@ -349,6 +349,82 @@ try {
   check('canvas blit presents the interpolated triangle', near(atCanvas(320, 288), [85, 85, 85, 255], 6), JSON.stringify(atCanvas(320, 288)));
 
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
+  // Verify multisampled D3D11 render targets and ResolveSubresource in the WebGPU executor.
+  const msaaResolveResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 16; canvas.height = 16;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const logs = [];
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const vertexShader = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixelShader = tool.compileHlsl(`
+        float4 main() : SV_Target { return float4(0.25, 0.5, 0.75, 1.0); }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(4, words(1, 8, 8, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 render target
+      command(12, words(2, 0, 1, 28, 4, 0, 1, 0, 1));
+      command(27, words(2, 0, 0, 0, 0x3f800000)); // clear to black
+      shader(10, 0, vertexShader);
+      shader(11, 1, pixelShader);
+      command(17, words(0, 10));
+      command(17, words(1, 11));
+      command(21, words(1, 2, 0));
+      command(29, words(3, 0));
+      command(4, words(3, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      command(47, words(3, 0, 1, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackTexture(3);
+      const result = {
+        samples: gpu.res.get(1)?.samples,
+        width: pixels.width,
+        height: pixels.height,
+        format: pixels.format,
+        firstPixel: Array.from(pixels.data.slice(0, 4)),
+        allPixelsMatch: pixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
+        draws: gpu.stats.draws,
+        errors: gpu.stats.errors,
+        logs,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: String(error) };
+    }
+  });
+  check('4x multisampled render target draws and resolves into a single-sample texture',
+    msaaResolveResult.samples === 4 && msaaResolveResult.width === 8 && msaaResolveResult.height === 8
+      && msaaResolveResult.format === 'rgba8unorm' && msaaResolveResult.allPixelsMatch
+      && msaaResolveResult.draws === 1 && msaaResolveResult.errors?.length === 0,
+    JSON.stringify(msaaResolveResult));
+
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
   const texText = await page.textContent('#term');
@@ -649,9 +725,9 @@ try {
       clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
       command(27, clear);
       command(45, words(0x44, 64, 64)); // D3DFVF_XYZRHW | D3DFVF_DIFFUSE
-      command(2, words(11, 60, 1, 0, 0, 20));
-      const vertexData = new Uint8Array(60), vertexView = new DataView(vertexData.buffer);
-      [[8, 8], [56, 8], [32, 56]].forEach(([x, y], i) => {
+      command(2, words(11, 80, 1, 0, 0, 20));
+      const vertexData = new Uint8Array(80), vertexView = new DataView(vertexData.buffer);
+      [[8, 8], [56, 8], [56, 56], [8, 56]].forEach(([x, y], i) => {
         const offset = i * 20;
         vertexView.setFloat32(offset, x, true);
         vertexView.setFloat32(offset + 4, y, true);
@@ -662,26 +738,28 @@ try {
       const write = new Uint8Array(12 + vertexData.length);
       write.set(words(11, 0, vertexData.length)); write.set(vertexData, 12); command(3, write);
       command(13, words(0, 1, 11, 20, 0));
-      command(16, words(4)); // triangle list
-      command(29, words(3, 0));
+      command(16, words(6)); // D3D9 triangle fan
+      command(29, words(4, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y) => {
         const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
       };
-      const result = { pixel: at(32, 20), background: at(1, 1), stats: gpu.stats };
+      const result = { upperRight: at(45, 20), lowerLeft: at(20, 45), background: at(1, 1), stats: gpu.stats };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D9 FVF fixed-function triangle draws with no WebGPU validation errors',
+  check('D3D9 FVF fixed-function triangle fan draws with no WebGPU validation errors',
     d3d9FixedResult.stats?.draws === 1 && d3d9FixedResult.stats.errors.length === 0,
     JSON.stringify(d3d9FixedResult));
-  check('D3D9 XYZRHW and D3DCOLOR become screen-space geometry with the correct pixel color',
-    near(d3d9FixedResult.pixel, [255, 0, 0, 255], 1) && near(d3d9FixedResult.background, [0, 0, 0, 255], 1),
+  check('D3D9 triangle fan rasterizes both fan triangles with the correct pixel color',
+    near(d3d9FixedResult.upperRight, [255, 0, 0, 255], 1)
+      && near(d3d9FixedResult.lowerLeft, [255, 0, 0, 255], 1)
+      && near(d3d9FixedResult.background, [0, 0, 0, 255], 1),
     JSON.stringify(d3d9FixedResult));
 
   const d3d9TextureResult = await page.evaluate(async () => {
