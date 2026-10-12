@@ -2695,18 +2695,24 @@ try {
       blend(17, 5, 6, 1, 0x7); // src-alpha / inverse-src-alpha
       blend(18, 7, 8, 1, 0x7); // destination-alpha / inverse-destination-alpha
       blend(19, 11, 2, 1, 0x7); // saturate / one
-      blend(20, 14, 15, 1, 0x7); // blend-constant / inverse-blend-constant
+      blend(20, 3, 4, 1, 0x7); // source-color / inverse-source-color
+      blend(21, 9, 10, 1, 0x7); // destination-color / inverse-destination-color
+      blend(22, 14, 15, 1, 0x7); // blend-constant / inverse-blend-constant
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
       command(21, words(1, 2, 0)); command(25, words(12));
       const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
       clearView.setUint32(0, 2, true); [0.5, 0.1, 0.4, 0.3].forEach((v, i) => clearView.setFloat32(4 + i * 4, v, true)); command(27, clear);
-      const rects = [
-        [0, 0, 16, 32], [16, 0, 32, 32], [32, 0, 48, 32], [48, 0, 64, 32],
-        [0, 32, 16, 64], [16, 32, 32, 64], [32, 32, 48, 64], [48, 32, 64, 64],
+      const factorRects = Array.from({ length: 6 }, (_, i) => [Math.floor(i * 64 / 6), 32, Math.floor((i + 1) * 64 / 6), 64]);
+      const tests = [
+        ...[13, 14, 15, 16].map((id, i) => ({ id, rect: [i * 16, 0, (i + 1) * 16, 32], factor: [0, 0, 0, 0] })),
+        ...[17, 18, 19, 20, 21, 22].map((id, i) => ({
+          id,
+          rect: factorRects[i],
+          factor: i === 5 ? [0.25, 0.5, 0.75, 0.5] : [0, 0, 0, 0],
+        })),
       ];
-      const tests = rects.map((rect, i) => ({ id: 13 + i, rect, factor: i === 7 ? [0.25, 0.5, 0.75, 0.5] : [0, 0, 0, 0] }));
       const floatBits = (value) => {
         const data = new DataView(new ArrayBuffer(4)); data.setFloat32(0, value, true); return data.getUint32(0, true);
       };
@@ -2721,9 +2727,14 @@ try {
         const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
       };
+      const factorAt = (i) => {
+        const left = Math.floor(i * 64 / 6), right = Math.floor((i + 1) * 64 / 6);
+        return at(Math.floor((left + right) / 2), 48);
+      };
       const result = {
         add: at(8, 16), subtract: at(24, 16), min: at(40, 16), max: at(56, 16),
-        srcAlpha: at(8, 48), dstAlpha: at(24, 48), srcAlphaSaturate: at(40, 48), blendConstant: at(56, 48),
+        srcAlpha: factorAt(0), dstAlpha: factorAt(1), srcAlphaSaturate: factorAt(2),
+        srcColor: factorAt(3), dstColor: factorAt(4), blendConstant: factorAt(5),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -2733,17 +2744,21 @@ try {
     }
   });
   check('D3D11 ADD, SUBTRACT, MIN, and MAX blend operations match channel-wise pixels',
-    blendModesResult.draws === 8 && blendModesResult.errors.length === 0
+    blendModesResult.draws === 10 && blendModesResult.errors.length === 0
       && near(blendModesResult.add, [191, 153, 128, 255], 1)
       && near(blendModesResult.subtract, [0, 102, 0, 128], 1)
       && near(blendModesResult.min, [64, 26, 26, 77], 1)
       && near(blendModesResult.max, [128, 128, 102, 204], 1),
     JSON.stringify(blendModesResult));
-  check('D3D11 blend factors cover src-alpha, dst-alpha, saturate, and blend-constant paths',
+  check('D3D11 blend factors cover alpha, color, saturate, and blend-constant paths',
     blendModesResult.errors.length === 0
+      && ['srcAlpha', 'dstAlpha', 'srcAlphaSaturate', 'srcColor', 'dstColor', 'blendConstant']
+        .every((name) => Array.isArray(blendModesResult[name]))
       && near(blendModesResult.srcAlpha, [77, 107, 41, 77], 1)
       && near(blendModesResult.dstAlpha, [108, 56, 79, 77], 1)
       && near(blendModesResult.srcAlphaSaturate, [172, 115, 120, 77], 1)
+      && near(blendModesResult.srcColor, [112, 77, 94, 77], 1)
+      && near(blendModesResult.dstColor, [96, 36, 71, 77], 1)
       && near(blendModesResult.blendConstant, [112, 77, 45, 77], 1),
     JSON.stringify(blendModesResult));
 
