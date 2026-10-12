@@ -989,6 +989,78 @@ try {
       && near(scissorResult.outside, [0, 0, 0, 255], 1),
     JSON.stringify(scissorResult));
 
+  const cullResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const red = tool.compileHlsl('float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const green = tool.compileHlsl('float4 main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      const raster = (id, cullMode) => {
+        const payload = new Uint8Array(44), view = new DataView(payload.buffer);
+        view.setUint32(0, id, true); view.setUint32(4, 3, true); // solid fill
+        view.setUint32(8, cullMode, true); view.setUint32(12, 0, true); // clockwise front faces
+        view.setUint32(28, 1, true); command(10, payload);
+      };
+      raster(13, 3); // cull back faces; the fullscreen triangle is clockwise
+      raster(14, 2); // cull front faces
+      shader(7, 0, vertex); shader(8, 1, red); shader(9, 1, green);
+      command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
+      command(21, words(1, 2, 0)); command(25, words(13));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true); clearView.setFloat32(16, 1, true); command(27, clear);
+      command(17, words(0, 7)); command(17, words(1, 8)); command(29, words(3, 0));
+      command(25, words(14)); command(17, words(1, 9)); command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 front-face winding and cull mode discard front faces while keeping back-cull output',
+    cullResult.draws === 2 && cullResult.errors.length === 0
+      && near(cullResult.pixel, [255, 0, 0, 255], 1),
+    JSON.stringify(cullResult));
+
   const stencilResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
