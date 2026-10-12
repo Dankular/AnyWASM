@@ -51,6 +51,7 @@ function runBody(ids, moduleLength) {
   for (const id of ids) {
     for (const value of [id, 1024, moduleLength, 2048, 1, 1]) body.push(0x41, ...sleb(value));
     body.push(0x41, 0x7f); // firstRegisterRegister = u32::MAX
+    body.push(0x42, 0, 0x42, 0); // guest block start and code epoch
     body.push(0x10, 0, 0x1a); // call import 0, drop result
   }
   body.push(0x41, 0, 0x0b); // return 0
@@ -61,7 +62,7 @@ function callerModule(pressureIds, probeIds, codeBytes) {
   const bytes = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0];
   bytes.push(...section(1, [
     3,
-    0x60, 7, ...Array(7).fill(0x7f), 1, 0x7f, // run_emitted_block: (7 x i32) -> i32
+    0x60, 9, ...Array(7).fill(0x7f), 0x7e, 0x7e, 1, 0x7f, // 7 x i32, start/epoch i64 -> i32
     0x60, 1, 0x7e, 1, 0x7f, // aw_run: (i64) -> i32
     0x60, 0, 1, 0x7f, // aw_probe: () -> i32
   ]));

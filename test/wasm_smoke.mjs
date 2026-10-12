@@ -120,6 +120,46 @@ check('JIT opt-out uses interpreter fallback without compiling modules',
   interpreted.jitStats.executions === 0 && interpreted.jitStats.compilations === 0 && interpreted.jitStats.fallbacks > 0,
   JSON.stringify(interpreted.jitStats));
 
+const jitSseBundle = pack('fixtures/jit_sse.exe');
+const emittedSse = await runBundle(jitSseBundle, { jitMinPrefix: 4 });
+const cachedSse = await runBundle(jitSseBundle);
+const interpretedSse = await runBundle(jitSseBundle, { jit: false, jitMinPrefix: 4 });
+check('JIT emits packed-double MOV, MUL, and ADD and verifies both result lanes',
+  emittedSse.status === Status.EXITED && emittedSse.exitCode === 0 && emittedSse.jitStats.compilations > 0 &&
+    emittedSse.jitStats.executions > 0 && emittedSse.jitStats.fallbacks === 0,
+  JSON.stringify({ status: emittedSse.status, exitCode: emittedSse.exitCode, jitStats: emittedSse.jitStats }));
+check('packed-double execution matches cached-only and interpreter counts',
+  emittedSse.status === cachedSse.status && emittedSse.status === interpretedSse.status &&
+    emittedSse.exitCode === cachedSse.exitCode && emittedSse.exitCode === interpretedSse.exitCode &&
+    emittedSse.instr === cachedSse.instr && emittedSse.instr === interpretedSse.instr &&
+    emittedSse.retiredInstr === cachedSse.retiredInstr && emittedSse.retiredInstr === interpretedSse.retiredInstr,
+  JSON.stringify({ emitted: { status: emittedSse.status, exitCode: emittedSse.exitCode, instr: emittedSse.instr },
+    cached: { status: cachedSse.status, exitCode: cachedSse.exitCode, instr: cachedSse.instr },
+    interpreted: { status: interpretedSse.status, exitCode: interpretedSse.exitCode, instr: interpretedSse.instr } }));
+if (process.platform === 'win32') {
+  const nativeSse = spawnSync(join(repoRoot, 'fixtures/jit_sse.exe'), [], { cwd: tempDir });
+  check('native host executes the packed-double JIT fixture', nativeSse.status === 0,
+    nativeSse.stderr?.toString() ?? 'no stderr');
+}
+
+const sseLoopBundle = pack('fixtures/bench_sse.exe');
+const emittedSseLoop = await runBundle(sseLoopBundle, { jitMinPrefix: 1 });
+const cachedSseLoop = await runBundle(sseLoopBundle);
+const interpretedSseLoop = await runBundle(sseLoopBundle, { jit: false, jitMinPrefix: 1 });
+check('packed-double benchmark emits and chains its ADD/JNE loop with exact lane results',
+  emittedSseLoop.status === Status.EXITED && emittedSseLoop.exitCode === 0 &&
+    emittedSseLoop.jitStats.executions > 0 && emittedSseLoop.jitStats.chainTransitions > 0,
+  JSON.stringify({ status: emittedSseLoop.status, exitCode: emittedSseLoop.exitCode, jitStats: emittedSseLoop.jitStats }));
+check('packed-double benchmark matches cached-only and interpreter retirement counts',
+  emittedSseLoop.status === cachedSseLoop.status && emittedSseLoop.status === interpretedSseLoop.status &&
+    emittedSseLoop.exitCode === cachedSseLoop.exitCode && emittedSseLoop.exitCode === interpretedSseLoop.exitCode &&
+    emittedSseLoop.instr === cachedSseLoop.instr && emittedSseLoop.instr === interpretedSseLoop.instr &&
+    emittedSseLoop.retiredInstr === cachedSseLoop.retiredInstr &&
+    emittedSseLoop.retiredInstr === interpretedSseLoop.retiredInstr,
+  JSON.stringify({ emitted: { status: emittedSseLoop.status, exitCode: emittedSseLoop.exitCode, instr: emittedSseLoop.instr },
+    cached: { status: cachedSseLoop.status, exitCode: cachedSseLoop.exitCode, instr: cachedSseLoop.instr },
+    interpreted: { status: interpretedSseLoop.status, exitCode: interpretedSseLoop.exitCode, instr: interpretedSseLoop.instr } }));
+
 const jitStateBundle = pack('fixtures/jit_state.exe');
 const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 3 });
 const cachedState = await runBundle(jitStateBundle);
@@ -127,8 +167,10 @@ const interpretedState = await runBundle(jitStateBundle, { jit: false, jitMinPre
 const sameJitState = (a, b) => a.status === b.status && a.exitCode === b.exitCode &&
   a.out === b.out && a.err === b.err && a.instr === b.instr && a.retiredInstr === b.retiredInstr;
 check('JIT fixture emits warm memory, direct JMP/Jcc exits, and cold-page fallback',
-  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.compilations === 4 &&
-    emittedState.jitStats.executions === 3 && emittedState.jitStats.registerRegisterHits === 3 && emittedState.jitStats.fallbacks === 1,
+  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.compilations > 0 &&
+    emittedState.jitStats.executions >= 200000 && emittedState.jitStats.registerRegisterHits > 0 &&
+    emittedState.jitStats.fallbacks === 1 && emittedState.jitStats.chainTransitions > 0 &&
+    emittedState.jitStats.chainCompilations > 0,
   JSON.stringify({ status: emittedState.status, exitCode: emittedState.exitCode, jitStats: emittedState.jitStats }));
 check('emitted, cached-only, and interpreter paths agree on JIT register and memory state',
   sameJitState(emittedState, cachedState) && sameJitState(emittedState, interpretedState),

@@ -4,7 +4,7 @@
 //! snapshot. This keeps a trapped or rejected module from partially changing the live CPU.
 
 use crate::cpu::Cpu;
-use crate::decode::{Inst, MemOp, Op, Opnd};
+use crate::decode::{FpK, Inst, MemOp, Op, Opnd, Prec};
 #[cfg(target_arch = "wasm32")]
 use crate::mem::Memory;
 use crate::mem::TlbEntry;
@@ -18,7 +18,21 @@ const FRAMES_PTR_OFFSET: u32 = 160;
 const FRAMES_LEN_OFFSET: u32 = 164;
 const TLB_READ_PTR_OFFSET: u32 = 168;
 const TLB_WRITE_PTR_OFFSET: u32 = 172;
-const CHAIN_HANDOFF_OFFSET: u32 = 176;
+const CHAIN_FALLBACKS_OFFSET: u32 = 176;
+const CHAIN_TRANSITIONS_OFFSET: u32 = 180;
+const CHAIN_REGREG_HITS_OFFSET: u32 = 184;
+const CHAIN_SCRATCH_OFFSET: u32 = 192;
+const ADD_LHS_LOCAL: u32 = 5;
+const ADD_RHS_LOCAL: u32 = 6;
+const ADD_RESULT_LOCAL: u32 = 7;
+const ADD_FLAGS_LOCAL: u32 = 8;
+const GPR_LOCAL_BASE: u32 = 9;
+const XMM_OFFSET: u32 = 352;
+const MXCSR_OFFSET: u32 = 608;
+const XMM_LOCAL_BASE: u32 = 25;
+const RIP_LOCAL: u32 = 57;
+const ICOUNT_LOCAL: u32 = 58;
+const TSC_LOCAL: u32 = 59;
 const TLB_PAGE_OFFSET: u32 = std::mem::offset_of!(TlbEntry, page) as u32;
 const TLB_FRAME_OFFSET: u32 = std::mem::offset_of!(TlbEntry, offset) as u32;
 const TLB_PROT_OFFSET: u32 = std::mem::offset_of!(TlbEntry, prot) as u32;
@@ -36,11 +50,16 @@ struct JitState {
     frames_len: u32,
     tlb_read: u32,
     tlb_write: u32,
-    chain_handoff: u32,
+    chain_fallbacks: u32,
+    chain_transitions: u32,
+    chain_register_hits: u32,
     _reserved: u32,
+    chain_scratch: [u8; 160],
+    xmm: [u128; 16],
+    mxcsr: u32,
 }
 
-const _: [(); 184] = [(); std::mem::size_of::<JitState>()];
+const _: [(); 624] = [(); std::mem::size_of::<JitState>()];
 const _: [(); GPR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, gpr)];
 const _: [(); RIP_OFFSET as usize] = [(); std::mem::offset_of!(JitState, rip)];
 const _: [(); RFLAGS_OFFSET as usize] = [(); std::mem::offset_of!(JitState, rflags)];
@@ -50,7 +69,15 @@ const _: [(); FRAMES_PTR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, 
 const _: [(); FRAMES_LEN_OFFSET as usize] = [(); std::mem::offset_of!(JitState, frames_len)];
 const _: [(); TLB_READ_PTR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, tlb_read)];
 const _: [(); TLB_WRITE_PTR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, tlb_write)];
-const _: [(); CHAIN_HANDOFF_OFFSET as usize] = [(); std::mem::offset_of!(JitState, chain_handoff)];
+const _: [(); CHAIN_FALLBACKS_OFFSET as usize] =
+    [(); std::mem::offset_of!(JitState, chain_fallbacks)];
+const _: [(); CHAIN_TRANSITIONS_OFFSET as usize] =
+    [(); std::mem::offset_of!(JitState, chain_transitions)];
+const _: [(); CHAIN_REGREG_HITS_OFFSET as usize] =
+    [(); std::mem::offset_of!(JitState, chain_register_hits)];
+const _: [(); CHAIN_SCRATCH_OFFSET as usize] = [(); std::mem::offset_of!(JitState, chain_scratch)];
+const _: [(); XMM_OFFSET as usize] = [(); std::mem::offset_of!(JitState, xmm)];
+const _: [(); MXCSR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, mxcsr)];
 
 impl From<&Cpu> for JitState {
     fn from(cpu: &Cpu) -> Self {
@@ -64,8 +91,13 @@ impl From<&Cpu> for JitState {
             frames_len: 0,
             tlb_read: 0,
             tlb_write: 0,
-            chain_handoff: 0,
+            chain_fallbacks: 0,
+            chain_transitions: 0,
+            chain_register_hits: 0,
             _reserved: 0,
+            chain_scratch: [0; 160],
+            xmm: cpu.xmm,
+            mxcsr: cpu.mxcsr,
         }
     }
 }
@@ -78,6 +110,8 @@ impl JitState {
         cpu.rflags = self.rflags;
         cpu.icount = self.icount;
         cpu.tsc = self.tsc;
+        cpu.xmm = self.xmm;
+        cpu.mxcsr = self.mxcsr;
     }
 }
 
@@ -101,6 +135,18 @@ enum StoreSource {
 }
 
 #[derive(Clone, Copy)]
+enum AddSource {
+    Immediate(u32),
+    Register(u8),
+}
+
+#[derive(Clone, Copy)]
+enum XmmSource {
+    Register(u8),
+    Memory(MemOp),
+}
+
+#[derive(Clone, Copy)]
 struct StoreInstruction {
     address: MemOp,
     source: StoreSource,
@@ -121,6 +167,27 @@ enum JitInstruction {
         len: u8,
     },
     Store(StoreInstruction),
+    Add {
+        dst: u8,
+        source: AddSource,
+        len: u8,
+    },
+    XmmMove {
+        dst: u8,
+        source: XmmSource,
+        len: u8,
+    },
+    XmmStore {
+        address: MemOp,
+        source: u8,
+        len: u8,
+    },
+    XmmFp {
+        dst: u8,
+        source: u8,
+        kind: FpK,
+        len: u8,
+    },
     Jump {
         target: u64,
         len: u8,
@@ -173,19 +240,19 @@ impl EmittedBlock {
                 self.id,
                 self.wasm.as_ptr(),
                 self.wasm.len() as u32,
-                self.start,
-                mem.code_epoch,
                 &mut state,
                 budget,
                 self.instructions as u32,
                 self.first_register_register.unwrap_or(u32::MAX),
+                self.start,
+                mem.code_epoch,
             )
         };
         let expected = (budget as usize).min(self.instructions);
-        if executed <= 0 || (executed as usize) < expected || executed as u64 > budget {
+        if executed <= 0 || (executed as usize) < expected || executed as u64 > budget as u64 {
             return None;
         }
-        let chain_handoff = state.chain_handoff != 0;
+        let chain_handoff = state.chain_transitions != 0;
         state.copy_to(cpu);
         Some((executed as usize, chain_handoff))
     }
@@ -210,7 +277,10 @@ pub fn emit_mov_block(
         let Some(instruction) = translate_instruction(inst) else {
             break;
         };
-        let is_store = matches!(instruction, JitInstruction::Store(_));
+        let is_store = matches!(
+            instruction,
+            JitInstruction::Store(_) | JitInstruction::XmmStore { .. }
+        );
         let is_exit = matches!(
             instruction,
             JitInstruction::Jump { .. } | JitInstruction::Branch { .. }
@@ -264,6 +334,70 @@ fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
         _ => {}
     }
     translate_mov(inst)
+        .or_else(|| translate_add(inst))
+        .or_else(|| translate_sse(inst))
+}
+
+fn translate_add(inst: Inst) -> Option<JitInstruction> {
+    if inst.op != Op::Add || inst.osz != 4 {
+        return None;
+    }
+    match (inst.ops[0], inst.ops[1]) {
+        (Opnd::Gpr(dst), Opnd::Imm) if dst < 16 => Some(JitInstruction::Add {
+            dst,
+            source: AddSource::Immediate(inst.imm as u32),
+            len: inst.len,
+        }),
+        (Opnd::Gpr(dst), Opnd::Gpr(source)) if dst < 16 && source < 16 => {
+            Some(JitInstruction::Add {
+                dst,
+                source: AddSource::Register(source),
+                len: inst.len,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn translate_sse(inst: Inst) -> Option<JitInstruction> {
+    match inst.op {
+        Op::MovVec => match (inst.ops[0], inst.ops[1]) {
+            (Opnd::Xmm(dst), Opnd::Xmm(src)) if dst < 16 && src < 16 => {
+                Some(JitInstruction::XmmMove {
+                    dst,
+                    source: XmmSource::Register(src),
+                    len: inst.len,
+                })
+            }
+            (Opnd::Xmm(dst), Opnd::Mem(address)) if dst < 16 && inline_address(address) => {
+                Some(JitInstruction::XmmMove {
+                    dst,
+                    source: XmmSource::Memory(address),
+                    len: inst.len,
+                })
+            }
+            (Opnd::Mem(address), Opnd::Xmm(src)) if src < 16 && inline_address(address) => {
+                Some(JitInstruction::XmmStore {
+                    address,
+                    source: src,
+                    len: inst.len,
+                })
+            }
+            _ => None,
+        },
+        Op::Fp(kind @ (FpK::Add | FpK::Mul), Prec::Pd) => {
+            let (Opnd::Xmm(dst), Opnd::Xmm(source)) = (inst.ops[0], inst.ops[1]) else {
+                return None;
+            };
+            (dst < 16 && source < 16).then_some(JitInstruction::XmmFp {
+                dst,
+                source,
+                kind,
+                len: inst.len,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn translate_mov(inst: Inst) -> Option<JitInstruction> {
@@ -332,8 +466,26 @@ fn inline_address(address: MemOp) -> bool {
 
 fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
     let mut code = Vec::new();
-    // Locals: executed count (i32), effective address (i64), guest-frame offset (i32).
-    code.extend_from_slice(&[0x03, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f]);
+    // Locals: execution scratch, GPRs, both XMM lanes, RIP, retired count, and TSC.
+    code.extend_from_slice(&[
+        0x07, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03, 0x7e,
+    ]);
+    let (initial_gprs, written_gprs, initial_xmms, written_xmms) = register_masks(instructions);
+    for register in 0..16 {
+        if initial_gprs & (1 << register) != 0 {
+            emit_state_gpr_load(register, &mut code);
+        }
+        if initial_xmms & (1 << register) != 0 {
+            emit_state_xmm_load(register, &mut code);
+        }
+    }
+    emit_state_local_load(ICOUNT_OFFSET, ICOUNT_LOCAL, &mut code);
+    emit_state_local_load(TSC_OFFSET, TSC_LOCAL, &mut code);
+    code.push(0x42); // local RIP begins at this block's entry address
+    sleb(start as i64, &mut code);
+    code.push(0x21);
+    uleb(RIP_LOCAL, &mut code);
+    code.extend_from_slice(&[0x02, 0x40]); // shared budget-exit block
     let mut rip = start;
     for instruction in instructions {
         let len = match instruction {
@@ -341,14 +493,16 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::Mov(mov) => mov.len,
             JitInstruction::Load { len, .. } => *len,
             JitInstruction::Store(store) => store.len,
+            JitInstruction::Add { len, .. } => *len,
+            JitInstruction::XmmMove { len, .. }
+            | JitInstruction::XmmStore { len, .. }
+            | JitInstruction::XmmFp { len, .. } => *len,
             JitInstruction::Jump { len, .. } | JitInstruction::Branch { len, .. } => *len,
         };
         rip = rip.wrapping_add(len as u64);
         let mut rip_after = rip;
-        // if (executed >= budget) return executed;
-        code.extend_from_slice(&[
-            0x20, 0x02, 0x20, 0x01, 0x4f, 0x04, 0x40, 0x20, 0x02, 0x0f, 0x0b,
-        ]);
+        // if (executed >= budget) branch to the shared state-flush epilogue.
+        code.extend_from_slice(&[0x20, 0x02, 0x20, 0x01, 0x4f, 0x0d, 0x00]);
 
         match instruction {
             JitInstruction::Nop { .. } => {}
@@ -358,8 +512,6 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             } => {
                 emit_effective_address(*address, &mut code);
                 emit_tlb_guard(false, *size, &mut code);
-                code.push(0x20); // destination address in the JitState GPR array
-                uleb(0, &mut code);
                 emit_frame_address(&mut code);
                 if *size == 4 {
                     code.push(0x28); // i32.load
@@ -371,9 +523,8 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                     uleb(3, &mut code);
                     uleb(0, &mut code);
                 }
-                code.push(0x37); // i64.store GPR
-                uleb(3, &mut code);
-                uleb(GPR_OFFSET + *dst as u32 * 8, &mut code);
+                code.push(0x21); // local.set destination GPR
+                uleb(gpr_local(*dst), &mut code);
             }
             JitInstruction::Store(store) => {
                 emit_effective_address(store.address, &mut code);
@@ -390,10 +541,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                     }
                     StoreSource::Register(index) => {
                         code.push(0x20);
-                        uleb(0, &mut code);
-                        code.push(0x29); // i64.load source GPR
-                        uleb(3, &mut code);
-                        uleb(GPR_OFFSET + index as u32 * 8, &mut code);
+                        uleb(gpr_local(index), &mut code);
                         if store.size == 4 {
                             code.push(0xa7); // i32.wrap_i64
                         }
@@ -408,6 +556,25 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                 }
                 uleb(0, &mut code);
             }
+            JitInstruction::Add { dst, source, .. } => emit_add32(*dst, *source, &mut code),
+            JitInstruction::XmmMove { dst, source, .. } => match source {
+                XmmSource::Register(src) => emit_xmm_register_move(*dst, *src, &mut code),
+                XmmSource::Memory(address) => {
+                    emit_effective_address(*address, &mut code);
+                    emit_tlb_guard(false, 16, &mut code);
+                    emit_xmm_memory_load(*dst, &mut code);
+                }
+            },
+            JitInstruction::XmmStore {
+                address, source, ..
+            } => {
+                emit_effective_address(*address, &mut code);
+                emit_tlb_guard(true, 16, &mut code);
+                emit_xmm_memory_store(*source, &mut code);
+            }
+            JitInstruction::XmmFp {
+                dst, source, kind, ..
+            } => emit_xmm_fp(*dst, *source, *kind, &mut code),
             JitInstruction::Jump { target, .. } => rip_after = *target,
             JitInstruction::Branch { cc, target, .. } => {
                 emit_condition(*cc, &mut code);
@@ -418,31 +585,26 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                 code.push(0x42);
                 sleb(rip as i64, &mut code);
                 code.push(0x0b); // end
-                code.push(0x21); // local.set effective-address scratch (no longer needed)
-                uleb(3, &mut code);
+                code.push(0x21); // local.set RIP
+                uleb(RIP_LOCAL, &mut code);
             }
         }
 
-        // RIP points at the next guest instruction after each emitted instruction.
-        code.push(0x20);
-        uleb(0, &mut code);
-        if matches!(instruction, JitInstruction::Branch { .. }) {
-            code.push(0x20);
-            uleb(3, &mut code);
-        } else {
+        // RIP and counters stay in locals for the entire emitted block.
+        if !matches!(instruction, JitInstruction::Branch { .. }) {
             code.push(0x42);
             sleb(rip_after as i64, &mut code);
+            code.push(0x21);
+            uleb(RIP_LOCAL, &mut code);
         }
-        code.push(0x37);
-        uleb(3, &mut code);
-        uleb(RIP_OFFSET, &mut code);
-
-        emit_increment_i64(ICOUNT_OFFSET, &mut code);
-        emit_increment_i64(TSC_OFFSET, &mut code);
+        emit_increment_local(ICOUNT_LOCAL, &mut code);
+        emit_increment_local(TSC_LOCAL, &mut code);
 
         // executed += 1
         code.extend_from_slice(&[0x20, 0x02, 0x41, 0x01, 0x6a, 0x21, 0x02]);
     }
+    code.push(0x0b); // end shared budget-exit block
+    emit_flush_state(written_gprs, written_xmms, &mut code);
     code.extend_from_slice(&[0x20, 0x02, 0x0b]);
 
     let mut module = b"\0asm\x01\0\0\0".to_vec();
@@ -519,9 +681,7 @@ fn emit_flag(mask: u64, code: &mut Vec<u8>) {
 }
 
 fn emit_register_move(mov: MovInstruction, code: &mut Vec<u8>) {
-    // Store an immediate or load the source GPR. MOV r32 zero-extends the low dword.
-    code.push(0x20);
-    uleb(0, code);
+    // Store an immediate or copy a block-local GPR. MOV r32 zero-extends the low dword.
     match mov.source {
         MovSource::Immediate(value) => {
             code.push(0x42);
@@ -529,19 +689,252 @@ fn emit_register_move(mov: MovInstruction, code: &mut Vec<u8>) {
         }
         MovSource::Register { index, zero_extend } => {
             code.push(0x20);
-            uleb(0, code);
-            code.push(0x29); // i64.load source GPR
-            uleb(3, code);
-            uleb(GPR_OFFSET + index as u32 * 8, code);
+            uleb(gpr_local(index), code);
             if zero_extend {
                 code.push(0xa7); // i32.wrap_i64
                 code.push(0xad); // i64.extend_i32_u
             }
         }
     }
-    code.push(0x37); // i64.store
+    code.push(0x21); // local.set destination GPR
+    uleb(gpr_local(mov.dst), code);
+}
+
+fn emit_xmm_register_move(dst: u8, source: u8, code: &mut Vec<u8>) {
+    for lane in 0..2 {
+        code.push(0x20);
+        uleb(xmm_local(source, lane), code);
+        code.push(0x21);
+        uleb(xmm_local(dst, lane), code);
+    }
+}
+
+fn emit_xmm_memory_load(dst: u8, code: &mut Vec<u8>) {
+    for lane in 0..2 {
+        emit_frame_address(code);
+        code.push(0x29); // i64.load one packed-double lane
+        uleb(3, code);
+        uleb(lane as u32 * 8, code);
+        code.push(0x21);
+        uleb(xmm_local(dst, lane), code);
+    }
+}
+
+fn emit_xmm_memory_store(source: u8, code: &mut Vec<u8>) {
+    for lane in 0..2 {
+        emit_frame_address(code);
+        code.push(0x20);
+        uleb(xmm_local(source, lane), code);
+        code.push(0x37); // i64.store one packed-double lane
+        uleb(3, code);
+        uleb(lane as u32 * 8, code);
+    }
+}
+
+fn emit_xmm_fp(dst: u8, source: u8, kind: FpK, code: &mut Vec<u8>) {
+    let operation = match kind {
+        FpK::Add => 0xa0, // f64.add
+        FpK::Mul => 0xa2, // f64.mul
+        _ => unreachable!("only packed add and multiply are translated"),
+    };
+    for lane in 0..2 {
+        emit_xmm_fp_guard(xmm_local(dst, lane), code);
+        emit_xmm_fp_guard(xmm_local(source, lane), code);
+        code.push(0x20);
+        uleb(xmm_local(dst, lane), code);
+        code.push(0xbf); // f64.reinterpret_i64
+        code.push(0x20);
+        uleb(xmm_local(source, lane), code);
+        code.push(0xbf);
+        code.push(operation);
+        code.push(0xbd); // i64.reinterpret_f64
+        code.push(0x21);
+        uleb(xmm_local(dst, lane), code);
+    }
+}
+
+fn emit_xmm_fp_guard(local: u32, code: &mut Vec<u8>) {
+    // Alternate MXCSR rounding modes, DAZ/FTZ, and exceptional operands use the interpreter.
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x28); // i32.load copied MXCSR
+    uleb(2, code);
+    uleb(MXCSR_OFFSET, code);
+    code.push(0x41);
+    sleb(0xe040, code); // DAZ, FTZ, and rounding-control bits
+    code.push(0x71); // i32.and
+    emit_fallback_if_true(code);
+
+    code.push(0x20);
+    uleb(local, code);
+    code.push(0x42);
+    sleb(0x7ff0_0000_0000_0000u64 as i64, code);
+    code.push(0x83); // i64.and
+    code.push(0x50); // i64.eqz: zero/subnormal exponent
+    emit_fallback_if_true(code);
+
+    code.push(0x20);
+    uleb(local, code);
+    code.push(0x42);
+    sleb(0x7ff0_0000_0000_0000u64 as i64, code);
+    code.push(0x83); // i64.and
+    code.push(0x42);
+    sleb(0x7ff0_0000_0000_0000u64 as i64, code);
+    code.push(0x51); // i64.eq: infinity/NaN exponent
+    emit_fallback_if_true(code);
+}
+
+fn emit_add32(dst: u8, source: AddSource, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(gpr_local(dst), code);
+    code.push(0xa7); // i32.wrap_i64
+    code.push(0x21);
+    uleb(ADD_LHS_LOCAL, code);
+    match source {
+        AddSource::Immediate(value) => {
+            code.push(0x41);
+            sleb(value as i32 as i64, code);
+        }
+        AddSource::Register(index) => {
+            code.push(0x20);
+            uleb(gpr_local(index), code);
+            code.push(0xa7); // i32.wrap_i64
+        }
+    }
+    code.push(0x21);
+    uleb(ADD_RHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_LHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_RHS_LOCAL, code);
+    code.push(0x6a); // i32.add
+    code.push(0x21);
+    uleb(ADD_RESULT_LOCAL, code);
+    code.push(0x20);
+    uleb(ADD_RESULT_LOCAL, code);
+    code.push(0xad); // i64.extend_i32_u
+    code.push(0x21);
+    uleb(gpr_local(dst), code);
+
+    code.push(0x41);
+    sleb(0, code);
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
+
+    emit_add_flag(code, crate::cpu::CF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x49); // i32.lt_u
+    });
+    emit_add_flag(code, crate::cpu::ZF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x45); // i32.eqz
+    });
+    emit_add_flag(code, crate::cpu::SF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x41);
+        sleb(i32::MIN as i64, code);
+        code.push(0x71); // i32.and
+        code.push(0x45); // i32.eqz
+        code.push(0x45); // invert: sign bit was set
+    });
+    emit_add_flag(code, crate::cpu::OF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RHS_LOCAL, code);
+        code.push(0x73); // i32.xor
+        code.push(0x41);
+        sleb(-1, code);
+        code.push(0x73); // bitwise not of lhs ^ rhs
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x73); // lhs ^ result
+        code.push(0x71); // i32.and
+        code.push(0x41);
+        sleb(i32::MIN as i64, code);
+        code.push(0x71); // i32.and sign bit
+        code.push(0x45);
+        code.push(0x45); // nonzero -> overflow
+    });
+    emit_add_flag(code, crate::cpu::AF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RHS_LOCAL, code);
+        code.push(0x73);
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x73);
+        code.push(0x41);
+        sleb(0x10, code);
+        code.push(0x71);
+        code.push(0x45);
+        code.push(0x45); // carry out of bit 3
+    });
+    emit_add_flag(code, crate::cpu::PF as u32, |code| {
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x41);
+        sleb(0xff, code);
+        code.push(0x71);
+        code.push(0x21);
+        uleb(ADD_LHS_LOCAL, code);
+        for shift in [4, 2, 1] {
+            code.push(0x20);
+            uleb(ADD_LHS_LOCAL, code);
+            code.push(0x20);
+            uleb(ADD_LHS_LOCAL, code);
+            code.push(0x41);
+            sleb(shift, code);
+            code.push(0x76); // i32.shr_u
+            code.push(0x73); // i32.xor
+            code.push(0x21);
+            uleb(ADD_LHS_LOCAL, code);
+        }
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x41);
+        sleb(1, code);
+        code.push(0x71); // low bit is odd parity
+        code.push(0x45); // x86 PF is set for even parity
+    });
+
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x29); // i64.load old RFLAGS
     uleb(3, code);
-    uleb(GPR_OFFSET + mov.dst as u32 * 8, code);
+    uleb(RFLAGS_OFFSET, code);
+    code.push(0x42);
+    sleb((!crate::cpu::ARITH_FLAGS) as i64, code);
+    code.push(0x83); // preserve non-arithmetic flags
+    code.push(0x20);
+    uleb(ADD_FLAGS_LOCAL, code);
+    code.push(0xad); // i64.extend_i32_u new arithmetic flags
+    code.push(0x84); // i64.or
+    code.push(0x37); // i64.store updated RFLAGS
+    uleb(3, code);
+    uleb(RFLAGS_OFFSET, code);
+}
+
+fn emit_add_flag(code: &mut Vec<u8>, flag: u32, condition: impl FnOnce(&mut Vec<u8>)) {
+    condition(code);
+    code.push(0x41);
+    sleb(flag.trailing_zeros() as i64, code);
+    code.push(0x74); // i32.shl boolean into its RFLAGS position
+    code.push(0x20);
+    uleb(ADD_FLAGS_LOCAL, code);
+    code.push(0x72); // i32.or
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
 }
 
 fn emit_effective_address(address: MemOp, code: &mut Vec<u8>) {
@@ -549,18 +942,12 @@ fn emit_effective_address(address: MemOp, code: &mut Vec<u8>) {
     sleb(address.disp, code);
     if address.base != 0xff {
         code.push(0x20);
-        uleb(0, code);
-        code.push(0x29); // i64.load base GPR
-        uleb(3, code);
-        uleb(GPR_OFFSET + address.base as u32 * 8, code);
+        uleb(gpr_local(address.base), code);
         code.push(0x7c); // i64.add
     }
     if address.index != 0xff {
         code.push(0x20);
-        uleb(0, code);
-        code.push(0x29); // i64.load index GPR
-        uleb(3, code);
-        uleb(GPR_OFFSET + address.index as u32 * 8, code);
+        uleb(gpr_local(address.index), code);
         if address.scale != 0 {
             code.push(0x42); // i64.const shift
             sleb(address.scale as i64, code);
@@ -682,20 +1069,171 @@ fn emit_fallback_if_true(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0x04, 0x40, 0x41, 0x7f, 0x0f, 0x0b]); // if { return -1 }
 }
 
-fn emit_increment_i64(offset: u32, code: &mut Vec<u8>) {
-    code.push(0x20);
-    uleb(0, code);
+fn emit_state_local_load(offset: u32, local: u32, code: &mut Vec<u8>) {
     code.push(0x20);
     uleb(0, code);
     code.push(0x29); // i64.load
     uleb(3, code);
     uleb(offset, code);
+    code.push(0x21);
+    uleb(local, code);
+}
+
+fn emit_state_gpr_load(register: u8, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x29); // i64.load initial GPR value
+    uleb(3, code);
+    uleb(GPR_OFFSET + register as u32 * 8, code);
+    code.push(0x21);
+    uleb(gpr_local(register), code);
+}
+
+fn emit_state_xmm_load(register: u8, code: &mut Vec<u8>) {
+    for lane in 0..2 {
+        code.push(0x20);
+        uleb(0, code);
+        code.push(0x29); // i64.load one XMM lane
+        uleb(3, code);
+        uleb(xmm_offset(register, lane), code);
+        code.push(0x21);
+        uleb(xmm_local(register, lane), code);
+    }
+}
+
+fn emit_state_local_store(offset: u32, local: u32, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(0, code);
+    code.push(0x20);
+    uleb(local, code);
+    code.push(0x37); // i64.store committed state field
+    uleb(3, code);
+    uleb(offset, code);
+}
+
+fn emit_flush_state(written_gprs: u16, written_xmms: u16, code: &mut Vec<u8>) {
+    for register in 0..16 {
+        if written_gprs & (1 << register) != 0 {
+            emit_state_local_store(GPR_OFFSET + register as u32 * 8, gpr_local(register), code);
+        }
+        if written_xmms & (1 << register) != 0 {
+            emit_state_local_store(xmm_offset(register, 0), xmm_local(register, 0), code);
+            emit_state_local_store(xmm_offset(register, 1), xmm_local(register, 1), code);
+        }
+    }
+    emit_state_local_store(RIP_OFFSET, RIP_LOCAL, code);
+    emit_state_local_store(ICOUNT_OFFSET, ICOUNT_LOCAL, code);
+    emit_state_local_store(TSC_OFFSET, TSC_LOCAL, code);
+}
+
+fn emit_increment_local(local: u32, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(local, code);
     code.push(0x42);
     sleb(1, code);
     code.push(0x7c); // i64.add
-    code.push(0x37); // i64.store
-    uleb(3, code);
-    uleb(offset, code);
+    code.push(0x21);
+    uleb(local, code);
+}
+
+fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
+    let mut initialized = 0u16;
+    let mut initial_reads = 0u16;
+    let mut written = 0u16;
+    let mut initialized_xmm = 0u16;
+    let mut initial_xmm_reads = 0u16;
+    let mut written_xmm = 0u16;
+    for instruction in instructions {
+        match instruction {
+            JitInstruction::Nop { .. }
+            | JitInstruction::Jump { .. }
+            | JitInstruction::Branch { .. } => {}
+            JitInstruction::Mov(mov) => {
+                if let MovSource::Register { index, .. } = mov.source {
+                    require_initial_register(index, initialized, &mut initial_reads);
+                }
+                initialized |= 1 << mov.dst;
+                written |= 1 << mov.dst;
+            }
+            JitInstruction::Add { dst, source, .. } => {
+                require_initial_register(*dst, initialized, &mut initial_reads);
+                if let AddSource::Register(index) = source {
+                    require_initial_register(*index, initialized, &mut initial_reads);
+                }
+                initialized |= 1 << *dst;
+                written |= 1 << *dst;
+            }
+            JitInstruction::Load { dst, address, .. } => {
+                address_initial_registers(*address, initialized, &mut initial_reads);
+                initialized |= 1 << dst;
+                written |= 1 << dst;
+            }
+            JitInstruction::Store(store) => {
+                address_initial_registers(store.address, initialized, &mut initial_reads);
+                if let StoreSource::Register(index) = store.source {
+                    require_initial_register(index, initialized, &mut initial_reads);
+                }
+            }
+            JitInstruction::XmmMove { dst, source, .. } => {
+                match source {
+                    XmmSource::Register(index) => {
+                        require_initial_xmm(*index, initialized_xmm, &mut initial_xmm_reads)
+                    }
+                    XmmSource::Memory(address) => {
+                        address_initial_registers(*address, initialized, &mut initial_reads)
+                    }
+                }
+                initialized_xmm |= 1 << dst;
+                written_xmm |= 1 << dst;
+            }
+            JitInstruction::XmmStore {
+                address, source, ..
+            } => {
+                address_initial_registers(*address, initialized, &mut initial_reads);
+                require_initial_xmm(*source, initialized_xmm, &mut initial_xmm_reads);
+            }
+            JitInstruction::XmmFp { dst, source, .. } => {
+                require_initial_xmm(*dst, initialized_xmm, &mut initial_xmm_reads);
+                require_initial_xmm(*source, initialized_xmm, &mut initial_xmm_reads);
+                initialized_xmm |= 1 << *dst;
+                written_xmm |= 1 << *dst;
+            }
+        }
+    }
+    (initial_reads, written, initial_xmm_reads, written_xmm)
+}
+
+fn address_initial_registers(address: MemOp, initialized: u16, initial_reads: &mut u16) {
+    if address.base != 0xff {
+        require_initial_register(address.base, initialized, initial_reads);
+    }
+    if address.index != 0xff {
+        require_initial_register(address.index, initialized, initial_reads);
+    }
+}
+
+fn require_initial_register(register: u8, initialized: u16, initial_reads: &mut u16) {
+    if initialized & (1 << register) == 0 {
+        *initial_reads |= 1 << register;
+    }
+}
+
+fn require_initial_xmm(register: u8, initialized: u16, initial_reads: &mut u16) {
+    if initialized & (1 << register) == 0 {
+        *initial_reads |= 1 << register;
+    }
+}
+
+fn gpr_local(register: u8) -> u32 {
+    GPR_LOCAL_BASE + register as u32
+}
+
+fn xmm_local(register: u8, lane: u8) -> u32 {
+    XMM_LOCAL_BASE + register as u32 * 2 + lane as u32
+}
+
+fn xmm_offset(register: u8, lane: u8) -> u32 {
+    XMM_OFFSET + register as u32 * 16 + lane as u32 * 8
 }
 
 fn section(id: u8, payload: &[u8], module: &mut Vec<u8>) {
@@ -738,12 +1276,12 @@ extern "C" {
         id: u32,
         wasm_ptr: *const u8,
         wasm_len: u32,
-        start: u64,
-        code_epoch: u64,
         state: *mut JitState,
         budget: u32,
         emitted_instructions: u32,
         first_register_register: u32,
+        start: u64,
+        code_epoch: u64,
     ) -> i32;
 }
 
@@ -771,6 +1309,73 @@ mod tests {
 
         assert_eq!(emitted.instruction_count(), 2);
         assert_eq!(emitted.first_register_register, Some(1));
+    }
+
+    #[test]
+    fn loads_a_reused_source_register_once_per_emitted_block() {
+        let mov_rax_rbx = decode(&[0x48, 0x89, 0xd8], 0x1810).unwrap();
+        let mov_rcx_rbx = decode(&[0x48, 0x89, 0xd9], 0x1813).unwrap();
+        let mov_rdx_rbx = decode(&[0x48, 0x89, 0xda], 0x1816).unwrap();
+        let emitted =
+            emit_mov_block(72, 0x1810, &[mov_rax_rbx, mov_rcx_rbx, mov_rdx_rbx], 1).unwrap();
+
+        // RBX is JitState byte offset 24. Each instruction currently emits its own i64.load;
+        // block-local register caching should leave one entry load for all three MOVs.
+        assert_eq!(
+            emitted
+                .wasm
+                .windows(3)
+                .filter(|window| *window == [0x29, 0x03, 24])
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn flushes_a_written_register_once_at_the_block_exit() {
+        let mov_rax_rbx = decode(&[0x48, 0x89, 0xd8], 0x1820).unwrap();
+        let emitted = emit_mov_block(73, 0x1820, &[mov_rax_rbx], 1).unwrap();
+
+        assert_eq!(
+            emitted
+                .wasm
+                .windows(3)
+                .filter(|window| *window == [0x37, 0x03, 0])
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn emits_packed_double_multiply_and_add_instructions() {
+        let mulpd = decode(&[0x66, 0x0f, 0x59, 0xc1], 0x1830).unwrap();
+        let addpd = decode(&[0x66, 0x0f, 0x58, 0xc1], 0x1834).unwrap();
+        let emitted = emit_mov_block(74, 0x1830, &[mulpd, addpd], 1).unwrap();
+
+        assert_eq!(emitted.instruction_count(), 2);
+        assert!(emitted.wasm.contains(&0xa2), "missing Wasm f64.mul");
+        assert!(emitted.wasm.contains(&0xa0), "missing Wasm f64.add");
+    }
+
+    #[test]
+    fn emits_a_32_bit_add_before_a_conditional_loop_exit() {
+        let add_eax_minus_eight = decode(&[0x83, 0xc0, 0xf8], 0x1840).unwrap();
+        let jne = decode(&[0x75, 0xfb], 0x1843).unwrap();
+        assert_eq!(jne.imm as u64, 0x1840);
+
+        let emitted = emit_mov_block(75, 0x1840, &[add_eax_minus_eight, jne], 2).unwrap();
+        assert_eq!(emitted.instruction_count(), 2);
+        assert!(emitted.wasm.contains(&0x6a), "missing Wasm i32.add");
+    }
+
+    #[test]
+    fn initializes_the_old_destination_for_a_leading_add() {
+        let add_eax_minus_eight = decode(&[0x83, 0xc0, 0xf8], 0x1850).unwrap();
+        let add = translate_instruction(add_eax_minus_eight).unwrap();
+        let (initial_reads, written, _, _) = register_masks(&[add]);
+
+        assert_eq!(initial_reads & 1, 1, "ADD reads the incoming EAX value");
+        assert_eq!(written & 1, 1, "ADD writes EAX");
     }
 
     #[test]
@@ -829,15 +1434,27 @@ mod tests {
 
         assert_eq!(emitted.instruction_count(), 2);
         assert_eq!(emitted.first_register_register, Some(0));
-        assert!(emitted.wasm.windows(3).any(|w| w == [0x29, 0x03, 24])); // load RBX
         assert!(emitted
             .wasm
-            .windows(6)
-            .any(|w| w == [0x29, 0x03, 24, 0xa7, 0xad, 0x37]));
+            .windows(7)
+            .any(|w| w == [0x20, 0x00, 0x29, 0x03, 24, 0x21, (GPR_LOCAL_BASE + 3) as u8]));
+        assert!(emitted.wasm.windows(6).any(|w| w
+            == [
+                0x20,
+                (GPR_LOCAL_BASE + 3) as u8,
+                0xa7,
+                0xad,
+                0x21,
+                GPR_LOCAL_BASE as u8
+            ]));
         assert!(emitted
             .wasm
-            .windows(6)
-            .any(|w| w == [0x29, 0x03, 8, 0x37, 0x03, 0]));
+            .windows(4)
+            .any(|w| w == [0x20, (GPR_LOCAL_BASE + 1) as u8, 0x21, GPR_LOCAL_BASE as u8]));
+        assert!(emitted
+            .wasm
+            .windows(7)
+            .any(|w| w == [0x20, 0, 0x20, GPR_LOCAL_BASE as u8, 0x37, 0x03, 0]));
     }
 
     #[test]

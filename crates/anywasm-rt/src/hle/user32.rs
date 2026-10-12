@@ -42,6 +42,7 @@ const PM_REMOVE: u64 = 1;
 const TME_LEAVE: u32 = 0x0000_0002;
 const TME_CANCEL: u32 = 0x8000_0000;
 const HWND_BASE: u64 = 0x0001_0010;
+const HWND_DESKTOP: u64 = HWND_BASE;
 const WS_CHILD: u32 = 0x4000_0000;
 
 fn set_windows_hook(p: &mut Process) -> R {
@@ -257,8 +258,18 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(1)
         },
-        "IsWindow" => |p| Ok(p.extra.win.windows.contains_key(&p.arg(0)) as u64),
-        "IsWindowVisible" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.visible as u64).unwrap_or(0)),
+        "IsWindow" => |p| {
+            let hwnd = p.arg(0);
+            Ok((hwnd == HWND_DESKTOP || p.extra.win.windows.contains_key(&hwnd)) as u64)
+        },
+        "IsWindowVisible" => |p| {
+            let hwnd = p.arg(0);
+            Ok(if hwnd == HWND_DESKTOP {
+                1
+            } else {
+                p.extra.win.windows.get(&hwnd).map(|w| w.visible as u64).unwrap_or(0)
+            })
+        },
         "IsWindowUnicode" => |p| Ok(p.extra.win.windows.get(&p.arg(0)).map(|w| w.unicode as u64).unwrap_or(0)),
         "IsIconic" | "IsZoomed" => |_| Ok(0),
         "GetMessageA" | "GetMessageW" => get_message,
@@ -312,13 +323,21 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "GetClientRect" => |p| {
             let (h, r) = (p.arg(0), p.arg(1));
-            let (w, ht) = p.extra.win.windows.get(&h).map(|x| (x.w, x.h)).unwrap_or((0, 0));
+            let (w, ht) = if h == HWND_DESKTOP {
+                (system_metric(0) as i32, system_metric(1) as i32)
+            } else {
+                p.extra.win.windows.get(&h).map(|x| (x.w, x.h)).unwrap_or((0, 0))
+            };
             write_rect(p, r, 0, 0, w, ht)?;
-            Ok(p.extra.win.windows.contains_key(&h) as u64)
+            Ok((h == HWND_DESKTOP || p.extra.win.windows.contains_key(&h)) as u64)
         },
         "GetWindowRect" => |p| {
             let (h, r) = (p.arg(0), p.arg(1));
-            let (x, y, w, ht) = p.extra.win.windows.get(&h).map(|x| (x.x, x.y, x.w, x.h)).unwrap_or((0, 0, 0, 0));
+            let (x, y, w, ht) = if h == HWND_DESKTOP {
+                (0, 0, system_metric(0) as i32, system_metric(1) as i32)
+            } else {
+                p.extra.win.windows.get(&h).map(|x| (x.x, x.y, x.w, x.h)).unwrap_or((0, 0, 0, 0))
+            };
             write_rect(p, r, x, y, x + w, y + ht)?;
             Ok(1)
         },
@@ -453,6 +472,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(std::mem::replace(&mut p.extra.win.focus, h))
         },
         "GetFocus" | "GetForegroundWindow" | "GetActiveWindow" => |p| Ok(p.extra.win.main_window),
+        "GetDesktopWindow" => |_| Ok(HWND_DESKTOP),
         "SetForegroundWindow" | "SetActiveWindow" | "BringWindowToTop" => |_| Ok(1),
         "GetSystemMetrics" => |p| Ok(system_metric(p.arg(0) as u32)),
         "GetSystemMetricsForDpi" => |p| {
@@ -1498,4 +1518,5 @@ mod tests {
 
         assert_eq!(input_target_window(&win), game);
     }
+
 }

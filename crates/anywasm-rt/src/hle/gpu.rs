@@ -48,7 +48,7 @@ pub mod op {
     pub const DISPATCH: u32 = 42; // x, y, z
     pub const SET_UAVS: u32 = 43; // start, count, (view id, initial count) pairs
     pub const SET_CBUFFERS1: u32 = 44; // stage, start, count, (buffer id, first constant, num constants) triples
-    pub const SET_FIXED_FUNCTION: u32 = 45; // D3D9 FVF, viewport width, viewport height
+    pub const SET_FIXED_FUNCTION: u32 = 45; // D3D9 FVF, viewport, stage-0 color/alpha op and arguments
     pub const CREATE_TEXTURE3D: u32 = 46; // id,w,h,depth,mips,format,bind,usage,misc
 }
 

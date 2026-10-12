@@ -1346,9 +1346,7 @@ impl BlockCache {
         let (mut executed, start_index, interpreter_only) = match block.emitted.as_ref() {
             Some(emitted) => match emitted.execute(cpu, mem, max_instructions) {
                 Some((executed, true)) => return (executed as u64, Ok(())),
-                Some((executed, false)) => {
-                    (executed as u64, emitted.instruction_count(), true)
-                }
+                Some((executed, false)) => (executed as u64, emitted.instruction_count(), true),
                 None => (0, 0, true),
             },
             None => (0, 0, false),

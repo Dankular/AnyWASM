@@ -124,8 +124,8 @@ try {
       });
       assert.equal(jitPressure.firstStatus, 0, `${item.name} JIT cache pressure run failed`);
       assert.equal(jitPressure.probeStatus, 0, `${item.name} JIT cache eviction probe failed`);
-      assert.deepEqual(jitPressure.afterPressure, { compilations: 344, executions: 344, fallbacks: 0, registerRegisterHits: 0 });
-      assert.deepEqual(jitPressure.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0 });
+      assert.deepEqual(jitPressure.afterPressure, { compilations: 344, executions: 344, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 });
+      assert.deepEqual(jitPressure.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 });
       assert.deepEqual(pageErrors, [], `${item.name} had uncaught page errors`);
       console.log(`${item.name} ${browser.version()}: ${JSON.stringify({ capabilities, hello, graphics, jitPressure })}`);
 
@@ -157,8 +157,8 @@ try {
         assert.equal(cspJit.error, undefined, `${item.name} CSP probe error: ${cspJit.error}`);
         assert.equal(cspJit.firstStatus, 0, `${item.name} CSP emitted run failed`);
         assert.equal(cspJit.probeStatus, 0, `${item.name} CSP eviction probe failed`);
-        assert.deepEqual(cspJit.afterPressure, { compilations: 344, executions: 344, fallbacks: 0, registerRegisterHits: 0 });
-        assert.deepEqual(cspJit.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0 });
+        assert.deepEqual(cspJit.afterPressure, { compilations: 344, executions: 344, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 });
+        assert.deepEqual(cspJit.afterProbe, { compilations: 345, executions: 390, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 });
         assert.deepEqual(cspPageErrors, [], `${item.name} CSP page had uncaught errors: ${cspPageErrors.join('; ')}`);
         console.log(`${item.name} CSP: ${JSON.stringify({ hello: cspHello, jitPressure: cspJit })}`);
       } finally {

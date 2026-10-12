@@ -203,8 +203,9 @@ try {
   }, Array.from(readFileSync(jitStateBundle)));
   check('Chrome emits warmed memory and direct JMP/Jcc exits, then falls back on a cold TLB page',
     jitStateBrowser.emitted.status === jitStateBrowser.exited && jitStateBrowser.emitted.exitCode === 0 &&
-      jitStateBrowser.emitted.jitStats.compilations === 4 && jitStateBrowser.emitted.jitStats.executions === 3 &&
-      jitStateBrowser.emitted.jitStats.registerRegisterHits === 3 && jitStateBrowser.emitted.jitStats.fallbacks === 1,
+      jitStateBrowser.emitted.jitStats.compilations > 0 && jitStateBrowser.emitted.jitStats.executions >= 200000 &&
+      jitStateBrowser.emitted.jitStats.registerRegisterHits > 0 && jitStateBrowser.emitted.jitStats.fallbacks === 1 &&
+      jitStateBrowser.emitted.jitStats.chainTransitions > 0 && jitStateBrowser.emitted.jitStats.chainCompilations > 0,
     JSON.stringify(jitStateBrowser.emitted));
   check('Chrome NOP/MOV prefix matches cached-only status and retired count',
     jitStateBrowser.cached.status === jitStateBrowser.emitted.status &&
@@ -683,6 +684,78 @@ try {
     near(d3d9FixedResult.pixel, [255, 0, 0, 255], 1) && near(d3d9FixedResult.background, [0, 0, 0, 255], 1),
     JSON.stringify(d3d9FixedResult));
 
+  const d3d9TextureResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(21, words(1, 2, 0));
+      command(4, words(13, 2, 2, 1, 1, 28, 8, 0, 1, 0)); // 2x2 RGBA8 D3D9 texture
+      const texel = new Uint8Array(52);
+      texel.set(words(13, 0, 0, 0, 0, 2, 2, 8, 16));
+      texel.set([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255], 36);
+      command(5, texel);
+      command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1)); // texture SRV
+      command(19, words(1, 0, 1, 14));
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 15, true); samplerView.setUint32(4, 0x15, true); // linear min/mag/mip
+      samplerView.setUint32(8, 1, true); samplerView.setUint32(12, 1, true); samplerView.setUint32(16, 1, true);
+      samplerView.setUint32(24, 1, true); samplerView.setUint32(28, 8, true);
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
+      command(8, sampler); command(20, words(1, 0, 1, 15));
+      command(45, words(0x144, 64, 64, 2, 2, 1, 2, 2, 1)); // stage 0 selects texture color and alpha
+      command(2, words(11, 84, 1, 0, 0, 28));
+      const vertices = new Uint8Array(84), view = new DataView(vertices.buffer);
+      [[8, 8, 0.5, 0.5], [56, 8, 0.5, 0.5], [32, 56, 0.5, 0.5]].forEach(([x, y, u, v], i) => {
+        const offset = i * 28;
+        view.setFloat32(offset, x, true); view.setFloat32(offset + 4, y, true);
+        view.setFloat32(offset + 8, 0.5, true); view.setFloat32(offset + 12, 1, true);
+        view.setUint32(offset + 16, 0x80ff0000, true); // half-alpha red D3DCOLOR
+        view.setFloat32(offset + 20, u, true); view.setFloat32(offset + 24, v, true);
+      });
+      const upload = new Uint8Array(12 + vertices.length);
+      upload.set(words(11, 0, vertices.length)); upload.set(vertices, 12); command(3, upload);
+      command(13, words(0, 1, 11, 28, 0));
+      command(16, words(4)); command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (20 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
+    d3d9TextureResult.draws === 1 && d3d9TextureResult.errors.length === 0
+      && near(d3d9TextureResult.pixel, [127, 127, 127, 255], 2),
+    JSON.stringify(d3d9TextureResult));
+
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
@@ -861,6 +934,109 @@ try {
     computeResult.uav?.width === 4 && computeResult.uav.height === 4 && computeResult.uav.format === 'r32float'
       && computeResult.uav.values.length === 16 && computeResult.uav.values.every((value) => Math.abs(value - 0.25) < 0.0001),
     JSON.stringify(computeResult.uav));
+
+  const structuredBufferUavResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const logs = [];
+    let shaderDetails;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const compute = tool.compileHlsl(`
+        RWStructuredBuffer<uint> output : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { output[id.x] = 123; }
+      `, 'main', 'cs_5_0');
+      const descriptors = tool.scan(compute);
+      const records = new Uint32Array(descriptors.length * 7);
+      descriptors.forEach((d, i) => records.set([
+        d.type, d.space, d.register, d.resourceType,
+        ({ 2: 0, 0: 1, 3: 2, 1: 3 })[d.type], d.register + (d.type === 1 ? 1 : 0), d.count,
+      ], i * 7));
+      const rawSpirv = tool._withBytes(compute, (pointer) => {
+        const table = records.length ? tool.vk._malloc(records.byteLength) : 0;
+        if (table) tool.vk.HEAPU8.set(new Uint8Array(records.buffer), table);
+        try {
+          if (tool.vk._wb_dxbc_compile_bound(pointer, compute.length, table, descriptors.length) !== 1) throw new Error('DXBC->SPIR-V: ' + tool._msg());
+          return tool._result();
+        } finally { if (table) tool.vk._free(table); tool.vk._wb_clear(); }
+      });
+      const spirvWords = new Uint32Array(rawSpirv.buffer, rawSpirv.byteOffset, rawSpirv.byteLength / 4);
+      const instructions = [];
+      for (let i = 5; i < spirvWords.length;) {
+        const count = spirvWords[i] >>> 16, opcode = spirvWords[i] & 0xffff;
+        if (!count || i + count > spirvWords.length) break;
+        instructions.push([opcode, ...Array.from(spirvWords.slice(i + 1, i + count))]);
+        i += count;
+      }
+      shaderDetails = { descriptors, instructions };
+      globalThis.__anywasmDebugBufferImages = true;
+      const translated = tool.translate(compute);
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, dxbc) => {
+        const head = words(id, 2, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const initial = new Uint32Array(16).fill(0xfeed1234);
+      command(2, words(13, initial.byteLength, 0x80, 0, 0x40, 4)); // structured UAV buffer, 4-byte elements
+      const write = new Uint8Array(12 + initial.byteLength);
+      write.set(words(13, 0, initial.byteLength)); write.set(new Uint8Array(initial.buffer), 12); command(3, write);
+      command(12, words(14, 3, 13, 0, 1, 2, 3, 0, 0)); // buffer UAV, elements [2, 5)
+      shader(15, compute);
+      command(17, words(2, 15));
+      command(43, words(0, 1, 14, 0xffffffff));
+      command(42, words(3, 1, 1));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
+      gpu.execute(commands);
+
+      const resource = gpu.res.get(13);
+      const readback = gpu.device.createBuffer({ size: initial.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const encoder = gpu.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(resource.gpu, 0, readback, 0, initial.byteLength);
+      gpu.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const values = Array.from(new Uint32Array(readback.getMappedRange().slice(0)));
+      readback.unmap(); readback.destroy(); gpu.device.destroy();
+      return { values, dispatches: gpu.stats.dispatches, errors: gpu.stats.errors, logs, descriptors: translated.descriptors, wgsl: translated.wgsl };
+    } catch (error) {
+      const lowered = globalThis.__anywasmDebugBufferImages;
+      let loweredInstructions;
+      if (lowered instanceof Uint8Array) {
+        const words = new Uint32Array(lowered.buffer, lowered.byteOffset, lowered.byteLength / 4);
+        loweredInstructions = [];
+        for (let i = 5; i < words.length;) {
+          const count = words[i] >>> 16, opcode = words[i] & 0xffff;
+          if (!count || i + count > words.length) break;
+          loweredInstructions.push([opcode, ...Array.from(words.slice(i + 1, i + count))]);
+          i += count;
+        }
+      }
+      return { error: String(error), stack: error?.stack, logs, shaderDetails, loweredInstructions };
+    }
+  });
+  const sentinelsOutsideStructuredView = structuredBufferUavResult.values?.every((value, i) =>
+    (i < 2 || i >= 5) ? value === 0xfeed1234 : value === 123);
+  check('D3D11 structured-buffer UAV dispatch honors FirstElement and NumElements',
+    structuredBufferUavResult.dispatches === 1 && structuredBufferUavResult.errors.length === 0
+      && sentinelsOutsideStructuredView,
+    JSON.stringify(structuredBufferUavResult));
 
   const drawParamsResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
@@ -1164,6 +1340,102 @@ try {
     cullResult.draws === 2 && cullResult.errors.length === 0
       && near(cullResult.pixel, [255, 0, 0, 255], 1),
     JSON.stringify(cullResult));
+
+  const wireframeResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          uint local = vertexId % 3;
+          float center = vertexId < 3 ? -0.5 : 0.5;
+          float x = local == 0 ? center - 0.4 : local == 1 ? center + 0.4 : center;
+          float y = local == 2 ? 0.65 : -0.75;
+          float2 trianglePosition = float2(x, y);
+          float2 stripPosition = vertexId == 6 ? float2(-0.9, 0.75)
+            : vertexId == 7 ? float2(-0.1, 0.75)
+            : vertexId == 8 ? float2(-0.9, -0.75) : float2(-0.1, -0.75);
+          float2 p = vertexId >= 6 ? stripPosition : trianglePosition;
+          return float4(p, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(2, words(11, 12, 0, 0x40, 0, 0, 0));
+      command(2, words(12, 12, 0, 0x40, 0, 0, 0));
+      const indices = new Uint8Array(12), indexData = new DataView(indices.buffer);
+      [0, 1, 2].forEach((value, i) => indexData.setUint32(i * 4, value, true));
+      const indexWrite = new Uint8Array(12 + indices.length);
+      indexWrite.set(words(11, 0, indices.length)); indexWrite.set(indices, 12); command(3, indexWrite);
+      command(33, words(12, 11));
+      const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
+      rasterView.setUint32(0, 6, true); rasterView.setUint32(4, 2, true); rasterView.setUint32(8, 1, true);
+      command(10, raster); command(25, words(6)); // wireframe, no culling
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(21, words(1, 2, 0)); command(16, words(4));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true); clearView.setFloat32(16, 1, true); command(27, clear);
+      command(29, words(3, 0));
+      command(14, words(12, 42, 0)); command(30, words(3, 0, 3));
+      command(16, words(5)); command(29, words(4, 6));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const samplePixel = (x, y) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      const isRed = (color) => color[0] > 250 && color[1] < 2 && color[2] < 2 && color[3] > 250;
+      let leftEdgeRed = 0, rightEdgeRed = 0, stripEdgeRed = 0;
+      for (let y = 54; y <= 58; y++) {
+        for (let x = 14; x <= 18; x++) if (isRed(samplePixel(x, y))) leftEdgeRed++;
+        for (let x = 46; x <= 50; x++) if (isRed(samplePixel(x, y))) rightEdgeRed++;
+      }
+      for (let y = 6; y <= 10; y++) for (let x = 14; x <= 18; x++) if (isRed(samplePixel(x, y))) stripEdgeRed++;
+      const result = {
+        leftEdgeRed, rightEdgeRed, stripEdgeRed,
+        leftInterior: samplePixel(16, 34), rightInterior: samplePixel(48, 34), stripInterior: samplePixel(8, 32),
+        stripDiagonal: samplePixel(15, 32), draws: gpu.stats.draws, errors: gpu.stats.errors,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 wireframe fill draws triangle edges and leaves the interior clear',
+    wireframeResult.leftEdgeRed >= 3 && wireframeResult.rightEdgeRed >= 3 && wireframeResult.stripEdgeRed >= 3
+      && near(wireframeResult.leftInterior, [0, 0, 0, 255], 1) && near(wireframeResult.rightInterior, [0, 0, 0, 255], 1)
+      && near(wireframeResult.stripInterior, [0, 0, 0, 255], 1) && near(wireframeResult.stripDiagonal, [255, 0, 0, 255], 1)
+      && wireframeResult.draws === 3 && wireframeResult.errors.length === 0,
+    JSON.stringify(wireframeResult));
 
   const depthBiasResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
@@ -1959,8 +2231,8 @@ try {
       command(38, words(1, 0, 9, 64, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
       command(46, words(3, 4, 4, 2, 1, 28, 0x8, 0, 0)); // 4x4x2 volume texture
-      command(46, words(9, 4, 4, 2, 1, 28, 0x8, 0, 0)); // Copy destination
-      command(12, words(5, 2, 9, 28, 8, 0, 1, 0, 1)); // Texture3D SRV on the copy
+      command(46, words(13, 4, 4, 2, 1, 28, 0x8, 0, 0)); // Copy destination
+      command(12, words(5, 2, 13, 28, 8, 0, 1, 0, 1)); // Texture3D SRV on the copy
       const uploadSlice = (z, rgba) => {
         const texels = new Uint8Array(64);
         for (let i = 0; i < 16; i++) texels.set(rgba, i * 4);
@@ -1969,7 +2241,7 @@ try {
         payload.set(texels, 36); command(5, payload);
       };
       uploadSlice(0, [255, 0, 0, 255]); uploadSlice(1, [0, 255, 0, 255]);
-      command(33, words(9, 3)); // CopyResource preserves the volume slices
+      command(33, words(13, 3)); // CopyResource preserves the volume slices
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
       samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);

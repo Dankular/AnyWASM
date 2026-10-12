@@ -17,6 +17,8 @@ const IID_D3D9: &str = "81bdcbca-64d4-426d-ae8d-ad0147f4275c";
 const IID_D3D9_DEVICE: &str = "d0223b96-bf7a-43fd-92bd-a43b0d82b9eb";
 const IID_D3D9_SURFACE: &str = "0cfbaf3a-9ff6-429a-99b3-a2796af8b89b";
 const IID_D3D9_RESOURCE: &str = "05eec05d-8f7d-4362-b999-d1baf357c704";
+const IID_D3D9_BASE_TEXTURE: &str = "580ca87e-1d3c-4d54-991d-b7d3e3c298ce";
+const IID_D3D9_TEXTURE: &str = "85c31227-3de5-4f00-9b3a-f11ac38c18b5";
 const IID_D3D9_VERTEX_BUFFER: &str = "b64bb1b5-fd70-4df6-bf91-19d0a12455e3";
 const IID_D3D9_INDEX_BUFFER: &str = "7c9dd65e-d3f7-4529-acee-785830acde35";
 const IID_D3D9_VERTEX_DECLARATION: &str = "dd13c59c-36fa-4098-a8fb-c7ed39dc8546";
@@ -68,6 +70,19 @@ const D3D9_RESOURCE_METHODS: &[&str] = &[
     "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType",
 ];
 
+const D3D9_BASE_TEXTURE_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData", "GetPrivateData",
+    "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType", "SetLOD", "GetLOD",
+    "GetLevelCount", "SetAutoGenFilterType", "GetAutoGenFilterType", "GenerateMipSubLevels",
+];
+
+const D3D9_TEXTURE_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData", "GetPrivateData",
+    "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType", "SetLOD", "GetLOD",
+    "GetLevelCount", "SetAutoGenFilterType", "GetAutoGenFilterType", "GenerateMipSubLevels",
+    "GetLevelDesc", "GetSurfaceLevel", "LockRect", "UnlockRect", "AddDirtyRect",
+];
+
 const D3D9_VERTEX_BUFFER_METHODS: &[&str] = &[
     "QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData", "GetPrivateData",
     "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType", "Lock", "Unlock",
@@ -96,6 +111,8 @@ pub fn methods(iface: &str) -> Option<&'static [&'static str]> {
         "IDirect3DDevice9" => Some(D3D9_DEVICE_METHODS),
         "IDirect3DSurface9" => Some(D3D9_SURFACE_METHODS),
         "IDirect3DResource9" => Some(D3D9_RESOURCE_METHODS),
+        "IDirect3DBaseTexture9" => Some(D3D9_BASE_TEXTURE_METHODS),
+        "IDirect3DTexture9" => Some(D3D9_TEXTURE_METHODS),
         "IDirect3DVertexBuffer9" => Some(D3D9_VERTEX_BUFFER_METHODS),
         "IDirect3DIndexBuffer9" => Some(D3D9_INDEX_BUFFER_METHODS),
         "IDirect3DVertexDeclaration9" => Some(D3D9_VERTEX_DECLARATION_METHODS),
@@ -110,6 +127,8 @@ pub fn iid_name(iid: &str) -> Option<&'static str> {
         IID_D3D9_DEVICE => Some("IDirect3DDevice9"),
         IID_D3D9_SURFACE => Some("IDirect3DSurface9"),
         IID_D3D9_RESOURCE => Some("IDirect3DResource9"),
+        IID_D3D9_BASE_TEXTURE => Some("IDirect3DBaseTexture9"),
+        IID_D3D9_TEXTURE => Some("IDirect3DTexture9"),
         IID_D3D9_VERTEX_BUFFER => Some("IDirect3DVertexBuffer9"),
         IID_D3D9_INDEX_BUFFER => Some("IDirect3DIndexBuffer9"),
         IID_D3D9_VERTEX_DECLARATION => Some("IDirect3DVertexDeclaration9"),
@@ -143,6 +162,7 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirect3DDevice9", "GetStreamSource") => 5,
         ("IDirect3DDevice9", "GetBackBuffer") => 5,
         ("IDirect3DDevice9", "CreateDepthStencilSurface") => 9,
+        ("IDirect3DDevice9", "CreateTexture") => 9,
         ("IDirect3DDevice9", "GetDepthStencilSurface" | "SetDepthStencilSurface") => 2,
         ("IDirect3DDevice9", "CreateVertexBuffer" | "CreateIndexBuffer") => 7,
         ("IDirect3DDevice9", "CreateVertexDeclaration") => 3,
@@ -160,11 +180,17 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirect3DDevice9", "DrawIndexedPrimitive") => 7,
         ("IDirect3DDevice9", "Reset") => 2,
         ("IDirect3DSurface9", "QueryInterface") => 3,
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "QueryInterface") => 3,
         ("IDirect3DSurface9", "AddRef" | "Release" | "GetPriority" | "PreLoad" | "GetType") => 1,
         ("IDirect3DSurface9", "GetDevice" | "GetDesc" | "GetDC") => 2,
         ("IDirect3DSurface9", "UnlockRect") => 1,
         ("IDirect3DSurface9", "GetContainer") => 3,
         ("IDirect3DSurface9", "LockRect") => 4,
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "AddRef" | "Release" | "GetPriority" | "PreLoad" | "GetType" | "GetLOD" | "GetLevelCount" | "GetAutoGenFilterType" | "GenerateMipSubLevels") => 1,
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetDevice" | "SetPriority" | "SetLOD" | "SetAutoGenFilterType") => 2,
+        ("IDirect3DTexture9", "GetLevelDesc" | "GetSurfaceLevel" | "AddDirtyRect") => 3,
+        ("IDirect3DTexture9", "LockRect") => 5,
+        ("IDirect3DTexture9", "UnlockRect") => 2,
         ("IDirect3DResource9", "GetDevice") => 2,
         ("IDirect3DResource9", "SetPrivateData") => 5,
         ("IDirect3DResource9", "GetPrivateData") => 4,
@@ -213,6 +239,7 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "Present") => present,
         ("IDirect3DDevice9", "GetBackBuffer") => get_backbuffer,
         ("IDirect3DDevice9", "CreateDepthStencilSurface") => create_depth_stencil_surface,
+        ("IDirect3DDevice9", "CreateTexture") => create_texture9,
         ("IDirect3DDevice9", "GetDepthStencilSurface") => get_depth_stencil_surface,
         ("IDirect3DDevice9", "GetStreamSource") => get_stream_source,
         ("IDirect3DDevice9", "GetIndices") => get_indices,
@@ -240,17 +267,31 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "SetPixelShader") => |p| set_shader9(p, false),
         ("IDirect3DDevice9", "GetVertexShader") => |p| get_shader9(p, true),
         ("IDirect3DDevice9", "GetPixelShader") => |p| get_shader9(p, false),
-        ("IDirect3DDevice9", "SetTexture" | "SetTransform" | "SetTextureStageState" | "SetSamplerState" | "SetVertexShaderConstantF" | "SetPixelShaderConstantF") => |_| Ok(S_OK),
+        ("IDirect3DDevice9", "SetTexture") => set_texture,
+        ("IDirect3DDevice9", "SetSamplerState") => set_sampler_state,
+        ("IDirect3DDevice9", "SetTextureStageState") => set_texture_stage_state,
+        ("IDirect3DDevice9", "SetTransform" | "SetVertexShaderConstantF" | "SetPixelShaderConstantF") => |_| Ok(S_OK),
         ("IDirect3DDevice9", "DrawPrimitive") => draw_primitive,
         ("IDirect3DDevice9", "DrawPrimitiveUP") => draw_primitive_up,
         ("IDirect3DDevice9", "DrawIndexedPrimitive") => draw_indexed_primitive,
         ("IDirect3DSurface9", "GetDevice") => surface_get_device,
         ("IDirect3DSurface9", "GetContainer") => |_| Ok(E_NOTIMPL),
         ("IDirect3DSurface9", "GetDesc") => surface_get_desc,
-        ("IDirect3DSurface9", "LockRect") => |_| Ok(E_NOTIMPL),
-        ("IDirect3DSurface9", "UnlockRect") => |_| Ok(S_OK),
+        ("IDirect3DSurface9", "LockRect") => surface_lock_rect,
+        ("IDirect3DSurface9", "UnlockRect") => surface_unlock_rect,
         ("IDirect3DSurface9", "GetDC") => |_| Ok(E_NOTIMPL),
         ("IDirect3DSurface9", "ReleaseDC") => |_| Ok(S_OK),
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetDevice") => resource_get_device,
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "SetPriority" | "PreLoad" | "SetAutoGenFilterType" | "GenerateMipSubLevels") => |_| Ok(S_OK),
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetPriority" | "GetLOD" | "GetAutoGenFilterType") => |_| Ok(0),
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "SetLOD") => |_| Ok(0),
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetLevelCount") => texture_level_count,
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetType") => get_resource_type,
+        ("IDirect3DTexture9", "GetLevelDesc") => texture_get_level_desc,
+        ("IDirect3DTexture9", "GetSurfaceLevel") => texture_get_surface_level,
+        ("IDirect3DTexture9", "LockRect") => texture_lock_rect,
+        ("IDirect3DTexture9", "UnlockRect") => texture_unlock_rect,
+        ("IDirect3DTexture9", "AddDirtyRect") => |_| Ok(S_OK),
         ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetDevice") => resource_get_device,
         ("IDirect3DVertexDeclaration9", "GetDevice") => declaration_get_device,
         ("IDirect3DVertexDeclaration9", "GetDeclaration") => declaration_get_elements,
@@ -410,16 +451,392 @@ fn get_device_caps_device(p: &mut Process) -> R {
 
 fn dxgi_format(d3d: u32) -> u32 {
     match d3d {
+        20 => 87, // 24-bit D3D9 RGB is expanded to BGRA8.
         21 => 87, // A8R8G8B8 -> B8G8R8A8_UNORM
         22 => 88, // X8R8G8B8 -> B8G8R8X8_UNORM
         23 => 85, // R5G6B5 -> B5G6R5_UNORM
+        28 => 65, // A8 -> A8_UNORM
         32 => 28, // A8B8G8R8 -> R8G8B8A8_UNORM
+        0x3154_5844 => 71, // DXT1 -> BC1
+        0x3254_5844 | 0x3354_5844 => 74, // DXT2/3 -> BC2
+        0x3454_5844 | 0x3554_5844 => 77, // DXT4/5 -> BC3
+        50 => 61, // L8 -> R8_UNORM
+        51 => 49, // A8L8 -> R8G8_UNORM
         71 => 40, // D3DFMT_D32 -> DXGI_FORMAT_D32_FLOAT
         75 => 45, // D3DFMT_D24S8 -> DXGI_FORMAT_D24_UNORM_S8_UINT
         77 => 46, // D3DFMT_D24X8 -> DXGI_FORMAT_R24_UNORM_X8_TYPELESS
         80 => 55, // D3DFMT_D16 -> DXGI_FORMAT_D16_UNORM
         _ => 87,
     }
+}
+
+fn texture_mip_dim(base: u32, level: u32) -> u32 {
+    (base >> level).max(1)
+}
+
+fn texture_level_layout(width: u32, height: u32, format: u32) -> (u32, u32, u32, u32, u32) {
+    let (block_width, block_height, bytes_per_block) = super::d3d11::format_info(format);
+    let row_pitch = width.div_ceil(block_width) * bytes_per_block;
+    let rows = height.div_ceil(block_height);
+    (width, height, row_pitch, rows, row_pitch.saturating_mul(rows))
+}
+
+fn texture_level_offset(info: &com::ResInfo, level: u32) -> u32 {
+    (0..level.min(info.mips)).fold(0u32, |offset, mip| {
+        let (_, _, _, _, size) = texture_level_layout(
+            texture_mip_dim(info.width, mip),
+            texture_mip_dim(info.height, mip),
+            info.format,
+        );
+        offset.saturating_add(size)
+    })
+}
+
+fn create_texture9(p: &mut Process) -> R {
+    let (device, width, height, requested_levels, usage, d3d_format, pool, out) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+        p.arg(6) as u32,
+        p.arg(7),
+    );
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    if width == 0 || height == 0 || !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let format = dxgi_format(d3d_format);
+    let levels = if requested_levels == 0 {
+        32 - width.max(height).leading_zeros()
+    } else {
+        requested_levels
+    };
+    let (block_width, block_height, bytes_per_block) = super::d3d11::format_info(format);
+    let mut size = 0u32;
+    for level in 0..levels {
+        let w = texture_mip_dim(width, level);
+        let h = texture_mip_dim(height, level);
+        size = size.saturating_add(w.div_ceil(block_width) * h.div_ceil(block_height) * bytes_per_block);
+    }
+    if size == 0 || size == u32::MAX {
+        return Ok(E_OUTOFMEMORY);
+    }
+    let mut bind = 0x8; // shader resource
+    if usage & 0x1 != 0 { bind |= 0x20; } // render target
+    if usage & 0x2 != 0 { bind |= 0x40; } // depth stencil
+    let id = com::new_res(p, com::ResInfo {
+        width,
+        height,
+        mips: levels,
+        array: 1,
+        format,
+        usage,
+        bind,
+        size,
+        shadow: vec![0; size as usize],
+        ..Default::default()
+    });
+    p.extra.gpu.emit(
+        op::CREATE_TEXTURE2D,
+        Pk::new().u32(id).u32(width).u32(height).u32(levels).u32(1).u32(format).u32(bind).u32(0).u32(1).u32(0),
+    );
+    let view_id = p.extra.gpu.new_id();
+    p.extra.gpu.emit(
+        op::CREATE_VIEW,
+        Pk::new().u32(view_id).u32(2).u32(id).u32(format).u32(4).u32(0).u32(levels).u32(0).u32(1),
+    );
+    p.extra.com.d3d9_texture_views.insert(id, view_id);
+    let texture = com::create(p, "IDirect3DTexture9", com::Kind::Direct3DTexture9 {
+        id,
+        device,
+        width,
+        height,
+        levels,
+        format: d3d_format,
+        pool,
+    });
+    p.wrptr(out, texture)?;
+    Ok(S_OK)
+}
+
+fn d3d9_texture(p: &Process, texture: u64) -> Option<(u32, u64, u32, u32, u32, u32, u32)> {
+    match com::kind_of(p, texture)? {
+        com::Kind::Direct3DTexture9 { id, device, width, height, levels, format, pool } => {
+            Some((id, device, width, height, levels, format, pool))
+        }
+        _ => None,
+    }
+}
+
+fn set_texture(p: &mut Process) -> R {
+    let (device, stage, texture) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if stage != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let view = if texture == 0 {
+        0
+    } else {
+        let Some((resource, ..)) = d3d9_texture(p, texture) else {
+            return Ok(D3DERR_INVALIDCALL);
+        };
+        let Some(&view) = p.extra.com.d3d9_texture_views.get(&resource) else {
+            return Ok(D3DERR_INVALIDCALL);
+        };
+        view
+    };
+
+    let key = (device, stage);
+    let previous = p.extra.com.d3d9_bound_textures.get(&key).copied().unwrap_or(0);
+    if previous != texture {
+        if texture != 0 && com::add_ref_obj(p, texture) == 0 {
+            return Ok(D3DERR_INVALIDCALL);
+        }
+        if texture == 0 {
+            p.extra.com.d3d9_bound_textures.remove(&key);
+        } else {
+            p.extra.com.d3d9_bound_textures.insert(key, texture);
+        }
+        if previous != 0 {
+            com::release_obj(p, previous);
+        }
+    }
+    p.extra.gpu.emit(
+        op::SET_SRVS,
+        Pk::new().u32(1).u32(stage).u32(1).u32(view),
+    );
+    Ok(S_OK)
+}
+
+fn d3d9_sampler_state(p: &Process, device: u64, stage: u32, state: u32, default: u32) -> u32 {
+    p.extra.com.d3d9_sampler_states
+        .get(&(device, stage, state))
+        .copied()
+        .unwrap_or(default)
+}
+
+fn set_sampler_state(p: &mut Process) -> R {
+    let (device, stage, state, value) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+    );
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if stage != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let valid = match state {
+        1..=3 => matches!(value, 1..=3), // wrap, mirror, clamp-to-edge
+        5 | 6 => matches!(value, 1..=3), // point, linear, anisotropic
+        7 => matches!(value, 0..=2), // none, point, linear
+        8 => value == 0, // WebGPU has no sampler LOD bias
+        9 => value <= 31, // most detailed mip level
+        10 => (1..=16).contains(&value),
+        11 => value == 0, // sRGB sampling needs an sRGB texture view
+        _ => false,
+    };
+    if !valid {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let state_key = (device, stage, state);
+    if p.extra.com.d3d9_sampler_states.get(&state_key).copied() == Some(value) {
+        return Ok(S_OK);
+    }
+    p.extra.com.d3d9_sampler_states.insert(state_key, value);
+
+    let min_filter = d3d9_sampler_state(p, device, stage, 6, 1);
+    let mag_filter = d3d9_sampler_state(p, device, stage, 5, 1);
+    let mip_filter = d3d9_sampler_state(p, device, stage, 7, 0);
+    let anisotropy = d3d9_sampler_state(p, device, stage, 10, 1);
+    let filter = if min_filter == 3 || mag_filter == 3 {
+        0x55 // D3D11_FILTER_ANISOTROPIC
+    } else {
+        u32::from(min_filter == 2) << 4
+            | u32::from(mag_filter == 2) << 2
+            | u32::from(mip_filter == 2)
+    };
+    let address_u = d3d9_sampler_state(p, device, stage, 1, 1);
+    let address_v = d3d9_sampler_state(p, device, stage, 2, 1);
+    let address_w = d3d9_sampler_state(p, device, stage, 3, 1);
+    let max_mip = d3d9_sampler_state(p, device, stage, 9, 0);
+    let max_lod = if mip_filter == 0 { 0.0f32 } else { 32.0f32 };
+    let mut desc = [0u8; 52];
+    for (offset, field) in [
+        (0, filter),
+        (4, address_u),
+        (8, address_v),
+        (12, address_w),
+        (20, anisotropy),
+        (24, 8), // D3D11_COMPARISON_ALWAYS
+    ] {
+        desc[offset..offset + 4].copy_from_slice(&field.to_le_bytes());
+    }
+    desc[44..48].copy_from_slice(&(max_mip as f32).to_le_bytes());
+    desc[48..52].copy_from_slice(&max_lod.to_le_bytes());
+
+    let sampler_id = p.extra.gpu.new_id();
+    p.extra.gpu.emit(op::CREATE_SAMPLER, Pk::new().u32(sampler_id).bytes(&desc));
+    p.extra.gpu.emit(
+        op::SET_SAMPLERS,
+        Pk::new().u32(1).u32(stage).u32(1).u32(sampler_id),
+    );
+    if let Some(previous) = p.extra.com.d3d9_sampler_objects.insert((device, stage), sampler_id) {
+        p.extra.gpu.emit(op::RELEASE, Pk::new().u32(previous));
+    }
+    Ok(S_OK)
+}
+
+fn texture_level_count(p: &mut Process) -> R {
+    Ok(d3d9_texture(p, p.arg(0)).map(|(_, _, _, _, levels, _, _)| levels as u64).unwrap_or(0))
+}
+
+fn texture_get_level_desc(p: &mut Process) -> R {
+    let (texture, level, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    let Some((id, _, width, height, levels, format, pool)) = d3d9_texture(p, texture) else { return Ok(D3DERR_INVALIDCALL); };
+    if out == 0 { return Ok(E_POINTER); }
+    if level >= levels { return Ok(D3DERR_INVALIDCALL); }
+    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    let w = texture_mip_dim(width, level);
+    let h = texture_mip_dim(height, level);
+    let size = texture_level_layout(w, h, info.format).4;
+    let mut desc = [0u8; 36];
+    desc[0..4].copy_from_slice(&format.to_le_bytes());
+    desc[4..8].copy_from_slice(&3u32.to_le_bytes()); // D3DRTYPE_TEXTURE
+    desc[8..12].copy_from_slice(&info.usage.to_le_bytes());
+    desc[12..16].copy_from_slice(&pool.to_le_bytes());
+    desc[16..20].copy_from_slice(&size.to_le_bytes());
+    desc[28..32].copy_from_slice(&w.to_le_bytes());
+    desc[32..36].copy_from_slice(&h.to_le_bytes());
+    p.write_bytes(out, &desc)?;
+    Ok(S_OK)
+}
+
+fn texture_get_surface_level(p: &mut Process) -> R {
+    let (texture, level, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if out == 0 { return Ok(E_POINTER); }
+    p.wrptr(out, 0)?;
+    let Some((id, device, width, height, levels, format, _)) = d3d9_texture(p, texture) else { return Ok(D3DERR_INVALIDCALL); };
+    if level >= levels { return Ok(D3DERR_INVALIDCALL); }
+    let surface = com::create(p, "IDirect3DSurface9", com::Kind::Direct3DSurface9 {
+        device,
+        texture_id: id,
+        level,
+        rtv: 0,
+        width: texture_mip_dim(width, level),
+        height: texture_mip_dim(height, level),
+        format,
+    });
+    p.wrptr(out, surface)?;
+    Ok(S_OK)
+}
+
+fn texture_lock_rect(p: &mut Process) -> R {
+    let texture = p.arg(0);
+    let Some((id, _, width, height, levels, _, _)) = d3d9_texture(p, texture) else { return Ok(D3DERR_INVALIDCALL); };
+    let mip = p.arg(1) as u32;
+    let rect_ptr = p.arg(2);
+    let out = p.arg(3);
+    let flags = p.arg(4) as u32;
+    lock_texture_level(p, id, width, height, levels, mip, rect_ptr, out, flags)
+}
+
+fn lock_texture_level(
+    p: &mut Process,
+    id: u32,
+    width: u32,
+    height: u32,
+    levels: u32,
+    mip: u32,
+    rect_ptr: u64,
+    out: u64,
+    flags: u32,
+) -> R {
+    if out == 0 { return Ok(E_POINTER); }
+    if mip >= levels { return Ok(D3DERR_INVALIDCALL); }
+    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    if info.map_addr != 0 { return Ok(D3DERR_INVALIDCALL); }
+    let w = texture_mip_dim(width, mip);
+    let h = texture_mip_dim(height, mip);
+    let (bw, bh, bb) = super::d3d11::format_info(info.format);
+    let (x, y) = if rect_ptr == 0 {
+        (0, 0)
+    } else {
+        let left = p.rd32(rect_ptr)? as i32;
+        let top = p.rd32(rect_ptr + 4)? as i32;
+        let right = p.rd32(rect_ptr + 8)? as i32;
+        let bottom = p.rd32(rect_ptr + 12)? as i32;
+        if left < 0 || top < 0 || right <= left || bottom <= top || right as u32 > w || bottom as u32 > h
+            || left as u32 % bw != 0 || top as u32 % bh != 0
+            || (right as u32 != w && right as u32 % bw != 0)
+            || (bottom as u32 != h && bottom as u32 % bh != 0)
+        {
+            return Ok(D3DERR_INVALIDCALL);
+        }
+        (left as u32, top as u32)
+    };
+    let (_, _, pitch, _, size) = texture_level_layout(w, h, info.format);
+    if size == 0 { return Ok(D3DERR_INVALIDCALL); }
+    let base = super::kernel32::alloc_block(p, size as u64, true);
+    if base == 0 { return Ok(E_OUTOFMEMORY); }
+    let offset = texture_level_offset(&info, mip);
+    if flags & 0x2000 == 0 && !info.shadow.is_empty() {
+        let start = offset as usize;
+        let end = start.saturating_add(size as usize).min(info.shadow.len());
+        if end > start { p.write_bytes(base, &info.shadow[start..end])?; }
+    }
+    if let Some(resource) = p.extra.com.res.get_mut(&id) {
+        resource.map_addr = base;
+        resource.map_write = flags & 0x10 == 0;
+        resource.map_sub = mip;
+    }
+    let byte_offset = (y / bh) * pitch + (x / bw) * bb;
+    p.wr32(out, pitch)?;
+    p.wr32(out + 4, (base + byte_offset as u64) as u32)?;
+    Ok(S_OK)
+}
+
+fn texture_unlock_rect(p: &mut Process) -> R {
+    let texture = p.arg(0);
+    let Some((id, _, width, height, levels, _, _)) = d3d9_texture(p, texture) else { return Ok(D3DERR_INVALIDCALL); };
+    unlock_texture_level(p, id, width, height, levels)
+}
+
+fn unlock_texture_level(p: &mut Process, id: u32, width: u32, height: u32, levels: u32) -> R {
+    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    if info.map_addr == 0 || info.map_sub >= levels { return Ok(D3DERR_INVALIDCALL); }
+    let mip = info.map_sub;
+    let w = texture_mip_dim(width, mip);
+    let h = texture_mip_dim(height, mip);
+    let (_, _, pitch, _, size) = texture_level_layout(w, h, info.format);
+    if info.map_write {
+        let bytes = p.read_bytes(info.map_addr, size as usize)?;
+        let offset = texture_level_offset(&info, mip) as usize;
+        if let Some(resource) = p.extra.com.res.get_mut(&id) {
+            if resource.shadow.len() >= offset.saturating_add(bytes.len()) {
+                resource.shadow[offset..offset + bytes.len()].copy_from_slice(&bytes);
+            }
+        }
+        p.extra.gpu.emit(
+            op::TEXTURE_WRITE,
+            Pk::new().u32(id).u32(mip).u32(0).u32(0).u32(0).u32(w).u32(h).u32(pitch).u32(size).bytes(&bytes),
+        );
+    }
+    super::kernel32::free_block(p, info.map_addr);
+    if let Some(resource) = p.extra.com.res.get_mut(&id) {
+        resource.map_addr = 0;
+        resource.map_write = false;
+    }
+    Ok(S_OK)
 }
 
 fn create_backbuffer_view(p: &mut Process, backbuffer: u64) -> Result<u64, Stop> {
@@ -584,6 +1001,7 @@ fn create_surface_for_device(p: &mut Process, device: u64) -> Result<u64, Stop> 
     Ok(com::create(p, "IDirect3DSurface9", com::Kind::Direct3DSurface9 {
         device,
         texture_id,
+        level: 0,
         rtv,
         width,
         height,
@@ -661,6 +1079,7 @@ fn create_depth_surface(
         com::Kind::Direct3DSurface9 {
             device,
             texture_id,
+            level: 0,
             rtv: view,
             width,
             height,
@@ -1004,6 +1423,7 @@ fn get_resource_type(p: &mut Process) -> R {
     Ok(match com::kind_of(p, p.arg(0)) {
         Some(com::Kind::Direct3DVertexBuffer9 { .. }) => 6,
         Some(com::Kind::Direct3DIndexBuffer9 { .. }) => 7,
+        Some(com::Kind::Direct3DTexture9 { .. }) => 3,
         _ => return Ok(D3DERR_INVALIDCALL),
     })
 }
@@ -1337,7 +1757,7 @@ fn get_render_state(p: &mut Process) -> R {
 
 fn set_fvf(p: &mut Process) -> R {
     let (device, fvf) = (p.arg(0), p.arg(1) as u32);
-    if !matches!(fvf, 0x42 | 0x44 | 0x142 | 0x144) {
+    if fvf_stride(fvf).is_none() {
         return Ok(D3DERR_INVALIDCALL);
     }
     apply_fvf(p, device, fvf)
@@ -1350,7 +1770,62 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
     if let Some(o) = p.extra.com.objs.get_mut(&device) {
         if let com::Kind::Direct3DDevice9 { fvf: current, .. } = &mut o.kind { *current = fvf; }
     }
-    p.extra.gpu.emit(op::SET_FIXED_FUNCTION, Pk::new().u32(fvf).u32(width).u32(height));
+    let stage_state = |state, default| {
+        p.extra.com.d3d9_texture_stage_states
+            .get(&(device, 0, state))
+            .copied()
+            .unwrap_or(default)
+    };
+    p.extra.gpu.emit(
+        op::SET_FIXED_FUNCTION,
+        Pk::new()
+            .u32(fvf)
+            .u32(width)
+            .u32(height)
+            .u32(stage_state(1, 4)) // D3DTSS_COLOROP = D3DTOP_MODULATE
+            .u32(stage_state(2, 2)) // D3DTSS_COLORARG1 = D3DTA_TEXTURE
+            .u32(stage_state(3, 1)) // D3DTSS_COLORARG2 = D3DTA_CURRENT
+            .u32(stage_state(4, 2)) // D3DTSS_ALPHAOP = D3DTOP_SELECTARG1
+            .u32(stage_state(5, 2)) // D3DTSS_ALPHAARG1 = D3DTA_TEXTURE
+            .u32(stage_state(6, 1)), // D3DTSS_ALPHAARG2 = D3DTA_CURRENT
+    );
+    Ok(S_OK)
+}
+
+fn set_texture_stage_state(p: &mut Process) -> R {
+    let (device, stage, state, value) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+    );
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if stage != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let valid = match state {
+        1 => matches!(value, 1..=7 | 10), // disable, select, modulate, add, subtract
+        2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
+        4 => (2..=4).contains(&value), // select or modulate alpha
+        _ => false,
+    };
+    if !valid {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let key = (device, stage, state);
+    if p.extra.com.d3d9_texture_stage_states.get(&key).copied() == Some(value) {
+        return Ok(S_OK);
+    }
+    p.extra.com.d3d9_texture_stage_states.insert(key, value);
+    let fvf = p.extra.com.objs.get(&device).and_then(|object| match object.kind {
+        com::Kind::Direct3DDevice9 { fvf, .. } => Some(fvf),
+        _ => None,
+    }).unwrap_or(0);
+    if fvf_stride(fvf).is_some() {
+        apply_fvf(p, device, fvf)?;
+    }
     Ok(S_OK)
 }
 
@@ -1359,7 +1834,7 @@ fn declaration_fvf(p: &Process, address: u64) -> Result<Option<(u32, Vec<u8>)>, 
         return Ok(None);
     }
     let mut elements = Vec::new();
-    let (mut position, mut color, mut texcoord) = (0u32, false, false);
+    let (mut position, mut normal, mut color, mut texcoord) = (0u32, false, false, false);
     let mut terminated = false;
     for index in 0..64u64 {
         let bytes = p.read_bytes(address + index * 8, 8)?;
@@ -1388,6 +1863,7 @@ fn declaration_fvf(p: &Process, address: u64) -> Result<Option<(u32, Vec<u8>)>, 
         match usage {
             0 if kind == 2 => position = 0x02, // POSITION / FLOAT3 => XYZ
             9 if kind == 3 => position = 0x04, // POSITIONT / FLOAT4 => XYZRHW
+            3 if kind == 2 && usage_index == 0 => normal = true, // NORMAL / FLOAT3
             10 if kind == 4 && usage_index == 0 => color = true,
             5 if kind == 1 && usage_index == 0 => texcoord = true,
             _ => return Ok(None),
@@ -1397,7 +1873,10 @@ fn declaration_fvf(p: &Process, address: u64) -> Result<Option<(u32, Vec<u8>)>, 
     if !terminated || position == 0 || !color {
         return Ok(None);
     }
-    let fvf = position | 0x40 | if texcoord { 0x100 } else { 0 };
+    let fvf = position
+        | if normal { 0x10 } else { 0 }
+        | 0x40
+        | if texcoord { 0x100 } else { 0 };
     if fvf_stride(fvf).is_none() {
         return Ok(None);
     }
@@ -1605,6 +2084,7 @@ fn fvf_stride(fvf: u32) -> Option<u32> {
         0x44 => Some(20), // XYZRHW + D3DCOLOR
         0x142 => Some(24), // XYZ + D3DCOLOR + TEX1
         0x144 => Some(28), // XYZRHW + D3DCOLOR + TEX1
+        0x152 => Some(36), // XYZ + NORMAL + D3DCOLOR + TEX1
         _ => None,
     }
 }
@@ -1630,6 +2110,30 @@ fn surface_get_desc(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
+fn surface_lock_rect(p: &mut Process) -> R {
+    let (surface, out, rect, flags) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3) as u32);
+    let Some(com::Kind::Direct3DSurface9 { texture_id, level, .. }) = com::kind_of(p, surface) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let info = p.extra.com.res.get(&texture_id).cloned().unwrap_or_default();
+    if texture_id == 0 || info.width == 0 || info.height == 0 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    lock_texture_level(p, texture_id, info.width, info.height, info.mips.max(1), level, rect, out, flags)
+}
+
+fn surface_unlock_rect(p: &mut Process) -> R {
+    let surface = p.arg(0);
+    let Some(com::Kind::Direct3DSurface9 { texture_id, .. }) = com::kind_of(p, surface) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let info = p.extra.com.res.get(&texture_id).cloned().unwrap_or_default();
+    if texture_id == 0 || info.width == 0 || info.height == 0 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    unlock_texture_level(p, texture_id, info.width, info.height, info.mips.max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1637,6 +2141,313 @@ mod tests {
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
     use anywasm_cpu::CpuMode;
     use crate::vfs::Vfs;
+
+    #[test]
+    fn create_texture_returns_a_guest_texture_and_emits_a_webgpu_resource() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [
+            (4, device as u32),
+            (8, 512),
+            (12, 512),
+            (16, 1),
+            (20, 0),
+            (24, 0x3154_5844), // D3DFMT_DXT1
+            (28, 1), // D3DPOOL_MANAGED
+            (32, OUT as u32),
+            (36, 0), // shared handle
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+
+        let create_texture = method("IDirect3DDevice9", "CreateTexture").unwrap();
+        assert_eq!(create_texture(&mut p).unwrap(), S_OK);
+        assert_ne!(p.rd32(OUT).unwrap(), 0);
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert!(commands.iter().any(|(opcode, _)| *opcode == op::CREATE_TEXTURE2D));
+    }
+
+    #[test]
+    fn set_texture_binds_the_d3d9_texture_srv_to_the_pixel_shader_stage() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 64,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [
+            (4, device as u32),
+            (8, 1),
+            (12, 1),
+            (16, 1),
+            (20, 0),
+            (24, 21), // D3DFMT_A8R8G8B8
+            (28, 1), // D3DPOOL_MANAGED
+            (32, OUT as u32),
+            (36, 0), // shared handle
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DDevice9", "CreateTexture").unwrap()(&mut p).unwrap(), S_OK);
+        let texture = p.rd32(OUT).unwrap() as u64;
+        let resource = match com::kind_of(&p, texture).unwrap() {
+            com::Kind::Direct3DTexture9 { id, .. } => id,
+            other => panic!("expected Direct3DTexture9, got {other:?}"),
+        };
+        let view = p.extra.com.d3d9_texture_views[&resource];
+
+        for (offset, value) in [(4, device as u32), (8, 0), (12, texture as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DDevice9", "SetTexture").unwrap()(&mut p).unwrap(), S_OK);
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, payload) = commands.iter().find(|(opcode, _)| *opcode == op::SET_SRVS)
+            .expect("SetTexture should bind a pixel-shader SRV");
+        assert_eq!(
+            payload,
+            &[
+                1u32.to_le_bytes(),
+                0u32.to_le_bytes(),
+                1u32.to_le_bytes(),
+                view.to_le_bytes(),
+            ]
+            .concat(),
+        );
+    }
+
+    #[test]
+    fn set_sampler_state_rebuilds_the_d3d9_sampler_with_linear_minification() {
+        const STACK: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 64,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [(4, device as u32), (8, 0), (12, 6), (16, 2)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DDevice9", "SetSamplerState").unwrap()(&mut p).unwrap(), S_OK);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, sampler) = commands.iter().find(|(opcode, _)| *opcode == op::CREATE_SAMPLER)
+            .expect("SetSamplerState should create the translated sampler");
+        assert_eq!(u32::from_le_bytes(sampler[0..4].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(sampler[4..8].try_into().unwrap()), 0x10); // linear min, point mag/mip
+        assert_eq!(u32::from_le_bytes(sampler[8..12].try_into().unwrap()), 1); // wrap U
+        assert_eq!(u32::from_le_bytes(sampler[12..16].try_into().unwrap()), 1); // wrap V
+        assert_eq!(u32::from_le_bytes(sampler[24..28].try_into().unwrap()), 1); // max anisotropy
+        let (_, binding) = commands.iter().find(|(opcode, _)| *opcode == op::SET_SAMPLERS)
+            .expect("SetSamplerState should bind the translated sampler");
+        assert_eq!(
+            binding,
+            &[
+                1u32.to_le_bytes(),
+                0u32.to_le_bytes(),
+                1u32.to_le_bytes(),
+                1u32.to_le_bytes(),
+            ]
+            .concat(),
+        );
+    }
+
+    #[test]
+    fn set_texture_stage_state_reemits_stage_zero_fixed_function_state() {
+        const STACK: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 64,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [(4, device as u32), (8, 0x144)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DDevice9", "SetFVF").unwrap()(&mut p).unwrap(), S_OK);
+        for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, 2)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DDevice9", "SetTextureStageState").unwrap()(&mut p).unwrap(), S_OK);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
+            .expect("SetTextureStageState should update the fixed-function shader state");
+        let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
+        assert_eq!(words, [0x144, 64, 64, 2, 2, 1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn surface_lock_rect_uploads_a_dxt1_texture_level() {
+        const STACK: u64 = 0x10000;
+        const TEX_OUT: u64 = 0x11000;
+        const SURFACE_OUT: u64 = 0x12000;
+        const LOCKED_RECT: u64 = 0x13000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, TEX_OUT, SURFACE_OUT, LOCKED_RECT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [
+            (4, device as u32), (8, 512), (12, 512), (16, 1), (20, 0),
+            (24, 0x3154_5844), (28, 1), (32, TEX_OUT as u32), (36, 0),
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DDevice9", "CreateTexture").unwrap()(&mut p).unwrap(), S_OK);
+        let texture = p.rd32(TEX_OUT).unwrap();
+        let Some(com::Kind::Direct3DTexture9 { id, .. }) = com::kind_of(&p, texture as u64) else { panic!("expected D3D9 texture"); };
+        assert_eq!(p.extra.com.res[&id].format, 71);
+        p.wr32(STACK + 4, texture).unwrap();
+        p.wr32(STACK + 8, 0).unwrap();
+        p.wr32(STACK + 12, SURFACE_OUT as u32).unwrap();
+        assert_eq!(method("IDirect3DTexture9", "GetSurfaceLevel").unwrap()(&mut p).unwrap(), S_OK);
+        let surface = p.rd32(SURFACE_OUT).unwrap();
+
+        for (offset, value) in [
+            (4, surface), (8, LOCKED_RECT as u32), (12, 0), (16, 0x800),
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(method("IDirect3DSurface9", "LockRect").unwrap()(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(LOCKED_RECT).unwrap(), 1024);
+        let pixels = p.rd32(LOCKED_RECT + 4).unwrap() as u64;
+        let block = [1, 2, 3, 4, 5, 6, 7, 8];
+        p.write_bytes(pixels, &block).unwrap();
+        p.wr32(STACK + 4, surface).unwrap();
+        assert_eq!(method("IDirect3DSurface9", "UnlockRect").unwrap()(&mut p).unwrap(), S_OK);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let upload = commands.iter().find(|(opcode, _)| *opcode == op::TEXTURE_WRITE).unwrap();
+        assert_eq!(u32::from_le_bytes(upload.1[28..32].try_into().unwrap()), 1024);
+        assert_eq!(&upload.1[36..44], &block);
+    }
+
+    #[test]
+    fn create_vertex_declaration_accepts_xyz_normal_diffuse_texcoord_layout() {
+        const STACK: u64 = 0x10000;
+        const ELEMENTS: u64 = 0x11000;
+        const OUT: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, ELEMENTS, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 800,
+                height: 600,
+                fvf: 0,
+            },
+        );
+        let declaration = [
+            0, 0, 0, 0, 2, 0, 0, 0,       // POSITION: FLOAT3 at byte 0
+            0, 0, 12, 0, 2, 0, 3, 0,      // NORMAL: FLOAT3 at byte 12
+            0, 0, 24, 0, 4, 0, 10, 0,     // COLOR0: D3DCOLOR at byte 24
+            0, 0, 28, 0, 1, 0, 5, 0,      // TEXCOORD0: FLOAT2 at byte 28
+            0xff, 0, 0, 0, 17, 0, 0, 0,   // D3DDECL_END
+        ];
+        p.write_bytes(ELEMENTS, &declaration).unwrap();
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK + 4, device as u32).unwrap();
+        p.wr32(STACK + 8, ELEMENTS as u32).unwrap();
+        p.wr32(STACK + 12, OUT as u32).unwrap();
+
+        assert_eq!(create_vertex_declaration(&mut p).unwrap(), S_OK);
+        let declaration = p.rd32(OUT).unwrap() as u64;
+        let Some(com::Kind::Direct3DVertexDeclaration9 { fvf, .. }) = com::kind_of(&p, declaration) else {
+            panic!("CreateVertexDeclaration did not return a D3D9 declaration");
+        };
+        assert_eq!(fvf, 0x152); // XYZ | NORMAL | DIFFUSE | TEX1
+        assert_eq!(fvf_stride(fvf), Some(36));
+    }
 
     #[test]
     fn draw_primitive_up_emits_a_fvf_draw_and_releases_its_temporary_buffer() {
@@ -1702,7 +2513,7 @@ mod tests {
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
                 .collect::<Vec<_>>(),
-            vec![0x44, 640, 480]
+            vec![0x44, 640, 480, 4, 2, 1, 2, 2, 1]
         );
         let buffer_id = u32::from_le_bytes(commands[1].1[0..4].try_into().unwrap());
         assert_eq!(

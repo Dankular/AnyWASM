@@ -469,6 +469,22 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         }
         return Err(error);
     }
+    if std::env::var_os("ANYWASM_GTA_STARTUP_PROBE_SKIP_EVENT15").is_some() {
+        const BRANCH: u64 = 0x748851;
+        let opcode = p
+            .mem
+            .read_u8(BRANCH)
+            .map_err(|error| format!("startup probe could not read {BRANCH:#x}: {error:?}"))?;
+        if opcode != 0x75 {
+            return Err(format!(
+                "startup probe expected JNE at {BRANCH:#x}, found {opcode:#04x}"
+            ));
+        }
+        p.mem
+            .write_force(BRANCH, &[0xeb])
+            .map_err(|error| format!("startup probe could not patch {BRANCH:#x}: {error:?}"))?;
+        eprintln!("[gta-startup-probe] patched event 0x15 rejection branch in guest memory");
+    }
     let mut left = o.max_steps;
     let stop = loop {
         if left == 0 {

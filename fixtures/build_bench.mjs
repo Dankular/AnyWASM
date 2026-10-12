@@ -28,6 +28,7 @@ try {
     ['bench_call', 'bench_call.exe'],
     ['bench_memory', 'bench_memory.exe'],
     ['bench_sse', 'bench_sse.exe'],
+    ['jit_sse', 'jit_sse.exe'],
     ['callback_budget', 'callback_budget.exe'],
     ['jit_state', 'jit_state.exe'],
   ]) {

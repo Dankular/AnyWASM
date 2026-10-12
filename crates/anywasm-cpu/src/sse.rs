@@ -683,6 +683,18 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 _ => return Err(Exit::Undefined),
             }
         }
+        Op::Vinserti128 => {
+            let dst = dst_n(&i.ops[0])?;
+            let (mut low, mut high) = src_ymm(cpu, mem, &i.ops[1], 32)?;
+            let inserted = src_x(cpu, mem, &i.ops[2], 16)?;
+            if imm8 & 1 == 0 {
+                low = inserted;
+            } else {
+                high = inserted;
+            }
+            cpu.xmm[dst] = low;
+            cpu.ymm_hi[dst] = high;
+        }
         Op::Vmovups | Op::Vmovdqu | Op::Vmovdqa => match (&i.ops[0], &i.ops[1]) {
             (Opnd::Xmm(d), Opnd::Xmm(s)) => {
                 let (d, s) = (*d as usize, *s as usize);
@@ -737,21 +749,85 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             cpu.xmm[dst] = value as u32 as u128;
             cpu.ymm_hi[dst] = 0;
         }
+        Op::Vmovq => {
+            let value = rd(cpu, mem, &i.ops[1], 8, 0)?;
+            let dst = dst_n(&i.ops[0])?;
+            cpu.xmm[dst] = value as u64 as u128;
+            cpu.ymm_hi[dst] = 0;
+        }
         Op::Vpbroadcastd => {
             let source = src_x(cpu, mem, &i.ops[2], 4)? as u32;
             let pair = source as u64 | ((source as u64) << 32);
             let half = pair as u128 | ((pair as u128) << 64);
             let dst = dst_n(&i.ops[0])?;
             cpu.xmm[dst] = half;
-            cpu.ymm_hi[dst] = half;
+            cpu.ymm_hi[dst] = if i.osz == 32 { half } else { 0 };
+        }
+        Op::Vpbroadcastq => {
+            let source = src_x(cpu, mem, &i.ops[2], 8)? as u64 as u128;
+            let half = source | (source << 64);
+            let dst = dst_n(&i.ops[0])?;
+            cpu.xmm[dst] = half;
+            cpu.ymm_hi[dst] = if i.osz == 32 { half } else { 0 };
+        }
+        Op::VShiftQ { left, immediate } => {
+            let dst = dst_n(&i.ops[0])?;
+            let count = if immediate {
+                i.imm as u8 as u64
+            } else {
+                src_x(cpu, mem, &i.ops[2], 16)? as u64
+            };
+            let (source_lo, source_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let lanes = i.osz as usize / 8;
+            let mut result_lo = 0u128;
+            let mut result_hi = 0u128;
+            for lane in 0..lanes {
+                let source = if lane < 2 {
+                    get(source_lo, 8, lane)
+                } else {
+                    get(source_hi, 8, lane - 2)
+                };
+                let result = if count >= 64 {
+                    0
+                } else if left {
+                    source.wrapping_shl(count as u32)
+                } else {
+                    source >> count
+                };
+                if lane < 2 {
+                    put(&mut result_lo, 8, lane, result);
+                } else {
+                    put(&mut result_hi, 8, lane - 2, result);
+                }
+            }
+            cpu.xmm[dst] = result_lo;
+            cpu.ymm_hi[dst] = if i.osz == 32 { result_hi } else { 0 };
+        }
+        Op::Vpmovsxdq => {
+            let dst = dst_n(&i.ops[0])?;
+            let source = src_x(cpu, mem, &i.ops[1], i.osz / 2)?;
+            let lanes = i.osz as usize / 8;
+            let mut low = 0u128;
+            let mut high = 0u128;
+            for lane in 0..lanes {
+                let value = get(source, 4, lane) as u32 as i32 as i64 as u64;
+                if lane < 2 {
+                    put(&mut low, 8, lane, value);
+                } else {
+                    put(&mut high, 8, lane - 2, value);
+                }
+            }
+            cpu.xmm[dst] = low;
+            cpu.ymm_hi[dst] = if i.osz == 32 { high } else { 0 };
         }
         Op::Vpaddd => {
             let dst = dst_n(&i.ops[0])?;
-            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], 32)?;
-            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], 32)?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], i.osz)?;
             let mut result_lo = 0u128;
             let mut result_hi = 0u128;
-            for lane in 0..8 {
+            let lanes = i.osz as usize / 4;
+            for lane in 0..lanes {
                 let (a, b) = if lane < 4 {
                     (get(a_lo, 4, lane), get(b_lo, 4, lane))
                 } else {
@@ -765,7 +841,74 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 }
             }
             cpu.xmm[dst] = result_lo;
-            cpu.ymm_hi[dst] = result_hi;
+            cpu.ymm_hi[dst] = if i.osz == 32 { result_hi } else { 0 };
+        }
+        Op::Vpsllq => {
+            let dst = dst_n(&i.ops[0])?;
+            let (source_lo, source_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let count = i.imm as u8;
+            let lanes = i.osz as usize / 8;
+            let mut result_lo = 0u128;
+            let mut result_hi = 0u128;
+            for lane in 0..lanes {
+                let source = if lane < 2 {
+                    get(source_lo, 8, lane)
+                } else {
+                    get(source_hi, 8, lane - 2)
+                };
+                let result = if count < 64 { source << count } else { 0 };
+                if lane < 2 {
+                    put(&mut result_lo, 8, lane, result);
+                } else {
+                    put(&mut result_hi, 8, lane - 2, result);
+                }
+            }
+            cpu.xmm[dst] = result_lo;
+            cpu.ymm_hi[dst] = if i.osz == 32 { result_hi } else { 0 };
+        }
+        Op::Vpsrldq | Op::Vpslldq => {
+            let dst = dst_n(&i.ops[0])?;
+            let (source_lo, source_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let count = i.imm as u8;
+            let shift = (count as u32).saturating_mul(8);
+            let byte_shift = |value: u128| {
+                if count >= 16 {
+                    0
+                } else if i.op == Op::Vpslldq {
+                    value << shift
+                } else {
+                    value >> shift
+                }
+            };
+            cpu.xmm[dst] = byte_shift(source_lo);
+            cpu.ymm_hi[dst] = if i.osz == 32 {
+                byte_shift(source_hi)
+            } else {
+                0
+            };
+        }
+        Op::Vpaddq => {
+            let dst = dst_n(&i.ops[0])?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], i.osz)?;
+            let lanes = i.osz as usize / 8;
+            let mut result_lo = 0u128;
+            let mut result_hi = 0u128;
+            for lane in 0..lanes {
+                let (a, b) = if lane < 2 {
+                    (get(a_lo, 8, lane), get(b_lo, 8, lane))
+                } else {
+                    (get(a_hi, 8, lane - 2), get(b_hi, 8, lane - 2))
+                };
+                let result = a.wrapping_add(b);
+                if lane < 2 {
+                    put(&mut result_lo, 8, lane, result);
+                } else {
+                    put(&mut result_hi, 8, lane - 2, result);
+                }
+            }
+            cpu.xmm[dst] = result_lo;
+            cpu.ymm_hi[dst] = if i.osz == 32 { result_hi } else { 0 };
         }
         Op::Vpxor => {
             let d = dst_n(&i.ops[0])?;
@@ -785,10 +928,42 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 | value;
             cpu.ymm_hi[d] = 0;
         }
+        Op::VcvtSi2Sd => {
+            let d = dst_n(&i.ops[0])?;
+            let source = rd(cpu, mem, &i.ops[2], i.ssz, 0)?;
+            let value = (sext(source, i.ssz) as f64).to_bits() as u128;
+            cpu.xmm[d] = (cpu.xmm[match i.ops[1] {
+                Opnd::Xmm(n) => n as usize,
+                _ => return Err(Exit::Undefined),
+            }] & !lane_mask(8))
+                | value;
+            cpu.ymm_hi[d] = 0;
+        }
+        Op::VcvtSs2Sd => {
+            let d = dst_n(&i.ops[0])?;
+            let merge = src_x(cpu, mem, &i.ops[1], 16)?;
+            let source = src_x(cpu, mem, &i.ops[2], 4)?;
+            let value = (f32::from_bits(source as u32) as f64).to_bits() as u128;
+            cpu.xmm[d] = (merge & !lane_mask(8)) | value;
+            cpu.ymm_hi[d] = 0;
+        }
+        Op::VcvtSd2Ss => {
+            let d = dst_n(&i.ops[0])?;
+            let merge = src_x(cpu, mem, &i.ops[1], 16)?;
+            let source = src_x(cpu, mem, &i.ops[2], 8)?;
+            let value = (f64::from_bits(source as u64) as f32).to_bits() as u128;
+            cpu.xmm[d] = (merge & !lane_mask(4)) | value;
+            cpu.ymm_hi[d] = 0;
+        }
         Op::Vfp(k, pr) => {
             let d = dst_n(&i.ops[0])?;
             let a = src_x(cpu, mem, &i.ops[1], 16)?;
-            let b = src_x(cpu, mem, &i.ops[2], 4)?;
+            let bytes = match pr {
+                Prec::Ss => 4,
+                Prec::Sd => 8,
+                Prec::Ps | Prec::Pd => 16,
+            };
+            let b = src_x(cpu, mem, &i.ops[2], bytes)?;
             cpu.xmm[d] = fp_exec(k, pr, a, b);
             cpu.ymm_hi[d] = 0;
         }
@@ -948,6 +1123,25 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             put(&mut r, 4, 2, get(s, 4, (imm8 >> 4 & 3) as usize));
             put(&mut r, 4, 3, get(s, 4, (imm8 >> 6 & 3) as usize));
             cpu.xmm[dst_n(&i.ops[0])?] = r;
+        }
+        Op::Vshufps => {
+            let d = dst_n(&i.ops[0])?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], i.osz)?;
+            let shuffle = |a, b| {
+                let mut r = 0u128;
+                put(&mut r, 4, 0, get(a, 4, (imm8 & 3) as usize));
+                put(&mut r, 4, 1, get(a, 4, (imm8 >> 2 & 3) as usize));
+                put(&mut r, 4, 2, get(b, 4, (imm8 >> 4 & 3) as usize));
+                put(&mut r, 4, 3, get(b, 4, (imm8 >> 6 & 3) as usize));
+                r
+            };
+            cpu.xmm[d] = shuffle(a_lo, b_lo);
+            cpu.ymm_hi[d] = if i.osz == 32 {
+                shuffle(a_hi, b_hi)
+            } else {
+                0
+            };
         }
         Op::Shufpd => {
             let (d, s) = (cpu.xmm[dst_n(&i.ops[0])?], src_x(cpu, mem, &i.ops[1], 16)?);
@@ -1226,6 +1420,23 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
                 }
             }
             cpu.xmm[n] = r;
+        }
+        Op::Vinsertps => {
+            let n = dst_n(&i.ops[0])?;
+            let (cnt_s, cnt_d, zmask) = ((imm8 >> 6) as usize, (imm8 >> 4 & 3) as usize, imm8 & 15);
+            let mut r = src_x(cpu, mem, &i.ops[1], 16)?;
+            let v = match i.ops[2] {
+                Opnd::Xmm(s) => get(cpu.xmm[s as usize], 4, cnt_s),
+                _ => src_x(cpu, mem, &i.ops[2], 4)? as u64,
+            };
+            put(&mut r, 4, cnt_d, v);
+            for k in 0..4 {
+                if zmask >> k & 1 != 0 {
+                    put(&mut r, 4, k, 0);
+                }
+            }
+            cpu.xmm[n] = r;
+            cpu.ymm_hi[n] = 0;
         }
         Op::Extractps => {
             let v = get(src_x(cpu, mem, &i.ops[1], 16)?, 4, (imm8 & 3) as usize);

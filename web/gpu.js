@@ -257,7 +257,7 @@ export class GpuExecutor {
       case OP.CREATE_BUFFER: {
         const size = Math.max(16, (u(1) + 15) & ~15);
         const gpu = this.device.createBuffer({ size, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2) });
+        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), shadow: new Uint8Array(size) });
         break;
       }
       case OP.BUFFER_WRITE: {
@@ -268,6 +268,7 @@ export class GpuExecutor {
         const aligned = off & ~3;
         let payload = data;
         if (aligned !== off) { const t = new Uint8Array(n + (off - aligned)); t.set(data, off - aligned); payload = t; }
+        if (r.shadow && off + data.length <= r.shadow.length) r.shadow.set(data, off);
         this.endPass();
         const s = this.stage(payload);
         this.encoder().copyBufferToBuffer(s.buffer, s.offset, r.gpu, aligned, Math.min(s.size, r.size - aligned));
@@ -292,7 +293,17 @@ export class GpuExecutor {
       case OP.SET_INDEX_BUFFER: st.ib = { buf: u(0), format: u(1), offset: u(2) }; break;
       case OP.SET_INPUT_LAYOUT: st.layout = u(0); break;
       case OP.SET_TOPOLOGY: st.topology = u(0); break;
-      case OP.SET_FIXED_FUNCTION: this.setFixedFunction(u(0), u(1), u(2)); break;
+      case OP.SET_FIXED_FUNCTION:
+        this.setFixedFunction(
+          u(0), u(1), u(2),
+          dv.byteLength >= 16 ? u(3) : 4,
+          dv.byteLength >= 20 ? u(4) : 2,
+          dv.byteLength >= 24 ? u(5) : 1,
+          dv.byteLength >= 28 ? u(6) : 2,
+          dv.byteLength >= 32 ? u(7) : 2,
+          dv.byteLength >= 36 ? u(8) : 1,
+        );
+        break;
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
       case OP.SET_CBUFFERS: case OP.SET_SRVS: case OP.SET_SAMPLERS: {
         const arr = (op === OP.SET_CBUFFERS ? st.cb : op === OP.SET_SRVS ? st.srv : st.smp)[u(0)];
@@ -421,23 +432,28 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
-  setFixedFunction(fvf, width, height) {
-    if (![0x42, 0x44, 0x142, 0x144].includes(fvf)) {
+  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1) {
+    if (![0x42, 0x44, 0x142, 0x144, 0x152].includes(fvf)) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
       this.st.layout = 0;
       this.log(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
-    const key = `${fvf}/${width}/${height}`;
+    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg1}/${alphaArg2}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
       const transformed = fvf === 0x44 || fvf === 0x144;
-      const textured = fvf === 0x142 || fvf === 0x144;
+      const normal = fvf === 0x152;
+      const textured = fvf === 0x142 || fvf === 0x144 || normal;
       const positionFormat = transformed ? 2 : 6;
-      const colorOffset = transformed ? 16 : 12;
+      const positionSize = transformed ? 16 : 12;
+      const normalInput = normal ? '@location(1) normal: vec3<f32>,' : '';
+      const colorLocation = normal ? 2 : 1;
+      const texcoordLocation = normal ? 3 : 2;
+      const colorOffset = positionSize + (normal ? 12 : 0);
       const inputPosition = transformed ? 'vec4<f32>' : 'vec3<f32>';
-      const texcoordInput = textured ? '@location(2) uv: vec2<f32>,' : '';
+      const texcoordInput = textured ? `@location(${texcoordLocation}) uv: vec2<f32>,` : '';
       const texcoordOutput = textured ? '@location(2) uv: vec2<f32>,' : '';
       const texcoordAssign = textured ? 'output.uv = input.uv;' : '';
       const positionCode = transformed
@@ -450,7 +466,8 @@ export class GpuExecutor {
       const code = `
         struct VertexInput {
           @location(0) position: ${inputPosition},
-          @location(1) color: vec4<f32>,
+          ${normalInput}
+          @location(${colorLocation}) color: vec4<f32>,
           ${texcoordInput}
         };
         struct VertexOutput {
@@ -470,22 +487,62 @@ export class GpuExecutor {
         }
       `;
       const module = this.device.createShaderModule({ code });
+      const channelArg = (argument, channel) => argument === 2 ? `texel.${channel}` : `input.color.${channel}`;
+      const colorA = channelArg(colorArg1, 'rgb'), colorB = channelArg(colorArg2, 'rgb');
+      const alphaA = channelArg(alphaArg1, 'a'), alphaB = channelArg(alphaArg2, 'a');
+      const colorExpr = colorOp === 1 ? 'input.color.rgb'
+        : colorOp === 2 ? colorA
+        : colorOp === 3 ? colorB
+        : colorOp === 4 ? `(${colorA} * ${colorB})`
+        : colorOp === 5 ? `((${colorA} * ${colorB}) * 2.0)`
+        : colorOp === 6 ? `((${colorA} * ${colorB}) * 4.0)`
+        : colorOp === 7 ? `(${colorA} + ${colorB})`
+        : colorOp === 10 ? `(${colorA} - ${colorB})`
+        : 'input.color.rgb';
+      const alphaExpr = alphaOp === 2 ? alphaA
+        : alphaOp === 3 ? alphaB
+        : alphaOp === 4 ? `(${alphaA} * ${alphaB})`
+        : 'input.color.a';
+      const texturedCode = textured ? `${code}
+        @group(1) @binding(0) var d3d9Texture: texture_2d<f32>;
+        @group(2) @binding(0) var d3d9Sampler: sampler;
+        @fragment fn fsTextured(input: VertexOutput) -> @location(0) vec4<f32> {
+          let texel = textureSample(d3d9Texture, d3d9Sampler, input.uv);
+          return vec4<f32>(${colorExpr}, ${alphaExpr});
+        }
+      ` : null;
+      const texturedModule = texturedCode ? this.device.createShaderModule({ code: texturedCode }) : null;
+      const texturedPsId = textured ? this.fixedFunctionNextId-- : 0;
       fixed = {
         vsId: this.fixedFunctionNextId--,
         psId: this.fixedFunctionNextId--,
+        texturedPsId,
         layoutId: this.fixedFunctionNextId--,
         layout: [
           { location: 0, format: positionFormat, slot: 0, offset: 0, cls: 0, step: 0 },
-          { location: 1, format: 28, slot: 0, offset: colorOffset, cls: 0, step: 0 },
-          ...(textured ? [{ location: 2, format: 16, slot: 0, offset: colorOffset + 4, cls: 0, step: 0 }] : []),
+          ...(normal ? [{ location: 1, format: 6, slot: 0, offset: positionSize, cls: 0, step: 0 }] : []),
+          { location: colorLocation, format: 28, slot: 0, offset: colorOffset, cls: 0, step: 0 },
+          ...(textured ? [{ location: texcoordLocation, format: 16, slot: 0, offset: colorOffset + 4, cls: 0, step: 0 }] : []),
         ],
         vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
-        ps: { stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
+        ps: {
+          stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false,
+          texturedVariant: texturedPsId || undefined,
+        },
+        texturedPs: texturedModule ? {
+          stage: 1,
+          module: texturedModule,
+          entry: 'fsTextured',
+          descriptors: [{ type: 0, register: 0, resourceType: 4 }, { type: 3, register: 0 }],
+          cbSizes: {},
+          usesDrawParameters: false,
+        } : null,
       };
       this.fixedFunctionShaders.set(key, fixed);
     }
     this.shaders.set(fixed.vsId, fixed.vs);
     this.shaders.set(fixed.psId, fixed.ps);
+    if (fixed.texturedPs) this.shaders.set(fixed.texturedPsId, fixed.texturedPs);
     this.layouts.set(fixed.layoutId, fixed.layout);
     this.st.shader[0] = fixed.vsId;
     this.st.shader[1] = fixed.psId;
@@ -602,8 +659,30 @@ export class GpuExecutor {
 
   draw(indexed, count, instances, first, baseVertex, firstInstance) {
     const st = this.st;
-    const vs = this.shaders.get(st.shader[0]), ps = this.shaders.get(st.shader[1]);
+    const vs = this.shaders.get(st.shader[0]);
+    let psId = st.shader[1];
+    let ps = this.shaders.get(psId);
+    if (ps?.texturedVariant && st.srv[1][0]) {
+      psId = ps.texturedVariant;
+      ps = this.shaders.get(psId);
+    }
     if (!vs) return;
+    let topology = st.topology;
+    let wireframeIndexBuffer = null;
+    const rasterState = this.rasters.get(st.raster);
+    if (rasterState?.getUint32(0, true) === 2 && (topology === 4 || topology === 5)) {
+      const indices = this.wireframeIndices(indexed, count, first, baseVertex);
+      if (!indices) return;
+      if (indices.length === 0) return;
+      wireframeIndexBuffer = this.device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(wireframeIndexBuffer, 0, indices);
+      this.transientBuffers.push(wireframeIndexBuffer);
+      indexed = true;
+      count = indices.length;
+      first = 0;
+      baseVertex = 0;
+      topology = 2; // D3D11 triangle wireframe -> WebGPU line-list
+    }
     const att = this.attachments();
     if (!att.colors.some(Boolean) && !att.depth) return;
 
@@ -689,10 +768,10 @@ export class GpuExecutor {
       boundVertexBuffers.set(slot, { gpu, offset });
     }
     const rtFormats = att.colors.map((c) => c?.format || null);
-    const key = JSON.stringify([st.shader[0], st.shader[1], st.layout, strides, st.topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, layoutEntries, indexed && (st.topology === 3 || st.topology === 5) ? st.ib.format : 0]);
+    const key = JSON.stringify([st.shader[0], psId, st.layout, strides, topology, st.blend.id, st.raster, st.depth.id, rtFormats, att.depth?.format || null, layoutEntries, indexed && (topology === 3 || topology === 5) ? st.ib.format : 0]);
     let pipe = this.pipelines.get(key);
     if (!pipe) {
-      pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed);
+      pipe = this.buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed, topology);
       this.pipelines.set(key, pipe);
       this.stats.pipelines++;
     }
@@ -709,9 +788,13 @@ export class GpuExecutor {
       pass.setVertexBuffer(slot, buffer.gpu, buffer.offset);
     }
     if (indexed) {
-      const r = this.res.get(st.ib.buf);
-      if (!r) return;
-      pass.setIndexBuffer(r.gpu, st.ib.format === 42 ? 'uint32' : 'uint16', st.ib.offset);
+      if (wireframeIndexBuffer) {
+        pass.setIndexBuffer(wireframeIndexBuffer, 'uint32', 0);
+      } else {
+        const r = this.res.get(st.ib.buf);
+        if (!r) return;
+        pass.setIndexBuffer(r.gpu, st.ib.format === 42 ? 'uint32' : 'uint16', st.ib.offset);
+      }
     }
     // Viewport / scissor.
     const first0 = att.colors.find(Boolean) || att.depth;
@@ -732,6 +815,59 @@ export class GpuExecutor {
     if (indexed) pass.drawIndexed(count, instances, first, baseVertex, firstInstance);
     else pass.draw(count, instances, first, firstInstance);
     this.stats.draws++;
+  }
+
+  wireframeIndices(indexed, count, first, baseVertex) {
+    const st = this.st;
+    const source = [];
+    if (indexed) {
+      const buffer = this.res.get(st.ib.buf);
+      const indexBytes = st.ib.format === 42 ? 4 : 2;
+      const start = st.ib.offset + first * indexBytes;
+      if (!buffer?.shadow || start + count * indexBytes > buffer.shadow.length) {
+        this.log('wireframe draw skipped: index data is not available on the CPU');
+        return null;
+      }
+      const view = new DataView(buffer.shadow.buffer, buffer.shadow.byteOffset, buffer.shadow.byteLength);
+      for (let i = 0; i < count; i++) {
+        const raw = indexBytes === 4 ? view.getUint32(start + i * indexBytes, true) : view.getUint16(start + i * indexBytes, true);
+        const restart = indexBytes === 4 ? 0xffffffff : 0xffff;
+        if (raw === restart && (st.topology === 5)) {
+          source.push(restart);
+          continue;
+        }
+        const index = raw + baseVertex;
+        if (index < 0 || index > 0xffffffff) {
+          this.log('wireframe draw skipped: base vertex produces an invalid index');
+          return null;
+        }
+        source.push(index);
+      }
+    } else {
+      for (let i = 0; i < count; i++) source.push(first + i);
+    }
+
+    const triangles = [];
+    if (st.topology === 4) {
+      for (let i = 0; i + 2 < source.length; i += 3) triangles.push([source[i], source[i + 1], source[i + 2]]);
+    } else if (st.topology === 5) {
+      const restart = indexed ? (st.ib.format === 42 ? 0xffffffff : 0xffff) : -1;
+      let strip = [];
+      const flush = () => {
+        for (let i = 0; i + 2 < strip.length; i++) {
+          triangles.push(i & 1 ? [strip[i + 1], strip[i], strip[i + 2]] : [strip[i], strip[i + 1], strip[i + 2]]);
+        }
+        strip = [];
+      };
+      for (const index of source) {
+        if (index === restart) flush();
+        else strip.push(index);
+      }
+      flush();
+    }
+    const edges = [];
+    for (const [a, b, c] of triangles) edges.push(a, b, b, c, c, a);
+    return new Uint32Array(edges);
   }
 
   expandInstanceBuffer(source, sourceOffset, stride, stepRate, requiredInstances) {
@@ -934,7 +1070,7 @@ export class GpuExecutor {
     return b;
   }
 
-  buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed) {
+  buildPipeline(vs, ps, layoutDesc, strides, att, layoutEntries, indexed, topology = this.st.topology) {
     const st = this.st;
     const bgls = layoutEntries.map((e, g) => this.bindGroupLayout(g, e));
     const pl = this.device.createPipelineLayout({ bindGroupLayouts: bgls });
@@ -971,11 +1107,11 @@ export class GpuExecutor {
     const desc = {
       layout: pl,
       vertex: { module: vs.module, entryPoint: vs.entry, buffers },
-      primitive: { topology: TOPOLOGY[st.topology] || 'triangle-list' },
+      primitive: { topology: TOPOLOGY[topology] || 'triangle-list' },
     };
     if (ps) desc.fragment = { module: ps.module, entryPoint: ps.entry, targets };
     else if (targets.some(Boolean)) desc.fragment = undefined;
-    if (indexed && (st.topology === 3 || st.topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';
+    if (indexed && (topology === 3 || topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';
     const r = this.rasters.get(st.raster);
     if (r) {
       desc.primitive.cullMode = ({ 1: 'none', 2: 'front', 3: 'back' })[r.getUint32(4, true)] || 'back';
@@ -1011,7 +1147,11 @@ export class GpuExecutor {
     if (!d || !s) return;
     this.endPass();
     const enc = this.encoder();
-    if (d.kind === 'buffer' && s.kind === 'buffer') enc.copyBufferToBuffer(s.gpu, 0, d.gpu, 0, Math.min(s.size, d.size));
+    if (d.kind === 'buffer' && s.kind === 'buffer') {
+      const size = Math.min(s.size, d.size);
+      enc.copyBufferToBuffer(s.gpu, 0, d.gpu, 0, size);
+      if (d.shadow && s.shadow) d.shadow.set(s.shadow.subarray(0, size), 0);
+    }
     else if (d.kind === 'texture' && s.kind === 'texture') {
       for (let m = 0; m < Math.min(d.mips, s.mips); m++) {
         const sourceLayers = s.dimension === '3d' ? Math.max(1, s.depth >> m) : s.array;
@@ -1029,7 +1169,12 @@ export class GpuExecutor {
     this.endPass();
     if (d.kind === 'buffer' && s.kind === 'buffer') {
       const l = hasBox ? u(8) : 0, r = hasBox ? u(11) : s.size;
-      this.encoder().copyBufferToBuffer(s.gpu, l & ~3, d.gpu, dx & ~3, Math.min(r - l, d.size - dx) & ~3);
+      const sourceOffset = l & ~3, destOffset = dx & ~3;
+      const size = Math.min(r - l, d.size - dx) & ~3;
+      this.encoder().copyBufferToBuffer(s.gpu, sourceOffset, d.gpu, destOffset, size);
+      if (d.shadow && s.shadow && sourceOffset + size <= s.shadow.length && destOffset + size <= d.shadow.length) {
+        d.shadow.set(s.shadow.subarray(sourceOffset, sourceOffset + size), destOffset);
+      }
       return;
     }
     const smip = ssub % s.mips, sslice = Math.floor(ssub / s.mips), dmip = dsub % d.mips, dslice = Math.floor(dsub / d.mips);

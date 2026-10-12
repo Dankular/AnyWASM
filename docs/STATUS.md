@@ -26,8 +26,7 @@
   **headless Chromium** through the real page and worker (`test/browser/run.mjs`). CLI `run` passes
   the remaining `--max-steps` budget to synchronous callbacks and accounts for retired instructions
   at frame stops; an integration fixture verifies a callback longer than the former 2,000,000-step
-  slice completes. The current Asyncify-transformed WASM also passes the standalone
-  `node test/wasm_smoke.mjs` suite.
+  slice completes.
 - **Direct3D 11 -> WebGPU, end to end.** A mingw-compiled Win64 program using the real `d3d11.h`
   COM API (window class + `CreateWindowEx`, `D3D11CreateDeviceAndSwapChain`, buffers, DXBC shaders,
   input layout, `Map`/`Unmap`, `Present`) runs in the interpreter; COM vtables are generated from the
@@ -67,12 +66,6 @@
   correctness checks. These are local benchmark samples, not a speedup claim. The earlier
   cached-block baseline above was collected separately (two runs); compare like-for-like only in
   future controlled runs.
-- A fresh six-round local sweep on 2026-10-12 measured medians of 24.15 / 19.7 / 23.15 / 33.75 M
-  instr/s for cached-only compute, call-heavy, memory-heavy, and SSE-float fixtures. Forcing prefix 1
-  measured 12.65 / 13.4 / 11.15 / 31.75 M instr/s; the SSE fixture emitted no instructions. This
-  confirms the MOV emitter should remain disabled while JIT work addresses the memory and SSE paths.
-  The raw-WASM benchmark and emitted-module counts are recorded in
-  [`target-data/jit-benchmark-2026-10-12.json`](target-data/jit-benchmark-2026-10-12.json).
 - Representative-target guest-cost sample (`test/target_frame_bench.mjs`): Diligent GLFW Demo,
   release WASM under Node 24.16.0/Windows x64, eight guest frame stops. Corrected process accounting
   includes synchronous callbacks, yielding HLE calls, and instructions retired before a block fault.
@@ -109,38 +102,35 @@
   coverage; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
-- **Dynamic WASM emission (opt-in prototype, default disabled):** at a block entry, Rust emits a
-  leading sequence of NOPs, 32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs, selected 32-bit/
-  64-bit memory MOVs, and immediate `JMP`/`Jcc` exits. Memory forms use plain, unsegmented 64-bit
-  addressing and inline probes of
-  the one-entry read/write TLBs; accesses must stay within one mapped page with compatible
-  permissions. Cold misses, faults, page crossings, and writes to executable pages retry in the
-  interpreter. A direct store ends its emitted prefix. Register-to-register MOV32 and memory
-  loads zero-extend; self-moves retire normally. Conditional exits read copied RFLAGS unchanged;
-  after a direct exit Rust resumes dispatch at the emitted RIP. The generated module imports the main runtime's
-  memory and runs through `anywasm.run_emitted_block` in `web/anywasm.js`. It receives a 176-byte
-  call state consisting of the 160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC) plus
-  a 16-byte backing-memory/TLB view. Rust commits the CPU snapshot only after a valid exact
+- **Dynamic WASM emission (opt-in prototype, default disabled):** at a block entry, Rust emits a module for a
+  leading sequence of NOPs and 32-bit/64-bit GPR-immediate and GPR-to-GPR MOVs. Register-to-register 32-bit
+  moves zero-extend; self-moves retire normally. The module imports the main runtime's
+  memory and runs through `anywasm.run_emitted_block` in `web/anywasm.js`. It mutates a copied
+  160-byte CPU snapshot (GPRs, RIP, RFLAGS, retired count, TSC); Rust commits only a valid exact
   instruction count. Compile/trap/invalid-count failures retry through the interpreter. The JS
   wrapper caches up to 256 generated modules and validates bytes if an ID is reused. Rust tests,
-  `test/wasm_smoke.mjs` (including forced execution, one-instruction budgets, and same-bundle
-  comparisons against cached-only and `{ jit: false }` for compute status, exit code, output,
-  errors, and retired count) pass. The smoke confirms the default gate skips short prefixes and
-  exercises safe interpreter retry after a host compile failure. Headless Chrome runs `compute.exe`
-  through the emitter in the page and worker, compares output/counts, and grows WASM memory by one
-  page after emission starts; later emitted calls continue and the cold-TLB fallback count does not
-  increase. `jit_state.exe` enters a nine-instruction prefix with a warmed memory load and final
-  store, then checks stored values; a second cold-page load checks interpreter retry. Its emitted
-  path also takes a direct unconditional jump and a ZF-dependent conditional exit. WASM smoke
-  compares emitted, cached-only, and interpreter status, exit code,
-  output, errors, and retired count; Chromium compares page-realm output/counts with cached-only,
-  and Windows runs the fixture natively. The fixture checks selected registers and memory, not
-  arbitrary final process state; full JIT/interpreter/host differential remains open. This is a
-  mechanism prototype, not a throughput win: emission requires explicit opt-in, and benchmarks
-  show prefix-1 emission is slower on current compute, call-heavy, and memory-heavy fixtures.
-  Partial-width MOVs, LEA, arithmetic, indirect/control-system exits, block chaining, and SSE/x87
-  emission remain open. Module-cache pressure and emitted-path CSP checks have passed in Node, Chromium,
-  Firefox, and WebKit; generated-module page/worker checks pass in the same browser set.
+  `test/wasm_smoke.mjs` (including explicitly forced generated execution, one-instruction budgets,
+  and same-bundle comparisons against both the default cached-only path and `{ jit: false }` for
+  compute status, exit code, stdout/stderr, and retired count) pass. The smoke also confirms the
+  default gate skips the fixture's short prefixes and forces one host module-compile failure with
+  safe interpreter fallback. The headless Chrome suite also runs `compute.exe` through the opt-in
+  emitter in the page realm, confirms emitted register-register MOV execution without fallback, and
+  compares output and retired count with cached-only execution. It also grows WASM memory by one
+  page after an emitted block has run, then verifies further emitted executions complete without
+  fallback and preserve output/count parity. A dedicated browser-worker run forces the emitter,
+  confirms register-register execution without fallback, and matches the page-realm output and
+  retired count. The standard worker, input, and WebGPU checks pass with the default gate. A
+  `jit_state.exe` fixture emits a leading NOP and six GPR MOVs as one forced seven-instruction
+  prefix, stores their values to guest memory, and fails if those values differ; the WASM smoke
+  compares emitted, cached-only, and interpreter status, exit code, output, errors, and retired
+  count, while Windows also runs the fixture natively.
+  This checks the fixture-observed MOV state and memory only; a full final-state differential remains
+  open. This is a
+  mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
+  memory MOVs, LEA, arithmetic,
+  SIMD, or control flow are not emitted. Full JIT/interpreter state differential and real-game
+  performance remain open. Module-cache pressure and emitted-path CSP checks have passed in Node,
+  Chromium, Firefox, and WebKit; generated-module page/worker checks pass in the same browser set.
 - Thread support uses a deterministic cooperative scheduler with saved CPU/stack/TEB TLS pointers,
   dynamic TLS/FLS maps, static PE TLS blocks, quantum rotation, resumable waits, events, mutexes,
   semaphores, critical sections, SRW locks, and condition-variable wake/reacquire behavior. An earlier
@@ -198,10 +188,8 @@
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` have now been run with `--mode d3d11` under
   AnyWASM. Both reach virtual D3D11 device discovery/creation before stopping at the first unresolved
-  `MSVCP140.dll` `basic_ios<char>` constructor. Static-CRT builds of both tutorials move past that
-  import, complete D3D11 device and render/depth texture setup, then stop at unsupported VEX2
-  `vsubss xmm1,xmm0,xmm2` before shader creation or `Present`. Neither tutorial has a pixel
-  verification yet; Asteroids remains analyzer-only pending licence review.
+  `MSVCP140.dll` `basic_ios<char>` constructor. They do not reach shader creation, guest `Present`,
+  or pixel verification; Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in
   D3Dcompiler. A prior status note listed 96, which this build does not reproduce; analyzing each
@@ -232,20 +220,10 @@
   draw samples it into a pixel. A follow-up headless Chromium replay fixes the group's hidden
   draw-parameter binding and captures a nonempty 1040x807 frame from the selected target with one
   dispatch, five draws, and no WebGPU validation errors. The initial, W-movement, and Tab-regeneration
-  frames are saved in `docs/images/` and can be reproduced with `test/browser/target.mjs`. On
-  2026-10-12, a deterministic seed-1 route completed with the production 250,000-instruction worker
-  slice; the callback yielded and resumed 16 times, and the teleport returned the marker within 1.27
-  screen pixels of center. A follow-up with the rebuilt served runtime (SHA-256
-  `A9E315E598191A80190EDB6B9AE0DBF1BA7C3855AC8F9B219E30DCC18B3DCC2A`) completed all 35 steps and
-  1,834 input pulses over 1,858 presents, with 16 callback yields/resumes, two compute dispatches,
-  and no WebGPU validation errors. The final marker was 0.29 pixels from its starting position. The
-  replay record is
-  [`target-data/glfwdemo-seed1-asyncify-replay.json`](target-data/glfwdemo-seed1-asyncify-replay.json).
-  The fixed-direction flashlight check remains unreliable: the latest production-slice run gained 90
-  bright pixels against its 100-pixel threshold (mean luminance delta 0.00947). Other movement states,
-  broad gameplay acceptance, other UAV
-  formats, and native comparison remain open. See [`docs/TARGETS.md`](TARGETS.md) for exact traces
-  and limits.
+  frames are saved in `docs/images/` and can be reproduced with `test/browser/target.mjs`. The normal
+  worker slice still stops in a synchronous callback that cannot resume. Target UAV values and native
+  comparison remain unverified; other movement directions and gameplay acceptance are open. See
+  [`docs/TARGETS.md`](TARGETS.md) for exact traces and limits.
 - The D3D11 textured fixture has Rust command-stream and WASM smoke coverage, and its tested WebGPU
   rendering states have pixel checks in `test/browser/run.mjs`. Other rendering states listed in
   `CLAUDE.md` are not pixel-verified.

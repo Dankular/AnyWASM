@@ -78,8 +78,8 @@ emission remains disabled by default. The 10–50x figure in `STATUS.md` is stil
 none of these results sets a product performance target. See `docs/TARGETS.md` for exact commands,
 counts, and limits.
 
-Design (partial implementation; the verified dynamic-emission scope is a leading sequence of NOPs,
-32-bit or 64-bit GPR-immediate and GPR-to-GPR MOVs, and selected TLB-resident memory MOVs):
+Design (partial implementation; the verified dynamic-emission scope is a leading sequence of NOPs
+and 32-bit or 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block entry):
 - [x] **Baseline**: add a benchmark set beyond `compute.exe` (call-heavy, memory-heavy, SSE float
       loops) and record instr/s in CI (report-only; no throughput threshold yet).
 - [~] **Representative-target demand**: corrected cached-only and forced-emission runs each reached
@@ -98,26 +98,19 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       process-local module ID is reused. `{ jitMinPrefix: 1 }` explicitly opts in; the default
       threshold is 65, above the 64-instruction block limit, so short blocks avoid host compile and
       execute overhead. No throughput win is established; module batching and performance remain open.
-- [~] **State model (MVP)**: generated code receives a 176-byte `repr(C)` call state: a 160-byte CPU
-      snapshot containing GPRs, RIP, RFLAGS, retired count, and TSC, followed by a 16-byte view of
-      backing memory and the read/write TLB entries. It writes CPU GPRs, RIP, count, and TSC; RFLAGS
-      pass through unchanged. Rust commits the CPU snapshot only when the returned retired count
-      matches the budget and emitted prefix. Register-local allocation and lazy flags remain open.
-- [~] **Memory access**: 32-bit and 64-bit MOV loads/stores use an inline check of the existing
-      one-entry read/write TLBs for plain, unsegmented 64-bit addressing, only when the access stays
-      within one mapped page and has compatible permissions. Cold TLB misses, faults, and page
-      crossings retry in the interpreter. Direct stores are kept at the end of an emitted prefix;
-      writes to executable pages use the interpreter so `code_epoch` remains correct. Multi-page
-      spans, addr32/segment forms, and broader memory operations remain open.
-- [~] **Exits**: immediate `JMP` and `Jcc` now update generated RIP and terminate the emitted
-      block; Rust resumes dispatch at that destination. Direct block chaining, indirect jumps via
-      hash lookup, `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`,
-      `skip_ret`, and `yield_request` integration remain open.
-- [~] **Fallback**: leading NOPs, 32-bit or 64-bit GPR-immediate or GPR-to-GPR MOVs, limited
-      TLB-resident memory MOV forms, and immediate `JMP`/`Jcc` exits are emitted. Partial-width and
-      other memory MOVs and all remaining instructions use the interpreter. 32-bit register moves
-      and loads zero-extend; NOPs and self-moves still advance RIP/count/TSC. A store terminates its
-      emitted prefix. Compile/trap/invalid-count failures retry from the untouched live CPU snapshot.
+- [~] **State model (MVP)**: generated code receives a 160-byte `repr(C)` snapshot containing GPRs,
+      RIP, RFLAGS, retired count, and TSC. It writes GPRs, RIP, count, and TSC; RFLAGS pass through
+      unchanged. Rust commits the snapshot only when the returned retired count matches the budget
+      and emitted prefix. Register-local allocation and lazy flags remain open.
+- [ ] **Memory access**: fast path through the existing 3-level page table/TLB, with an inline TLB
+      probe in generated code and a slow-path call for misses/faults.
+- [ ] **Exits**: direct block chaining for known targets; indirect jumps via hash lookup;
+      `call_guest`, HLE thunk addresses (region `0x7ffe_0000_0000`), `Stop::*`, `skip_ret`,
+      `yield_request`, step limit/icount accounting must all keep working.
+- [x] **Fallback**: leading NOPs and 32-bit or 64-bit GPR-immediate or GPR-to-GPR MOVs are emitted.
+      Partial-width and memory MOVs and all remaining instructions use the interpreter. 32-bit
+      register moves zero-extend; NOPs and self-moves still advance RIP/count/TSC. Compile/trap/
+      invalid-count failures retry from the untouched live CPU snapshot.
 - [~] **Correctness checks**: Rust emitter tests cover prefix limits, 32-bit zero-extension,
       64-bit copies, self-move retirement, and that prefixes below the configured gate are skipped.
       Process accounting now includes nested guest callbacks, yielding HLE calls, and successful
@@ -129,12 +122,9 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       and compares the same bundle with the default cached-only path and `{ jit: false }` for status,
       exit code, stdout/stderr, and retired count. A forced host compile failure also falls back
       safely. The Chrome suite also explicitly runs the emitted path and compares its compute output
-      and retired count with cached-only execution. Chromium also runs the dedicated `jit_state.exe`
-      page-realm check against cached-only. The fixture sets ZF before a
-      branch to a nine-instruction NOP/MOV prefix with a warmed memory load and final store, then
-      checks the MOV-produced values after guest memory stores; a second cold-page load checks
-      interpreter fallback. The fixture also emits an unconditional direct jump and a ZF-dependent
-      conditional branch and verifies the selected exit. The WASM smoke compares emitted, cached-only, and
+      and retired count with cached-only execution. A dedicated `jit_state.exe` starts with a NOP
+      followed by six emitted GPR MOVs. Its forced seven-instruction prefix stores their values
+      through guest memory and checks them; the WASM smoke compares emitted, cached-only, and
       interpreter status, exit code, output, and retired
       count, while Windows also runs the same fixture natively. This verifies those MOV-produced
       registers and checked memory values, but not arbitrary final process state or a full
@@ -144,7 +134,7 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
 - [~] **Browser check**: the rebuilt runtime passes the headless Chromium worker, input, and WebGPU
       suite; page-realm and worker checks force the opt-in emitter and compare results with the
       cached-only path. The page-realm check grows WASM memory by one page after emitted execution
-      begins and verifies the cached generated module resumes without an additional fallback. A cache-pressure
+      begins and verifies the cached generated module resumes without fallback. A cache-pressure
       probe compiles 300 unique emitted modules, revisits entries, and confirms eviction/recompile
       and retained-module hits in Node, Firefox, and WebKit. Firefox 141.0 runs the hello and D3D11
       triangle fixtures through its page and worker, but validation errors leave the triangle black;

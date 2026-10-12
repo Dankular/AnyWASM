@@ -2031,6 +2031,98 @@ impl Process {
             self.dispatch_thunk(rip)?;
             return Ok((1, self.yield_request.take()));
         }
+        if self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && matches!(rip as u32 as u64, 0x7fb230 | 0x7fb261 | 0x7fb297)
+        {
+            let backend = self.mem.read_u32(0xc97b24).unwrap_or(0) as u64;
+            let callback = self
+                .mem
+                .read_u32(backend.wrapping_add(0x58))
+                .unwrap_or(0);
+            let object = self.cpu.gpr[RSI] as u32 as u64;
+            let object4 = self.mem.read_u32(object.wrapping_add(4)).unwrap_or(0);
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-render-object] rip={rip:#x} eax={:#x} esi={object:#x} callback={callback:#x} object4={object4:#x} args={:#x}/{:#x}/{:#x}/{:#x} stackret={:#x}\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(4)).unwrap_or(0),
+                    self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(8)).unwrap_or(0),
+                    self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(12)).unwrap_or(0),
+                    self.mem.read_u32(self.cpu.gpr[RSP].wrapping_add(16)).unwrap_or(0),
+                    self.mem.read_u32(self.cpu.gpr[RSP]).unwrap_or(0),
+                )
+                .as_bytes(),
+            );
+        }
+        if self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && matches!(rip as u32 as u64, 0x72f420 | 0x72f42a | 0x801cf8 | 0x801cfe | 0x7fb255)
+        {
+            let backend = self.mem.read_u32(0xc97b24).unwrap_or(0);
+            let size_or_arg = self.mem.read_u32(self.cpu.gpr[RSP] + 4).unwrap_or(0);
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-backend-allocation] rip={rip:#x} eax={:#x} ecx={:#x} edx={:#x} esi={:#x} stackarg={size_or_arg:#x} backend={backend:#x}\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RCX] as u32,
+                    self.cpu.gpr[RDX] as u32,
+                    self.cpu.gpr[RSI] as u32,
+                )
+                .as_bytes(),
+            );
+        }
+        if self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && matches!(rip as u32 as u64, 0x619b71 | 0x74884c)
+        {
+            let caller_stack = self
+                .mem
+                .read_u32(self.cpu.gpr[RSP].wrapping_add(4))
+                .unwrap_or(0);
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-event-dispatch] rip={rip:#x} eax={:#x} edi={:#x} stack_arg={caller_stack:#x}\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RDI] as u32,
+                )
+                .as_bytes(),
+            );
+        }
+        if self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && matches!(
+                rip as u32 as u64,
+                0x5bd600 | 0x5bd62b | 0x5bd656 | 0x5bd65c | 0x5bd661 | 0x5bd666
+                    | 0x5bd676 | 0x5bd681 | 0x5bd684 | 0x5bd68e
+                    | 0x5bd71c | 0x5bd721 | 0x5bd724 | 0x5bd726 | 0x5bd748
+            )
+        {
+            let backend = self.mem.read_u32(0xc97b24).unwrap_or(0) as u64;
+            let state = self
+                .mem
+                .read_u32(backend.wrapping_add(0x150))
+                .unwrap_or(0);
+            let backend_factory = self.mem.read_u32(backend.wrapping_add(0x144)).unwrap_or(0);
+            let backend_create = self.mem.read_u32(backend.wrapping_add(0x134)).unwrap_or(0);
+            let backend_release = self.mem.read_u32(backend.wrapping_add(0x148)).unwrap_or(0);
+            let remaining = self.mem.read_u32(0xc97b20).unwrap_or(0);
+            let object = self.cpu.gpr[RSI] as u32 as u64;
+            let field4 = self.mem.read_u32(object.wrapping_add(4)).unwrap_or(0);
+            let field60 = self.mem.read_u32(object.wrapping_add(0x60)).unwrap_or(0);
+            let field64 = self.mem.read_u32(object.wrapping_add(0x64)).unwrap_or(0);
+            let field60_vtable = self.mem.read_u32(field60 as u64).unwrap_or(0);
+            let field64_vtable = self.mem.read_u32(field64 as u64).unwrap_or(0);
+            self.stderr.extend_from_slice(
+                format!(
+                    "[gta-backend-init] rip={rip:#x} eax={:#x} ebx={:#x} esi={object:#x} edi={:#x} backend={backend:#x} state={state:#x} factory={backend_factory:#x} create={backend_create:#x} release={backend_release:#x} remaining={remaining:#x} field4={field4:#x} field60={field60:#x}/{field60_vtable:#x} field64={field64:#x}/{field64_vtable:#x}\n",
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RBX] as u32,
+                    self.cpu.gpr[RDI] as u32,
+                )
+                .as_bytes(),
+            );
+        }
         if self.trace_imports && self.cpu.mode == CpuMode::X86_32 {
             let mut recent = VecDeque::with_capacity(128);
             let mut executed = 0;
@@ -2189,19 +2281,12 @@ impl Process {
             };
             self.stderr.extend_from_slice(line.as_bytes());
         }
-        if self.trace_modules_only
-            && group == "com"
-            && (name.starts_with("IDirectDraw7::")
-                || name.starts_with("IDirectSound8::")
-                || name.starts_with("IDirectSoundBuffer8::")
-                || name.starts_with("IDirect3D9::")
-                || name.starts_with("IDirect3DDevice9::")
-                || name.starts_with("IDirect3DSurface9::"))
-        {
+        if self.trace_modules_only && group == "com" {
             let args = (0..8)
                 .map(|index| format!("{:#x}", self.arg(index)))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);
             let detail = if name == "IDirect3DDevice9::SetVertexDeclaration" {
                 let declaration = self.arg(1);
                 let bytes = self
@@ -2216,7 +2301,7 @@ impl Process {
                 String::new()
             };
             self.stderr.extend_from_slice(
-                format!("[com-call] {name} args=[{args}]{detail}\n").as_bytes(),
+                format!("[com-call] {name} args=[{args}]{detail} caller={caller:#x}\n").as_bytes(),
             );
         }
         let import_caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);

@@ -20,6 +20,7 @@ try {
     ['call-heavy', 'bench_call.exe'],
     ['memory-heavy', 'bench_memory.exe'],
     ['sse-float', 'bench_sse.exe'],
+    ['block-chain', 'jit_state.exe'],
   ];
 
   console.log(`minimum emitted MOV prefix: ${jitMinPrefix}; rounds: ${rounds}`);
@@ -39,7 +40,7 @@ try {
         throw new Error(`${name} did not exit cleanly: status=${r.status}, exit=${r.exitCode}, message=${r.message}`);
       }
       const jit = w.jitStats;
-      console.log(`  round ${round}: status=${r.status} exit=${r.exitCode} ${n.toLocaleString()} instr in ${dt.toFixed(2)}s = ${(n / dt / 1e6).toFixed(1)} M instr/s; emitted=${jit.executions} modules=${jit.compilations} regreg=${jit.registerRegisterHits} fallback=${jit.fallbacks}`);
+      console.log(`  round ${round}: status=${r.status} exit=${r.exitCode} ${n.toLocaleString()} instr in ${dt.toFixed(2)}s = ${(n / dt / 1e6).toFixed(1)} M instr/s; emitted=${jit.executions} modules=${jit.compilations} chainModules=${jit.chainCompilations} chains=${jit.chainTransitions} regreg=${jit.registerRegisterHits} fallback=${jit.fallbacks}`);
     }
   }
 } finally {

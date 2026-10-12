@@ -89,6 +89,7 @@ pub enum Kind {
     Direct3DSurface9 {
         device: u64,
         texture_id: u32,
+        level: u32,
         rtv: u64,
         width: u32,
         height: u32,
@@ -101,6 +102,15 @@ pub enum Kind {
     Direct3DIndexBuffer9 {
         id: u32,
         device: u64,
+    },
+    Direct3DTexture9 {
+        id: u32,
+        device: u64,
+        width: u32,
+        height: u32,
+        levels: u32,
+        format: u32,
+        pool: u32,
     },
     Direct3DVertexDeclaration9 {
         device: u64,
@@ -125,6 +135,7 @@ impl Kind {
             | Kind::Buffer { id }
             | Kind::Direct3DVertexBuffer9 { id, .. }
             | Kind::Direct3DIndexBuffer9 { id, .. }
+            | Kind::Direct3DTexture9 { id, .. }
             | Kind::Texture2D { id }
             | Kind::Texture3D { id }
             | Kind::View { id, .. }
@@ -197,6 +208,16 @@ pub struct ComState {
     /// Current Direct3D 9 vertex and pixel shader objects per device.
     pub d3d9_vertex_shaders: HashMap<u64, u64>,
     pub d3d9_pixel_shaders: HashMap<u64, u64>,
+    /// Shader-resource views lazily associated with D3D9 textures.
+    pub d3d9_texture_views: HashMap<u32, u32>,
+    /// Textures retained by D3D9 device stage bindings.
+    pub d3d9_bound_textures: HashMap<(u64, u32), u64>,
+    /// D3D9 sampler-state values keyed by `(device, sampler, state)`.
+    pub d3d9_sampler_states: HashMap<(u64, u32, u32), u32>,
+    /// Current translated sampler object keyed by `(device, sampler)`.
+    pub d3d9_sampler_objects: HashMap<(u64, u32), u32>,
+    /// D3D9 stage-0 texture-combine state keyed by `(device, stage, state)`.
+    pub d3d9_texture_stage_states: HashMap<(u64, u32, u32), u32>,
     /// Direct3D 9 render-state values set by the guest, keyed by `(device, state)`.
     pub d3d9_render_states: HashMap<(u64, u32), u32>,
 }
@@ -308,6 +329,11 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Direct3DIndexBuffer9 { .. } => {
             &["IDirect3DIndexBuffer9", "IDirect3DResource9"]
         }
+        Kind::Direct3DTexture9 { .. } => &[
+            "IDirect3DTexture9",
+            "IDirect3DBaseTexture9",
+            "IDirect3DResource9",
+        ],
         Kind::Direct3DVertexDeclaration9 { .. } => &["IDirect3DVertexDeclaration9"],
         Kind::Direct3DShader9 { vertex: true, .. } => &["IDirect3DVertexShader9"],
         Kind::Direct3DShader9 { vertex: false, .. } => &["IDirect3DPixelShader9"],
@@ -426,6 +452,8 @@ const ALL_NAMES: &[&str] = &[
     "IDirect3DResource9",
     "IDirect3DVertexBuffer9",
     "IDirect3DIndexBuffer9",
+    "IDirect3DBaseTexture9",
+    "IDirect3DTexture9",
     "IDirect3DVertexDeclaration9",
     "IDirect3DVertexShader9",
     "IDirect3DPixelShader9",
@@ -546,7 +574,7 @@ fn interface_version(iface: &str) -> u32 {
     iface[family.len()..].parse().unwrap_or(0)
 }
 
-fn add_ref_obj(p: &mut Process, this: u64) -> u64 {
+pub fn add_ref_obj(p: &mut Process, this: u64) -> u64 {
     match p.extra.com.objs.get_mut(&this) {
         Some(o) => {
             o.refs += 1;
@@ -563,8 +591,12 @@ pub fn add_ref(p: &mut Process) -> R {
 
 pub fn release(p: &mut Process) -> R {
     let this = p.arg(0);
+    Ok(release_obj(p, this))
+}
+
+pub fn release_obj(p: &mut Process, this: u64) -> u64 {
     let Some(o) = p.extra.com.objs.get_mut(&this) else {
-        return Ok(0);
+        return 0;
     };
     if o.refs > 0 {
         o.refs -= 1;
@@ -572,6 +604,30 @@ pub fn release(p: &mut Process) -> R {
     let refs = o.refs;
     if refs == 0 {
         let o = p.extra.com.objs.remove(&this).unwrap();
+        if matches!(&o.kind, Kind::Direct3DDevice9 { .. }) {
+            let bound = p.extra.com.d3d9_bound_textures
+                .iter()
+                .filter_map(|(&(device, stage), &texture)| (device == this).then_some((stage, texture)))
+                .collect::<Vec<_>>();
+            for (stage, texture) in bound {
+                p.extra.com.d3d9_bound_textures.remove(&(this, stage));
+                p.extra.gpu.emit(
+                    op::SET_SRVS,
+                    Pk::new().u32(1).u32(stage).u32(1).u32(0),
+                );
+                release_obj(p, texture);
+            }
+            let samplers = p.extra.com.d3d9_sampler_objects
+                .iter()
+                .filter_map(|(&(device, stage), &sampler)| (device == this).then_some((stage, sampler)))
+                .collect::<Vec<_>>();
+            for (stage, sampler) in samplers {
+                p.extra.com.d3d9_sampler_objects.remove(&(this, stage));
+                p.extra.gpu.emit(op::RELEASE, Pk::new().u32(sampler));
+            }
+            p.extra.com.d3d9_sampler_states.retain(|(device, _, _), _| *device != this);
+            p.extra.com.d3d9_texture_stage_states.retain(|(device, _, _), _| *device != this);
+        }
         if let Some(id) = o.kind.host_id() {
             let left = p.extra.com.id_refs.get_mut(&id).map(|c| {
                 *c = c.saturating_sub(1);
@@ -582,6 +638,7 @@ pub fn release(p: &mut Process) -> R {
                 if let Some(handle) = p.extra.com.frame_latency_handles.remove(&id) {
                     p.handles.remove(&handle);
                 }
+                p.extra.com.d3d9_texture_views.remove(&id);
                 // The backbuffer texture belongs to its swap chain; the host releases it with it.
                 p.extra.com.res.remove(&id);
                 p.extra.gpu.emit(op::RELEASE, Pk::new().u32(id));
@@ -592,7 +649,7 @@ pub fn release(p: &mut Process) -> R {
         }
         kernel32::free_block(p, o.block);
     }
-    Ok(refs as u64)
+    refs as u64
 }
 
 pub fn get_device(p: &mut Process) -> R {
@@ -611,7 +668,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "QueryInterface" => query_interface,
         "AddRef" => add_ref,
         "Release" => release,
-        "GetDevice" if matches!(iface, "IDirect3DSurface9" | "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" | "IDirect3DVertexDeclaration9" | "IDirect3DVertexShader9" | "IDirect3DPixelShader9") => {
+        "GetDevice" if matches!(iface, "IDirect3DSurface9" | "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" | "IDirect3DBaseTexture9" | "IDirect3DTexture9" | "IDirect3DVertexDeclaration9" | "IDirect3DVertexShader9" | "IDirect3DPixelShader9") => {
             return d3d9::method(iface, m)
         }
         "GetDevice" => get_device,

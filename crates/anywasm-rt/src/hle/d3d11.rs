@@ -1289,6 +1289,52 @@ mod tests {
     }
 
     #[test]
+    fn create_unordered_access_view_tracks_buffer_range_and_flags() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        let resource = p.extra.gpu.new_id();
+        p.extra.com.res.insert(
+            resource,
+            ResInfo {
+                is_buffer: true,
+                size: 64,
+                stride: 4,
+                misc: 0x40, // D3D11_RESOURCE_MISC_BUFFER_STRUCTURED
+                ..Default::default()
+            },
+        );
+        let buffer = create(&mut p, "ID3D11Buffer", Kind::Buffer { id: resource });
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let mut desc = Vec::new();
+        for value in [0u32, 1, 2, 3, 0] {
+            desc.extend(value.to_le_bytes());
+        }
+        p.write_bytes(DESC, &desc).unwrap(); // BUFFER, FirstElement=2, NumElements=3, Flags=0
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = buffer;
+        p.cpu.gpr[R8] = DESC;
+        p.cpu.gpr[R9] = OUT;
+
+        let create_uav = method("ID3D11Device1", "CreateUnorderedAccessView").unwrap();
+        assert_eq!(create_uav(&mut p).unwrap(), S_OK);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands.last().unwrap();
+        assert_eq!(*opcode, op::CREATE_VIEW);
+        let fields = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(fields[1..], [3, resource, 0, 1, 2, 3, 0, 0]);
+    }
+
+    #[test]
     fn cs_set_unordered_access_views_emits_view_ids_and_initial_counts() {
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};

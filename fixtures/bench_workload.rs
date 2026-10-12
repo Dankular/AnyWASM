@@ -80,6 +80,11 @@ core::arch::global_asm!(
     "mov r8, r8",
     "mov r11, r11",
     "mov r10, r10",
+    "mov r13d, 0x89abcdef",
+    "mov r15d, 0x76543210",
+    "mov ebp, 0x13579bdf",
+    "mov esi, 0x2468ace0",
+    "mov edi, 0x10203040",
     "cmp r14, r11",
     "jne JIT_STATE_FAIL",
     "nop",
@@ -93,6 +98,39 @@ core::arch::global_asm!(
     "mov eax, 1",
     "ret",
     "JIT_STATE_SUCCESS:",
+    "lea rax, [rip + JIT_STATE_OUTPUT]",
+    "cmp r10, rax",
+    "jne JIT_STATE_FAIL",
+    "movabs rax, 0x8877665544332211",
+    "cmp r11, rax",
+    "jne JIT_STATE_FAIL",
+    "cmp r12, qword ptr [rip + JIT_STATE_INPUT]",
+    "jne JIT_STATE_FAIL",
+    "cmp r13d, 0x89abcdef",
+    "jne JIT_STATE_FAIL",
+    "cmp r14, rax",
+    "jne JIT_STATE_FAIL",
+    "cmp r15d, 0x76543210",
+    "jne JIT_STATE_FAIL",
+    "cmp ebp, 0x13579bdf",
+    "jne JIT_STATE_FAIL",
+    "cmp esi, 0x2468ace0",
+    "jne JIT_STATE_FAIL",
+    "cmp edi, 0x10203040",
+    "jne JIT_STATE_FAIL",
+    "mov ecx, 100000",
+    "JIT_STATE_CHAIN_CHECK:",
+    "dec ecx",
+    "jz JIT_STATE_CHAIN_DONE",
+    "JIT_STATE_CHAIN_A:",
+    "nop",
+    "mov rbx, rbx",
+    "jmp JIT_STATE_CHAIN_B",
+    "JIT_STATE_CHAIN_B:",
+    "nop",
+    "mov r12, r12",
+    "jmp JIT_STATE_CHAIN_CHECK",
+    "JIT_STATE_CHAIN_DONE:",
     "xor eax, eax",
     "ret",
     ".data",
@@ -107,6 +145,52 @@ core::arch::global_asm!(
     ".globl JIT_STATE_MISS_INPUT",
     "JIT_STATE_MISS_INPUT:",
     ".quad 0x8877665544332211",
+    ".text",
+);
+
+#[cfg(jit_sse)]
+unsafe extern "system" {
+    fn jit_sse_entry() -> u32;
+}
+
+#[cfg(jit_sse)]
+core::arch::global_asm!(
+    ".text",
+    ".globl jit_sse_entry",
+    "jit_sse_entry:",
+    "mov dword ptr [rip + JIT_SSE_RESULT], 0",
+    "movupd xmm0, xmmword ptr [rip + JIT_SSE_INPUT0]",
+    "movupd xmm1, xmmword ptr [rip + JIT_SSE_INPUT1]",
+    "jmp JIT_SSE_OPS",
+    "JIT_SSE_OPS:",
+    "movapd xmm2, xmm0",
+    "mulpd xmm2, xmm1",
+    "addpd xmm2, xmm1",
+    "movupd xmmword ptr [rip + JIT_SSE_RESULT], xmm2",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT]",
+    "movabs rdx, 0x4016800000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "mov rax, qword ptr [rip + JIT_SSE_RESULT + 8]",
+    "movabs rdx, 0x401b000000000000",
+    "cmp rax, rdx",
+    "jne JIT_SSE_FAIL",
+    "xor eax, eax",
+    "ret",
+    "JIT_SSE_FAIL:",
+    "mov eax, 1",
+    "ret",
+    ".data",
+    ".p2align 4",
+    ".globl JIT_SSE_RESULT",
+    "JIT_SSE_RESULT:",
+    ".quad 0, 0",
+    ".globl JIT_SSE_INPUT0",
+    "JIT_SSE_INPUT0:",
+    ".quad 0x3ff8000000000000, 0x3ff4000000000000",
+    ".globl JIT_SSE_INPUT1",
+    "JIT_SSE_INPUT1:",
+    ".quad 0x4002000000000000, 0x4008000000000000",
     ".text",
 );
 
@@ -153,7 +237,7 @@ fn run_workload() {
 }
 
 #[cfg(bench_sse)]
-fn run_workload() {
+fn run_workload() -> u32 {
     use core::arch::x86_64::{_mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set_pd, _mm_storeu_pd};
 
     let mut lanes = [1.0f64, 2.0f64];
@@ -167,6 +251,11 @@ fn run_workload() {
         _mm_storeu_pd(lanes.as_mut_ptr(), value);
     }
     core::hint::black_box(lanes);
+    if lanes[0].to_bits() == 0x3ff1_9de7_2584_5e7b && lanes[1].to_bits() == 0x4000_6879_5faf_a5af {
+        0
+    } else {
+        1
+    }
 }
 
 #[cfg(callback_budget)]
@@ -205,16 +294,35 @@ fn run_workload() -> u32 {
     }
 }
 
-#[cfg(not(any(bench_call, bench_memory, bench_sse, callback_budget, jit_state)))]
+#[cfg(not(any(
+    bench_call,
+    bench_memory,
+    bench_sse,
+    callback_budget,
+    jit_state,
+    jit_sse
+)))]
 compile_error!(
     "select one workload with --cfg bench_call, bench_memory, bench_sse, callback_budget, or jit_state"
 );
 
-#[cfg(not(any(callback_budget, jit_state)))]
+#[cfg(not(any(callback_budget, jit_state, jit_sse, bench_sse)))]
 #[no_mangle]
 pub extern "system" fn mainCRTStartup() -> u32 {
     run_workload();
     0
+}
+
+#[cfg(bench_sse)]
+#[no_mangle]
+pub extern "system" fn mainCRTStartup() -> u32 {
+    run_workload()
+}
+
+#[cfg(jit_sse)]
+#[no_mangle]
+pub extern "system" fn mainCRTStartup() -> u32 {
+    unsafe { jit_sse_entry() }
 }
 
 #[cfg(callback_budget)]

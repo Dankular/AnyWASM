@@ -1,5 +1,5 @@
 use anywasm_cpu::cpu::{Cpu, RAX, RSI, RSP};
-use anywasm_cpu::decode::{decode, Op, Opnd};
+use anywasm_cpu::decode::{decode, FpK, Op, Opnd, Prec};
 use anywasm_cpu::exec::step;
 use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RW, PROT_RWX};
 
@@ -180,7 +180,10 @@ fn decodes_target_vex_vmovd_register_and_memory_forms() {
 
     assert!(decode(&[0xc5, 0xfd, 0x6e, 0xc0], 0x3000).is_err()); // L=1 is not this form
     assert!(decode(&[0xc5, 0xf1, 0x6e, 0xc0], 0x3000).is_err()); // vvvv is reserved
-    assert!(decode(&[0xc4, 0xe1, 0xf9, 0x6e, 0xc0], 0x3000).is_err()); // W=1 is not this form
+    let movq = decode(&[0xc4, 0xe1, 0xf9, 0x6e, 0xc0], 0x3000).unwrap();
+    assert_eq!((format!("{:?}", movq.op).as_str(), movq.osz), ("Vmovq", 16));
+    assert_eq!(movq.ops[0], Opnd::Xmm(0));
+    assert_eq!(movq.ops[1], Opnd::Gpr(0));
 }
 
 #[test]
@@ -200,7 +203,8 @@ fn decodes_target_vpbroadcastd_vpaddd_and_ymm_store() {
     let broadcast_mem = decode(&[0xc4, 0xe2, 0x7d, 0x58, 0x08], 0x3000).unwrap();
     assert!(matches!(broadcast_mem.ops[2], Opnd::Mem(mem) if mem.base == RAX as u8));
 
-    assert!(decode(&[0xc4, 0xe2, 0x79, 0x58, 0xc0], 0x3000).is_err()); // L=0 not in this slice
+    let broadcast_xmm = decode(&[0xc4, 0xe2, 0x79, 0x58, 0xc0], 0x3000).unwrap();
+    assert_eq!((format!("{:?}", broadcast_xmm.op).as_str(), broadcast_xmm.osz), ("Vpbroadcastd", 16));
     assert!(decode(&[0xc4, 0xe2, 0x75, 0x58, 0xc0], 0x3000).is_err()); // vvvv is reserved
 
     let add = decode(&[0xc5, 0xfd, 0xfe, 0xca], 0x4000).unwrap();
@@ -216,7 +220,8 @@ fn decodes_target_vpbroadcastd_vpaddd_and_ymm_store() {
     assert_eq!((store.op, store.len, store.osz), (Op::Vmovdqu, 6, 32));
     assert!(matches!(store.ops[0], Opnd::Mem(mem) if mem.base == 9 && mem.disp == -64));
     assert_eq!(store.ops[1], Opnd::Xmm(1));
-    assert!(decode(&[0xc5, 0xf9, 0xfe, 0xca], 0x5000).is_err()); // 128-bit form not in this slice
+    let add_xmm = decode(&[0xc5, 0xf9, 0xfe, 0xca], 0x5000).unwrap();
+    assert_eq!((format!("{:?}", add_xmm.op).as_str(), add_xmm.osz), ("Vpaddd", 16));
 }
 
 #[test]
@@ -643,6 +648,62 @@ fn vex_scalar_float_arithmetic_uses_three_sources_and_comiss_sets_flags() {
 }
 
 #[test]
+fn vex_vsubss_uses_three_sources_and_merges_upper_lanes_from_vvvv() {
+    const CODE: u64 = 0x1a000;
+    const MERGE_SOURCE: u128 = 0x1122_3344_5566_7788_99aa_bbcc_4120_0000; // 10.0f
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc5, 0xfa, 0x5c, 0xca]).unwrap(); // vsubss xmm1, xmm0, xmm2
+
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.xmm[0] = MERGE_SOURCE;
+    cpu.xmm[1] = 0xdead_beef_cafe_babe_0123_4567_3f80_0000;
+    cpu.xmm[2] = 0xfedc_ba98_7654_3210_0000_0000_4000_0000; // 2.0f
+    cpu.ymm_hi[1] = u128::MAX;
+
+    step(&mut cpu, &mut mem).unwrap();
+
+    assert_eq!(cpu.xmm[1] as u32, 8.0f32.to_bits());
+    assert_eq!(cpu.xmm[1] >> 32, MERGE_SOURCE >> 32);
+    assert_eq!(cpu.ymm_hi[1], 0);
+}
+
+#[test]
+fn vex_vsubss_decodes_three_sources() {
+    let instruction = decode(&[0xc5, 0xfa, 0x5c, 0xca], 0xd000).unwrap();
+    assert_eq!(instruction.op, Op::Vfp(FpK::Sub, Prec::Ss));
+    assert_eq!(instruction.ops[0], Opnd::Xmm(1));
+    assert_eq!(instruction.ops[1], Opnd::Xmm(0));
+    assert_eq!(instruction.ops[2], Opnd::Xmm(2));
+}
+
+#[test]
+fn vex_vmulss_uses_vvvv_and_extended_modrm_sources() {
+    const CODE: u64 = 0x1c000;
+    const MERGE_SOURCE: u128 = 0x1122_3344_5566_7788_99aa_bbcc_4040_0000; // 3.0f
+    let mut mem = Memory::new();
+    assert!(mem.map(CODE, PAGE_SIZE, PROT_RWX));
+    mem.write_force(CODE, &[0xc4, 0xc1, 0x72, 0x59, 0xca]).unwrap();
+
+    let mut cpu = Cpu::new();
+    cpu.rip = CODE;
+    cpu.xmm[1] = MERGE_SOURCE;
+    cpu.xmm[10] = 0xfedc_ba98_7654_3210_0000_0000_4080_0000; // 4.0f
+    cpu.ymm_hi[1] = u128::MAX;
+    cpu.ymm_hi[10] = u128::MAX;
+    cpu.rflags = 0x8d7;
+    let flags = cpu.rflags;
+
+    step(&mut cpu, &mut mem).unwrap();
+
+    assert_eq!(cpu.xmm[1] as u32, 12.0f32.to_bits());
+    assert_eq!(cpu.xmm[1] >> 32, MERGE_SOURCE >> 32);
+    assert_eq!(cpu.ymm_hi[1], 0);
+    assert_eq!(cpu.rflags, flags);
+}
+
+#[test]
 fn vex_vroundss_uses_immediate_rounding_mode_and_merge_source() {
     const CODE: u64 = 0xb000;
     let mut mem = Memory::new();
@@ -897,7 +958,10 @@ fn target_vex_movq_and_pextrq_decode_with_target_operands() {
 
     assert!(decode(&[0xc4, 0xc1, 0xfd, 0x7e, 0xc0], 0x1000).is_err()); // VEX.L=1
     assert!(decode(&[0xc4, 0xc1, 0xf1, 0x7e, 0xc0], 0x1000).is_err()); // VEX.vvvv is not reserved
-    assert!(decode(&[0xc4, 0xc1, 0xf9, 0x6e, 0xc0], 0x1000).is_err()); // other VMOVQ direction
+    let movq = decode(&[0xc4, 0xc1, 0xf9, 0x6e, 0xc0], 0x1000).unwrap();
+    assert_eq!((format!("{:?}", movq.op).as_str(), movq.osz), ("Vmovq", 16));
+    assert_eq!(movq.ops[0], Opnd::Xmm(0));
+    assert_eq!(movq.ops[1], Opnd::Gpr(8));
     assert!(decode(&[0xc4, 0xe3, 0xfd, 0x16, 0xc0, 0x01], 0x1000).is_err()); // VEX.L=1
 }
 

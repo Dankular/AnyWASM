@@ -14,9 +14,188 @@ function bytesEqual(a, b) {
   return true;
 }
 
+function buildChainModule(entries) {
+  entries = [...entries].sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : 0);
+  const uleb = (value) => {
+    let n = BigInt(value), bytes = [];
+    do {
+      let byte = Number(n & 0x7fn);
+      n >>= 7n;
+      if (n !== 0n) byte |= 0x80;
+      bytes.push(byte);
+    } while (n !== 0n);
+    return bytes;
+  };
+  const sleb = (value) => {
+    let n = BigInt.asIntN(64, BigInt(value)), bytes = [], more;
+    do {
+      let byte = Number(n & 0x7fn);
+      n >>= 7n;
+      const sign = (byte & 0x40) !== 0;
+      more = !((n === 0n && !sign) || (n === -1n && sign));
+      if (more) byte |= 0x80;
+      bytes.push(byte);
+    } while (more);
+    return bytes;
+  };
+  const name = (value) => {
+    const bytes = Array.from(new TextEncoder().encode(value));
+    return [...uleb(bytes.length), ...bytes];
+  };
+  const section = (id, payload) => [id, ...uleb(payload.length), ...payload];
+  const readUleb = (bytes, cursor) => {
+    let value = 0, shift = 0, byte;
+    do {
+      byte = bytes[cursor.offset++];
+      value |= (byte & 0x7f) << shift;
+      shift += 7;
+    } while (byte & 0x80);
+    return value >>> 0;
+  };
+  const functionBody = (bytes) => {
+    const cursor = { offset: 8 };
+    while (cursor.offset < bytes.length) {
+      const id = bytes[cursor.offset++];
+      const size = readUleb(bytes, cursor);
+      const end = cursor.offset + size;
+      if (id === 10) {
+        const count = readUleb(bytes, cursor);
+        if (count !== 1) throw new Error('unexpected emitted module function count');
+        const bodySize = readUleb(bytes, cursor);
+        if (cursor.offset + bodySize > end) throw new Error('truncated emitted module function');
+        return bytes.slice(cursor.offset, cursor.offset + bodySize);
+      }
+      cursor.offset = end;
+    }
+    throw new Error('emitted module has no code body');
+  };
+  const localGet = (index, code) => code.push(0x20, ...uleb(index));
+  const localSet = (index, code) => code.push(0x21, ...uleb(index));
+  const i32const = (value, code) => code.push(0x41, ...sleb(value));
+  const incrementState = (offset, code) => {
+    localGet(0, code);
+    localGet(0, code);
+    code.push(0x28, 0x02, ...uleb(offset)); // i32.load
+    i32const(1, code);
+    code.push(0x6a, 0x36, 0x02, ...uleb(offset)); // i32.add; i32.store
+  };
+
+  const body = [0x01, 0x04, 0x7f]; // four i32 locals: total, result, remaining, expected
+  i32const(0, body);
+  localSet(3, body);
+  for (const offset of [176, 180, 184]) {
+    localGet(0, body);
+    i32const(0, body);
+    body.push(0x36, 0x02, ...uleb(offset));
+  }
+  body.push(0x02, 0x40, 0x03, 0x40); // block $exit; loop $dispatch
+  localGet(3, body);
+  localGet(1, body);
+  body.push(0x4f, 0x0d, 0x01); // total >= budget -> exit
+  emitDispatchTree(entries, 0, entries.length, 0, body, {
+    uleb, sleb, localGet, localSet, i32const, incrementState,
+  });
+  body.push(0x0b, 0x0b); // end loop and exit block
+  localGet(3, body);
+  body.push(0x0b);
+
+  const bytes = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0];
+  bytes.push(...section(1, [
+    2,
+    0x60, 2, 0x7f, 0x7f, 1, 0x7f,
+    0x60, 3, 0x7f, 0x7f, 0x7f, 1, 0x7f,
+  ]));
+  bytes.push(...section(2, [1, ...name('anywasm'), ...name('memory'), 0x02, 0x00, 0x01]));
+  bytes.push(...section(3, [...uleb(entries.length + 1), ...Array(entries.length).fill(0), 1]));
+  bytes.push(...section(7, [1, ...name('run'), 0x00, ...uleb(entries.length)]));
+  const code = [...uleb(entries.length + 1)];
+  for (const entry of entries) {
+    const emittedBody = functionBody(entry.bytes);
+    code.push(...uleb(emittedBody.length), ...emittedBody);
+  }
+  code.push(...uleb(body.length), ...body);
+  bytes.push(...section(10, code));
+  return new Uint8Array(bytes);
+}
+
+function emitDispatchTree(entries, first, end, depth, body, wasm) {
+  const { uleb, sleb, localGet, localSet, i32const, incrementState } = wasm;
+  if (first === end) {
+    body.push(0x0c, ...uleb(depth * 2 + 1)); // unknown RIP exits the dispatcher
+    return;
+  }
+
+  const middle = (first + end) >>> 1;
+  const entry = entries[middle];
+  localGet(0, body);
+  body.push(0x29, 0x03, 0x80, 0x01); // i64.load state.rip at offset 128
+  body.push(0x42, ...sleb(entry.start), 0x51, 0x04, 0x40); // if RIP equals this entry
+
+  localGet(3, body);
+  body.push(0x45, 0x04, 0x40); // if total == 0
+  body.push(0x05); // else: count a module transition
+  incrementState(180, body);
+  body.push(0x0b);
+
+  localGet(2, body);
+  localGet(0, body);
+  i32const(160, body);
+  body.push(0xfc, 0x0a, 0x00, 0x00); // memory.copy CPU snapshot to scratch
+
+  localGet(1, body);
+  localGet(3, body);
+  body.push(0x6b); // remaining = budget - total
+  localSet(5, body);
+  localGet(5, body);
+  i32const(entry.instructions, body);
+  body.push(0x49, 0x04, 0x7f); // if remaining < block length, result i32
+  localGet(5, body);
+  body.push(0x05);
+  i32const(entry.instructions, body);
+  body.push(0x0b);
+  localSet(6, body);
+
+  localGet(0, body);
+  localGet(5, body);
+  body.push(0x10, ...uleb(middle)); // call this emitted block function
+  localSet(4, body);
+  localGet(4, body);
+  localGet(6, body);
+  body.push(0x47, 0x04, 0x40); // if returned count is invalid or the module fell back
+  localGet(0, body);
+  localGet(2, body);
+  i32const(160, body);
+  body.push(0xfc, 0x0a, 0x00, 0x00); // restore CPU snapshot
+  incrementState(176, body); // fallback count
+  body.push(0x0c, ...uleb(depth * 2 + 3)); // exit the dispatcher
+  body.push(0x0b);
+
+  if (entry.firstRegisterRegister !== 0xffff_ffff) {
+    localGet(4, body);
+    i32const(entry.firstRegisterRegister, body);
+    body.push(0x4b, 0x04, 0x40); // executed > first register-register MOV
+    incrementState(184, body);
+    body.push(0x0b);
+  }
+  localGet(3, body);
+  localGet(4, body);
+  body.push(0x6a);
+  localSet(3, body);
+  body.push(0x0c, ...uleb(depth * 2 + 1)); // redispatch using the new guest RIP
+  body.push(0x05); // else: select a subtree by the sorted start address
+
+  localGet(0, body);
+  body.push(0x29, 0x03, 0x80, 0x01); // i64.load state.rip at offset 128
+  body.push(0x42, ...sleb(entry.start), 0x54, 0x04, 0x40); // if RIP is below this entry
+  emitDispatchTree(entries, first, middle, depth + 1, body, wasm);
+  body.push(0x05);
+  emitDispatchTree(entries, middle + 1, end, depth + 1, body, wasm);
+  body.push(0x0b, 0x0b); // end less-than and equality branches
+}
+
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
     /** Counts calls routed through the dynamic WebAssembly trampoline. */
@@ -46,11 +225,26 @@ export class AnyWasm {
     const modules = new Map();
     const modulesByStart = new Map();
     let activeCodeEpoch;
-    const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0 };
+    let registryVersion = 0;
+    let chainRunner;
+    const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 };
     const forgetModule = (id) => {
       const old = modules.get(id);
-      if (old && modulesByStart.get(old.start) === old) modulesByStart.delete(old.start);
+      if (old && modulesByStart.get(old.start) === old) {
+        modulesByStart.delete(old.start);
+        registryVersion++;
+        chainRunner = undefined;
+      }
       modules.delete(id);
+    };
+    const getChainRunner = (memory) => {
+      if (chainRunner?.version === registryVersion) return chainRunner;
+      const entries = Array.from(modulesByStart.values());
+      const module = new WebAssembly.Module(buildChainModule(entries));
+      const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
+      chainRunner = { version: registryVersion, run: emitted.exports.run };
+      jitStats.chainCompilations++;
+      return chainRunner;
     };
     const imports = {
       anywasm: {
@@ -70,12 +264,18 @@ export class AnyWasm {
             if (activeCodeEpoch !== codeEpoch) {
               modulesByStart.clear();
               activeCodeEpoch = codeEpoch;
+              registryVersion++;
+              chainRunner = undefined;
             }
             const memory = instance.exports.memory;
             const moduleView = new Uint8Array(memory.buffer, modulePtr >>> 0, moduleLen >>> 0);
             let cached = modules.get(id >>> 0);
             if (!cached || !bytesEqual(cached.bytes, moduleView)) {
-              if (cached && modulesByStart.get(cached.start) === cached) modulesByStart.delete(cached.start);
+              if (cached && modulesByStart.get(cached.start) === cached) {
+                modulesByStart.delete(cached.start);
+                registryVersion++;
+                chainRunner = undefined;
+              }
               const moduleBytes = moduleView.slice();
               const module = new WebAssembly.Module(moduleBytes);
               const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
@@ -93,45 +293,51 @@ export class AnyWasm {
             cached.instructions = emittedInstructions >>> 0;
             cached.firstRegisterRegister = firstRegisterRegister >>> 0;
             cached.start = start;
-            modulesByStart.set(start, cached);
+            if (modulesByStart.get(start) !== cached) {
+              modulesByStart.set(start, cached);
+              registryVersion++;
+              chainRunner = undefined;
+            }
 
             const remainingBudget = budget >>> 0;
-            const state = new DataView(memory.buffer, statePtr >>> 0, 184);
-            const cpuState = new Uint8Array(memory.buffer, statePtr >>> 0, 160);
-            state.setUint32(176, 0, true);
-            let totalExecuted = 0;
-            let current = cached;
-            while (totalExecuted < remainingBudget) {
-              const remaining = remainingBudget - totalExecuted;
+            if (modulesByStart.size === 1) {
+              const cpuState = new Uint8Array(memory.buffer, statePtr >>> 0, 160);
               const rollback = cpuState.slice();
               let executed = -1;
               try {
-                executed = current.run(statePtr, remaining);
+                executed = cached.run(statePtr, remainingBudget);
               } catch {
-                // The failing module is retried by Rust from this block's untouched CPU state.
+                // Rust retries the block through the interpreter on a module trap.
               }
-              const expected = Math.min(remaining, current.instructions);
+              const expected = Math.min(remainingBudget, cached.instructions);
               if (executed !== expected) {
                 cpuState.set(rollback);
                 jitStats.fallbacks++;
-                if (totalExecuted === 0) return -1;
-                state.setUint32(176, 1, true);
-                return totalExecuted;
+                return -1;
               }
-              totalExecuted += executed;
               jitStats.executions++;
-              if (current.firstRegisterRegister !== 0xffff_ffff && executed > current.firstRegisterRegister) {
+              if (cached.firstRegisterRegister !== 0xffff_ffff && executed > cached.firstRegisterRegister) {
                 jitStats.registerRegisterHits++;
               }
-              if (totalExecuted >= remainingBudget) break;
-              const nextRip = state.getBigUint64(128, true);
-              const next = modulesByStart.get(nextRip);
-              if (!next) break;
-              state.setUint32(176, 1, true);
-              jitStats.chainTransitions++;
-              current = next;
+              return executed;
             }
-            return totalExecuted;
+
+            const runner = getChainRunner(memory);
+            const scratch = ((statePtr >>> 0) + 192) >>> 0;
+            const executed = runner.run(statePtr, remainingBudget, scratch);
+            const state = new DataView(memory.buffer, statePtr >>> 0, 352);
+            const fallbacks = state.getUint32(176, true);
+            const transitions = state.getUint32(180, true);
+            const registerHits = state.getUint32(184, true);
+            jitStats.fallbacks += fallbacks;
+            jitStats.chainTransitions += transitions;
+            jitStats.registerRegisterHits += registerHits;
+            jitStats.executions += Math.max(0, transitions + 1 - fallbacks);
+            if (executed <= 0) {
+              if (fallbacks === 0) jitStats.fallbacks++;
+              return -1;
+            }
+            return executed;
           } catch {
             // The Rust side passed a copied CPU state, so the interpreter can retry safely.
             jitStats.fallbacks++;

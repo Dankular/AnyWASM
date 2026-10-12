@@ -146,6 +146,248 @@ function specializeSingleFloatUavImage(spirv, descriptors) {
   return bytes;
 }
 
+// WebGPU has no buffer-texture binding, and Naga rejects SPIR-V DimBuffer.
+// Convert buffer images to runtime storage arrays; D3D buffer views already
+// supply the exact byte range through a per-view GPUBuffer binding.
+function lowerBufferImagesToStorageBuffers(spirv) {
+  const bytes = new Uint8Array(spirv);
+  if (bytes.byteLength < 20 || bytes.byteLength % 4 !== 0) return spirv;
+  const input = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (input.getUint32(0, true) !== 0x07230203) return spirv;
+
+  const instructions = [];
+  const imageTypes = new Map(), pointerTypes = new Map(), variables = new Map();
+  const scalarTypes = new Map(), vectorTypes = new Map(), constants = new Map();
+  for (let at = 20; at < bytes.byteLength;) {
+    const first = input.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
+    if (wordCount === 0 || at + wordCount * 4 > bytes.byteLength) return spirv;
+    const inst = Array.from({ length: wordCount }, (_, i) => input.getUint32(at + 4 * i, true));
+    instructions.push(inst);
+    if (opcode === 25 && wordCount >= 9 && inst[3] === 5) {
+      imageTypes.set(inst[1], { id: inst[1], sampledType: inst[2], format: inst[8] });
+    }
+    if (opcode === 21 && wordCount === 4) scalarTypes.set(inst[1], { kind: 'int', width: inst[2], signed: inst[3] });
+    if (opcode === 22 && wordCount === 3) scalarTypes.set(inst[1], { kind: 'float', width: inst[2] });
+    if (opcode === 23 && wordCount === 4) vectorTypes.set(inst[1], { componentType: inst[2], count: inst[3] });
+    if (opcode === 32 && wordCount === 4) pointerTypes.set(inst[1], { storage: inst[2], pointee: inst[3] });
+    if (opcode === 59 && wordCount >= 4) variables.set(inst[2], { pointerType: inst[1], storage: inst[3] });
+    if (opcode === 43 && wordCount === 4) {
+      const key = `${inst[1]}:${inst[3] >>> 0}`;
+      constants.set(key, inst[2]);
+    }
+    at += wordCount * 4;
+  }
+  if (!imageTypes.size) return spirv;
+
+  let nextId = input.getUint32(12, true);
+  const infoByType = new Map();
+  const componentCount = new Map([[0, 1], [1, 4], [3, 1], [6, 2], [21, 4], [24, 1], [25, 2], [30, 4], [33, 1], [34, 2]]);
+  for (const info of imageTypes.values()) {
+    const components = componentCount.get(info.format);
+    if (components === undefined || !scalarTypes.has(info.sampledType)) return spirv;
+    info.components = components;
+    info.arrayType = nextId++;
+    info.structType = nextId++;
+    info.elementType = info.sampledType;
+    if (components > 1) {
+      const existing = [...vectorTypes].find(([, v]) => v.componentType === info.sampledType && v.count === components);
+      if (existing) info.elementType = existing[0];
+      else {
+        info.elementType = nextId++;
+        info.vectorTypeDecl = [(4 << 16) | 23, info.elementType, info.sampledType, components];
+      }
+    }
+    info.elementPointer = nextId++;
+    info.pointerTypeIds = [];
+    info.variables = [];
+    infoByType.set(info.id, info);
+  }
+
+  const infoByPointer = new Map();
+  for (const [pointerId, pointer] of pointerTypes) {
+    const info = pointer.storage === 0 ? infoByType.get(pointer.pointee) : null;
+    if (info) {
+      infoByPointer.set(pointerId, info);
+      info.pointerTypeIds.push(pointerId);
+    }
+  }
+  if (![...infoByType.values()].some((info) => info.pointerTypeIds.length)) return spirv;
+
+  const infoByVariable = new Map();
+  for (const [variableId, variable] of variables) {
+    const info = infoByPointer.get(variable.pointerType);
+    if (info) {
+      infoByVariable.set(variableId, info);
+      info.variables.push(variableId);
+    }
+  }
+  const infoByImageValue = new Map();
+  for (const inst of instructions) {
+    const opcode = inst[0] & 0xffff;
+    if (opcode === 61 && inst.length >= 4) {
+      const info = infoByType.get(inst[1]);
+      if (info && infoByVariable.has(inst[3])) infoByImageValue.set(inst[2], { info, variableId: inst[3] });
+    }
+  }
+
+  const newDecorations = [];
+  const typeDeclsByPointer = new Map();
+  for (const info of infoByType.values()) {
+    const pointerId = info.pointerTypeIds[0];
+    const declarations = [];
+    if (info.vectorTypeDecl) declarations.push(info.vectorTypeDecl);
+    declarations.push([(3 << 16) | 29, info.arrayType, info.elementType]); // OpTypeRuntimeArray
+    declarations.push([(3 << 16) | 30, info.structType, info.arrayType]); // OpTypeStruct
+    declarations.push([(4 << 16) | 32, info.elementPointer, 12, info.elementType]); // OpTypePointer StorageBuffer element
+    typeDeclsByPointer.set(pointerId, declarations);
+    newDecorations.push(
+      [(4 << 16) | 71, info.arrayType, 6, info.components * 4], // ArrayStride
+      [(3 << 16) | 71, info.structType, 2], // Block
+      [(5 << 16) | 72, info.structType, 0, 35, 0], // MemberDecorate Offset 0
+    );
+  }
+
+  let zeroIndexId = 0, zeroIndexType = 0;
+  for (const [typeId, type] of scalarTypes) {
+    if (type.kind === 'int' && type.width === 32) { zeroIndexType = typeId; break; }
+  }
+  if (!zeroIndexType) return spirv;
+  zeroIndexId = constants.get(`${zeroIndexType}:0`) || 0;
+  const newConstants = [];
+  const ensureConstant = (typeId, value) => {
+    const key = `${typeId}:${value >>> 0}`;
+    let id = constants.get(key);
+    if (!id) {
+      id = nextId++;
+      constants.set(key, id);
+      newConstants.push([(4 << 16) | 43, typeId, id, value >>> 0]);
+    }
+    return id;
+  };
+  if (!zeroIndexId) zeroIndexId = ensureConstant(zeroIndexType, 0);
+  for (const info of infoByType.values()) {
+    const scalar = scalarTypes.get(info.sampledType);
+    info.zeroValue = ensureConstant(info.sampledType, 0);
+    info.oneValue = ensureConstant(info.sampledType, scalar.kind === 'float' ? 0x3f800000 : 1);
+  }
+
+  const valueTypes = new Map();
+  for (const inst of instructions) {
+    const opcode = inst[0] & 0xffff;
+    if ([43, 44, 45, 61, 80, 81, 83].includes(opcode) && inst.length >= 3) valueTypes.set(inst[2], inst[1]);
+  }
+  const emittedTypeDeclarations = new Set();
+  const output = [];
+  let annotationsEmitted = false, constantsEmitted = false;
+  const pushInst = (inst) => output.push(...inst);
+  const accessChain = (info, variableId, coordinateId) => {
+    const pointerId = nextId++;
+    return { pointerId, inst: [(6 << 16) | 65, info.elementPointer, pointerId, variableId, zeroIndexId, coordinateId] };
+  };
+  const extract = (typeId, compositeId, component) => {
+    const resultId = nextId++;
+    return { resultId, inst: [(5 << 16) | 81, typeId, resultId, compositeId, component] };
+  };
+  const vectorTypeFor = (typeId, count) => [...vectorTypes].find(([, v]) => v.componentType === typeId && v.count === count)?.[0]
+    || [...infoByType.values()].find((i) => i.sampledType === typeId && i.components === count)?.elementType;
+
+  for (const original of instructions) {
+    const inst = original.slice(), opcode = inst[0] & 0xffff;
+    if (!annotationsEmitted && opcode >= 19 && opcode <= 39) {
+      for (const decoration of newDecorations) pushInst(decoration);
+      annotationsEmitted = true;
+    }
+    if (opcode === 17 && (inst[1] === 46 || inst[1] === 47)) continue; // Remove SampledBuffer/ImageBuffer.
+    if (opcode === 25 && infoByType.has(inst[1])) continue; // Remove the unsupported OpTypeImage.
+    if (opcode === 5 && infoByType.has(inst[1])) inst[1] = infoByType.get(inst[1]).structType; // OpName.
+    if (opcode === 32 && infoByPointer.has(inst[1])) {
+      const info = infoByPointer.get(inst[1]);
+      if (!emittedTypeDeclarations.has(info.id)) {
+        for (const declaration of typeDeclsByPointer.get(inst[1])) pushInst(declaration);
+        emittedTypeDeclarations.add(info.id);
+      }
+      inst[2] = 12; inst[3] = info.structType; // UniformConstant image pointer -> StorageBuffer block pointer.
+    }
+    if (opcode === 59 && infoByVariable.has(inst[2])) inst[3] = 12; // OpVariable storage class.
+    if (opcode === 61 && infoByType.has(inst[1])) continue; // Image handle load, replaced by the variable pointer.
+
+    if ((opcode === 98 || opcode === 95) && inst.length >= 5) { // OpImageRead / OpImageFetch.
+      const loaded = infoByImageValue.get(inst[3]);
+      if (loaded) {
+        const { info, variableId } = loaded, coordinateId = inst[4];
+        const access = accessChain(info, variableId, coordinateId);
+        pushInst(access.inst);
+        const resultType = inst[1], resultId = inst[2];
+        if (info.components === 4 && resultType === info.elementType) {
+          pushInst([(4 << 16) | 61, resultType, resultId, access.pointerId]);
+        } else {
+          const loadedId = nextId++;
+          pushInst([(4 << 16) | 61, info.elementType, loadedId, access.pointerId]);
+          const scalarVector = vectorTypes.get(resultType);
+          if (!scalarVector || scalarVector.count !== 4 || scalarVector.componentType !== info.sampledType) return spirv;
+          const values = [];
+          if (info.components === 1) values.push(loadedId, info.zeroValue, info.zeroValue, info.oneValue);
+          else if (info.components === 2) {
+            values.push(extract(info.sampledType, loadedId, 0), extract(info.sampledType, loadedId, 1));
+            values.push(info.zeroValue, info.oneValue);
+          } else return spirv;
+          for (const item of values) if (typeof item !== 'number') pushInst(item.inst);
+          const ids = values.map((item) => typeof item === 'number' ? item : item.resultId);
+          pushInst([(ids.length + 3 << 16) | 80, resultType, resultId, ...ids]);
+        }
+        continue;
+      }
+    }
+    if (opcode === 99 && inst.length >= 4) { // OpImageWrite.
+      const loaded = infoByImageValue.get(inst[1]);
+      if (loaded) {
+        const { info, variableId } = loaded, coordinateId = inst[2], texelId = inst[3];
+        const access = accessChain(info, variableId, coordinateId);
+        pushInst(access.inst);
+        let storedId = texelId;
+        const texelType = valueTypes.get(texelId), texelVector = vectorTypes.get(texelType);
+        if (info.components === 1 && texelVector) {
+          const component = extract(info.sampledType, texelId, 0);
+          pushInst(component.inst); storedId = component.resultId;
+        } else if (info.components === 2 && texelVector?.count === 4) {
+          const x = extract(info.sampledType, texelId, 0), y = extract(info.sampledType, texelId, 1);
+          pushInst(x.inst); pushInst(y.inst);
+          const typeId = vectorTypeFor(info.sampledType, 2);
+          if (!typeId) return spirv;
+          storedId = nextId++;
+          pushInst([(5 << 16) | 80, typeId, storedId, x.resultId, y.resultId]);
+        } else if (info.components === 4 && texelType !== info.elementType) {
+          const ids = [];
+          for (let component = 0; component < 4; component++) {
+            const part = extract(info.sampledType, texelId, component);
+            pushInst(part.inst); ids.push(part.resultId);
+          }
+          storedId = nextId++;
+          pushInst([(7 << 16) | 80, info.elementType, storedId, ...ids]);
+        }
+        pushInst([(3 << 16) | 62, access.pointerId, storedId]); // OpStore.
+        continue;
+      }
+    }
+
+    if (opcode === 59 && inst[3] !== 7 && !constantsEmitted) {
+      for (const constant of newConstants) pushInst(constant);
+      constantsEmitted = true;
+    }
+    pushInst(inst);
+  }
+  if (!annotationsEmitted) for (const decoration of newDecorations) output.unshift(...decoration);
+  if (!constantsEmitted) {
+    const firstFunction = output.findIndex((word) => (word & 0xffff) === 54);
+    if (firstFunction >= 0) output.splice(firstFunction, 0, ...newConstants.flat());
+  }
+  output[3] = nextId;
+  const result = new Uint8Array(output.length * 4), resultView = new DataView(result.buffer);
+  output.forEach((word, i) => resultView.setUint32(i * 4, word, true));
+  if (globalThis.__anywasmDebugBufferImages) globalThis.__anywasmDebugBufferImages = result;
+  return result;
+}
+
 export class ShaderTool {
   constructor(base = new URL('./shaders/', import.meta.url)) {
     this.base = base;
@@ -236,7 +478,8 @@ export class ShaderTool {
       } finally { if (tbl) this.vk._free(tbl); this.vk._wb_clear(); }
     });
     const normalizedSpirv = deferNonFiniteF32StoreConstants(spirv);
-    const wgsl = this.naga.spirv_to_wgsl(specializeSingleFloatUavImage(normalizedSpirv, descriptors));
+    const bufferImageSpirv = lowerBufferImagesToStorageBuffers(normalizedSpirv);
+    const wgsl = this.naga.spirv_to_wgsl(specializeSingleFloatUavImage(bufferImageSpirv, descriptors));
     return { spirv, wgsl, descriptors };
   }
 }
