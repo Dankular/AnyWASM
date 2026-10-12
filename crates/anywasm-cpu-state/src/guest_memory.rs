@@ -12,7 +12,9 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::memory::{Access as CpuAccess, Fault as CpuFault, GuestMemory, MemResult};
+use crate::memory::{
+    Access as CpuAccess, Fault as CpuFault, FaultKind as CpuFaultKind, GuestMemory, MemResult,
+};
 use crate::shared::{LayoutError, MappingEntry, Region, SharedHeader, GUEST_PAGE_SIZE};
 
 const PAGE_MASK: u64 = GUEST_PAGE_SIZE as u64 - 1;
@@ -620,6 +622,11 @@ fn to_cpu_fault(fault: Fault) -> CpuFault {
             Access::Execute => CpuAccess::Exec,
         },
         protection: fault.kind == FaultKind::Protection,
+        kind: match fault.kind {
+            FaultKind::UnsupportedAtomicAlignment => CpuFaultKind::UnsupportedAtomicAlignment,
+            FaultKind::UnsupportedAtomicWidth => CpuFaultKind::UnsupportedAtomicWidth,
+            _ => CpuFaultKind::GuestMemory,
+        },
     }
 }
 

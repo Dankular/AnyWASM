@@ -9,7 +9,7 @@ use anywasm_cpu_state::memory::GuestMemory;
 use anywasm_cpu_state::shared::{MappingEntry, GUEST_PAGE_SIZE};
 use std::cell::Cell;
 
-pub use anywasm_cpu_state::memory::{Access, Fault, MemResult};
+pub use anywasm_cpu_state::memory::{Access, Fault, FaultKind, MemResult};
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_MASK: u64 = PAGE_SIZE - 1;
@@ -694,6 +694,7 @@ impl Memory {
             addr,
             access: acc,
             protection: false,
+            kind: FaultKind::GuestMemory,
         })?;
         let prot = ((s >> 1) & 7) as u8;
         let need = match acc {
@@ -708,6 +709,7 @@ impl Memory {
                 addr,
                 access: acc,
                 protection: true,
+                kind: FaultKind::GuestMemory,
             });
         }
         let off = (s >> 32) as usize * PAGE_SIZE as usize;
@@ -808,6 +810,7 @@ impl Memory {
                 addr: a,
                 access: Access::Write,
                 protection: false,
+                kind: FaultKind::GuestMemory,
             })?;
             let off = (s >> 32) as usize * PAGE_SIZE as usize + (a & PAGE_MASK) as usize;
             let n = ((PAGE_SIZE - (a & PAGE_MASK)) as usize).min(src.len() - done);
@@ -1175,7 +1178,8 @@ mod tests {
             Err(Fault {
                 addr: 0x1000,
                 access: Access::Read,
-                protection: false
+                protection: false,
+                kind: FaultKind::GuestMemory,
             })
         );
         m.map(0x1000, 0x1000, PROT_R);

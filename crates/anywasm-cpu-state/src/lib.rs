@@ -23,7 +23,7 @@ pub mod sse;
 #[path = "../../anywasm-cpu/src/x87.rs"]
 pub mod x87;
 
-pub use memory::{Access, Fault, GuestMemory, MemResult};
+pub use memory::{Access, Fault, FaultKind, GuestMemory, MemResult};
 
 // Keep the decoder's existing import path while it is shared with the std interpreter crate.
 pub mod cpu {

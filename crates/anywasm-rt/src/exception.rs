@@ -1749,7 +1749,7 @@ fn unsupported<T>(p: &mut Process, detail: String) -> Result<T, Stop> {
 mod tests {
     use super::*;
     use crate::vfs::Vfs;
-    use anywasm_cpu::mem::{Fault, PAGE_SIZE, PROT_RW, PROT_RWX};
+    use anywasm_cpu::mem::{Fault, FaultKind, PAGE_SIZE, PROT_RW, PROT_RWX};
 
     const INFO: u64 = 0x10000;
     const STACK: u64 = 0x20000;
@@ -1992,6 +1992,7 @@ mod tests {
                     addr: FAULT_ADDRESS,
                     access: Access::Write,
                     protection: false,
+                    kind: FaultKind::GuestMemory,
                 }),
                 STATUS_ACCESS_VIOLATION,
                 FAULT_RIP,

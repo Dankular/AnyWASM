@@ -215,8 +215,11 @@
   HLE-only Tutorial01 probe confirmed cross-origin isolation and rendered 719 draws and 360 presents
   in 30 seconds with no WebGPU errors; the process remained active, so target completion is not
   established. Shared memory now uses worker/coordinator dirty-page tracking, cached mapping rows,
-  and full refreshes after mapping or protection changes. The live probe found and fixed a scheduler
-  fallback that stepped one instruction per turn after a worker quantum expired. The target trace
+  and full refreshes after mapping or protection changes. Shared-memory atomic operations outside
+  the worker backend's supported width or alignment stop at the faulting instruction with a
+  distinct coordinator-fallback reason, so the serialized interpreter retries them. The live probe
+  found and fixed a scheduler fallback that stepped one instruction per turn after a worker quantum
+  expired. The target trace
   and limits are in `docs/TARGETS.md`.
 - DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
   dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE

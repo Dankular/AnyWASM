@@ -2,7 +2,7 @@
 
 use crate::cpu::*;
 use crate::decode::{decode_mode, DecodeError, Inst, MemOp, Op, Opnd};
-use crate::memory::{Access, Fault, GuestMemory, MemResult};
+use crate::memory::{Access, Fault, FaultKind, GuestMemory, MemResult};
 use crate::{cond, parity};
 
 /// Why execution of an instruction did not complete normally.
@@ -1133,6 +1133,7 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
                         addr: a,
                         access: Access::Write,
                         protection: true,
+                        kind: FaultKind::GuestMemory,
                     }));
                 }
                 let cmp = (cpu.gpr[RDX] as u128) << 64 | cpu.gpr[RAX] as u128;

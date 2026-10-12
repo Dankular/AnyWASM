@@ -78,7 +78,7 @@
 - [x] Ensure every guest page mutation, permission change, DLL mapping, executable write, and unmap first reaches an all-worker quiescence barrier.
 - [x] Publish mapping/code/dispatch generations atomically and make each worker stop and refresh mappings or invalidate translated code before its next slice.
 - [x] Keep dirty-page collection correct when more than one worker writes different or identical pages in the same batch.
-- [ ] Make unsupported atomic widths and alignment faults explicit and consistent with the current worker ISA limits.
+- [x] Make unsupported atomic widths and alignment faults explicit and consistent with the current worker ISA limits. Shared-memory faults preserve their unsupported category through the executor ABI, publish a dedicated worker stop reason, and leave the instruction at its original RIP for coordinator-interpreter fallback.
 
 **Acceptance:** No worker can use a stale mapping or translated block after a generation change; shared writes survive collection, and locked operations have one documented linearization point.
 

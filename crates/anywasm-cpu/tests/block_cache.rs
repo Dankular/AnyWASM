@@ -1,5 +1,5 @@
 use anywasm_cpu::exec::{BlockCache, DecodeCache, Exit};
-use anywasm_cpu::mem::{Access, Fault, PAGE_SIZE, PROT_RW, PROT_RWX};
+use anywasm_cpu::mem::{Access, Fault, FaultKind, PAGE_SIZE, PROT_RW, PROT_RWX};
 use anywasm_cpu::{Cpu, Memory, Op};
 
 const BASE: u64 = 0x1000;
@@ -71,7 +71,8 @@ fn does_not_use_a_cached_block_after_execute_permission_is_removed() {
         Exit::Fault(Fault {
             addr: BASE,
             access: Access::Exec,
-            protection: true
+            protection: true,
+            kind: FaultKind::GuestMemory,
         })
     );
 }
@@ -195,7 +196,7 @@ fn retires_valid_instructions_before_a_later_block_fetch_fault() {
     assert_eq!(cpu.icount, 1);
     assert!(matches!(
         blocks.execute(&mut cpu, &mut mem, 2),
-        Err(Exit::Fault(Fault { addr, access: Access::Exec, protection: false }))
+        Err(Exit::Fault(Fault { addr, access: Access::Exec, protection: false, .. }))
             if addr == BASE + PAGE_SIZE
     ));
 }

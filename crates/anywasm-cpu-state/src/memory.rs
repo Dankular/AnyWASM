@@ -8,10 +8,19 @@ pub enum Access {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultKind {
+    GuestMemory,
+    UnsupportedAtomicAlignment,
+    UnsupportedAtomicWidth,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fault {
     pub addr: u64,
     pub access: Access,
     pub protection: bool,
+    /// A worker-only operation limit that must be retried by the coordinator interpreter.
+    pub kind: FaultKind,
 }
 
 pub type MemResult<T> = Result<T, Fault>;

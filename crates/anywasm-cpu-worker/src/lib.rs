@@ -18,7 +18,12 @@ pub const STOP_ILLEGAL_INSTRUCTION: u32 = 5;
 pub const STOP_PRIVILEGED_INSTRUCTION: u32 = 6;
 pub const STOP_SYSCALL: u32 = 7;
 pub const STOP_SOFTWARE_INTERRUPT_BASE: u32 = 0x100;
+/// Retry this instruction on the coordinator's full interpreter.
 pub const STOP_UNSUPPORTED: u32 = 0x200;
+/// Coordinator fallback because the shared-memory backend cannot atomically access this alignment.
+pub const STOP_UNSUPPORTED_ATOMIC_ALIGNMENT: u32 = 0x201;
+/// Coordinator fallback because the shared-memory backend cannot atomically access this width.
+pub const STOP_UNSUPPORTED_ATOMIC_WIDTH: u32 = 0x202;
 
 const ABI_FAILURE: u32 = 2;
 const DISPATCH_FAILURE: u32 = 3;
@@ -163,15 +168,26 @@ fn fail_claim(slot: &WorkerSlot, sequence: u32, reason: u32) -> u32 {
 
 fn encode_exit(exit: Exit, rip: u64) -> (u32, u64, u64) {
     match exit {
-        Exit::Fault(fault) => (
-            STOP_ACCESS_VIOLATION,
-            fault.addr,
-            (match fault.access {
-                anywasm_cpu_state::Access::Read => 0,
-                anywasm_cpu_state::Access::Write => 1,
-                anywasm_cpu_state::Access::Exec => 8,
-            }) | ((fault.protection as u64) << 8),
-        ),
+        Exit::Fault(fault) => {
+            let stop_reason = match fault.kind {
+                anywasm_cpu_state::memory::FaultKind::UnsupportedAtomicAlignment => {
+                    STOP_UNSUPPORTED_ATOMIC_ALIGNMENT
+                }
+                anywasm_cpu_state::memory::FaultKind::UnsupportedAtomicWidth => {
+                    STOP_UNSUPPORTED_ATOMIC_WIDTH
+                }
+                anywasm_cpu_state::memory::FaultKind::GuestMemory => STOP_ACCESS_VIOLATION,
+            };
+            (
+                stop_reason,
+                fault.addr,
+                (match fault.access {
+                    anywasm_cpu_state::Access::Read => 0,
+                    anywasm_cpu_state::Access::Write => 1,
+                    anywasm_cpu_state::Access::Exec => 8,
+                }) | ((fault.protection as u64) << 8),
+            )
+        }
         Exit::DivideError => (STOP_DIVIDE_ERROR, rip, 0),
         Exit::Breakpoint => (STOP_BREAKPOINT, rip, 0),
         Exit::IllegalInstruction | Exit::Decode(_) => (STOP_ILLEGAL_INSTRUCTION, rip, 0),
