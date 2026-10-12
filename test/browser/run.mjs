@@ -813,6 +813,90 @@ try {
       && anisotropicSamplerResult.errors?.length === 0,
     JSON.stringify(anisotropicSamplerResult));
 
+  const samplerAddressResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState wrapSampler : register(s0);
+        SamplerState clampSampler : register(s1);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          return position.x < 32.0
+            ? image.SampleLevel(wrapSampler, float2(1.25, 0.5), 0.0)
+            : image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0);
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(13, 2, 1, 1, 1, 28, 8, 0, 1, 0));
+      const texels = new Uint8Array(44);
+      texels.set(words(13, 0, 0, 0, 0, 2, 1, 8, 8));
+      texels.set([255, 0, 0, 255, 0, 255, 0, 255], 36);
+      command(5, texels);
+      command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1));
+      const sampler = (id, addressU) => {
+        const data = new Uint8Array(56), view = new DataView(data.buffer);
+        view.setUint32(0, id, true); view.setUint32(4, 0, true); // point min/mag/mip
+        view.setUint32(8, addressU, true); view.setUint32(12, 3, true); view.setUint32(16, 3, true);
+        view.setUint32(24, 1, true); view.setUint32(28, 1, true);
+        view.setFloat32(48, 0, true); view.setFloat32(52, 0, true);
+        return data;
+      };
+      command(8, sampler(15, 1)); // wrap U
+      command(8, sampler(16, 3)); // clamp U
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(21, words(1, 2, 0)); command(16, words(4));
+      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 2, 15, 16));
+      command(29, words(3, 0));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const result = { wrap: at(16), clamp: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 sampler repeat and clamp address modes select the wrapped and edge texels',
+    samplerAddressResult.draws === 1 && samplerAddressResult.errors.length === 0
+      && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
+      && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1),
+    JSON.stringify(samplerAddressResult));
+
   const d3d9FixedResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
