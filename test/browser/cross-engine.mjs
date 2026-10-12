@@ -114,6 +114,8 @@ try {
           `${item.name} staging D16_UNORM Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging RGBA8_SRGB readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8/,
           `${item.name} staging RGBA8_SRGB Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging BGRA8_SRGB readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8/,
+          `${item.name} staging BGRA8_SRGB Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging BGRA8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8/,
           `${item.name} staging BGRA8_UNORM Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R16_FLOAT readback=3400,3800,3c00,4000,4200,4400 row_pitch=6/,

@@ -338,6 +338,8 @@ try {
     triText.includes('staging D16_UNORM readback=4000,4000,4000,4000 row_pitch=4'), triText);
   check('D3D11 staging RGBA8_SRGB Map(READ) preserves encoded colour bytes',
     triText.includes('staging RGBA8_SRGB readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
+  check('D3D11 staging BGRA8_SRGB Map(READ) preserves encoded colour bytes',
+    triText.includes('staging BGRA8_SRGB readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
   check('D3D11 staging Texture3D Map(READ) preserves row and depth pitches',
     triText.includes('staging Texture3D R32_FLOAT readback=0.125,0.250,0.375,0.500,0.625,0.750,0.875,1.000 row_pitch=8 depth_pitch=16'), triText);
   const gpuStats = await page.evaluate(() => window.__gpuStats);

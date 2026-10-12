@@ -249,8 +249,8 @@ register-stack subset):
       for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels with row
       pitch, packed RGBA16_FLOAT and R16_FLOAT values, raw BGRA8_UNORM and R10G10B10A2_UNORM bytes,
-      encoded RGBA8_SRGB bytes, R8G8_UNORM two-channel texels, odd-width R8_UNORM row packing plus
-      mip/array subresource selection, depth-only D16_UNORM and D32_FLOAT values, and Texture3D
+      encoded RGBA8_SRGB and BGRA8_SRGB bytes, R8G8_UNORM two-channel texels, odd-width R8_UNORM row
+      packing plus mip/array subresource selection, depth-only D16_UNORM and D32_FLOAT values, and Texture3D
       R32_FLOAT row/depth
       pitches. Comparison
       samplers pixel-test all eight

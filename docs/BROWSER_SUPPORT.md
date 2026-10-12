@@ -48,16 +48,18 @@ three engines. Chromium and Firefox reported WebGPU and OffscreenCanvas worker t
 hello and D3D11 triangle fixtures successfully (three frames), and passed the emitted-module
 cache-pressure probe. Both passed 640x480 back-buffer checks and visible-canvas checks at 640x453;
 each reported clear pixel `[0,0,51,255]`, back-buffer center `[85,86,85,255]`, visible-canvas center
-`[85,85,84,255]`, and no WebGPU validation
-errors. WebKit exited hello, passed cache pressure, and returned the expected explicit
-graphics-unavailable status because WebGPU and OffscreenCanvas worker transfer are unavailable.
+`[85,85,84,255]`, and no WebGPU validation errors. The D3D11 fixture also preserved the expected
+encoded bytes through BGRA8_SRGB staging readback in both browsers. WebKit exited hello, passed cache
+pressure, and returned the expected explicit graphics-unavailable status because WebGPU and
+OffscreenCanvas worker transfer are unavailable.
 These results are specific to the installed browser builds and platform.
 
 Fresh Chromium suite on 2026-10-12: Chrome `154.0.8037.98`, selected through `CHROMIUM` on Windows
 x64. `node test/browser/run.mjs` passed the worker, emitted-module, input, D3D11 triangle, textured,
 and compute checks. The `?test=1` triangle back-buffer readback matched barycentric samples at 216
 pixels (worst error 1/255); a separate visible-canvas screenshot verified the clear colour and
-interpolated centre pixel. The textured fixture passed 18 indexed draws and its tested depth, blend,
+interpolated centre pixel. The triangle fixture preserved encoded bytes through RGBA8_SRGB and
+BGRA8_SRGB staging readback. The textured fixture passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
 following pixel shader sampled that result. The run reported no WebGPU validation errors or page
 errors. The D3D9 fixed-function fixture also passed pixel checks for stage-0 SELECTARG1/SELECTARG2,
@@ -74,6 +76,7 @@ non-Chromium pixel coverage beyond the D3D11 triangle.
 | Large-game memory, `memory64`, asset streaming | **Unmeasured / open.** The build target is `wasm32-unknown-unknown`. The browser buffers the complete `.awb` as an `ArrayBuffer`, copies it into WASM linear memory, then `Bundle::from_bytes` copies each file into the in-memory VFS. No 4 GB pressure test, memory64 build, or large-asset streaming test has run; this is a source-level assessment, not a browser measurement. |
 
 The checked-in assertions establish their scope; they do not test the GLFW Demo or a real game.
-Firefox and WebKit have only smoke coverage outside Chromium. No full cross-browser support claim
+Firefox graphics coverage is limited to the D3D11 triangle; WebKit only verifies the explicit
+graphics-unavailable path. No full cross-browser support claim
 should be made based on these runs. See [`CLAUDE.md`](../CLAUDE.md) for the project checklist and
 [`STATUS.md`](STATUS.md) for implementation limits.
