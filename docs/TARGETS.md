@@ -115,6 +115,24 @@ that exceeds the former 2,000,000-instruction internal slice. This removes an ar
 it does not make callbacks resumable when the configured run budget itself expires. These tutorial
 traces did not reach shader compilation, guest `Present`, browser WebGPU execution, or visible pixels.
 
+### Static-CRT tutorial follow-up
+
+To continue past the dynamic tutorials' MSVCP140 import, `Tutorial01_HelloTriangle` and
+`Tutorial03_Texturing` were built with the static-CRT D3D11 build tree at
+`D:\Dev Proj\WASM\target-eval\DiligentBuild-GLFWDemo-staticcrt` and run with a 100,000,000-step
+cap. Both pass D3D11 device creation and render/depth texture setup, then stop at the same unsupported
+VEX2 instruction before shader creation or `Present`:
+
+| Program | AnyWASM stop | Capstone decode |
+|---|---|---|
+| `Tutorial01_HelloTriangle.exe` | exit 121 at `0x140036eb6` | `C5 FA 5C CA` — `vsubss xmm1, xmm0, xmm2` |
+| `Tutorial03_Texturing.exe` | exit 121 at `0x1400acc26` | `C5 FA 5C CA` — `vsubss xmm1, xmm0, xmm2` |
+
+This narrows the next CPU gap to decoding the VEX scalar-subtract form; the existing scalar floating-
+point executor already handles `FpK::Sub`. The static-CRT runs do not verify shader compilation, guest
+`Present`, browser WebGPU execution, or visible pixels. The dynamic-CRT binaries still stop earlier
+at `basic_ios<char>` as recorded above.
+
 ## Selected game candidate: DiligentSamples GLFW Demo
 
 The pinned DiligentSamples README describes GLFW Demo as a simple maze mini-game. The repository
@@ -589,28 +607,30 @@ formats/readback paths, all gameplay states, or game acceptance.
 
 This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
 directions, a flashlight response for one seed/aim direction, and map regeneration in the selected
-target. A controlled replay of the deterministic seed-1 bundle, recorded before the 2026-10-12
-frame-time unit correction, also traversed the maze to its teleport, regenerated the map (compute
-dispatches 1 → 2), and returned the player marker to the center with no WebGPU errors. It covered
-45.01 map units in 1,834 key pulses over 34 measured route segments; the complete measurements and
-bundle hash are in
-[`target-data/glfwdemo-seed1-playthrough.json`](target-data/glfwdemo-seed1-playthrough.json). This
-route record needs a rerun before its timing is treated as current. It does not establish general
-gameplay acceptance: the random Release map, other gameplay states, graphics states, and other
-readback paths remain unverified. The default
-250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
-is diagnostic test routing only.
+target. After the 2026-10-12 frame-time correction, the deterministic seed-1 route was replayed with
+the exact recorded bundle SHA-256 `34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36`
+and the production 250,000-instruction worker slice. All 35 recorded input steps (1,834 key pulses
+at 6.7 ms per pulse) completed; the last segment triggered the teleport and returned the marker to
+within 1.27 screen pixels of its starting position. The browser wrapper recorded 16 callback yields
+and 16 resumes. The complete per-step replay, including the runtime WASM hash, is in
+[`target-data/glfwdemo-seed1-asyncify-replay.json`](target-data/glfwdemo-seed1-asyncify-replay.json).
+This verifies the selected callback and route on one deterministic bundle; it does not establish
+general gameplay acceptance. The random Release map, other gameplay states, graphics states, and
+other readback paths remain unverified.
 
 ## Next evidence needed
 
-- A controlled seed-1 maze traversal is now recorded, but it does not establish general gameplay
-  acceptance. Flashlight behavior outside the single seeded check, other gameplay states, other UAV
-  formats, and general staging readback remain untested. Stabilize the flashlight browser assertion
-  for the random Release bundle (or make it consume a deterministic seeded build); the current
-  100-bright-pixel threshold failed once at +36 pixels when the random wall layout occluded most of
-  the beam.
-- Make the selected target's synchronous guest callbacks suspend and resume across normal worker
-  slices; the large-slice replay does not address the default browser scheduling limit.
+- The current served, Asyncify-transformed runtime (SHA-256
+  `A9E315E598191A80190EDB6B9AE0DBF1BA7C3855AC8F9B219E30DCC18B3DCC2A`) completed the exact seed-1
+  route on the production 250,000-instruction worker slice: 35 steps, 1,834 input pulses, 16 callback
+  yields/resumes, 1,858 presents, two compute dispatches, and no WebGPU validation errors. The marker
+  ended 0.29 pixels from its initial position. The refreshed replay evidence is in
+  [`target-data/glfwdemo-seed1-asyncify-replay.json`](target-data/glfwdemo-seed1-asyncify-replay.json).
+  The single-direction flashlight assertion remains unreliable: this same bundle/runtime gained only
+  90 bright pixels against its 100-pixel threshold, with mean luminance increasing by 0.00947. The
+  measurement is saved in
+  [`target-data/glfwdemo-seed1-flashlight-normal-slices-2026-10-12.json`](target-data/glfwdemo-seed1-flashlight-normal-slices-2026-10-12.json).
+  Other gameplay states, other UAV formats, and general staging readback remain untested.
 - Extend the virtual registry only from observed target paths and required values. The current
   `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
   registry query, create, write, or persisted-value behavior.

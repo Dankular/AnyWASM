@@ -1,5 +1,5 @@
 // Runs real Windows executables through the WebAssembly build under Node.
-// Usage: node test/wasm_smoke.mjs   (expects target/wasm32-unknown-unknown/release/anywasm_wasm.wasm
+// Usage: node test/wasm_smoke.mjs   (expects target/wasm32-unknown-unknown/release/anywasm_wasm.asyncified.wasm
 //                                    and target/debug/anywasm for packing)
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -11,7 +11,7 @@ import { fillCryptoRandom } from '../web/entropy.js';
 import { runJitCachePressure } from './jit_cache_pressure.mjs';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
-const wasm = readFileSync(fileURLToPath(new URL('../target/wasm32-unknown-unknown/release/anywasm_wasm.wasm', import.meta.url)));
+const wasm = readFileSync(fileURLToPath(new URL('../target/wasm32-unknown-unknown/release/anywasm_wasm.asyncified.wasm', import.meta.url)));
 const cliPath = fileURLToPath(new URL(`../target/debug/anywasm${process.platform === 'win32' ? '.exe' : ''}`, import.meta.url));
 const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-smoke-'));
 process.on('exit', () => rmSync(tempDir, { recursive: true, force: true }));
@@ -101,7 +101,8 @@ check('SystemFunction036 resolves and fills through the WASM host', r.status ===
 const computeBundle = pack('fixtures/compute.exe');
 r = await runBundle(computeBundle, { jitMinPrefix: 1 });
 check('compute.exe (heap, SSE2, indirect calls)', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('primes<20000=2262') && r.out.includes('fp=609') && r.out.includes('gpa=ok'), JSON.stringify(r));
-check('compute.exe executes generated WebAssembly blocks', r.jitStats.executions > 0 && r.jitStats.compilations > 0 && r.jitStats.fallbacks === 0, JSON.stringify(r.jitStats));
+check('compute.exe resumes emitted execution after one cold-page TLB fallback',
+  r.jitStats.executions > 0 && r.jitStats.compilations > 0 && r.jitStats.fallbacks === 1, JSON.stringify(r.jitStats));
 check('compute.exe executes generated register-to-register MOVs', r.jitStats.registerRegisterHits > 0, JSON.stringify(r.jitStats));
 
 const cachedOnly = await runBundle(computeBundle);
@@ -120,14 +121,14 @@ check('JIT opt-out uses interpreter fallback without compiling modules',
   JSON.stringify(interpreted.jitStats));
 
 const jitStateBundle = pack('fixtures/jit_state.exe');
-const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 7 });
+const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 3 });
 const cachedState = await runBundle(jitStateBundle);
 const interpretedState = await runBundle(jitStateBundle, { jit: false, jitMinPrefix: 1 });
 const sameJitState = (a, b) => a.status === b.status && a.exitCode === b.exitCode &&
   a.out === b.out && a.err === b.err && a.instr === b.instr && a.retiredInstr === b.retiredInstr;
-check('JIT state fixture emits a branch-target NOP and six MOVs as one prefix',
-  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.compilations === 1 &&
-    emittedState.jitStats.executions === 1 && emittedState.jitStats.registerRegisterHits === 1 && emittedState.jitStats.fallbacks === 0,
+check('JIT fixture emits warm memory, direct JMP/Jcc exits, and cold-page fallback',
+  emittedState.status === Status.EXITED && emittedState.exitCode === 0 && emittedState.jitStats.compilations === 4 &&
+    emittedState.jitStats.executions === 3 && emittedState.jitStats.registerRegisterHits === 3 && emittedState.jitStats.fallbacks === 1,
   JSON.stringify({ status: emittedState.status, exitCode: emittedState.exitCode, jitStats: emittedState.jitStats }));
 check('emitted, cached-only, and interpreter paths agree on JIT register and memory state',
   sameJitState(emittedState, cachedState) && sameJitState(emittedState, interpretedState),
@@ -157,8 +158,8 @@ try {
 } finally {
   WebAssembly.Module = NativeModule;
 }
-check('host compile failure falls back safely and resumes emitted execution',
-  forcedCompileFailures === 1 && compileFailureWasm.jitStats.fallbacks === 1 && compileFailureWasm.jitStats.executions > 0 &&
+check('compile failure and cold-page TLB miss fall back safely before emitted execution resumes',
+  forcedCompileFailures === 1 && compileFailureWasm.jitStats.fallbacks === 2 && compileFailureWasm.jitStats.executions > 0 &&
     compileFailureRun.status === r.status && compileFailureRun.exitCode === r.exitCode &&
     compileFailureOut === r.out && compileFailureErr === r.err && compileFailureWasm.instructions() === r.instr,
   JSON.stringify({ forcedCompileFailures, jitStats: compileFailureWasm.jitStats, status: compileFailureRun.status,

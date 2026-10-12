@@ -46,6 +46,9 @@ pub enum Kind {
     Texture2D {
         id: u32,
     },
+    Texture3D {
+        id: u32,
+    },
     View {
         vk: ViewKind,
         id: u32,
@@ -91,6 +94,24 @@ pub enum Kind {
         height: u32,
         format: u32,
     },
+    Direct3DVertexBuffer9 {
+        id: u32,
+        device: u64,
+    },
+    Direct3DIndexBuffer9 {
+        id: u32,
+        device: u64,
+    },
+    Direct3DVertexDeclaration9 {
+        device: u64,
+        fvf: u32,
+        elements: Vec<u8>,
+    },
+    Direct3DShader9 {
+        device: u64,
+        vertex: bool,
+        function: Vec<u8>,
+    },
     DirectDraw,
     DirectSound,
     SoundBuffer { memory: u64, size: u32 },
@@ -102,7 +123,10 @@ impl Kind {
         match self {
             Kind::SwapChain { id, .. }
             | Kind::Buffer { id }
+            | Kind::Direct3DVertexBuffer9 { id, .. }
+            | Kind::Direct3DIndexBuffer9 { id, .. }
             | Kind::Texture2D { id }
+            | Kind::Texture3D { id }
             | Kind::View { id, .. }
             | Kind::Shader { id, .. }
             | Kind::InputLayout { id }
@@ -125,6 +149,8 @@ pub struct ResInfo {
     pub is_buffer: bool,
     pub width: u32,
     pub height: u32,
+    pub depth: u32,
+    pub is_3d: bool,
     pub mips: u32,
     pub array: u32,
     pub format: u32,
@@ -160,6 +186,19 @@ pub struct ComState {
     /// Currently bound render targets (guest COM pointers) for `OMGetRenderTargets`.
     pub bound_rtv: Vec<u64>,
     pub bound_dsv: u64,
+    /// Current Direct3D 9 depth-stencil surface per device object.
+    pub d3d9_depth_surfaces: HashMap<u64, u64>,
+    /// Direct3D 9 stream zero binding `(buffer, stride, offset)` per device.
+    pub d3d9_stream0: HashMap<u64, (u64, u32, u32)>,
+    /// Direct3D 9 index buffer binding per device.
+    pub d3d9_indices: HashMap<u64, u64>,
+    /// Current Direct3D 9 vertex declaration per device.
+    pub d3d9_vertex_declarations: HashMap<u64, u64>,
+    /// Current Direct3D 9 vertex and pixel shader objects per device.
+    pub d3d9_vertex_shaders: HashMap<u64, u64>,
+    pub d3d9_pixel_shaders: HashMap<u64, u64>,
+    /// Direct3D 9 render-state values set by the guest, keyed by `(device, state)`.
+    pub d3d9_render_states: HashMap<(u64, u32), u32>,
 }
 
 /// Canonical interface family used to share method implementations across versions
@@ -263,6 +302,15 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Direct3D9 => &["IDirect3D9"],
         Kind::Direct3DDevice9 { .. } => &["IDirect3DDevice9"],
         Kind::Direct3DSurface9 { .. } => &["IDirect3DSurface9"],
+        Kind::Direct3DVertexBuffer9 { .. } => {
+            &["IDirect3DVertexBuffer9", "IDirect3DResource9"]
+        }
+        Kind::Direct3DIndexBuffer9 { .. } => {
+            &["IDirect3DIndexBuffer9", "IDirect3DResource9"]
+        }
+        Kind::Direct3DVertexDeclaration9 { .. } => &["IDirect3DVertexDeclaration9"],
+        Kind::Direct3DShader9 { vertex: true, .. } => &["IDirect3DVertexShader9"],
+        Kind::Direct3DShader9 { vertex: false, .. } => &["IDirect3DPixelShader9"],
         Kind::Device => &["ID3D11Device", "IDXGIDevice", "IDXGIObject"],
         Kind::Context => &["ID3D11DeviceContext", "ID3D11DeviceChild"],
         Kind::SwapChain { .. } => &["IDXGISwapChain", "IDXGIObject", "IDXGIDeviceSubObject"],
@@ -275,6 +323,14 @@ fn supports(kind: &Kind, want: &str) -> bool {
             "ID3D11Resource",
             "ID3D11DeviceChild",
             "IDXGISurface",
+            "IDXGIObject",
+            "IDXGIResource",
+        ],
+        Kind::Texture3D { .. } => &[
+            "ID3D11Texture3D",
+            "ID3D11Texture3D1",
+            "ID3D11Resource",
+            "ID3D11DeviceChild",
             "IDXGIObject",
             "IDXGIResource",
         ],
@@ -367,6 +423,12 @@ const ALL_NAMES: &[&str] = &[
     "IDirect3D9",
     "IDirect3DDevice9",
     "IDirect3DSurface9",
+    "IDirect3DResource9",
+    "IDirect3DVertexBuffer9",
+    "IDirect3DIndexBuffer9",
+    "IDirect3DVertexDeclaration9",
+    "IDirect3DVertexShader9",
+    "IDirect3DPixelShader9",
     "ID3D11DeviceChild",
     "ID3D11Resource",
     "ID3D11Buffer",
@@ -549,7 +611,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "QueryInterface" => query_interface,
         "AddRef" => add_ref,
         "Release" => release,
-        "GetDevice" if iface == "IDirect3DSurface9" => {
+        "GetDevice" if matches!(iface, "IDirect3DSurface9" | "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9" | "IDirect3DVertexDeclaration9" | "IDirect3DVertexShader9" | "IDirect3DPixelShader9") => {
             return d3d9::method(iface, m)
         }
         "GetDevice" => get_device,
@@ -557,12 +619,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetPrivateData" | "SetPrivateDataInterface" | "SetEvictionPriority" => |_| Ok(S_OK),
         "GetEvictionPriority" => |_| Ok(0x8000_0000),
         _ => {
-            return d3d11::method(iface, m)
+            return d3d9::method(iface, m)
+                .or_else(|| d3d11::method(iface, m))
                 .or_else(|| dxgi::method(iface, m))
                 .or_else(|| ddraw::method(iface, m))
                 .or_else(|| dsound::method(iface, m))
                 .or_else(|| directinput8::method(iface, m))
-                .or_else(|| d3d9::method(iface, m))
         }
     })
 }

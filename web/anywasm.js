@@ -6,6 +6,7 @@ export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, C
 
 const MAX_JIT_MODULES = 256;
 const DEFAULT_JIT_MIN_PREFIX = 65; // decoded blocks are capped at 64 instructions
+const ASYNCIFY_STACK_BYTES = 1024 * 1024;
 
 function bytesEqual(a, b) {
   if (a.length !== b.length) return false;
@@ -15,12 +16,16 @@ function bytesEqual(a, b) {
 
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
     /** Counts calls routed through the dynamic WebAssembly trampoline. */
     this.jitStats = jitStats;
     this.jitMinPrefix = jitMinPrefix;
+    this.asyncifyData = asyncifyData;
+    this.asyncifyControl = asyncifyControl;
+    this.callbackSuspended = false;
+    this.pendingHostEvents = [];
   }
 
   /**
@@ -36,8 +41,17 @@ export class AnyWasm {
     if (typeof source === 'string') bytes = await (await fetch(source)).arrayBuffer();
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
     let instance;
+    let asyncifyData = 0;
+    const asyncifyControl = { resumeSliceSteps: 0n, yields: 0, resumes: 0 };
     const modules = new Map();
-    const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0 };
+    const modulesByStart = new Map();
+    let activeCodeEpoch;
+    const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0 };
+    const forgetModule = (id) => {
+      const old = modules.get(id);
+      if (old && modulesByStart.get(old.start) === old) modulesByStart.delete(old.start);
+      modules.delete(id);
+    };
     const imports = {
       anywasm: {
         random_fill(pointer, length) {
@@ -47,46 +61,114 @@ export class AnyWasm {
             return 0;
           }
         },
-        run_emitted_block(id, modulePtr, moduleLen, statePtr, budget, emittedInstructions, firstRegisterRegister) {
+        run_emitted_block(id, modulePtr, moduleLen, statePtr, budget, emittedInstructions, firstRegisterRegister, start, codeEpoch) {
           try {
             if (!jit) {
               jitStats.fallbacks++;
               return -1;
             }
+            if (activeCodeEpoch !== codeEpoch) {
+              modulesByStart.clear();
+              activeCodeEpoch = codeEpoch;
+            }
             const memory = instance.exports.memory;
             const moduleView = new Uint8Array(memory.buffer, modulePtr >>> 0, moduleLen >>> 0);
             let cached = modules.get(id >>> 0);
             if (!cached || !bytesEqual(cached.bytes, moduleView)) {
+              if (cached && modulesByStart.get(cached.start) === cached) modulesByStart.delete(cached.start);
               const moduleBytes = moduleView.slice();
               const module = new WebAssembly.Module(moduleBytes);
               const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
-              cached = { bytes: moduleBytes, run: emitted.exports.run };
+              cached = {
+                bytes: moduleBytes,
+                run: emitted.exports.run,
+                instructions: emittedInstructions >>> 0,
+                firstRegisterRegister: firstRegisterRegister >>> 0,
+                start,
+              };
               modules.set(id >>> 0, cached);
-              if (modules.size > MAX_JIT_MODULES) modules.delete(modules.keys().next().value);
+              if (modules.size > MAX_JIT_MODULES) forgetModule(modules.keys().next().value);
               jitStats.compilations++;
             }
-            const executed = cached.run(statePtr, budget);
-            const expected = Math.min(budget >>> 0, emittedInstructions >>> 0);
-            if (executed !== expected) {
-              jitStats.fallbacks++;
-              return -1;
+            cached.instructions = emittedInstructions >>> 0;
+            cached.firstRegisterRegister = firstRegisterRegister >>> 0;
+            cached.start = start;
+            modulesByStart.set(start, cached);
+
+            const remainingBudget = budget >>> 0;
+            const state = new DataView(memory.buffer, statePtr >>> 0, 184);
+            const cpuState = new Uint8Array(memory.buffer, statePtr >>> 0, 160);
+            state.setUint32(176, 0, true);
+            let totalExecuted = 0;
+            let current = cached;
+            while (totalExecuted < remainingBudget) {
+              const remaining = remainingBudget - totalExecuted;
+              const rollback = cpuState.slice();
+              let executed = -1;
+              try {
+                executed = current.run(statePtr, remaining);
+              } catch {
+                // The failing module is retried by Rust from this block's untouched CPU state.
+              }
+              const expected = Math.min(remaining, current.instructions);
+              if (executed !== expected) {
+                cpuState.set(rollback);
+                jitStats.fallbacks++;
+                if (totalExecuted === 0) return -1;
+                state.setUint32(176, 1, true);
+                return totalExecuted;
+              }
+              totalExecuted += executed;
+              jitStats.executions++;
+              if (current.firstRegisterRegister !== 0xffff_ffff && executed > current.firstRegisterRegister) {
+                jitStats.registerRegisterHits++;
+              }
+              if (totalExecuted >= remainingBudget) break;
+              const nextRip = state.getBigUint64(128, true);
+              const next = modulesByStart.get(nextRip);
+              if (!next) break;
+              state.setUint32(176, 1, true);
+              jitStats.chainTransitions++;
+              current = next;
             }
-            jitStats.executions++;
-            const firstRegisterMove = firstRegisterRegister >>> 0;
-            if (firstRegisterMove !== 0xffff_ffff && executed > firstRegisterMove) {
-              jitStats.registerRegisterHits++;
-            }
-            return executed;
+            return totalExecuted;
           } catch {
             // The Rust side passed a copied CPU state, so the interpreter can retry safely.
             jitStats.fallbacks++;
             return -1;
           }
         },
+        yield_slice() {
+          const exports = instance?.exports;
+          if (!exports?.asyncify_get_state || !asyncifyData) {
+            throw new Error('guest callback exhausted its slice but the runtime was not Asyncify transformed');
+          }
+          const state = exports.asyncify_get_state();
+          if (state === 2) {
+            exports.asyncify_stop_rewind();
+            const steps = asyncifyControl.resumeSliceSteps;
+            asyncifyControl.resumeSliceSteps = 0n;
+            asyncifyControl.resumes++;
+            return steps;
+          }
+          if (state !== 0) throw new Error(`cannot suspend guest callback from Asyncify state ${state}`);
+          exports.asyncify_start_unwind(asyncifyData);
+          asyncifyControl.yields++;
+          return 0n;
+        },
       },
     };
     ({ instance } = await WebAssembly.instantiate(bytes, imports));
-    return new AnyWasm(instance, jitStats, jitMinPrefix);
+    const x = instance.exports;
+    if (typeof x.asyncify_start_unwind === 'function' && typeof x.asyncify_stop_unwind === 'function' &&
+        typeof x.asyncify_start_rewind === 'function' && typeof x.asyncify_stop_rewind === 'function' &&
+        typeof x.asyncify_get_state === 'function') {
+      asyncifyData = x.aw_alloc(ASYNCIFY_STACK_BYTES + 8);
+      const view = new DataView(x.memory.buffer);
+      view.setUint32(asyncifyData, asyncifyData + 8, true);
+      view.setUint32(asyncifyData + 4, asyncifyData + ASYNCIFY_STACK_BYTES + 8, true);
+    }
+    return new AnyWasm(instance, jitStats, jitMinPrefix, asyncifyData, asyncifyControl);
   }
 
   /** Load an .awb bundle. Throws with the loader's message on failure. */
@@ -102,10 +184,31 @@ export class AnyWasm {
 
   /** Execute up to `steps` guest instructions. Returns a Status value. */
   run(steps = 1_000_000) {
-    return this.x.aw_run(BigInt(steps));
+    if (this.callbackSuspended) {
+      this.asyncifyControl.resumeSliceSteps = BigInt(steps);
+      this.x.asyncify_start_rewind(this.asyncifyData);
+    }
+    const status = this.x.aw_run(BigInt(steps));
+    if (this.asyncifyData) {
+      const state = this.x.asyncify_get_state();
+      if (state === 1) {
+        this.x.asyncify_stop_unwind();
+        this.callbackSuspended = true;
+        return Status.RUNNING;
+      }
+      if (state !== 0) throw new Error(`guest run returned in unexpected Asyncify state ${state}`);
+      this.callbackSuspended = false;
+      this.flushPendingHostEvents();
+    }
+    return status;
+  }
+
+  get asyncifyStats() {
+    return { yields: this.asyncifyControl.yields, resumes: this.asyncifyControl.resumes };
   }
 
   _take(ptrFn, lenFn, clearFn) {
+    if (this.callbackSuspended) return new Uint8Array(0);
     const len = lenFn();
     if (!len) return new Uint8Array(0);
     const out = new Uint8Array(this.x.memory.buffer, ptrFn(), len).slice();
@@ -115,7 +218,11 @@ export class AnyWasm {
   /** Window/GPU command stream produced since the last call (copied out of WASM memory). */
   takeGpu() { return this._take(this.x.aw_gpu_ptr, this.x.aw_gpu_len, this.x.aw_gpu_clear); }
   /** Deliver an input event: see crates/anywasm-rt/src/hle/user32.rs `input_event`. */
-  input(kind, a = 0, b = 0, c = 0) { this.x.aw_input(kind, BigInt(a), BigInt(b), BigInt(c)); }
+  input(kind, a = 0, b = 0, c = 0) {
+    const event = () => this.x.aw_input(kind, BigInt(a), BigInt(b), BigInt(c));
+    if (this.callbackSuspended) this.pendingHostEvents.push(event);
+    else event();
+  }
   /** Add host elapsed time in 100 ns ticks to the guest clock after a frame yield. */
   advanceTime100ns(ticks) {
     if (typeof ticks !== 'bigint' || ticks < 0n) throw new RangeError('ticks must be a nonnegative BigInt');
@@ -140,11 +247,26 @@ export class AnyWasm {
   }
 
   pushStdin(bytes) {
+    const copy = this.callbackSuspended ? Uint8Array.from(bytes) : bytes;
+    const push = () => this._pushStdin(copy);
+    if (this.callbackSuspended) {
+      this.pendingHostEvents.push(push);
+      return;
+    }
+    push();
+  }
+
+  _pushStdin(bytes) {
     const n = bytes.byteLength;
     const ptr = this.x.aw_alloc(n);
     new Uint8Array(this.x.memory.buffer, ptr, n).set(bytes);
     this.x.aw_stdin_push(ptr, n);
     this.x.aw_free(ptr, n);
+  }
+
+  flushPendingHostEvents() {
+    if (this.callbackSuspended) return;
+    while (this.pendingHostEvents.length) this.pendingHostEvents.shift()();
   }
 
   /** Run to completion, calling `onOutput(stream, text)` between slices. Returns {status, exitCode, message}. */

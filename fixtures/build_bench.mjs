@@ -6,10 +6,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = dirname(fixtureDir);
 const target = 'x86_64-pc-windows-msvc';
 const sysroot = execFileSync('rustc', ['--print', 'sysroot'], { encoding: 'utf8' }).trim();
 const rustLld = join(sysroot, 'lib', 'rustlib', target, 'bin', process.platform === 'win32' ? 'rust-lld.exe' : 'rust-lld');
-const linkDir = mkdtempSync(join(tmpdir(), 'anywasm-lld-'));
+const linkDir = mkdtempSync(join(repoRoot, 'target', 'anywasm-lld-'));
 const buildDir = mkdtempSync(join(tmpdir(), 'anywasm-bench-build-'));
 const lldLink = join(linkDir, process.platform === 'win32' ? 'lld-link.exe' : 'lld-link');
 const source = join(fixtureDir, 'bench_workload.rs');
@@ -19,7 +20,7 @@ try {
     if (process.platform === 'win32') linkSync(rustLld, lldLink);
     else symlinkSync(rustLld, lldLink);
   } catch (error) {
-    if (error.code !== 'EXDEV') throw error;
+    if (error.code !== 'EXDEV' && error.code !== 'EPERM') throw error;
     copyFileSync(rustLld, lldLink);
   }
 

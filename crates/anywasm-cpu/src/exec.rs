@@ -86,7 +86,11 @@ fn next_ip(cpu: &Cpu, len: u8) -> u64 {
 
 #[inline]
 fn stack_size(cpu: &Cpu) -> u8 {
-    if cpu.mode == CpuMode::X86_32 { 4 } else { 8 }
+    if cpu.mode == CpuMode::X86_32 {
+        4
+    } else {
+        8
+    }
 }
 
 pub fn read_mem(mem: &Memory, a: u64, sz: u8) -> MemResult<u64> {
@@ -928,11 +932,14 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             return Ok(());
         }
         Op::Jcc => {
-            cpu.rip = ip_value(cpu.mode, if cond(cpu.rflags, i.cc) {
-                i.imm as u64
-            } else {
-                next
-            });
+            cpu.rip = ip_value(
+                cpu.mode,
+                if cond(cpu.rflags, i.cc) {
+                    i.imm as u64
+                } else {
+                    next
+                },
+            );
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
@@ -1337,8 +1344,11 @@ impl BlockCache {
         };
         #[cfg(target_arch = "wasm32")]
         let (mut executed, start_index, interpreter_only) = match block.emitted.as_ref() {
-            Some(emitted) => match emitted.execute(cpu, max_instructions) {
-                Some(executed) => (executed as u64, emitted.instruction_count(), true),
+            Some(emitted) => match emitted.execute(cpu, mem, max_instructions) {
+                Some((executed, true)) => return (executed as u64, Ok(())),
+                Some((executed, false)) => {
+                    (executed as u64, emitted.instruction_count(), true)
+                }
                 None => (0, 0, true),
             },
             None => (0, 0, false),
@@ -1363,7 +1373,8 @@ impl BlockCache {
             }
             executed += 1;
 
-            let sequential_rip = ip_value(cpu.mode, before_rip.wrapping_add(cached.inst.len as u64));
+            let sequential_rip =
+                ip_value(cpu.mode, before_rip.wrapping_add(cached.inst.len as u64));
             if mem.code_epoch != before_epoch
                 || ends_basic_block(cached.inst.op)
                 || cpu.rip != sequential_rip
@@ -1397,16 +1408,17 @@ impl BlockCache {
                 .map(translate_instruction)
                 .collect();
             #[cfg(target_arch = "wasm32")]
-            let emitted = if mode == CpuMode::X86_32 || self.min_jit_prefix > decoded.instructions.len() {
-                None
-            } else {
-                crate::jit::emit_mov_block(
-                    self.next_jit_id,
-                    decoded.start,
-                    &decoded.instructions,
-                    self.min_jit_prefix,
-                )
-            };
+            let emitted =
+                if mode == CpuMode::X86_32 || self.min_jit_prefix > decoded.instructions.len() {
+                    None
+                } else {
+                    crate::jit::emit_mov_block(
+                        self.next_jit_id,
+                        decoded.start,
+                        &decoded.instructions,
+                        self.min_jit_prefix,
+                    )
+                };
             #[cfg(target_arch = "wasm32")]
             if emitted.is_some() {
                 self.next_jit_id = self.next_jit_id.wrapping_add(1).max(1);

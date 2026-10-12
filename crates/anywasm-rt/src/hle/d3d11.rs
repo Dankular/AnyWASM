@@ -78,7 +78,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "GetResource" => |p| {
             let (this, out) = (p.arg(0), p.arg(1));
             if let Some(Kind::View { resource, .. }) = kind_of(p, this) {
-                let obj = p.extra.com.objs.iter().find(|(_, o)| o.kind.host_id() == Some(resource) && matches!(o.kind, Kind::Buffer { .. } | Kind::Texture2D { .. })).map(|(k, _)| *k);
+                let obj = p.extra.com.objs.iter().find(|(_, o)| o.kind.host_id() == Some(resource) && matches!(o.kind, Kind::Buffer { .. } | Kind::Texture2D { .. } | Kind::Texture3D { .. })).map(|(k, _)| *k);
                 if let Some(o) = obj {
                     p.extra.com.objs.get_mut(&o).map(|x| x.refs += 1);
                     p.wr64(out, o)?;
@@ -90,12 +90,19 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         "GetType" => |p| {
             let o = p.arg(1);
-            p.wr32(o, 3)?; // D3D11_RESOURCE_DIMENSION_TEXTURE2D (buffers report 1 below)
+            let dimension = match kind_of(p, p.arg(0)) {
+                Some(Kind::Buffer { .. }) => 1,
+                Some(Kind::Texture2D { .. }) => 3,
+                Some(Kind::Texture3D { .. }) => 4,
+                _ => 0,
+            };
+            p.wr32(o, dimension)?;
             Ok(0)
         },
         // ── ID3D11Device ──
         "CreateBuffer" => create_buffer,
         "CreateTexture2D" => create_texture2d,
+        "CreateTexture3D" | "CreateTexture3D1" => create_texture3d,
         "CreateRenderTargetView" => |p| create_view(p, ViewKind::Rtv),
         "CreateDepthStencilView" => |p| create_view(p, ViewKind::Dsv),
         "CreateShaderResourceView" => |p| create_view(p, ViewKind::Srv),
@@ -495,6 +502,10 @@ fn mip_count(w: u32, h: u32) -> u32 {
     32 - w.max(h).max(1).leading_zeros()
 }
 
+fn mip_count_3d(w: u32, h: u32, d: u32) -> u32 {
+    32 - w.max(h).max(d).max(1).leading_zeros()
+}
+
 fn create_texture2d(p: &mut Process) -> R {
     // (this, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**)
     let (desc, init, out) = (p.arg(1), p.arg(2), p.arg(3));
@@ -539,12 +550,68 @@ fn create_texture2d(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
+fn create_texture3d(p: &mut Process) -> R {
+    // (this, const D3D11_TEXTURE3D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture3D**)
+    let (desc, init, out) = (p.arg(1), p.arg(2), p.arg(3));
+    if desc == 0 || out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    let (w, h, depth, mut mips, format) = (
+        p.rd32(desc)?, p.rd32(desc + 4)?, p.rd32(desc + 8)?, p.rd32(desc + 12)?, p.rd32(desc + 16)?,
+    );
+    let (usage, bind, cpu, misc) = (p.rd32(desc + 20)?, p.rd32(desc + 24)?, p.rd32(desc + 28)?, p.rd32(desc + 32)?);
+    if w == 0 || h == 0 || depth == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    if mips == 0 {
+        mips = mip_count_3d(w, h, depth);
+    }
+    let keep_shadow = cpu != 0;
+    let base_pitch = row_bytes(format, w);
+    let base_depth_pitch = base_pitch * rows(format, h);
+    let size = base_depth_pitch.saturating_mul(depth);
+    let id = new_res(p, ResInfo {
+        width: w, height: h, depth, is_3d: true, mips, array: 1, format, usage, bind, cpu, misc, size,
+        shadow: if keep_shadow { vec![0u8; size as usize] } else { Vec::new() },
+        ..Default::default()
+    });
+    p.extra.gpu.emit(op::CREATE_TEXTURE3D, Pk::new().u32(id).u32(w).u32(h).u32(depth).u32(mips).u32(format).u32(bind).u32(usage).u32(misc));
+    if init != 0 {
+        for mip in 0..mips {
+            let sd = init + 16 * mip as u64;
+            let (data, mut pitch, mut depth_pitch) = (p.rd64(sd)?, p.rd32(sd + 8)?, p.rd32(sd + 12)?);
+            if data == 0 {
+                continue;
+            }
+            let (mw, mh, md) = (mip_dim(w, mip), mip_dim(h, mip), mip_dim(depth, mip));
+            if pitch == 0 { pitch = row_bytes(format, mw); }
+            let nrows = rows(format, mh);
+            if depth_pitch == 0 { depth_pitch = pitch * nrows; }
+            for z in 0..md {
+                let bytes = p.read_bytes(data + z as u64 * depth_pitch as u64, (pitch * nrows) as usize)?;
+                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(z).u32(0).u32(0).u32(mw).u32(mh).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+                if keep_shadow && mip == 0 {
+                    let dst = z as usize * base_depth_pitch as usize;
+                    if dst < size as usize {
+                        let n = (bytes.len()).min(base_depth_pitch as usize).min(size as usize - dst);
+                        p.extra.com.res.get_mut(&id).unwrap().shadow[dst..dst + n].copy_from_slice(&bytes[..n]);
+                    }
+                }
+            }
+        }
+    }
+    let o = create(p, "ID3D11Texture3D", Kind::Texture3D { id });
+    p.wr64(out, o)?;
+    Ok(S_OK)
+}
+
 fn create_view(p: &mut Process, vk: ViewKind) -> R {
     // (this, ID3D11Resource*, const D3D11_xxx_VIEW_DESC*, ID3D11xxxView**)
     let (res, desc, out) = (p.arg(1), p.arg(2), p.arg(3));
     let Some(rid) = kind_of(p, res).and_then(|k| k.host_id()) else { return Ok(E_INVALIDARG) };
     let info = p.extra.com.res.get(&rid).cloned().unwrap_or_default();
-    let (mut format, mut dim, mut a, mut b, mut c, mut d) = (info.format, if info.is_buffer { 1 } else { 4 }, 0u32, info.mips.max(1), 0u32, info.array.max(1));
+    let default_dim = if info.is_buffer { 1 } else if info.is_3d { 8 } else { 4 };
+    let (mut format, mut dim, mut a, mut b, mut c, mut d) = (info.format, default_dim, 0u32, info.mips.max(1), 0u32, info.array.max(1));
     if desc != 0 {
         let f = p.rd32(desc)?;
         if f != 0 {
@@ -562,6 +629,10 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 b = p.rd32(desc + 12)?;
                 c = p.rd32(desc + 16)?;
                 d = p.rd32(desc + 20)?;
+            }
+            (ViewKind::Srv, 8) => {
+                a = p.rd32(desc + 8)?; // MostDetailedMip
+                b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
             }
             (ViewKind::Rtv, 4) | (ViewKind::Dsv, 3) => {
                 a = p.rd32(desc + 8)?; // MipSlice
@@ -582,6 +653,12 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 b = 1;
                 c = p.rd32(desc + 12)?; // FirstArraySlice
                 d = p.rd32(desc + 16)?; // ArraySize
+            }
+            (ViewKind::Rtv, 8) | (ViewKind::Uav, 8) => {
+                a = p.rd32(desc + 8)?; // MipSlice
+                b = 1;
+                c = p.rd32(desc + 12)?; // FirstWSlice
+                d = p.rd32(desc + 16)?; // WSize
             }
             _ => {}
         }
@@ -747,7 +824,7 @@ fn copy_subresource_region(p: &mut Process) -> R {
 
 fn update_subresource(p: &mut Process) -> R {
     // (this, pDstResource, DstSubresource, const D3D11_BOX* pDstBox, const void* pSrcData, SrcRowPitch, SrcDepthPitch)
-    let (res, sub, bx, src, row_pitch) = (p.arg(1), p.arg(2) as u32, p.arg(3), p.arg(4), p.arg(5) as u32);
+    let (res, sub, bx, src, row_pitch, depth_pitch) = (p.arg(1), p.arg(2) as u32, p.arg(3), p.arg(4), p.arg(5) as u32, p.arg(6) as u32);
     let Some(kind) = kind_of(p, res) else { return Ok(0) };
     match kind {
         Kind::Buffer { id } => {
@@ -772,6 +849,25 @@ fn update_subresource(p: &mut Process) -> R {
             let bytes = p.read_bytes(src, (pitch * nrows) as usize)?;
             p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(slice).u32(x).u32(y).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
         }
+        Kind::Texture3D { id } => {
+            let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let mip = sub % info.mips.max(1);
+            let (mw, mh, md) = (mip_dim(info.width, mip), mip_dim(info.height, mip), mip_dim(info.depth, mip));
+            let (x, y, z, w, h, depth) = if bx != 0 {
+                let (left, top, front) = (p.rd32(bx)?, p.rd32(bx + 4)?, p.rd32(bx + 8)?);
+                let (right, bottom, back) = (p.rd32(bx + 12)?, p.rd32(bx + 16)?, p.rd32(bx + 20)?);
+                (left, top, front, right - left, bottom - top, back - front)
+            } else {
+                (0, 0, 0, mw, mh, md)
+            };
+            let pitch = if row_pitch == 0 { row_bytes(info.format, w) } else { row_pitch };
+            let nrows = rows(info.format, h);
+            let depth_pitch = if depth_pitch == 0 { pitch * nrows } else { depth_pitch };
+            for slice in 0..depth {
+                let bytes = p.read_bytes(src + slice as u64 * depth_pitch as u64, (pitch * nrows) as usize)?;
+                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(z + slice).u32(x).u32(y).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+            }
+        }
         _ => {}
     }
     Ok(0)
@@ -782,13 +878,15 @@ fn map(p: &mut Process) -> R {
     let (res, sub, ty, out) = (p.arg(1), p.arg(2) as u32, p.arg(3) as u32, p.arg(5));
     let Some(id) = obj_id_opt(p, res) else { return Ok(E_INVALIDARG) };
     let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-    let (len, pitch) = if info.is_buffer {
-        (info.size as u64, info.size)
+    let (len, pitch, depth_pitch) = if info.is_buffer {
+        (info.size as u64, info.size, info.size)
     } else {
         let mip = sub % info.mips.max(1);
-        let w = mip_dim(info.width, mip);
+        let (w, h) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
         let pitch = row_bytes(info.format, w);
-        (pitch as u64 * rows(info.format, mip_dim(info.height, mip)) as u64, pitch)
+        let depth_pitch = pitch * rows(info.format, h);
+        let depth = if info.is_3d { mip_dim(info.depth, mip) } else { 1 };
+        (depth_pitch as u64 * depth as u64, pitch, depth_pitch)
     };
     let addr = if info.map_addr != 0 { info.map_addr } else { kernel32::alloc_block(p, len.max(16), true) };
     // MAP_READ=1, WRITE=2, READ_WRITE=3, WRITE_DISCARD=4, WRITE_NO_OVERWRITE=5
@@ -806,7 +904,7 @@ fn map(p: &mut Process) -> R {
     }
     p.wr64(out, addr)?;
     p.wr32(out + 8, pitch)?;
-    p.wr32(out + 12, pitch)?;
+    p.wr32(out + 12, depth_pitch)?;
     Ok(S_OK)
 }
 
@@ -831,10 +929,12 @@ fn unmap(p: &mut Process) -> R {
     } else {
         let sub = info.map_sub;
         let mip = sub % info.mips.max(1);
-        let slice = sub / info.mips.max(1);
         let (w, h) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
         let pitch = row_bytes(info.format, w);
-        let bytes = p.read_bytes(info.map_addr, (pitch * rows(info.format, h)) as usize)?;
+        let nrows = rows(info.format, h);
+        let depth_pitch = pitch * nrows;
+        let depth = if info.is_3d { mip_dim(info.depth, mip) } else { 1 };
+        let bytes = p.read_bytes(info.map_addr, (depth_pitch * depth) as usize)?;
         if let Some(r) = p.extra.com.res.get_mut(&id) {
             if sub == 0 && !r.shadow.is_empty() {
                 let n = r.shadow.len().min(bytes.len());
@@ -842,7 +942,15 @@ fn unmap(p: &mut Process) -> R {
             }
             r.map_write = false;
         }
-        p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(slice).u32(0).u32(0).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+        if info.is_3d {
+            for z in 0..depth {
+                let slice_bytes = &bytes[(z * depth_pitch) as usize..((z + 1) * depth_pitch) as usize];
+                p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(z).u32(0).u32(0).u32(w).u32(h).u32(pitch).u32(slice_bytes.len() as u32).bytes(slice_bytes));
+            }
+        } else {
+            let slice = sub / info.mips.max(1);
+            p.extra.gpu.emit(op::TEXTURE_WRITE, Pk::new().u32(id).u32(mip).u32(slice).u32(0).u32(0).u32(w).u32(h).u32(pitch).u32(bytes.len() as u32).bytes(&bytes));
+        }
     }
     Ok(0)
 }
@@ -918,6 +1026,13 @@ fn get_desc(p: &mut Process) -> R {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
         }
+        Kind::Texture3D { id } => {
+            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let vals = [r.width, r.height, r.depth, r.mips, r.format, r.usage, r.bind, r.cpu, r.misc];
+            for (i, v) in vals.iter().enumerate() {
+                p.wr32(out + 4 * i as u64, *v)?;
+            }
+        }
         _ => {}
     }
     Ok(S_OK)
@@ -981,6 +1096,133 @@ mod tests {
         p.cpu.gpr[R9] = 4;
         assert_eq!(get_data(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_texture3d_emits_volume_creation_and_each_initial_z_slice() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DESC: u64 = 0x10000;
+        const INIT: u64 = 0x11000;
+        const DATA: u64 = 0x12000;
+        const OUT: u64 = 0x13000;
+        let mut p = Process::new(Vfs::new());
+        for addr in [DESC, INIT, DATA, OUT] {
+            assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
+        }
+        let mut desc = Vec::new();
+        for value in [4u32, 4, 2, 1, 28, 0, 8, 0, 0] {
+            desc.extend(value.to_le_bytes());
+        }
+        p.write_bytes(DESC, &desc).unwrap();
+        let mut initial = DATA.to_le_bytes().to_vec();
+        initial.extend(16u32.to_le_bytes()); // row pitch
+        initial.extend(64u32.to_le_bytes()); // depth pitch
+        p.write_bytes(INIT, &initial).unwrap();
+        let mut volume = vec![0u8; 128];
+        for (z, rgba) in [[255, 0, 0, 255], [0, 255, 0, 255]].into_iter().enumerate() {
+            for pixel in 0..16 {
+                volume[z * 64 + pixel * 4..z * 64 + pixel * 4 + 4].copy_from_slice(&rgba);
+            }
+        }
+        p.write_bytes(DATA, &volume).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = INIT;
+        p.cpu.gpr[R9] = OUT;
+
+        let create_texture = method("ID3D11Device", "CreateTexture3D").unwrap();
+        assert_eq!(create_texture(&mut p).unwrap(), S_OK);
+
+        let texture = p.rd64(OUT).unwrap();
+        let texture_id = match kind_of(&p, texture) {
+            Some(Kind::Texture3D { id }) => id,
+            other => panic!("expected Texture3D resource, got {other:?}"),
+        };
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0].0, op::CREATE_TEXTURE3D);
+        let fields = commands[0].1.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+        assert_eq!(fields, vec![texture_id, 4, 4, 2, 1, 28, 8, 0, 0]);
+        for (z, rgba) in [[255, 0, 0, 255], [0, 255, 0, 255]].into_iter().enumerate() {
+            let (opcode, payload) = &commands[z + 1];
+            assert_eq!(*opcode, op::TEXTURE_WRITE);
+            let fields = payload[..36].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+            assert_eq!(fields, vec![texture_id, 0, z as u32, 0, 0, 4, 4, 16, 64]);
+            assert!(payload[36..].chunks_exact(4).all(|pixel| pixel == rgba));
+        }
+
+        let mut srv_desc = Vec::new();
+        for value in [28u32, 8, 0, 1] { srv_desc.extend(value.to_le_bytes()); }
+        p.write_bytes(DESC, &srv_desc).unwrap(); // Texture3D SRV: first mip 0, one mip
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = DESC;
+        p.cpu.gpr[R9] = OUT;
+        let create_srv = method("ID3D11Device", "CreateShaderResourceView").unwrap();
+        assert_eq!(create_srv(&mut p).unwrap(), S_OK);
+        let srv = p.rd64(OUT).unwrap();
+        let view_id = match kind_of(&p, srv) {
+            Some(Kind::View { vk: ViewKind::Srv, id, .. }) => id,
+            other => panic!("expected Texture3D SRV, got {other:?}"),
+        };
+        let (opcode, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
+        assert_eq!(opcode, op::CREATE_VIEW);
+        let fields = payload.chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(fields, vec![view_id, 2, texture_id, 28, 8, 0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn update_texture3d_emits_each_boxed_z_slice_with_depth_pitch() {
+        use anywasm_cpu::cpu::{RSP, RCX, RDX, R8, R9};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const BOX: u64 = 0x10000;
+        const DATA: u64 = 0x11000;
+        const STACK: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        let id = p.extra.gpu.new_id();
+        p.extra.com.res.insert(id, ResInfo {
+            width: 4, height: 4, depth: 4, is_3d: true, mips: 1, array: 1, format: 28,
+            ..Default::default()
+        });
+        let texture = create(&mut p, "ID3D11Texture3D", Kind::Texture3D { id });
+        for addr in [BOX, DATA, STACK] {
+            assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
+        }
+        for (i, value) in [1u32, 1, 1, 3, 3, 3].into_iter().enumerate() {
+            p.wr32(BOX + 4 * i as u64, value).unwrap();
+        }
+        let bytes = (0..32).map(|value| value as u8).collect::<Vec<_>>();
+        p.write_bytes(DATA, &bytes).unwrap();
+        p.cpu.gpr[RSP] = STACK;
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = BOX;
+        p.wr64(STACK + 8 + 8 * 4, DATA).unwrap();
+        p.wr64(STACK + 8 + 8 * 5, 8).unwrap();
+        p.wr64(STACK + 8 + 8 * 6, 16).unwrap();
+
+        let update = method("ID3D11DeviceContext", "UpdateSubresource").unwrap();
+        assert_eq!(update(&mut p).unwrap(), 0);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 2);
+        for (slice, command) in commands.iter().enumerate() {
+            let (opcode, payload) = command;
+            assert_eq!(*opcode, op::TEXTURE_WRITE);
+            let fields = payload[..36].chunks_exact(4)
+                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(fields, vec![id, 0, 1 + slice as u32, 1, 1, 2, 2, 8, 16]);
+            assert_eq!(&payload[36..], &bytes[slice * 16..(slice + 1) * 16]);
+        }
     }
 
     #[test]

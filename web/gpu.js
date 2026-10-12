@@ -14,7 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
-  SET_FIXED_FUNCTION: 45,
+  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -274,6 +274,7 @@ export class GpuExecutor {
         break;
       }
       case OP.CREATE_TEXTURE2D: this.createTexture(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(9)); break;
+      case OP.CREATE_TEXTURE3D: this.createTexture(u(0), u(1), u(2), u(4), u(3), u(5), u(6), u(7), u(8), '3d'); break;
       case OP.TEXTURE_WRITE: this.textureWrite(u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7), u(8), bytes.subarray(36, 36 + u(8))); break;
       case OP.CREATE_SHADER: this.createShader(u(0), u(1), bytes.slice(12, 12 + u(2))); break;
       case OP.CREATE_INPUT_LAYOUT: {
@@ -348,7 +349,7 @@ export class GpuExecutor {
   }
 
   // ── resources ────────────────────────────────────────────────────────────
-  createTexture(id, w, h, mips, array, dxgi, bind, usage, misc) {
+  createTexture(id, w, h, mips, array, dxgi, bind, usage, misc, dimension = '2d') {
     let format = this.texFormat(dxgi, bind);
     const viewFormats = [];
     if (SRGB_PAIR[format] && !format.startsWith('bc')) viewFormats.push(SRGB_PAIR[format]);
@@ -356,10 +357,14 @@ export class GpuExecutor {
     let u = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     if (bind & (0x20 | 0x40)) u |= GPUTextureUsage.RENDER_ATTACHMENT;
     if (bind & 0x80) u |= GPUTextureUsage.STORAGE_BINDING;
+    if (dimension === '3d' && (format === 'rgba8unorm' || format === 'r32float')) u |= GPUTextureUsage.STORAGE_BINDING;
     if (!BLOCK(format) && !isDepth(format)) u |= GPUTextureUsage.RENDER_ATTACHMENT; // allows mip generation and clears of any colour texture
-    const cube = (misc & 0x4) !== 0;
-    const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], mipLevelCount: Math.max(1, mips), format, usage: u, viewFormats });
-    this.res.set(id, { kind: 'texture', gpu, width: w, height: h, mips: Math.max(1, mips), array: Math.max(1, array), format, dxgi, bind, cube });
+    const cube = dimension === '2d' && (misc & 0x4) !== 0;
+    const gpu = this.device.createTexture({ size: [w, h, Math.max(1, array)], dimension, mipLevelCount: Math.max(1, mips), format, usage: u, viewFormats });
+    this.res.set(id, {
+      kind: 'texture', gpu, width: w, height: h, depth: dimension === '3d' ? Math.max(1, array) : 1,
+      mips: Math.max(1, mips), array: dimension === '3d' ? 1 : Math.max(1, array), format, dxgi, bind, cube, dimension,
+    });
   }
 
   textureWrite(id, mip, slice, x, y, w, h, rowPitch, len, data) {
@@ -391,7 +396,7 @@ export class GpuExecutor {
     if (isAniso) { d.minFilter = d.magFilter = d.mipmapFilter = 'linear'; d.maxAnisotropy = Math.max(1, Math.min(16, aniso)); }
     if (comparison) d.compare = CMP[cmp] || 'always';
     void bias;
-    return { gpu: this.device.createSampler(d), comparison };
+    return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1 };
   }
 
   createShader(id, stage, dxbc) {
@@ -417,7 +422,7 @@ export class GpuExecutor {
 
   // ── views ────────────────────────────────────────────────────────────────
   setFixedFunction(fvf, width, height) {
-    if (fvf !== 0x42 && fvf !== 0x44) {
+    if (![0x42, 0x44, 0x142, 0x144].includes(fvf)) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
       this.st.layout = 0;
@@ -427,10 +432,14 @@ export class GpuExecutor {
     const key = `${fvf}/${width}/${height}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
-      const transformed = fvf === 0x44;
+      const transformed = fvf === 0x44 || fvf === 0x144;
+      const textured = fvf === 0x142 || fvf === 0x144;
       const positionFormat = transformed ? 2 : 6;
       const colorOffset = transformed ? 16 : 12;
       const inputPosition = transformed ? 'vec4<f32>' : 'vec3<f32>';
+      const texcoordInput = textured ? '@location(2) uv: vec2<f32>,' : '';
+      const texcoordOutput = textured ? '@location(2) uv: vec2<f32>,' : '';
+      const texcoordAssign = textured ? 'output.uv = input.uv;' : '';
       const positionCode = transformed
         ? `let invW = 1.0 / max(input.position.w, 0.000001);
            output.position = vec4<f32>(
@@ -442,15 +451,18 @@ export class GpuExecutor {
         struct VertexInput {
           @location(0) position: ${inputPosition},
           @location(1) color: vec4<f32>,
+          ${texcoordInput}
         };
         struct VertexOutput {
           @builtin(position) position: vec4<f32>,
           @location(0) color: vec4<f32>,
+          ${texcoordOutput}
         };
         @vertex fn vs(input: VertexInput) -> VertexOutput {
           var output: VertexOutput;
           ${positionCode}
           output.color = input.color.bgra;
+          ${texcoordAssign}
           return output;
         }
         @fragment fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
@@ -465,6 +477,7 @@ export class GpuExecutor {
         layout: [
           { location: 0, format: positionFormat, slot: 0, offset: 0, cls: 0, step: 0 },
           { location: 1, format: 28, slot: 0, offset: colorOffset, cls: 0, step: 0 },
+          ...(textured ? [{ location: 2, format: 16, slot: 0, offset: colorOffset + 4, cls: 0, step: 0 }] : []),
         ],
         vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
         ps: { stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
@@ -497,7 +510,8 @@ export class GpuExecutor {
       d.dimension = '2d'; d.baseMipLevel = v.mip; d.mipLevelCount = 1; d.baseArrayLayer = v.dim === 5 || v.dim === 4 && v.slices > 1 ? v.slice : 0; d.arrayLayerCount = 1;
     } else {
       d.baseMipLevel = v.mip; d.mipLevelCount = Math.min(v.mips || tex.mips, tex.mips - v.mip);
-      if (v.dim === 9 || (tex.cube && v.dim !== 5)) { d.dimension = 'cube'; d.baseArrayLayer = 0; d.arrayLayerCount = 6; }
+      if (v.dim === 8 || tex.dimension === '3d') { d.dimension = '3d'; }
+      else if (v.dim === 9 || (tex.cube && v.dim !== 5)) { d.dimension = 'cube'; d.baseArrayLayer = 0; d.arrayLayerCount = 6; }
       else if (v.dim === 5) { d.dimension = '2d-array'; d.baseArrayLayer = v.slice; d.arrayLayerCount = Math.min(v.slices, tex.array - v.slice); }
       else { d.dimension = '2d'; d.baseArrayLayer = 0; d.arrayLayerCount = 1; }
     }
@@ -850,7 +864,7 @@ export class GpuExecutor {
       const uav = st.uav[reg];
       const view = uav && this.getView(uav.id);
       if (!declaration || !view || declaration.format !== view.format || declaration.dimension !== view.dim) {
-        this.log(`compute dispatch skipped: UAV u${reg} does not match the shader storage texture`);
+        this.log(`compute dispatch skipped: UAV u${reg} declaration=${JSON.stringify(declaration || null)} view=${JSON.stringify(view && { format: view.format, dimension: view.dim })}`);
         return;
       }
       layoutEntries[3].push({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: {
@@ -999,7 +1013,11 @@ export class GpuExecutor {
     const enc = this.encoder();
     if (d.kind === 'buffer' && s.kind === 'buffer') enc.copyBufferToBuffer(s.gpu, 0, d.gpu, 0, Math.min(s.size, d.size));
     else if (d.kind === 'texture' && s.kind === 'texture') {
-      for (let m = 0; m < Math.min(d.mips, s.mips); m++) enc.copyTextureToTexture({ texture: s.gpu, mipLevel: m }, { texture: d.gpu, mipLevel: m }, { width: Math.max(1, s.width >> m), height: Math.max(1, s.height >> m), depthOrArrayLayers: Math.min(s.array, d.array) });
+      for (let m = 0; m < Math.min(d.mips, s.mips); m++) {
+        const sourceLayers = s.dimension === '3d' ? Math.max(1, s.depth >> m) : s.array;
+        const destLayers = d.dimension === '3d' ? Math.max(1, d.depth >> m) : d.array;
+        enc.copyTextureToTexture({ texture: s.gpu, mipLevel: m }, { texture: d.gpu, mipLevel: m }, { width: Math.max(1, s.width >> m), height: Math.max(1, s.height >> m), depthOrArrayLayers: Math.min(sourceLayers, destLayers) });
+      }
     }
   }
 
@@ -1015,8 +1033,11 @@ export class GpuExecutor {
       return;
     }
     const smip = ssub % s.mips, sslice = Math.floor(ssub / s.mips), dmip = dsub % d.mips, dslice = Math.floor(dsub / d.mips);
-    const box = hasBox ? { l: u(8), t: u(9), r: u(11), b: u(12) } : { l: 0, t: 0, r: Math.max(1, s.width >> smip), b: Math.max(1, s.height >> smip) };
-    this.encoder().copyTextureToTexture({ texture: s.gpu, mipLevel: smip, origin: { x: box.l, y: box.t, z: sslice } }, { texture: d.gpu, mipLevel: dmip, origin: { x: dx, y: dy, z: dslice } }, { width: box.r - box.l, height: box.b - box.t, depthOrArrayLayers: 1 });
+    const box = hasBox ? { l: u(8), t: u(9), f: u(10), r: u(11), b: u(12), back: u(13) } : { l: 0, t: 0, f: 0, r: Math.max(1, s.width >> smip), b: Math.max(1, s.height >> smip), back: s.dimension === '3d' ? Math.max(1, s.depth >> smip) : 1 };
+    const sourceZ = s.dimension === '3d' ? box.f : sslice;
+    const destZ = d.dimension === '3d' ? dz : dslice;
+    const depth = s.dimension === '3d' || d.dimension === '3d' ? box.back - box.f : 1;
+    this.encoder().copyTextureToTexture({ texture: s.gpu, mipLevel: smip, origin: { x: box.l, y: box.t, z: sourceZ } }, { texture: d.gpu, mipLevel: dmip, origin: { x: dx, y: dy, z: destZ } }, { width: box.r - box.l, height: box.b - box.t, depthOrArrayLayers: depth });
   }
 
   generateMips(viewId) {
@@ -1026,6 +1047,10 @@ export class GpuExecutor {
     this.endPass();
     // Simple box-filter chain using the blit pipeline (colour textures only).
     if (isDepth(tex.format) || BLOCK(tex.format)) return;
+    if (tex.dimension === '3d') {
+      this.generateMips3d(tex);
+      return;
+    }
     if (!this.mipPipelines) this.mipPipelines = new Map();
     let pipe = this.mipPipelines.get(tex.format);
     if (!pipe) {
@@ -1043,6 +1068,54 @@ export class GpuExecutor {
         pass.draw(3);
         pass.end();
       }
+    }
+  }
+
+  generateMips3d(tex) {
+    if (tex.format !== 'rgba8unorm' && tex.format !== 'r32float') {
+      this.log(`GenerateMips skipped: 3D ${tex.format} storage textures are unsupported`);
+      return;
+    }
+    if (!this.mip3dPipelines) this.mip3dPipelines = new Map();
+    let pipe = this.mip3dPipelines.get(tex.format);
+    if (!pipe) {
+      const code = `
+        @group(0) @binding(0) var source: texture_3d<f32>;
+        @group(0) @binding(1) var destination: texture_storage_3d<${tex.format}, write>;
+        @compute @workgroup_size(4, 4, 4)
+        fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+          let sourceSize = textureDimensions(source, 0);
+          let destinationSize = max(sourceSize / vec3<u32>(2u), vec3<u32>(1u));
+          if (any(id >= destinationSize)) { return; }
+          let base = id * vec3<u32>(2u);
+          var sum = vec4<f32>(0.0);
+          for (var z = 0u; z < 2u; z++) {
+            for (var y = 0u; y < 2u; y++) {
+              for (var x = 0u; x < 2u; x++) {
+                let coord = min(base + vec3<u32>(x, y, z), sourceSize - vec3<u32>(1u));
+                sum += textureLoad(source, vec3<i32>(coord), 0);
+              }
+            }
+          }
+          textureStore(destination, vec3<i32>(id), sum * 0.125);
+        }
+      `;
+      const module = this.device.createShaderModule({ code });
+      pipe = this.device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+      this.mip3dPipelines.set(tex.format, pipe);
+    }
+    for (let mip = 1; mip < tex.mips; mip++) {
+      const source = tex.gpu.createView({ dimension: '3d', baseMipLevel: mip - 1, mipLevelCount: 1 });
+      const destination = tex.gpu.createView({ dimension: '3d', baseMipLevel: mip, mipLevelCount: 1 });
+      const bindGroup = this.device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: source }, { binding: 1, resource: destination },
+      ] });
+      const pass = this.encoder().beginComputePass();
+      pass.setPipeline(pipe);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(Math.max(1, tex.width >> mip) / 4), Math.ceil(Math.max(1, tex.height >> mip) / 4), Math.ceil(Math.max(1, tex.depth >> mip) / 4));
+      pass.end();
+      this.stats.dispatches++;
     }
   }
 

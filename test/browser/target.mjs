@@ -2,10 +2,11 @@
 // a non-empty frame does not establish correct gameplay or full application acceptance.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { buildPlaythroughPlan } from './target-playthrough.mjs';
 
 const bundlePath = resolve(process.argv[2] || '');
 const options = process.argv.slice(3);
@@ -16,12 +17,24 @@ const checkAim = options.includes('--check-aim');
 const checkFlashlight = options.includes('--check-flashlight');
 const checkMapReset = options.includes('--check-map-reset');
 const checkUav = options.includes('--check-uav');
+const normalWorkerSlices = options.includes('--normal-slices');
+const playthroughArgument = options.find((argument) => argument.startsWith('--playthrough='));
+const pulseMsArgument = options.find((argument) => argument.startsWith('--pulse-ms='));
+const pulseMs = pulseMsArgument ? Number(pulseMsArgument.slice('--pulse-ms='.length)) : 10;
+const playthroughPlan = playthroughArgument
+  ? buildPlaythroughPlan(JSON.parse(readFileSync(playthroughArgument.slice('--playthrough='.length), 'utf8')), { pulseMs })
+  : null;
+if (playthroughPlan && (checkMovement || checkDirections || checkAim || checkFlashlight || checkMapReset)) {
+  throw new Error('--playthrough cannot be combined with the independent input probes');
+}
 if (!process.argv[2] || !existsSync(bundlePath)) {
-  throw new Error('usage: CHROMIUM=<browser> node test/browser/target.mjs <target.awb> [frame.png]');
+  throw new Error('usage: CHROMIUM=<browser> node test/browser/target.mjs <target.awb> [frame.png] [--playthrough=<record.json>]');
 }
 if (!process.env.CHROMIUM) throw new Error('set CHROMIUM to a local Chromium executable');
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const wasmPath = resolve(process.env.TARGET_WASM || resolve(repoRoot, 'web/anywasm_wasm.wasm'));
+if (!existsSync(wasmPath)) throw new Error(`runtime WASM does not exist: ${wasmPath}`);
 const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
 let browser;
 try {
@@ -32,15 +45,18 @@ try {
   page.on('console', (message) => {
     if (message.text().startsWith('[target-probe]')) workerDiagnostics.push(message.text());
   });
+  await page.route('**/anywasm_wasm.wasm', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/wasm', body: readFileSync(wasmPath) });
+  });
   await page.route('**/worker.js', async (route) => {
     const response = await route.fetch();
     const original = await response.text();
     const inputBranch = "else if (m.type === 'input' && w) { w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }";
-    const source = original
-      .replace('w.run(250_000)', 'w.run(1_000_000_000)')
+    const source = (normalWorkerSlices ? original : original.replace('w.run(250_000)', 'w.run(1_000_000_000)'))
       .replace('frames % 30 === 0', 'frames % 1 === 0')
       .replace(inputBranch, "else if (m.type === 'input' && w) { console.log('[target-probe] input ' + m.kind + ':' + m.a + ':' + m.b); w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }");
     assert.notEqual(source, original, 'diagnostic worker overrides should match the current worker');
+    if (normalWorkerSlices) assert.match(source, /w\.run\(250_000\)/, 'normal-slice runs must keep the production worker quota');
     await route.fulfill({ response, body: source, contentType: 'text/javascript' });
   });
 
@@ -53,8 +69,15 @@ try {
   );
   const stats = await page.evaluate(() => window.__gpuStats);
   assert.ok(stats, 'the browser should report a GPU frame before terminating');
-  assert.ok(stats.dispatches > 0, 'the target should execute its compute dispatch');
-  assert.ok(stats.draws > 0, 'the target should submit graphics draws');
+  const startupDiagnostics = await page.evaluate(() => ({
+    status: document.querySelector('#stat')?.textContent,
+    terminal: document.querySelector('#term')?.textContent,
+    workerStatus: document.querySelector('#stat')?.dataset.status,
+  }));
+  assert.ok(stats.dispatches > 0,
+    `the target should execute its compute dispatch: ${JSON.stringify({ stats, startupDiagnostics, workerDiagnostics })}`);
+  assert.ok(stats.draws > 0,
+    `the target should submit graphics draws: ${JSON.stringify({ stats, startupDiagnostics, workerDiagnostics })}`);
   assert.deepEqual(stats.errors, [], 'the target frame should have no WebGPU validation errors');
 
   let uavReadback;
@@ -168,7 +191,103 @@ try {
   };
   let movement;
   let mapReset;
+  let playthroughReplay;
   let inputDiagnostics;
+  if (playthroughPlan) {
+    await page.locator('#screen').focus();
+    const progress = [];
+    let before = result.greenMarker;
+    for (const [index, step] of playthroughPlan.steps.entries()) {
+      const alignment = [];
+      for (const axis of ['x', 'y']) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const error = step.expectedBefore[axis] - before[axis];
+          if (Math.abs(error) <= 1.25) break;
+          const key = axis === 'x' ? (error > 0 ? 'd' : 'a') : (error > 0 ? 's' : 'w');
+          const durationMs = Math.min(100, Math.max(16, Math.round(Math.abs(error) * 21.8)));
+          await page.keyboard.down(key);
+          await page.waitForTimeout(durationMs);
+          await page.keyboard.up(key);
+          await page.waitForTimeout(100);
+          const afterCorrection = (await capturePixels()).greenMarker;
+          assert.ok(afterCorrection, `playthrough alignment ${index}:${axis} should retain the green player marker`);
+          alignment.push({ axis, key, requestedError: error, durationMs, before, after: afterCorrection });
+          before = afterCorrection;
+        }
+      }
+      const segmentBefore = before;
+      for (const key of step.keys) await page.keyboard.down(key);
+      await page.waitForTimeout(step.durationMs);
+      for (const key of [...step.keys].reverse()) await page.keyboard.up(key);
+      await page.waitForTimeout(100);
+
+      const after = (await capturePixels()).greenMarker;
+      assert.ok(after, `playthrough step ${index} should retain the green player marker`);
+      const dx = after.x - segmentBefore.x;
+      const dy = after.y - segmentBefore.y;
+      const expectedDx = step.expectedAfter.x - step.expectedBefore.x;
+      const expectedDy = step.expectedAfter.y - step.expectedBefore.y;
+      const expectedLength = Math.hypot(expectedDx, expectedDy) || 1;
+      progress.push({
+        index,
+        keys: step.keys,
+        pulses: step.pulseCount,
+        durationMs: step.durationMs,
+        alignment,
+        before: segmentBefore,
+        after,
+        delta: { x: dx, y: dy },
+        projectedPixels: (dx * expectedDx + dy * expectedDy) / expectedLength,
+        distanceFromRecordedEnd: Math.hypot(after.x - step.expectedAfter.x, after.y - step.expectedAfter.y),
+      });
+      before = after;
+    }
+
+    const finalDistanceFromStart = Math.hypot(before.x - result.greenMarker.x, before.y - result.greenMarker.y);
+    inputDiagnostics = await page.evaluate(() => ({
+      status: document.querySelector('#stat')?.textContent,
+      gpuStats: window.__gpuStats,
+    }));
+    playthroughReplay = {
+      record: playthroughArgument.slice('--playthrough='.length),
+      pulseMs: playthroughPlan.pulseMs,
+      keyPulses: playthroughPlan.keyPulses,
+      steps: progress.length,
+      totalInputMs: playthroughPlan.steps.reduce((sum, step) => sum + step.durationMs, 0),
+      expectedTeleport: playthroughPlan.teleported,
+      callbackSuspensions: inputDiagnostics.gpuStats?.asyncify,
+      initialMarker: result.greenMarker,
+      finalMarker: before,
+      finalDistanceFromStart,
+      actualTravelPixels: progress.reduce((sum, step) => sum + Math.hypot(step.delta.x, step.delta.y), 0),
+      alignmentTravelPixels: progress.flatMap((step) => step.alignment).reduce((sum, correction) => sum + Math.hypot(correction.after.x - correction.before.x, correction.after.y - correction.before.y), 0),
+      finalSegmentTravelPixels: Math.hypot(progress.at(-1).delta.x, progress.at(-1).delta.y),
+      progress,
+    };
+    const png = await page.evaluate(() => {
+      const p = window.__pixels, canvas = document.createElement('canvas');
+      canvas.width = p.width; canvas.height = p.height;
+      canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(p.data), p.width, p.height), 0, 0);
+      return canvas.toDataURL('image/png').split(',')[1];
+    });
+    writeFileSync(outputPath.replace(/\.png$/i, '.after-playthrough.png'), Buffer.from(png, 'base64'));
+    writeFileSync(outputPath.replace(/\.png$/i, '.playthrough.json'), `${JSON.stringify(playthroughReplay, null, 2)}\n`);
+    if (process.env.REQUIRE_TARGET_PLAYTHROUGH === '1') {
+      assert.ok(playthroughPlan.teleported, 'the stored route should describe a teleporting run');
+      assert.ok(playthroughReplay.actualTravelPixels > 100,
+        `the stored route should move the player through the maze: ${JSON.stringify(playthroughReplay)}`);
+      assert.ok(playthroughReplay.finalSegmentTravelPixels > 100,
+        `the stored route's final step should cross the teleporter: ${JSON.stringify(playthroughReplay)}`);
+      assert.ok(finalDistanceFromStart <= 8,
+        `the stored route should reach the teleport and return the player to its start: ${JSON.stringify(playthroughReplay)}`);
+    }
+    if (process.env.REQUIRE_TARGET_CALLBACK_SUSPENSIONS === '1') {
+      assert.ok(inputDiagnostics.gpuStats?.asyncify?.yields > 0,
+        `the target should suspend guest callbacks at worker slice boundaries: ${JSON.stringify(inputDiagnostics)}`);
+      assert.ok(inputDiagnostics.gpuStats.asyncify.resumes > 0,
+        `the target should resume suspended callbacks on later worker slices: ${JSON.stringify(inputDiagnostics)}`);
+    }
+  }
   if (checkMovement || checkDirections || checkMapReset) {
     assert.ok(result.greenMarker, 'the initial frame should show the green player marker');
     await page.evaluate(() => {
@@ -314,7 +433,7 @@ try {
       `holding the left mouse button should illuminate the maze: ${JSON.stringify(flashlight)}`);
     writeFileSync(outputPath.replace(/\.png$/i, '.flashlight.json'), `${JSON.stringify(flashlight, null, 2)}\n`);
   }
-  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, flashlight, mapReset, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
+  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, flashlight, mapReset, playthrough: playthroughReplay, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
 } finally {
   await browser?.close();
   server.kill();

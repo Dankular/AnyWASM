@@ -66,7 +66,7 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
     const e = w.takeStderr(); if (e.length) postMessage({ type: 'out', stream: 'stderr', text: dec.decode(e) });
     if (status === Status.FRAME) {
       frames++;
-      if (exec && frames % 30 === 0) postMessage({ type: 'gpu', ...exec.stats });
+      if (exec && frames % 30 === 0) postMessage({ type: 'gpu', ...exec.stats, asyncify: w.asyncifyStats });
       const waitStart = performance.now();
       await nextFrame();
       const elapsed100ns = Math.max(0, Math.round((performance.now() - waitStart) * 10_000));
@@ -75,9 +75,10 @@ async function start({ wasm, bundle, canvas, testMode: requestedTestMode, jitMin
     else if (status === Status.RUNNING) await sleep(0);
   }
   const dt = (performance.now() - t0) / 1000;
-  const n = w.instructions();
-  if (exec) postMessage({ type: 'gpu', ...exec.stats });
-  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: terminalMessage || w.message(), instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats });
+  const callbackSuspended = !!w?.callbackSuspended;
+  const n = callbackSuspended ? 0 : w.instructions();
+  if (exec) postMessage({ type: 'gpu', ...exec.stats, asyncify: w?.asyncifyStats });
+  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: callbackSuspended || status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: terminalMessage || (callbackSuspended ? 'stopped with a guest callback suspended' : w.message()), instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats });
 }
 
 onmessage = async (ev) => {

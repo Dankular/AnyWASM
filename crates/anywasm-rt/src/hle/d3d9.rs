@@ -10,10 +10,18 @@ const E_INVALIDARG: u64 = 0x8007_0057;
 const E_OUTOFMEMORY: u64 = 0x8007_000e;
 const D3DERR_INVALIDCALL: u64 = 0x8876_086c;
 const D3DERR_NOTAVAILABLE: u64 = 0x8876_086a;
+const D3DERR_NOTFOUND: u64 = 0x8876_0866;
+const D3DERR_MOREDATA: u64 = 0x8876_0867;
 
 const IID_D3D9: &str = "81bdcbca-64d4-426d-ae8d-ad0147f4275c";
 const IID_D3D9_DEVICE: &str = "d0223b96-bf7a-43fd-92bd-a43b0d82b9eb";
 const IID_D3D9_SURFACE: &str = "0cfbaf3a-9ff6-429a-99b3-a2796af8b89b";
+const IID_D3D9_RESOURCE: &str = "05eec05d-8f7d-4362-b999-d1baf357c704";
+const IID_D3D9_VERTEX_BUFFER: &str = "b64bb1b5-fd70-4df6-bf91-19d0a12455e3";
+const IID_D3D9_INDEX_BUFFER: &str = "7c9dd65e-d3f7-4529-acee-785830acde35";
+const IID_D3D9_VERTEX_DECLARATION: &str = "dd13c59c-36fa-4098-a8fb-c7ed39dc8546";
+const IID_D3D9_VERTEX_SHADER: &str = "efc5557e-6265-4613-8a94-43857889eb36";
+const IID_D3D9_PIXEL_SHADER: &str = "6d3bdbdc-5b02-4415-b852-ce5e8bccb289";
 
 const D3D9_METHODS: &[&str] = &[
     "QueryInterface", "AddRef", "Release", "RegisterSoftwareDevice", "GetAdapterCount",
@@ -33,7 +41,7 @@ const D3D9_DEVICE_METHODS: &[&str] = &[
     "CreateOffscreenPlainSurface", "SetRenderTarget", "GetRenderTarget", "SetDepthStencilSurface",
     "GetDepthStencilSurface", "BeginScene", "EndScene", "Clear", "SetTransform", "GetTransform",
     "MultiplyTransform", "SetViewport", "GetViewport", "SetMaterial", "GetMaterial", "SetLight", "GetLight",
-    "LightEnable", "GetLightEnable", "SetClipPlane", "GetClipPlane", "SetRenderState", "CreateStateBlock",
+    "LightEnable", "GetLightEnable", "SetClipPlane", "GetClipPlane", "SetRenderState", "GetRenderState", "CreateStateBlock",
     "BeginStateBlock", "EndStateBlock", "SetClipStatus", "GetClipStatus", "GetTexture", "SetTexture",
     "GetTextureStageState", "SetTextureStageState", "GetSamplerState", "SetSamplerState", "ValidateDevice",
     "SetPaletteEntries", "GetPaletteEntries", "SetCurrentTexturePalette", "GetCurrentTexturePalette",
@@ -55,6 +63,30 @@ const D3D9_SURFACE_METHODS: &[&str] = &[
     "GetDC", "ReleaseDC",
 ];
 
+const D3D9_RESOURCE_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData", "GetPrivateData",
+    "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType",
+];
+
+const D3D9_VERTEX_BUFFER_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData", "GetPrivateData",
+    "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType", "Lock", "Unlock",
+    "GetDesc",
+];
+
+const D3D9_INDEX_BUFFER_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "SetPrivateData", "GetPrivateData",
+    "FreePrivateData", "SetPriority", "GetPriority", "PreLoad", "GetType", "Lock", "Unlock",
+    "GetDesc",
+];
+
+const D3D9_VERTEX_DECLARATION_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "GetDeclaration",
+];
+const D3D9_SHADER_METHODS: &[&str] = &[
+    "QueryInterface", "AddRef", "Release", "GetDevice", "GetFunction",
+];
+
 pub fn lookup(name: &str) -> Option<HleFn> {
     (name == "Direct3DCreate9").then_some(direct3d_create9)
 }
@@ -63,6 +95,11 @@ pub fn methods(iface: &str) -> Option<&'static [&'static str]> {
         "IDirect3D9" => Some(D3D9_METHODS),
         "IDirect3DDevice9" => Some(D3D9_DEVICE_METHODS),
         "IDirect3DSurface9" => Some(D3D9_SURFACE_METHODS),
+        "IDirect3DResource9" => Some(D3D9_RESOURCE_METHODS),
+        "IDirect3DVertexBuffer9" => Some(D3D9_VERTEX_BUFFER_METHODS),
+        "IDirect3DIndexBuffer9" => Some(D3D9_INDEX_BUFFER_METHODS),
+        "IDirect3DVertexDeclaration9" => Some(D3D9_VERTEX_DECLARATION_METHODS),
+        "IDirect3DVertexShader9" | "IDirect3DPixelShader9" => Some(D3D9_SHADER_METHODS),
         _ => None,
     }
 }
@@ -72,6 +109,12 @@ pub fn iid_name(iid: &str) -> Option<&'static str> {
         IID_D3D9 => Some("IDirect3D9"),
         IID_D3D9_DEVICE => Some("IDirect3DDevice9"),
         IID_D3D9_SURFACE => Some("IDirect3DSurface9"),
+        IID_D3D9_RESOURCE => Some("IDirect3DResource9"),
+        IID_D3D9_VERTEX_BUFFER => Some("IDirect3DVertexBuffer9"),
+        IID_D3D9_INDEX_BUFFER => Some("IDirect3DIndexBuffer9"),
+        IID_D3D9_VERTEX_DECLARATION => Some("IDirect3DVertexDeclaration9"),
+        IID_D3D9_VERTEX_SHADER => Some("IDirect3DVertexShader9"),
+        IID_D3D9_PIXEL_SHADER => Some("IDirect3DPixelShader9"),
         _ => None,
     }
 }
@@ -95,11 +138,22 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirect3DDevice9", "QueryInterface") => 3,
         ("IDirect3DDevice9", "AddRef" | "Release" | "TestCooperativeLevel" | "GetAvailableTextureMem" | "EvictManagedResources" | "GetNumberOfSwapChains" | "BeginScene" | "EndScene") => 1,
         ("IDirect3DDevice9", "GetDirect3D" | "GetDeviceCaps" | "GetFVF" | "GetSoftwareVertexProcessing") => 2,
-        ("IDirect3DDevice9", "GetDisplayMode" | "GetCreationParameters" | "GetRenderTarget" | "GetScissorRect" | "GetViewport" | "GetSwapChain" | "GetStreamSource" | "GetIndices" | "GetVertexShader" | "GetPixelShader") => 3,
+        ("IDirect3DDevice9", "GetDisplayMode" | "GetSwapChain" | "GetRenderTarget") => 3,
+        ("IDirect3DDevice9", "GetCreationParameters" | "GetScissorRect" | "GetViewport" | "GetIndices" | "GetVertexShader" | "GetPixelShader") => 2,
+        ("IDirect3DDevice9", "GetStreamSource") => 5,
         ("IDirect3DDevice9", "GetBackBuffer") => 5,
+        ("IDirect3DDevice9", "CreateDepthStencilSurface") => 9,
+        ("IDirect3DDevice9", "GetDepthStencilSurface" | "SetDepthStencilSurface") => 2,
+        ("IDirect3DDevice9", "CreateVertexBuffer" | "CreateIndexBuffer") => 7,
+        ("IDirect3DDevice9", "CreateVertexDeclaration") => 3,
+        ("IDirect3DDevice9", "CreateVertexShader" | "CreatePixelShader") => 3,
+        ("IDirect3DDevice9", "SetVertexDeclaration" | "GetVertexDeclaration") => 2,
         ("IDirect3DDevice9", "Present") => 5,
         ("IDirect3DDevice9", "Clear") => 7,
-        ("IDirect3DDevice9", "SetRenderTarget" | "SetTexture" | "SetFVF" | "SetVertexShader" | "SetPixelShader" | "SetIndices" | "SetScissorRect" | "SetViewport" | "SetRenderState" | "SetTransform" | "SetSoftwareVertexProcessing") => 3,
+        ("IDirect3DDevice9", "SetRenderTarget" | "SetTexture" | "SetRenderState" | "SetTransform") => 3,
+        ("IDirect3DDevice9", "GetRenderState") => 3,
+        ("IDirect3DDevice9", "SetFVF" | "SetVertexShader" | "SetPixelShader" | "SetIndices" | "SetScissorRect" | "SetViewport" | "SetSoftwareVertexProcessing") => 2,
+        ("IDirect3DDevice9", "SetStreamSource") => 5,
         ("IDirect3DDevice9", "SetTextureStageState" | "SetSamplerState") => 4,
         ("IDirect3DDevice9", "DrawPrimitive") => 4,
         ("IDirect3DDevice9", "DrawPrimitiveUP") => 5,
@@ -107,9 +161,28 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirect3DDevice9", "Reset") => 2,
         ("IDirect3DSurface9", "QueryInterface") => 3,
         ("IDirect3DSurface9", "AddRef" | "Release" | "GetPriority" | "PreLoad" | "GetType") => 1,
-        ("IDirect3DSurface9", "GetDevice" | "GetDesc" | "UnlockRect" | "GetDC") => 2,
+        ("IDirect3DSurface9", "GetDevice" | "GetDesc" | "GetDC") => 2,
+        ("IDirect3DSurface9", "UnlockRect") => 1,
         ("IDirect3DSurface9", "GetContainer") => 3,
         ("IDirect3DSurface9", "LockRect") => 4,
+        ("IDirect3DResource9", "GetDevice") => 2,
+        ("IDirect3DResource9", "SetPrivateData") => 5,
+        ("IDirect3DResource9", "GetPrivateData") => 4,
+        ("IDirect3DResource9", "FreePrivateData") => 2,
+        ("IDirect3DResource9", "SetPriority") => 2,
+        ("IDirect3DResource9", "GetPriority" | "PreLoad" | "GetType") => 1,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetDevice") => 2,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "SetPrivateData") => 5,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetPrivateData") => 4,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "FreePrivateData") => 2,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "SetPriority") => 2,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetPriority" | "PreLoad" | "GetType" | "Unlock") => 1,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "Lock") => 5,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetDesc") => 2,
+        ("IDirect3DVertexDeclaration9", "GetDevice") => 2,
+        ("IDirect3DVertexDeclaration9", "GetDeclaration") => 3,
+        ("IDirect3DVertexShader9" | "IDirect3DPixelShader9", "GetDevice") => 2,
+        ("IDirect3DVertexShader9" | "IDirect3DPixelShader9", "GetFunction") => 3,
         _ => return None,
     };
     Some(count * 4)
@@ -123,7 +196,8 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3D9", "GetAdapterModeCount") => get_adapter_mode_count,
         ("IDirect3D9", "EnumAdapterModes") => enum_adapter_modes,
         ("IDirect3D9", "GetAdapterDisplayMode") => get_adapter_display_mode,
-        ("IDirect3D9", "CheckDeviceType" | "CheckDeviceFormat" | "CheckDeviceMultiSampleType" | "CheckDepthStencilMatch" | "CheckDeviceFormatConversion") => check_device,
+        ("IDirect3D9", "CheckDeviceType" | "CheckDeviceFormat" | "CheckDepthStencilMatch" | "CheckDeviceFormatConversion") => check_device,
+        ("IDirect3D9", "CheckDeviceMultiSampleType") => check_multisample,
         ("IDirect3D9", "GetDeviceCaps") => get_device_caps,
         ("IDirect3D9", "GetAdapterMonitor") => |_| Ok(0),
         ("IDirect3D9", "CreateDevice") => create_device,
@@ -138,15 +212,35 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "Reset") => |_| Ok(S_OK),
         ("IDirect3DDevice9", "Present") => present,
         ("IDirect3DDevice9", "GetBackBuffer") => get_backbuffer,
+        ("IDirect3DDevice9", "CreateDepthStencilSurface") => create_depth_stencil_surface,
+        ("IDirect3DDevice9", "GetDepthStencilSurface") => get_depth_stencil_surface,
+        ("IDirect3DDevice9", "GetStreamSource") => get_stream_source,
+        ("IDirect3DDevice9", "GetIndices") => get_indices,
         ("IDirect3DDevice9", "SetRenderTarget") => set_render_target,
         ("IDirect3DDevice9", "GetRenderTarget") => get_render_target,
+        ("IDirect3DDevice9", "SetDepthStencilSurface") => set_depth_stencil_surface,
+        ("IDirect3DDevice9", "CreateVertexBuffer") => |p| create_buffer9(p, true),
+        ("IDirect3DDevice9", "CreateIndexBuffer") => |p| create_buffer9(p, false),
+        ("IDirect3DDevice9", "CreateVertexDeclaration") => create_vertex_declaration,
+        ("IDirect3DDevice9", "CreateVertexShader") => |p| create_shader9(p, true),
+        ("IDirect3DDevice9", "CreatePixelShader") => |p| create_shader9(p, false),
+        ("IDirect3DDevice9", "SetVertexDeclaration") => set_vertex_declaration,
+        ("IDirect3DDevice9", "GetVertexDeclaration") => get_vertex_declaration,
         ("IDirect3DDevice9", "BeginScene" | "EndScene") => |_| Ok(S_OK),
         ("IDirect3DDevice9", "Clear") => clear,
         ("IDirect3DDevice9", "SetViewport") => set_viewport,
         ("IDirect3DDevice9", "SetScissorRect") => set_scissor_rect,
         ("IDirect3DDevice9", "SetFVF") => set_fvf,
         ("IDirect3DDevice9", "GetFVF") => get_fvf,
-        ("IDirect3DDevice9", "SetTexture" | "SetRenderState" | "SetTransform" | "SetTextureStageState" | "SetSamplerState" | "SetVertexShader" | "SetPixelShader" | "SetVertexShaderConstantF" | "SetPixelShaderConstantF") => |_| Ok(S_OK),
+        ("IDirect3DDevice9", "SetStreamSource") => set_stream_source,
+        ("IDirect3DDevice9", "SetIndices") => set_indices,
+        ("IDirect3DDevice9", "SetRenderState") => set_render_state,
+        ("IDirect3DDevice9", "GetRenderState") => get_render_state,
+        ("IDirect3DDevice9", "SetVertexShader") => |p| set_shader9(p, true),
+        ("IDirect3DDevice9", "SetPixelShader") => |p| set_shader9(p, false),
+        ("IDirect3DDevice9", "GetVertexShader") => |p| get_shader9(p, true),
+        ("IDirect3DDevice9", "GetPixelShader") => |p| get_shader9(p, false),
+        ("IDirect3DDevice9", "SetTexture" | "SetTransform" | "SetTextureStageState" | "SetSamplerState" | "SetVertexShaderConstantF" | "SetPixelShaderConstantF") => |_| Ok(S_OK),
         ("IDirect3DDevice9", "DrawPrimitive") => draw_primitive,
         ("IDirect3DDevice9", "DrawPrimitiveUP") => draw_primitive_up,
         ("IDirect3DDevice9", "DrawIndexedPrimitive") => draw_indexed_primitive,
@@ -157,6 +251,17 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DSurface9", "UnlockRect") => |_| Ok(S_OK),
         ("IDirect3DSurface9", "GetDC") => |_| Ok(E_NOTIMPL),
         ("IDirect3DSurface9", "ReleaseDC") => |_| Ok(S_OK),
+        ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetDevice") => resource_get_device,
+        ("IDirect3DVertexDeclaration9", "GetDevice") => declaration_get_device,
+        ("IDirect3DVertexDeclaration9", "GetDeclaration") => declaration_get_elements,
+        ("IDirect3DVertexShader9" | "IDirect3DPixelShader9", "GetDevice") => shader9_get_device,
+        ("IDirect3DVertexShader9" | "IDirect3DPixelShader9", "GetFunction") => shader9_get_function,
+        ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "SetPriority" | "PreLoad") => |_| Ok(S_OK),
+        ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetPriority") => |_| Ok(0),
+        ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetType") => get_resource_type,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "Lock") => buffer9_lock,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "Unlock") => buffer9_unlock,
+        ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetDesc") => buffer9_get_desc,
         _ => return None,
     })
 }
@@ -166,6 +271,17 @@ fn direct3d_create9(_p: &mut Process) -> R {
 }
 
 fn check_device(_p: &mut Process) -> R {
+    Ok(S_OK)
+}
+
+fn check_multisample(p: &mut Process) -> R {
+    if p.arg(5) != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let quality_levels = p.arg(6);
+    if quality_levels != 0 {
+        p.wr32(quality_levels, 1)?;
+    }
     Ok(S_OK)
 }
 
@@ -298,6 +414,10 @@ fn dxgi_format(d3d: u32) -> u32 {
         22 => 88, // X8R8G8B8 -> B8G8R8X8_UNORM
         23 => 85, // R5G6B5 -> B5G6R5_UNORM
         32 => 28, // A8B8G8R8 -> R8G8B8A8_UNORM
+        71 => 40, // D3DFMT_D32 -> DXGI_FORMAT_D32_FLOAT
+        75 => 45, // D3DFMT_D24S8 -> DXGI_FORMAT_D24_UNORM_S8_UINT
+        77 => 46, // D3DFMT_D24X8 -> DXGI_FORMAT_R24_UNORM_X8_TYPELESS
+        80 => 55, // D3DFMT_D16 -> DXGI_FORMAT_D16_UNORM
         _ => 87,
     }
 }
@@ -327,6 +447,9 @@ fn create_device(p: &mut Process) -> R {
     let height = p.rd32(params + 4)?;
     let format = p.rd32(params + 8)?;
     let buffers = p.rd32(params + 12)?.max(1);
+    let multisample = p.rd32(params + 16)?;
+    let auto_depth = p.rd32(params + 36)? != 0;
+    let auto_depth_format = p.rd32(params + 40)?;
     let hwnd = if p.rd32(params + 28)? != 0 { p.rd32(params + 28)? as u64 } else { focus };
     let fallback = if p.extra.win.main_window != 0 { p.extra.win.main_window } else {
         p.extra.win.windows.iter().find(|(_, w)| w.visible).map(|(h, _)| *h).unwrap_or(0)
@@ -370,14 +493,35 @@ fn create_device(p: &mut Process) -> R {
         fvf: 0,
     });
     p.wrptr(out, device)?;
+    if auto_depth {
+        if multisample != 0 {
+            return Ok(D3DERR_NOTAVAILABLE);
+        }
+        let surface = create_depth_surface(p, device, width, height, auto_depth_format)?;
+        if surface == 0 {
+            return Ok(D3DERR_NOTAVAILABLE);
+        }
+        p.extra.com.d3d9_depth_surfaces.insert(device, surface);
+        bind_depth_surface(p, device, surface)?;
+    }
     if p.trace_imports {
-        p.stderr.extend_from_slice(format!("[d3d9] CreateDevice hwnd={hwnd:#x} size={width}x{height} swapchain={sc_id} device={device:#x}\n").as_bytes());
+        p.stderr.extend_from_slice(format!("[d3d9] CreateDevice hwnd={hwnd:#x} size={width}x{height} auto_depth={auto_depth} depth_format={auto_depth_format} swapchain={sc_id} device={device:#x}\n").as_bytes());
     }
     Ok(S_OK)
 }
 
 fn format_to_d3d(format: u32) -> u32 {
-    match format { 87 => 21, 88 => 22, 85 => 23, 28 => 32, _ => 21 }
+    match format {
+        87 => 21,
+        88 => 22,
+        85 => 23,
+        28 => 32,
+        40 => 71,
+        45 => 75,
+        46 => 77,
+        55 => 80,
+        _ => 21,
+    }
 }
 
 fn device_state(p: &Process, device: u64) -> Option<(u64, u64, u64, u64, u32, u32, u32)> {
@@ -447,6 +591,536 @@ fn create_surface_for_device(p: &mut Process, device: u64) -> Result<u64, Stop> 
     }))
 }
 
+fn create_depth_surface(
+    p: &mut Process,
+    device: u64,
+    width: u32,
+    height: u32,
+    format: u32,
+) -> Result<u64, Stop> {
+    let dxgi = match format {
+        71 => 40, // D3DFMT_D32
+        75 => 45, // D3DFMT_D24S8
+        77 => 46, // D3DFMT_D24X8
+        80 => 55, // D3DFMT_D16
+        _ => return Ok(0),
+    };
+    let texture_id = com::new_res(
+        p,
+        com::ResInfo {
+            width,
+            height,
+            mips: 1,
+            array: 1,
+            format: dxgi,
+            samples: 1,
+            bind: 0x40, // D3D11_BIND_DEPTH_STENCIL
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_TEXTURE2D,
+        Pk::new()
+            .u32(texture_id)
+            .u32(width)
+            .u32(height)
+            .u32(1)
+            .u32(1)
+            .u32(dxgi)
+            .u32(0x40)
+            .u32(0)
+            .u32(1)
+            .u32(0),
+    );
+    let view_id = p.extra.gpu.new_id();
+    p.extra.gpu.emit(
+        op::CREATE_VIEW,
+        Pk::new()
+            .u32(view_id)
+            .u32(1) // DSV
+            .u32(texture_id)
+            .u32(dxgi)
+            .u32(4) // TEXTURE2D
+            .u32(0)
+            .u32(1)
+            .u32(0)
+            .u32(1),
+    );
+    let view = com::create(
+        p,
+        "ID3D11DepthStencilView",
+        com::Kind::View {
+            vk: com::ViewKind::Dsv,
+            id: view_id,
+            resource: texture_id,
+        },
+    );
+    Ok(com::create(
+        p,
+        "IDirect3DSurface9",
+        com::Kind::Direct3DSurface9 {
+            device,
+            texture_id,
+            rtv: view,
+            width,
+            height,
+            format,
+        },
+    ))
+}
+
+fn create_depth_stencil_surface(p: &mut Process) -> R {
+    let (device, width, height, format, multisample, out) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4),
+        p.arg(7),
+    );
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    if width == 0 || height == 0 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if multisample != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let surface = create_depth_surface(p, device, width, height, format)?;
+    if surface == 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    p.wrptr(out, surface)?;
+    Ok(S_OK)
+}
+
+fn create_buffer9(p: &mut Process, vertex: bool) -> R {
+    let (device, length, usage, format_or_fvf, pool, out) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5),
+    );
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    if length == 0 || length > 64 * 1024 * 1024 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if !vertex && !matches!(format_or_fvf, 101 | 102) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let bind = if vertex { 1 } else { 2 };
+    let stride = if vertex { fvf_stride(format_or_fvf).unwrap_or(0) } else { 0 };
+    let id = com::new_res(
+        p,
+        com::ResInfo {
+            is_buffer: true,
+            size: length,
+            format: if vertex { 0 } else { format_or_fvf },
+            usage,
+            bind,
+            cpu: pool,
+            misc: if vertex { format_or_fvf } else { 0 },
+            stride,
+            shadow: vec![0; length as usize],
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_BUFFER,
+        Pk::new().u32(id).u32(length).u32(bind).u32(0).u32(0).u32(stride),
+    );
+    let (iface, kind) = if vertex {
+        (
+            "IDirect3DVertexBuffer9",
+            com::Kind::Direct3DVertexBuffer9 { id, device },
+        )
+    } else {
+        (
+            "IDirect3DIndexBuffer9",
+            com::Kind::Direct3DIndexBuffer9 { id, device },
+        )
+    };
+    let buffer = com::create(p, iface, kind);
+    p.wrptr(out, buffer)?;
+    Ok(S_OK)
+}
+
+fn create_shader9(p: &mut Process, vertex: bool) -> R {
+    let (device, function, out) = (p.arg(0), p.arg(1), p.arg(2));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let Some(function) = read_shader9_function(p, function, vertex) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let iface = if vertex {
+        "IDirect3DVertexShader9"
+    } else {
+        "IDirect3DPixelShader9"
+    };
+    let shader = com::create(
+        p,
+        iface,
+        com::Kind::Direct3DShader9 {
+            device,
+            vertex,
+            function,
+        },
+    );
+    p.wrptr(out, shader)?;
+    Ok(S_OK)
+}
+
+fn read_shader9_function(p: &Process, function: u64, vertex: bool) -> Option<Vec<u8>> {
+    if function == 0 {
+        return None;
+    }
+    const MAX_SHADER_WORDS: usize = 65_536;
+    let version = p.rd32(function).ok()?;
+    let version_type = if vertex { 0xfffe } else { 0xffff };
+    if version >> 16 != version_type {
+        return None;
+    }
+    let major = (version >> 8) & 0xff;
+    let mut bytes = version.to_le_bytes().to_vec();
+    let mut cursor = function.checked_add(4)?;
+    for _ in 1..MAX_SHADER_WORDS {
+        let token = p.rd32(cursor).ok()?;
+        bytes.extend_from_slice(&token.to_le_bytes());
+        cursor = cursor.checked_add(4)?;
+        let opcode = token & 0xffff;
+        if opcode == 0xffff {
+            return Some(bytes);
+        }
+        if opcode == 0xfffe {
+            let comment_words = ((token >> 16) & 0x7fff) as usize;
+            for _ in 0..comment_words {
+                let word = p.rd32(cursor).ok()?;
+                bytes.extend_from_slice(&word.to_le_bytes());
+                cursor = cursor.checked_add(4)?;
+            }
+        } else if major >= 2 {
+            let operand_words = ((token >> 24) & 0xf) as usize;
+            for _ in 0..operand_words {
+                let word = p.rd32(cursor).ok()?;
+                bytes.extend_from_slice(&word.to_le_bytes());
+                cursor = cursor.checked_add(4)?;
+            }
+        }
+    }
+    None
+}
+
+fn set_shader9(p: &mut Process, vertex: bool) -> R {
+    let (device, shader) = (p.arg(0), p.arg(1));
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if shader != 0
+        && !matches!(
+            com::kind_of(p, shader),
+            Some(com::Kind::Direct3DShader9 { vertex: is_vertex, .. }) if is_vertex == vertex
+        )
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if vertex {
+        p.extra.com.d3d9_vertex_shaders.insert(device, shader);
+    } else {
+        p.extra.com.d3d9_pixel_shaders.insert(device, shader);
+    }
+    Ok(S_OK)
+}
+
+fn get_shader9(p: &mut Process, vertex: bool) -> R {
+    let (device, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let shader = if vertex {
+        p.extra.com.d3d9_vertex_shaders.get(&device).copied().unwrap_or(0)
+    } else {
+        p.extra.com.d3d9_pixel_shaders.get(&device).copied().unwrap_or(0)
+    };
+    if shader != 0 {
+        if let Some(object) = p.extra.com.objs.get_mut(&shader) {
+            object.refs = object.refs.saturating_add(1);
+        }
+    }
+    p.wrptr(out, shader)?;
+    Ok(S_OK)
+}
+
+fn shader9_get_device(p: &mut Process) -> R {
+    let (shader, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(com::Kind::Direct3DShader9 { device, .. }) = com::kind_of(p, shader) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    if let Some(object) = p.extra.com.objs.get_mut(&device) {
+        object.refs = object.refs.saturating_add(1);
+    }
+    p.wrptr(out, device)?;
+    Ok(S_OK)
+}
+
+fn shader9_get_function(p: &mut Process) -> R {
+    let (shader, out_data, out_size) = (p.arg(0), p.arg(1), p.arg(2));
+    if out_size == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(com::Kind::Direct3DShader9 { function, .. }) = com::kind_of(p, shader) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let required = function.len() as u32;
+    let available = p.rd32(out_size)?;
+    if out_data == 0 {
+        p.wr32(out_size, required)?;
+        return Ok(S_OK);
+    }
+    if available < required {
+        p.wr32(out_size, required)?;
+        return Ok(D3DERR_MOREDATA);
+    }
+    p.write_bytes(out_data, &function)?;
+    p.wr32(out_size, required)?;
+    Ok(S_OK)
+}
+
+fn d3d9_buffer_id(p: &Process, buffer: u64) -> Option<u32> {
+    match com::kind_of(p, buffer)? {
+        com::Kind::Direct3DVertexBuffer9 { id, .. }
+        | com::Kind::Direct3DIndexBuffer9 { id, .. } => Some(id),
+        _ => None,
+    }
+}
+
+fn buffer9_lock(p: &mut Process) -> R {
+    let (buffer, offset, requested, out, flags) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3),
+        p.arg(4) as u32,
+    );
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    let Some(id) = d3d9_buffer_id(p, buffer) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    let length = if requested == 0 {
+        info.size.saturating_sub(offset)
+    } else {
+        requested
+    };
+    if info.map_addr != 0
+        || offset > info.size
+        || length == 0
+        || offset.checked_add(length).is_none_or(|end| end > info.size)
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let addr = super::kernel32::alloc_block(p, info.size.max(16) as u64, true);
+    if flags & 0x2000 == 0 && !info.shadow.is_empty() {
+        p.write_bytes(addr, &info.shadow)?;
+    }
+    if let Some(resource) = p.extra.com.res.get_mut(&id) {
+        resource.map_addr = addr;
+        resource.map_write = flags & 0x10 == 0; // D3DLOCK_READONLY
+        resource.map_sub = offset;
+    }
+    p.wrptr(out, addr + offset as u64)?;
+    Ok(S_OK)
+}
+
+fn buffer9_unlock(p: &mut Process) -> R {
+    let buffer = p.arg(0);
+    let Some(id) = d3d9_buffer_id(p, buffer) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    if info.map_addr == 0 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if info.map_write {
+        let bytes = p.read_bytes(info.map_addr, info.size as usize)?;
+        if let Some(resource) = p.extra.com.res.get_mut(&id) {
+            resource.shadow = bytes.clone();
+        }
+        p.extra.gpu.emit(
+            op::BUFFER_WRITE,
+            Pk::new().u32(id).u32(0).u32(info.size).bytes(&bytes),
+        );
+    }
+    super::kernel32::free_block(p, info.map_addr);
+    if let Some(resource) = p.extra.com.res.get_mut(&id) {
+        resource.map_addr = 0;
+        resource.map_write = false;
+    }
+    Ok(S_OK)
+}
+
+fn resource_get_device(p: &mut Process) -> R {
+    let (resource, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let device = match com::kind_of(p, resource) {
+        Some(com::Kind::Direct3DVertexBuffer9 { device, .. })
+        | Some(com::Kind::Direct3DIndexBuffer9 { device, .. })
+        | Some(com::Kind::Direct3DSurface9 { device, .. }) => device,
+        _ => return Ok(D3DERR_INVALIDCALL),
+    };
+    if let Some(object) = p.extra.com.objs.get_mut(&device) {
+        object.refs += 1;
+    }
+    p.wrptr(out, device)?;
+    Ok(S_OK)
+}
+
+fn get_resource_type(p: &mut Process) -> R {
+    Ok(match com::kind_of(p, p.arg(0)) {
+        Some(com::Kind::Direct3DVertexBuffer9 { .. }) => 6,
+        Some(com::Kind::Direct3DIndexBuffer9 { .. }) => 7,
+        _ => return Ok(D3DERR_INVALIDCALL),
+    })
+}
+
+fn buffer9_get_desc(p: &mut Process) -> R {
+    let (buffer, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(id) = d3d9_buffer_id(p, buffer) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    let is_vertex = matches!(
+        com::kind_of(p, buffer),
+        Some(com::Kind::Direct3DVertexBuffer9 { .. })
+    );
+    let mut desc = [0u8; 28];
+    let format = if is_vertex { 100 } else { info.format }; // VERTEXDATA for vertex buffers
+    desc[0..4].copy_from_slice(&format.to_le_bytes());
+    desc[4..8].copy_from_slice(&(if is_vertex { 6u32 } else { 7u32 }).to_le_bytes());
+    desc[8..12].copy_from_slice(&info.usage.to_le_bytes());
+    desc[12..16].copy_from_slice(&info.cpu.to_le_bytes());
+    desc[16..20].copy_from_slice(&info.size.to_le_bytes());
+    if is_vertex {
+        desc[20..24].copy_from_slice(&info.misc.to_le_bytes());
+        desc[24..28].copy_from_slice(&info.stride.to_le_bytes());
+    }
+    p.write_bytes(out, &desc)?;
+    Ok(S_OK)
+}
+
+fn set_stream_source(p: &mut Process) -> R {
+    let (device, stream, buffer, offset, stride) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2),
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+    );
+    if stream != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let id = if buffer == 0 {
+        0
+    } else {
+        let Some(com::Kind::Direct3DVertexBuffer9 { id, .. }) = com::kind_of(p, buffer) else {
+            return Ok(D3DERR_INVALIDCALL);
+        };
+        id
+    };
+    p.extra.com.d3d9_stream0.insert(device, (buffer, stride, offset));
+    p.extra.gpu.emit(
+        op::SET_VERTEX_BUFFERS,
+        Pk::new().u32(0).u32(1).u32(id).u32(stride).u32(offset),
+    );
+    Ok(S_OK)
+}
+
+fn get_stream_source(p: &mut Process) -> R {
+    let (device, stream, out_buffer, out_offset, out_stride) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2),
+        p.arg(3),
+        p.arg(4),
+    );
+    if stream != 0 {
+        if out_buffer != 0 { p.wrptr(out_buffer, 0)?; }
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let (buffer, stride, offset) = p.extra.com.d3d9_stream0.get(&device).copied().unwrap_or((0, 0, 0));
+    if out_buffer != 0 {
+        if buffer != 0 {
+            if let Some(object) = p.extra.com.objs.get_mut(&buffer) { object.refs += 1; }
+        }
+        p.wrptr(out_buffer, buffer)?;
+    }
+    if out_offset != 0 { p.wr32(out_offset, offset)?; }
+    if out_stride != 0 { p.wr32(out_stride, stride)?; }
+    Ok(S_OK)
+}
+
+fn set_indices(p: &mut Process) -> R {
+    let (device, buffer) = (p.arg(0), p.arg(1));
+    let (id, format) = if buffer == 0 {
+        (0, 57)
+    } else {
+        let Some(com::Kind::Direct3DIndexBuffer9 { id, .. }) = com::kind_of(p, buffer) else {
+            return Ok(D3DERR_INVALIDCALL);
+        };
+        let d3d_format = p.extra.com.res.get(&id).map(|info| info.format).unwrap_or(101);
+        let format = match d3d_format {
+            101 => 57, // R16_UINT
+            102 => 42, // R32_UINT
+            _ => return Ok(D3DERR_INVALIDCALL),
+        };
+        (id, format)
+    };
+    p.extra.com.d3d9_indices.insert(device, buffer);
+    p.extra.gpu.emit(op::SET_INDEX_BUFFER, Pk::new().u32(id).u32(format).u32(0));
+    Ok(S_OK)
+}
+
+fn get_indices(p: &mut Process) -> R {
+    let (device, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let buffer = p.extra.com.d3d9_indices.get(&device).copied().unwrap_or(0);
+    if buffer != 0 {
+        if let Some(object) = p.extra.com.objs.get_mut(&buffer) { object.refs += 1; }
+    }
+    p.wrptr(out, buffer)?;
+    Ok(S_OK)
+}
+
 fn get_backbuffer(p: &mut Process) -> R {
     let (device, index, out) = (p.arg(0), p.arg(2), p.arg(4));
     if out == 0 { return Ok(E_POINTER); }
@@ -462,6 +1136,86 @@ fn current_render_target(p: &Process, device: u64) -> Option<u64> {
     match o.kind { com::Kind::Direct3DDevice9 { current_rtv, .. } => Some(current_rtv), _ => None }
 }
 
+fn depth_view_id(p: &Process, surface: u64) -> Option<u32> {
+    let com::Kind::Direct3DSurface9 { rtv, .. } = com::kind_of(p, surface)? else {
+        return None;
+    };
+    match com::kind_of(p, rtv)? {
+        com::Kind::View {
+            vk: com::ViewKind::Dsv,
+            id,
+            ..
+        } => Some(id),
+        _ => None,
+    }
+}
+
+fn bind_depth_surface(p: &mut Process, device: u64, surface: u64) -> Result<(), Stop> {
+    if surface == 0 {
+        p.extra.com.d3d9_depth_surfaces.remove(&device);
+    } else {
+        if depth_view_id(p, surface).is_none() {
+            return Ok(());
+        }
+        p.extra.com.d3d9_depth_surfaces.insert(device, surface);
+    }
+    let rtv_id = current_render_target(p, device)
+        .and_then(|rtv| match com::kind_of(p, rtv) {
+            Some(com::Kind::View { id, .. }) => Some(id),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let dsv_id = p
+        .extra
+        .com
+        .d3d9_depth_surfaces
+        .get(&device)
+        .and_then(|surface| depth_view_id(p, *surface))
+        .unwrap_or(0);
+    p.extra
+        .gpu
+        .emit(op::SET_RENDER_TARGETS, Pk::new().u32(1).u32(rtv_id).u32(dsv_id));
+    Ok(())
+}
+
+fn get_depth_stencil_surface(p: &mut Process) -> R {
+    let (device, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let surface = p
+        .extra
+        .com
+        .d3d9_depth_surfaces
+        .get(&device)
+        .copied()
+        .unwrap_or(0);
+    if surface == 0 {
+        p.wrptr(out, 0)?;
+        return Ok(D3DERR_NOTFOUND);
+    }
+    if let Some(object) = p.extra.com.objs.get_mut(&surface) {
+        object.refs += 1;
+    }
+    p.wrptr(out, surface)?;
+    Ok(S_OK)
+}
+
+fn set_depth_stencil_surface(p: &mut Process) -> R {
+    let (device, surface) = (p.arg(0), p.arg(1));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if surface != 0 && depth_view_id(p, surface).is_none() {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    bind_depth_surface(p, device, surface)?;
+    Ok(S_OK)
+}
+
 fn set_render_target(p: &mut Process) -> R {
     let (device, index, surface) = (p.arg(0), p.arg(1), p.arg(2));
     if index != 0 { return Ok(D3DERR_INVALIDCALL); }
@@ -473,7 +1227,14 @@ fn set_render_target(p: &mut Process) -> R {
         if let com::Kind::Direct3DDevice9 { current_rtv, .. } = &mut o.kind { *current_rtv = rtv; }
     }
     let id = match com::kind_of(p, rtv) { Some(com::Kind::View { id, .. }) => id, _ => 0 };
-    p.extra.gpu.emit(op::SET_RENDER_TARGETS, Pk::new().u32(1).u32(id).u32(0));
+    let dsv_id = p
+        .extra
+        .com
+        .d3d9_depth_surfaces
+        .get(&device)
+        .and_then(|surface| depth_view_id(p, *surface))
+        .unwrap_or(0);
+    p.extra.gpu.emit(op::SET_RENDER_TARGETS, Pk::new().u32(1).u32(id).u32(dsv_id));
     Ok(S_OK)
 }
 
@@ -499,16 +1260,31 @@ fn present(p: &mut Process) -> R {
 }
 
 fn clear(p: &mut Process) -> R {
-    let (device, flags, color, depth, stencil) = (p.arg(0), p.arg(3) as u32, p.arg(4) as u32, p.arg(5), p.arg(6) as u32);
+    let (device, flags, color, depth, stencil) = (
+        p.arg(0),
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        f32::from_bits(p.arg(5) as u32),
+        p.arg(6) as u32,
+    );
     let Some(rtv) = current_render_target(p, device) else { return Ok(D3DERR_INVALIDCALL); };
     if flags & 1 != 0 {
         let id = match com::kind_of(p, rtv) { Some(com::Kind::View { id, .. }) => id, _ => 0 };
         let [a, r, g, b] = color.to_be_bytes();
         p.extra.gpu.emit(op::CLEAR_RTV, Pk::new().u32(id).f32(r as f32 / 255.0).f32(g as f32 / 255.0).f32(b as f32 / 255.0).f32(a as f32 / 255.0));
     }
-    if flags & (2 | 4) != 0 && depth != 0 {
-        let id = match com::kind_of(p, depth) { Some(com::Kind::View { id, .. }) => id, _ => 0 };
-        p.extra.gpu.emit(op::CLEAR_DSV, Pk::new().u32(id).u32(((flags & 2 != 0) as u32) | (((flags & 4 != 0) as u32) << 1)).f32(f32::from_bits(p.arg(5) as u32)).u32(stencil));
+    if flags & (2 | 4) != 0 {
+        let dsv = p
+            .extra
+            .com
+            .d3d9_depth_surfaces
+            .get(&device)
+            .copied()
+            .and_then(|surface| depth_view_id(p, surface));
+        if let Some(id) = dsv {
+            let clear_flags = ((flags & 2 != 0) as u32) | (((flags & 4 != 0) as u32) << 1);
+            p.extra.gpu.emit(op::CLEAR_DSV, Pk::new().u32(id).u32(clear_flags).f32(depth).u32(stencil));
+        }
     }
     Ok(S_OK)
 }
@@ -529,11 +1305,45 @@ fn set_scissor_rect(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
-fn set_fvf(p: &mut Process) -> R {
-    let (device, fvf) = (p.arg(0), p.arg(1) as u32);
-    if !matches!(fvf, 0x42 | 0x44) {
+fn set_render_state(p: &mut Process) -> R {
+    let (device, state, value) = (p.arg(0), p.arg(1) as u32, p.arg(2) as u32);
+    if !matches!(com::kind_of(p, device), Some(com::Kind::Direct3DDevice9 { .. })) {
         return Ok(D3DERR_INVALIDCALL);
     }
+    p.extra.com.d3d9_render_states.insert((device, state), value);
+    Ok(S_OK)
+}
+
+fn get_render_state(p: &mut Process) -> R {
+    let (device, state, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let default = match state {
+        7 | 14 | 137 | 141 => 1, // ZENABLE, ZWRITEENABLE, LIGHTING, COLORVERTEX
+        22 => 3,                 // CULL_CCW
+        _ => 0,
+    };
+    let value = p
+        .extra
+        .com
+        .d3d9_render_states
+        .get(&(device, state))
+        .copied()
+        .unwrap_or(default);
+    p.wr32(out, value)?;
+    Ok(S_OK)
+}
+
+fn set_fvf(p: &mut Process) -> R {
+    let (device, fvf) = (p.arg(0), p.arg(1) as u32);
+    if !matches!(fvf, 0x42 | 0x44 | 0x142 | 0x144) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    apply_fvf(p, device, fvf)
+}
+
+fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
     let Some((_, _, _, _, width, height, _)) = device_state(p, device) else {
         return Ok(D3DERR_INVALIDCALL);
     };
@@ -541,6 +1351,174 @@ fn set_fvf(p: &mut Process) -> R {
         if let com::Kind::Direct3DDevice9 { fvf: current, .. } = &mut o.kind { *current = fvf; }
     }
     p.extra.gpu.emit(op::SET_FIXED_FUNCTION, Pk::new().u32(fvf).u32(width).u32(height));
+    Ok(S_OK)
+}
+
+fn declaration_fvf(p: &Process, address: u64) -> Result<Option<(u32, Vec<u8>)>, Stop> {
+    if address == 0 {
+        return Ok(None);
+    }
+    let mut elements = Vec::new();
+    let (mut position, mut color, mut texcoord) = (0u32, false, false);
+    let mut terminated = false;
+    for index in 0..64u64 {
+        let bytes = p.read_bytes(address + index * 8, 8)?;
+        let stream = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let offset = u16::from_le_bytes([bytes[2], bytes[3]]) as u32;
+        let kind = bytes[4];
+        let method = bytes[5];
+        let usage = bytes[6];
+        let usage_index = bytes[7];
+        elements.extend_from_slice(&bytes);
+        if stream == 0x00ff && kind == 17 {
+            terminated = true;
+            break;
+        }
+        if stream != 0 || method != 0 {
+            return Ok(None);
+        }
+        let element_size = match kind {
+            0 | 5 | 6 | 8 | 9 | 11 | 13 | 14 | 15 => 4,
+            1 | 7 | 10 | 12 | 16 => 8,
+            2 => 12,
+            3 => 16,
+            4 => 4,
+            _ => return Ok(None),
+        };
+        match usage {
+            0 if kind == 2 => position = 0x02, // POSITION / FLOAT3 => XYZ
+            9 if kind == 3 => position = 0x04, // POSITIONT / FLOAT4 => XYZRHW
+            10 if kind == 4 && usage_index == 0 => color = true,
+            5 if kind == 1 && usage_index == 0 => texcoord = true,
+            _ => return Ok(None),
+        }
+        let _end = offset.saturating_add(element_size);
+    }
+    if !terminated || position == 0 || !color {
+        return Ok(None);
+    }
+    let fvf = position | 0x40 | if texcoord { 0x100 } else { 0 };
+    if fvf_stride(fvf).is_none() {
+        return Ok(None);
+    }
+    Ok(Some((fvf, elements)))
+}
+
+fn create_vertex_declaration(p: &mut Process) -> R {
+    let (device, elements, out) = (p.arg(0), p.arg(1), p.arg(2));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    let Some((fvf, elements)) = declaration_fvf(p, elements)? else {
+        if p.trace_modules_only {
+            let bytes = p.read_bytes(elements, 64).unwrap_or_default();
+            let bytes = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
+            p.stderr.extend_from_slice(
+                format!("[d3d9-declaration-rejected] elements={elements:#x} bytes=[{bytes}]\n").as_bytes(),
+            );
+        }
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let declaration = com::create(
+        p,
+        "IDirect3DVertexDeclaration9",
+        com::Kind::Direct3DVertexDeclaration9 {
+            device,
+            fvf,
+            elements,
+        },
+    );
+    p.wrptr(out, declaration)?;
+    Ok(S_OK)
+}
+
+fn set_vertex_declaration(p: &mut Process) -> R {
+    let (device, declaration) = (p.arg(0), p.arg(1));
+    let Some(com::Kind::Direct3DDevice9 { .. }) = com::kind_of(p, device) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    if declaration == 0 {
+        p.extra.com.d3d9_vertex_declarations.remove(&device);
+        return apply_fvf(p, device, 0);
+    }
+    let (declaration, fvf) = match com::kind_of(p, declaration) {
+        Some(com::Kind::Direct3DVertexDeclaration9 { fvf, .. }) => (declaration, fvf),
+        _ => {
+            let Some((fvf, elements)) = declaration_fvf(p, declaration)? else {
+                return Ok(D3DERR_INVALIDCALL);
+            };
+            let declaration = com::create(
+                p,
+                "IDirect3DVertexDeclaration9",
+                com::Kind::Direct3DVertexDeclaration9 {
+                    device,
+                    fvf,
+                    elements,
+                },
+            );
+            (declaration, fvf)
+        }
+    };
+    p.extra.com.d3d9_vertex_declarations.insert(device, declaration);
+    apply_fvf(p, device, fvf)
+}
+
+fn get_vertex_declaration(p: &mut Process) -> R {
+    let (device, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let declaration = p
+        .extra
+        .com
+        .d3d9_vertex_declarations
+        .get(&device)
+        .copied()
+        .unwrap_or(0);
+    if declaration != 0 {
+        if let Some(object) = p.extra.com.objs.get_mut(&declaration) {
+            object.refs += 1;
+        }
+    }
+    p.wrptr(out, declaration)?;
+    Ok(S_OK)
+}
+
+fn declaration_get_device(p: &mut Process) -> R {
+    let (declaration, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(com::Kind::Direct3DVertexDeclaration9 { device, .. }) =
+        com::kind_of(p, declaration)
+    else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    if let Some(object) = p.extra.com.objs.get_mut(&device) {
+        object.refs += 1;
+    }
+    p.wrptr(out, device)?;
+    Ok(S_OK)
+}
+
+fn declaration_get_elements(p: &mut Process) -> R {
+    let (declaration, elements_out, count_out) = (p.arg(0), p.arg(1), p.arg(2));
+    if count_out == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(com::Kind::Direct3DVertexDeclaration9 { elements, .. }) =
+        com::kind_of(p, declaration)
+    else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let count = (elements.len() / 8) as u32;
+    if elements_out != 0 {
+        let capacity = p.rd32(count_out)? as usize;
+        let bytes = (capacity.min(count as usize)).saturating_mul(8);
+        p.write_bytes(elements_out, &elements[..bytes])?;
+    }
+    p.wr32(count_out, count)?;
     Ok(S_OK)
 }
 
@@ -625,6 +1603,8 @@ fn fvf_stride(fvf: u32) -> Option<u32> {
     match fvf {
         0x42 => Some(16), // XYZ + D3DCOLOR
         0x44 => Some(20), // XYZRHW + D3DCOLOR
+        0x142 => Some(24), // XYZ + D3DCOLOR + TEX1
+        0x144 => Some(28), // XYZRHW + D3DCOLOR + TEX1
         _ => None,
     }
 }
@@ -641,11 +1621,11 @@ fn surface_get_desc(p: &mut Process) -> R {
     let (surface, out) = (p.arg(0), p.arg(1));
     if out == 0 { return Ok(E_POINTER); }
     let Some(com::Kind::Direct3DSurface9 { width,height,format,.. }) = com::kind_of(p, surface) else { return Ok(D3DERR_INVALIDCALL); };
-    let mut data = [0u8; 32];
+    let mut data = [0u8; 36];
     data[0..4].copy_from_slice(&format.to_le_bytes());
     data[4..8].copy_from_slice(&1u32.to_le_bytes());
-    data[24..28].copy_from_slice(&width.to_le_bytes());
-    data[28..32].copy_from_slice(&height.to_le_bytes());
+    data[28..32].copy_from_slice(&width.to_le_bytes());
+    data[32..36].copy_from_slice(&height.to_le_bytes());
     p.write_bytes(out, &data)?;
     Ok(S_OK)
 }

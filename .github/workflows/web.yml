@@ -12,9 +12,12 @@ jobs:
     - uses: actions/checkout@v4
     - name: Add wasm target
       run: rustup target add wasm32-unknown-unknown
+    - name: Install WASM postprocessor
+      run: npm ci
     - name: Build wasm module and CLI
       run: |
         cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
+        node scripts/asyncify-wasm.mjs
         cargo build -p anywasm-cli
     - name: Run executables through the WASM build under Node
       run: node test/wasm_smoke.mjs

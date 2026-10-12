@@ -3,8 +3,8 @@
 //! One process per module instance. Typical host sequence:
 //! `aw_alloc` -> copy bundle bytes in -> `aw_load` -> loop `aw_run(steps)` while it returns 0,
 //! draining `aw_stdout_*` / `aw_stderr_*` between calls.
-//! The module imports `anywasm.run_emitted_block`; `web/anywasm.js` supplies the host trampoline
-//! that compiles emitted blocks against this module's exported memory.
+//! The module imports `anywasm.run_emitted_block` and `anywasm.yield_slice`; `web/anywasm.js`
+//! supplies the JIT trampoline and resumes Asyncify-suspended guest callbacks between slices.
 //!
 //! Status codes from `aw_run`: 0 running (step budget used), 1 exited, 2 stopped at an
 //! unimplemented import, 3 guest crash, 4 a frame was presented (drain the GPU stream, then call
@@ -186,9 +186,7 @@ buf_api!(aw_gpu_ptr, aw_gpu_len, aw_gpu_clear, gpu);
 #[no_mangle]
 pub extern "C" fn aw_input(kind: u32, a: i64, b: i64, c: i64) {
     if let Some(s) = state() {
-        if let Err(stop) = anywasm_rt::hle::user32::input_event(&mut s.p, kind, a, b, c) {
-            s.pending_stop = Some(stop);
-        }
+        s.p.queue_input_event(kind, a, b, c);
     }
 }
 

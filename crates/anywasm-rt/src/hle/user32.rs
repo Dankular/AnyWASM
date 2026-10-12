@@ -1205,7 +1205,14 @@ pub fn send(p: &mut Process, hwnd: u64, msg: u64, wparam: u64, lparam: u64) -> R
     if wndproc == 0 {
         return def_window_proc(p, hwnd, msg, wparam, lparam);
     }
-    p.call_guest(wndproc, &[hwnd, msg, wparam, lparam])
+    let result = p.call_guest(wndproc, &[hwnd, msg, wparam, lparam])?;
+    if p.trace_modules_only {
+        p.stderr.extend_from_slice(
+            format!("[wnd-message] hwnd={hwnd:#x} msg={msg:#x} wparam={wparam:#x} lparam={lparam:#x} result={result:#x}\n")
+                .as_bytes(),
+        );
+    }
+    Ok(result)
 }
 
 fn post(p: &mut Process, hwnd: u64, msg: u64, wparam: u64, lparam: u64) {

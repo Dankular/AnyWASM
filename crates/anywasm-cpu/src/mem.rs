@@ -43,6 +43,36 @@ const L_SIZE: usize = 1 << L_BITS;
 type Slot = u64;
 const PRESENT: u64 = 1;
 
+/// Stable translation-cache entry shared with the wasm32 emitted-block fast path.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct TlbEntry {
+    pub page: u64,
+    pub offset: u64,
+    pub prot: u8,
+}
+
+impl TlbEntry {
+    const INVALID: Self = Self {
+        page: u64::MAX,
+        offset: 0,
+        prot: 0,
+    };
+}
+
+const _: [(); 24] = [(); std::mem::size_of::<TlbEntry>()];
+const _: [(); 0] = [(); std::mem::offset_of!(TlbEntry, page)];
+const _: [(); 8] = [(); std::mem::offset_of!(TlbEntry, offset)];
+const _: [(); 16] = [(); std::mem::offset_of!(TlbEntry, prot)];
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct JitMemoryView {
+    pub frames: u32,
+    pub frames_len: u32,
+    pub tlb_read: u32,
+    pub tlb_write: u32,
+}
+
 struct Leaf(Box<[Slot; L_SIZE]>);
 struct Mid(Vec<Option<Leaf>>);
 
@@ -54,9 +84,9 @@ pub struct Memory {
     /// Bumped on every write to a page that has ever been fetched from (self-modifying code
     /// detection for future translation caches) and on every protection change.
     pub code_epoch: u64,
-    // Software TLB: (page number, frame byte offset) per access kind; u64::MAX = invalid.
-    tlb_r: Cell<(u64, usize)>,
-    tlb_w: Cell<(u64, usize)>,
+    // One-entry software TLB per access kind; the entry layout is also read by emitted WASM.
+    tlb_r: Cell<TlbEntry>,
+    tlb_w: Cell<TlbEntry>,
     /// Number of mapped pages that currently have PROT_X (0 lets writes skip SMC tracking).
     exec_page_count: u64,
 }
@@ -86,8 +116,8 @@ impl Memory {
             free_frames: Vec::new(),
             pages_mapped: 0,
             code_epoch: 0,
-            tlb_r: Cell::new((u64::MAX, 0)),
-            tlb_w: Cell::new((u64::MAX, 0)),
+            tlb_r: Cell::new(TlbEntry::INVALID),
+            tlb_w: Cell::new(TlbEntry::INVALID),
             exec_page_count: 0,
         }
     }
@@ -97,8 +127,8 @@ impl Memory {
     }
 
     fn flush_tlb(&self) {
-        self.tlb_r.set((u64::MAX, 0));
-        self.tlb_w.set((u64::MAX, 0));
+        self.tlb_r.set(TlbEntry::INVALID);
+        self.tlb_w.set(TlbEntry::INVALID);
     }
 
     fn slot(&self, page: u64) -> Option<Slot> {
@@ -140,7 +170,8 @@ impl Memory {
             return f;
         }
         let f = (self.frames.len() / PAGE_SIZE as usize) as u32;
-        self.frames.resize(self.frames.len() + PAGE_SIZE as usize, 0);
+        self.frames
+            .resize(self.frames.len() + PAGE_SIZE as usize, 0);
         f
     }
 
@@ -249,11 +280,15 @@ impl Memory {
             Access::Write => &self.tlb_w,
             _ => &self.tlb_r,
         };
-        let (tp, to) = tlb.get();
-        if tp == page && acc != Access::Exec {
-            return Ok(to + (addr & PAGE_MASK) as usize);
+        let cached = tlb.get();
+        if cached.page == page && acc != Access::Exec {
+            return Ok(cached.offset as usize + (addr & PAGE_MASK) as usize);
         }
-        let s = self.slot(page).ok_or(Fault { addr, access: acc, protection: false })?;
+        let s = self.slot(page).ok_or(Fault {
+            addr,
+            access: acc,
+            protection: false,
+        })?;
         let prot = ((s >> 1) & 7) as u8;
         let need = match acc {
             Access::Read => PROT_R,
@@ -263,13 +298,33 @@ impl Memory {
         // Reads are allowed from executable pages (no execute-only pages in practice).
         let ok = prot & need != 0 || (acc == Access::Read && prot & PROT_X != 0);
         if !ok {
-            return Err(Fault { addr, access: acc, protection: true });
+            return Err(Fault {
+                addr,
+                access: acc,
+                protection: true,
+            });
         }
         let off = (s >> 32) as usize * PAGE_SIZE as usize;
         if acc != Access::Exec {
-            tlb.set((page, off));
+            tlb.set(TlbEntry {
+                page,
+                offset: off as u64,
+                prot,
+            });
         }
         Ok(off + (addr & PAGE_MASK) as usize)
+    }
+
+    /// Pointers needed by emitted modules. The caller must keep this `Memory` borrowed for the
+    /// complete synchronous module execution so the backing vector cannot be reallocated.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn jit_view(&mut self) -> JitMemoryView {
+        JitMemoryView {
+            frames: self.frames.as_mut_ptr() as usize as u32,
+            frames_len: self.frames.len() as u32,
+            tlb_read: self.tlb_r.as_ptr() as usize as u32,
+            tlb_write: self.tlb_w.as_ptr() as usize as u32,
+        }
     }
 
     // ── byte-granular access ─────────────────────────────────────────────────
@@ -295,7 +350,11 @@ impl Memory {
             let off = self.translate(a, Access::Write)?;
             let n = ((PAGE_SIZE - (a & PAGE_MASK)) as usize).min(src.len() - done);
             self.frames[off..off + n].copy_from_slice(&src[done..done + n]);
-            if self.exec_page_count != 0 && self.slot(a >> 12).is_some_and(|s| (s >> 1) & PROT_X as u64 != 0) {
+            if self.exec_page_count != 0
+                && self
+                    .slot(a >> 12)
+                    .is_some_and(|s| (s >> 1) & PROT_X as u64 != 0)
+            {
                 self.code_epoch += 1;
             }
             done += n;
@@ -309,7 +368,11 @@ impl Memory {
         let mut a = addr;
         let mut done = 0;
         while done < src.len() {
-            let s = self.slot(a >> 12).ok_or(Fault { addr: a, access: Access::Write, protection: false })?;
+            let s = self.slot(a >> 12).ok_or(Fault {
+                addr: a,
+                access: Access::Write,
+                protection: false,
+            })?;
             let off = (s >> 32) as usize * PAGE_SIZE as usize + (a & PAGE_MASK) as usize;
             let n = ((PAGE_SIZE - (a & PAGE_MASK)) as usize).min(src.len() - done);
             self.frames[off..off + n].copy_from_slice(&src[done..done + n]);
@@ -412,7 +475,11 @@ impl Memory {
         if (a & PAGE_MASK) as usize + b.len() <= PAGE_SIZE as usize {
             let o = self.translate(a, Access::Write)?;
             self.frames[o..o + b.len()].copy_from_slice(b);
-            if self.exec_page_count != 0 && self.slot(a >> 12).is_some_and(|s| (s >> 1) & PROT_X as u64 != 0) {
+            if self.exec_page_count != 0
+                && self
+                    .slot(a >> 12)
+                    .is_some_and(|s| (s >> 1) & PROT_X as u64 != 0)
+            {
                 self.code_epoch += 1;
             }
             Ok(())
@@ -450,13 +517,23 @@ mod tests {
         m.write_u64(0x1_4000_0ffc, 0x1122_3344_5566_7788).unwrap(); // crosses a page
         assert_eq!(m.read_u64(0x1_4000_0ffc).unwrap(), 0x1122_3344_5566_7788);
         assert_eq!(m.read_u8(0x1_4000_1000).unwrap(), 0x44);
-        assert_eq!(m.read_u128(0x1_4000_0ff8).unwrap() >> 32 & 0xffff_ffff_ffff_ffff, 0x1122_3344_5566_7788);
+        assert_eq!(
+            m.read_u128(0x1_4000_0ff8).unwrap() >> 32 & 0xffff_ffff_ffff_ffff,
+            0x1122_3344_5566_7788
+        );
     }
 
     #[test]
     fn faults() {
         let mut m = Memory::new();
-        assert_eq!(m.read_u8(0x1000), Err(Fault { addr: 0x1000, access: Access::Read, protection: false }));
+        assert_eq!(
+            m.read_u8(0x1000),
+            Err(Fault {
+                addr: 0x1000,
+                access: Access::Read,
+                protection: false
+            })
+        );
         m.map(0x1000, 0x1000, PROT_R);
         assert!(m.write_u8(0x1000, 1).unwrap_err().protection);
         let mut b = [0u8; 15];

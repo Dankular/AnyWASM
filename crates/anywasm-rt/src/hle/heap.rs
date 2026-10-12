@@ -13,6 +13,10 @@ pub struct Heap {
 
 pub const HEAP_REGION: u64 = 0x3000_0000;
 const CHUNK: u64 = 4 << 20;
+// Keep enough mapped headroom before every payload for Win32 guest code that uses a
+// one-element sentinel at `buffer - 1`. Without block overhead, that access aliases the
+// previous allocation because this heap otherwise packs guest payloads back-to-back.
+const BLOCK_PREFIX: u64 = 0x30;
 
 impl Heap {
     pub fn new() -> Self {
@@ -33,8 +37,9 @@ impl Heap {
             self.bytes_in_use += k;
             return Some(a);
         }
-        if self.cur + sz > self.cur_end {
-            let want = sz.max(CHUNK);
+        let reservation = BLOCK_PREFIX + sz;
+        if self.cur + reservation > self.cur_end {
+            let want = reservation.max(CHUNK);
             let want = (want + 0xfff) & !0xfff;
             if !map(self.chunk_next, want) {
                 return None;
@@ -43,8 +48,8 @@ impl Heap {
             self.cur_end = self.chunk_next + want;
             self.chunk_next += want + 0x1000; // guard gap
         }
-        let a = self.cur;
-        self.cur += sz;
+        let a = self.cur + BLOCK_PREFIX;
+        self.cur += reservation;
         self.sizes.insert(a, sz);
         self.bytes_in_use += sz;
         Some(a)

@@ -131,7 +131,7 @@ try {
   check('Chrome executes opt-in emitted blocks including register-register MOVs',
     jitBrowser.emitted.status === jitBrowser.exited && jitBrowser.emitted.exitCode === 0 &&
       jitBrowser.emitted.jitStats.executions > 0 && jitBrowser.emitted.jitStats.registerRegisterHits > 0 &&
-      jitBrowser.emitted.jitStats.fallbacks === 0 && jitBrowser.emitted.out.includes('primes<20000=2262') &&
+      jitBrowser.emitted.jitStats.fallbacks === 1 && jitBrowser.emitted.out.includes('primes<20000=2262') &&
       jitBrowser.emitted.out.includes('fp=609') && jitBrowser.emitted.out.includes('gpa=ok'),
     JSON.stringify(jitBrowser.emitted));
   check('Chrome cached-only run matches emitted output and retired count',
@@ -145,7 +145,8 @@ try {
       jitBrowser.afterGrowth.bytesAfter === jitBrowser.afterGrowth.bytesBefore + 65_536 &&
       jitBrowser.afterGrowth.executionsBeforeGrowth > 0 &&
       jitBrowser.afterGrowth.jitStats.executions > jitBrowser.afterGrowth.executionsBeforeGrowth &&
-      jitBrowser.afterGrowth.jitStats.fallbacks === 0 && jitBrowser.afterGrowth.out === jitBrowser.emitted.out &&
+      jitBrowser.afterGrowth.jitStats.fallbacks === jitBrowser.emitted.jitStats.fallbacks &&
+      jitBrowser.afterGrowth.out === jitBrowser.emitted.out &&
       jitBrowser.afterGrowth.err === jitBrowser.emitted.err && jitBrowser.afterGrowth.instr === jitBrowser.emitted.instr,
     JSON.stringify(jitBrowser.afterGrowth));
 
@@ -173,10 +174,11 @@ try {
       worker.terminate();
     }
   }, computeBytes);
-  check('Chrome worker executes opt-in emitted blocks without fallback',
+  check('Chrome worker executes opt-in emitted blocks without an additional fallback',
     workerJit.status === jitBrowser.exited && workerJit.exitCode === 0 &&
       workerJit.jitStats?.executions > 0 && workerJit.jitStats?.registerRegisterHits > 0 &&
-      workerJit.jitStats?.fallbacks === 0 && workerJit.out.includes('primes<20000=2262') &&
+      workerJit.jitStats?.fallbacks === jitBrowser.emitted.jitStats.fallbacks &&
+      workerJit.out.includes('primes<20000=2262') &&
       workerJit.out.includes('fp=609') && workerJit.out.includes('gpa=ok'),
     JSON.stringify(workerJit));
   check('Chrome worker output and retired count match page-realm emitted execution',
@@ -194,15 +196,15 @@ try {
       return { ...result, instructions: runtime.instructions(), retired: runtime.retiredInstructions(), jitStats: runtime.jitStats };
     };
     return {
-      emitted: await run({ jitMinPrefix: 7 }),
+      emitted: await run({ jitMinPrefix: 3 }),
       cached: await run({}),
       exited: Status.EXITED,
     };
   }, Array.from(readFileSync(jitStateBundle)));
-  check('Chrome emits a branch-target NOP and six MOVs as one seven-instruction prefix',
+  check('Chrome emits warmed memory and direct JMP/Jcc exits, then falls back on a cold TLB page',
     jitStateBrowser.emitted.status === jitStateBrowser.exited && jitStateBrowser.emitted.exitCode === 0 &&
-      jitStateBrowser.emitted.jitStats.compilations === 1 && jitStateBrowser.emitted.jitStats.executions === 1 &&
-      jitStateBrowser.emitted.jitStats.registerRegisterHits === 1 && jitStateBrowser.emitted.jitStats.fallbacks === 0,
+      jitStateBrowser.emitted.jitStats.compilations === 4 && jitStateBrowser.emitted.jitStats.executions === 3 &&
+      jitStateBrowser.emitted.jitStats.registerRegisterHits === 3 && jitStateBrowser.emitted.jitStats.fallbacks === 1,
     JSON.stringify(jitStateBrowser.emitted));
   check('Chrome NOP/MOV prefix matches cached-only status and retired count',
     jitStateBrowser.cached.status === jitStateBrowser.emitted.status &&
@@ -373,6 +375,75 @@ try {
   check('CopyResource exposes the source red texel in quad D', near(at2(32, 150), RED, 1), JSON.stringify(at2(32, 150)));
   check('buffer CopyResource exposes the red quad at its copied vertex-buffer position', near(at2(604, 150), RED, 1), JSON.stringify(at2(604, 150)));
 
+  const indexCopyResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        float4 main() : SV_Target { return float4(0.25, 0.5, 1.0, 1.0); }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(2, words(11, 12, 0, 0x40, 0, 0, 0)); // source R32_UINT index buffer
+      command(2, words(12, 12, 0, 0x40, 0, 0, 0)); // destination R32_UINT index buffer
+      const indices = new Uint8Array(12), indexData = new DataView(indices.buffer);
+      [0, 1, 2].forEach((value, i) => indexData.setUint32(i * 4, value, true));
+      const write = new Uint8Array(12 + indices.length);
+      write.set(words(11, 0, indices.length)); write.set(indices, 12); command(3, write);
+      command(33, words(12, 11)); // CopyResource destination <- source
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(21, words(1, 2, 0)); command(16, words(4));
+      command(14, words(12, 42, 0)); // R32_UINT index buffer
+      command(30, words(3, 0, 0)); gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('index-buffer CopyResource preserves a drawable R32_UINT triangle',
+    indexCopyResult.draws === 1 && indexCopyResult.errors.length === 0
+      && near(indexCopyResult.pixel, [64, 128, 255, 255], 1),
+    JSON.stringify(indexCopyResult));
+
   const copyRegionResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
@@ -503,6 +574,39 @@ try {
   check('linear mip filtering blends LOD 0 and 1 at fractional LOD 0.5',
     near(copyRegionResult.trilinear, [159, 0, 0, 255], 2) && copyRegionResult.errors.length === 0,
     JSON.stringify({ pixel: copyRegionResult.trilinear, errors: copyRegionResult.errors }));
+
+  const anisotropicSamplerResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const desc = new DataView(new ArrayBuffer(52));
+      desc.setUint32(0, 0x55, true); // D3D11_FILTER_ANISOTROPIC
+      desc.setUint32(4, 3, true); desc.setUint32(8, 3, true); desc.setUint32(12, 3, true);
+      desc.setFloat32(16, 0, true); desc.setUint32(20, 8, true); desc.setUint32(24, 8, true);
+      desc.setFloat32(44, 0, true); desc.setFloat32(48, 8, true);
+      gpu.device.pushErrorScope('validation');
+      const sampler = gpu.makeSampler(desc);
+      const validation = await gpu.device.popErrorScope();
+      const result = {
+        maxAnisotropy: sampler.maxAnisotropy,
+        validation: validation?.message || null,
+        errors: gpu.stats.errors,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 anisotropic sampler requests the configured 8x filtering without validation errors',
+    anisotropicSamplerResult.maxAnisotropy === 8 && !anisotropicSamplerResult.validation
+      && anisotropicSamplerResult.errors?.length === 0,
+    JSON.stringify(anisotropicSamplerResult));
 
   const d3d9FixedResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
@@ -1808,6 +1912,252 @@ try {
       && near(constantRangeResult.packed, [64, 128, 191, 255], 1)
       && near(constantRangeResult.aligned, [255, 255, 0, 255], 1),
     JSON.stringify(constantRangeResult));
+
+  const texture3dResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture3D<float4> volume : register(t0);
+        SamplerState volumeSampler : register(s0);
+        float4 main() : SV_Target { return volume.SampleLevel(volumeSampler, float3(0.5, 0.5, 0.99), 0.0); }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(46, words(3, 4, 4, 2, 1, 28, 0x8, 0, 0)); // 4x4x2 volume texture
+      command(46, words(9, 4, 4, 2, 1, 28, 0x8, 0, 0)); // Copy destination
+      command(12, words(5, 2, 9, 28, 8, 0, 1, 0, 1)); // Texture3D SRV on the copy
+      const uploadSlice = (z, rgba) => {
+        const texels = new Uint8Array(64);
+        for (let i = 0; i < 16; i++) texels.set(rgba, i * 4);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(3, 0, z, 0, 0, 4, 4, 16, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      };
+      uploadSlice(0, [255, 0, 0, 255]); uploadSlice(1, [0, 255, 0, 255]);
+      command(33, words(9, 3)); // CopyResource preserves the volume slices
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
+      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 2, true); command(8, sampler);
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
+      command(29, words(3, 0)); gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 Texture3D CopyResource preserves slices for SRV sampling',
+    texture3dResult.draws === 1 && texture3dResult.errors.length === 0
+      && near(texture3dResult.pixel, [0, 255, 0, 255], 1),
+    JSON.stringify(texture3dResult));
+
+  const texture3dMipsResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture3D<float4> volume : register(t0);
+        SamplerState volumeSampler : register(s0);
+        float4 main() : SV_Target { return volume.SampleLevel(volumeSampler, float3(0.5, 0.5, 0.5), 2.0); }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(46, words(3, 4, 4, 4, 3, 28, 0x8, 0, 0)); // 4x4x4 volume with full mip chain
+      command(12, words(5, 2, 3, 28, 8, 0, 3, 0, 1)); // Texture3D SRV covering all mips
+      const uploadSlice = (z, rgba) => {
+        const texels = new Uint8Array(64);
+        for (let i = 0; i < 16; i++) texels.set(rgba, i * 4);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(3, 0, z, 0, 0, 4, 4, 16, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      };
+      uploadSlice(0, [255, 0, 0, 255]); uploadSlice(1, [255, 0, 0, 255]);
+      uploadSlice(2, [0, 255, 0, 255]); uploadSlice(3, [0, 255, 0, 255]);
+      command(39, words(5)); // GenerateMips
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
+      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 2, true); command(8, sampler);
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
+      command(29, words(3, 0)); gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, dispatches: gpu.stats.dispatches, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 GenerateMips box-filters a 3D volume through its final mip',
+    texture3dMipsResult.draws === 1 && texture3dMipsResult.dispatches === 2 && texture3dMipsResult.errors.length === 0
+      && near(texture3dMipsResult.pixel, [128, 128, 0, 255], 2),
+    JSON.stringify(texture3dMipsResult));
+
+  const texture3dUavResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const gpuLogs = [];
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (message) => gpuLogs.push(message), { noPresent: true });
+      await gpu.init();
+      const compute = tool.compileHlsl(`
+        RWTexture3D<float> volume : register(u0);
+        [numthreads(4, 4, 2)]
+        void main(uint3 id : SV_DispatchThreadID) { volume[id] = 0.25; }
+      `, 'main', 'cs_5_0');
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture3D<float> volume : register(t0);
+        SamplerState volumeSampler : register(s0);
+        float4 main() : SV_Target { return float4(volume.SampleLevel(volumeSampler, float3(0.5, 0.5, 0.5), 0.0), 0.0, 0.0, 1.0); }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1)); // back-buffer RTV
+      command(46, words(3, 4, 4, 2, 1, 41, 0x88, 0, 0)); // 4x4x2 R32_FLOAT SRV + UAV volume
+      command(12, words(4, 3, 3, 41, 8, 0, 1, 0, 2)); // 3D UAV covering both W slices
+      command(12, words(5, 2, 3, 41, 8, 0, 1, 0, 1)); // 3D SRV
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 10, true); samplerView.setUint32(4, 0x15, true);
+      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 2, true); command(8, sampler);
+      command(2, words(11, 24, 1, 0, 0, 8));
+      const vertices = new Uint8Array(24), vertexData = new DataView(vertices.buffer);
+      [-1, -1, -1, 3, 3, -1].forEach((value, i) => vertexData.setFloat32(i * 4, value, true));
+      const write = new Uint8Array(12 + vertices.length);
+      write.set(words(11, 0, vertices.length)); write.set(vertices, 12); command(3, write);
+      shader(6, 2, compute); shader(7, 0, vertex); shader(8, 1, pixel);
+      command(7, words(12, 1, 0, 16, 0, 0, 0, 0));
+      command(17, words(2, 6)); command(17, words(0, 7)); command(17, words(1, 8));
+      command(43, words(0, 1, 4, 0xffffffff));
+      command(42, words(1, 1, 1));
+      command(21, words(1, 2, 0)); command(15, words(12)); command(16, words(4));
+      command(13, words(0, 1, 11, 8, 0));
+      command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 10));
+      command(29, words(3, 0)); gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), dispatches: gpu.stats.dispatches, draws: gpu.stats.draws, errors: gpu.stats.errors, logs: gpuLogs };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message, logs: gpuLogs };
+    }
+  });
+  check('D3D11 3D UAV compute writes are visible through a Texture3D SRV',
+    texture3dUavResult.dispatches === 1 && texture3dUavResult.draws === 1 && texture3dUavResult.errors.length === 0
+      && near(texture3dUavResult.pixel, [64, 0, 0, 255], 1),
+    JSON.stringify(texture3dUavResult));
 
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());

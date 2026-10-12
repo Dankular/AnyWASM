@@ -26,6 +26,12 @@ pub const HLE_MODULE_BASE: u64 = 0x6000_0000;
 const CALLBACK_BUDGET_EXHAUSTED: &str =
     "synchronous guest callback exhausted the run budget; its continuation cannot be resumed";
 
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "anywasm")]
+extern "C" {
+    fn yield_slice() -> u64;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuestUnwind {
     pub target_frame: u64,
@@ -217,6 +223,7 @@ pub struct Process {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub stdin: VecDeque<u8>,
+    pending_input_events: VecDeque<(u32, i64, i64, i64)>,
     pub handles: HashMap<u64, Handle>,
     pub next_handle: u64,
     pub heap: crate::hle::heap::Heap,
@@ -323,24 +330,25 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             | "GetForegroundWindow"
             | "GetDesktopWindow"
             | "GetActiveWindow" => Some(0),
-            "GetWindowThreadProcessId"
-            | "GetCursorPos"
+            "GetCursorPos"
             | "GetSystemMetrics"
             | "GetAsyncKeyState"
             | "GetKeyboardType"
             | "GetKeyboardLayout"
             | "IsRectEmpty"
             | "GetKeyState"
+            | "ClipCursor"
+            | "DestroyWindow"
             | "CharUpperA"
             | "CharLowerA" => Some(1),
             "GetWindowLongA"
+            | "GetWindowThreadProcessId"
             | "GetWindowPlacement"
             | "GetWindowRect"
             | "GetClientRect"
             | "FindWindowA"
             | "ClientToScreen"
             | "SetCursorPos"
-            | "ClipCursor"
             | "SetWindowTextA"
             | "GetPropA"
             | "RemovePropA" => Some(2),
@@ -398,7 +406,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
         ],
         "user32" => &[
             (&["ReleaseCapture", "PostQuitMessage", "SetCursor", "ShowCursor", "SetCapture", "UpdateWindow", "GetKeyState", "SetForegroundWindow", "DispatchMessageA", "TranslateMessage", "SetFocus", "GetMenu", "GetKeyboardLayout", "SetCursorPos", "UnhookWindowsHookEx", "RegisterWindowMessageA", "RegisterWindowMessageW", "RegisterClassA", "RegisterClassW", "RegisterClassExA", "RegisterClassExW"], 1),
-            (&["GetWindowLongA", "DestroyWindow", "ShowWindow", "LoadIconA", "LoadCursorA", "GetWindowPlacement", "ClipCursor", "GetDlgItem", "GetWindowRect", "GetClientRect", "FindWindowA", "EndDialog", "MapVirtualKeyA", "ClientToScreen", "SetWindowTextA"], 2),
+            (&["GetWindowLongA", "ShowWindow", "LoadIconA", "LoadCursorA", "GetWindowPlacement", "GetDlgItem", "GetWindowRect", "GetClientRect", "FindWindowA", "EndDialog", "MapVirtualKeyA", "ClientToScreen", "SetWindowTextA"], 2),
             (&["AdjustWindowRect"], 3),
             (&["AdjustWindowRectEx", "SystemParametersInfoA", "SetTimer", "DefWindowProcA", "SendMessageA", "MessageBoxA", "SetWindowsHookExA", "SetWindowsHookExW", "CallNextHookEx"], 4),
             (&["PeekMessageA", "DialogBoxParamA"], 5),
@@ -460,6 +468,7 @@ impl Process {
             stdout: Vec::new(),
             stderr: Vec::new(),
             stdin: VecDeque::new(),
+            pending_input_events: VecDeque::new(),
             handles: HashMap::new(),
             next_handle: 0x100,
             heap: crate::hle::heap::Heap::new(),
@@ -1924,7 +1933,21 @@ impl Process {
             if self.cpu.rip == RET_MAGIC {
                 return Ok(());
             }
-            self.ensure_run_budget(1)?;
+            if let Err(stop) = self.ensure_run_budget(1) {
+                #[cfg(target_arch = "wasm32")]
+                if matches!(stop, Stop::StepLimit) {
+                    // The Asyncify-enabled browser runtime unwinds the Rust stack here, lets the
+                    // worker return to its event loop, and resumes this exact HLE call on the
+                    // next run slice. The import returns that slice's budget after rewind.
+                    let next_budget = unsafe { yield_slice() };
+                    if next_budget == 0 {
+                        return Err(Stop::Crash("callback resumed without a worker slice budget".into()));
+                    }
+                    self.active_run_budget = Some(next_budget);
+                    continue;
+                }
+                return Err(stop);
+            }
             if self.trace_imports && self.cpu.mode == CpuMode::X86_32 {
                 let rip = self.cpu.rip as u32 as u64;
                 let bytes = (0..8)
@@ -2060,34 +2083,33 @@ impl Process {
 
     fn describe_exit(&self, e: Exit) -> Stop {
         let c = &self.cpu;
-        let stack = if self.trace_imports {
-            if c.mode == CpuMode::X86_32 {
-                let words = (0..8)
-                    .map(|index| self.rd32((c.gpr[RSP] as u32).wrapping_add(index * 4) as u64).unwrap_or(0))
-                    .map(|word| format!("{word:#x}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(" stack32=[{words}]")
-            } else {
+        let stack = if c.mode == CpuMode::X86_32 {
+            let words = (0..8)
+                .map(|index| self.rd32((c.gpr[RSP] as u32).wrapping_add(index * 4) as u64).unwrap_or(0))
+                .map(|word| format!("{word:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" stack32=[{words}]")
+        } else if self.trace_imports {
                 let words = (0..8)
                     .map(|index| self.rd64(c.gpr[RSP].saturating_add(index * 8)).unwrap_or(0))
                     .map(|word| format!("{word:#x}"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(" stack=[{words}]")
-            }
         } else {
             String::new()
         };
         Stop::Crash(format!(
-            "{:?} at rip={:#x} (module {}) rax={:#x} rcx={:#x} rdx={:#x} rsp={:#x}{stack}",
+            "{:?} at rip={:#x} (module {}) rax={:#x} rcx={:#x} rdx={:#x} rsp={:#x} rflags={:#x}{stack}",
             e,
             c.rip,
             self.module_for(c.rip).unwrap_or("?"),
             c.gpr[RAX],
             c.gpr[RCX],
             c.gpr[RDX],
-            c.gpr[RSP]
+            c.gpr[RSP],
+            c.rflags
         ))
     }
 
@@ -2171,14 +2193,75 @@ impl Process {
             && group == "com"
             && (name.starts_with("IDirectDraw7::")
                 || name.starts_with("IDirectSound8::")
-                || name.starts_with("IDirectSoundBuffer8::"))
+                || name.starts_with("IDirectSoundBuffer8::")
+                || name.starts_with("IDirect3D9::")
+                || name.starts_with("IDirect3DDevice9::")
+                || name.starts_with("IDirect3DSurface9::"))
+        {
+            let args = (0..8)
+                .map(|index| format!("{:#x}", self.arg(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = if name == "IDirect3DDevice9::SetVertexDeclaration" {
+                let declaration = self.arg(1);
+                let bytes = self
+                    .read_bytes(declaration, 32)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(" decl={declaration:#x} known_com={} bytes=[{bytes}]", self.extra.com.objs.contains_key(&declaration))
+            } else {
+                String::new()
+            };
+            self.stderr.extend_from_slice(
+                format!("[com-call] {name} args=[{args}]{detail}\n").as_bytes(),
+            );
+        }
+        let import_caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);
+        if self.trace_modules_only
+            && ((0x746900..0x746a10).contains(&import_caller)
+                || (0x748700..0x748900).contains(&import_caller))
         {
             let args = (0..8)
                 .map(|index| format!("{:#x}", self.arg(index)))
                 .collect::<Vec<_>>()
                 .join(", ");
             self.stderr.extend_from_slice(
-                format!("[com-call] {name} args=[{args}]\n").as_bytes(),
+                format!("[target-import] {group}!{name} args=[{args}] caller={import_caller:#x}\n")
+                    .as_bytes(),
+            );
+        }
+        if self.trace_modules_only
+            && ((group == "user32"
+                && matches!(
+                    name.as_str(),
+                    "CreateWindowExA"
+                        | "CreateWindowExW"
+                        | "ShowWindow"
+                        | "GetMessageA"
+                        | "GetMessageW"
+                        | "PeekMessageA"
+                        | "PeekMessageW"
+                        | "DispatchMessageA"
+                        | "PostQuitMessage"
+                        | "DestroyWindow"
+                        | "MessageBoxA"
+                        | "DefWindowProcA"
+                        | "DefWindowProcW"
+                ))
+                || (group == "kernel32"
+                    && matches!(name.as_str(), "ExitProcess" | "TerminateProcess")))
+        {
+            let args = (0..8)
+                .map(|index| format!("{:#x}", self.arg(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);
+            self.stderr.extend_from_slice(
+                format!("[target-lifecycle] {group}!{name} args=[{args}] caller={caller:#x}\n")
+                    .as_bytes(),
             );
         }
         let Some(f) = func else {
@@ -2201,7 +2284,34 @@ impl Process {
             });
         };
         self.skip_ret = false;
+        let d3d9_output = if group == "com" {
+            match name.as_str() {
+                "IDirect3D9::CreateDevice" => Some(self.arg(6)),
+                "IDirect3DDevice9::CreateDepthStencilSurface" => Some(self.arg(7)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let ret = f(self)?;
+        if self.trace_modules_only
+            && group == "com"
+            && (name.starts_with("IDirect3D9::")
+                || name.starts_with("IDirect3DDevice9::")
+                || name.starts_with("IDirect3DSurface9::"))
+        {
+            let output = d3d9_output
+                .map(|address| {
+                    format!(
+                        " out={address:#x}:{:#x}",
+                        self.mem.read_u32(address).unwrap_or(0)
+                    )
+                })
+                .unwrap_or_default();
+            self.stderr.extend_from_slice(
+                format!("[com-result] {name} hr={ret:#x}{output}\n").as_bytes(),
+            );
+        }
         self.refresh_waiters();
         if self.skip_ret {
             self.skip_ret = false;
@@ -2255,6 +2365,12 @@ impl Process {
     fn run_with_budget(&mut self) -> RunResult {
         const THREAD_QUANTUM: u64 = 10_000;
         while self.active_run_budget.unwrap_or(0) != 0 {
+            if let Some((kind, a, b, c)) = self.pending_input_events.pop_front() {
+                if let Err(stop) = hle::user32::input_event(self, kind, a, b, c) {
+                    return stop;
+                }
+                continue;
+            }
             self.refresh_waiters();
             if self.current_thread_state != ThreadState::Running
                 || self.schedule_requested
@@ -2302,6 +2418,11 @@ impl Process {
             }
         }
         Stop::StepLimit
+    }
+
+    /// Queue a host input event to run inside the next budgeted guest slice.
+    pub fn queue_input_event(&mut self, kind: u32, a: i64, b: i64, c: i64) {
+        self.pending_input_events.push_back((kind, a, b, c));
     }
 
     /// Run until the program stops for a reason other than the step budget.
