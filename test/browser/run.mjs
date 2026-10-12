@@ -499,6 +499,55 @@ try {
           return item.bytes.length === expected.length && item.bytes.every((value, i) => value === expected[i]);
         })),
     JSON.stringify(bcReadbackResult));
+  const typelessReadbackResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    const gpu = new GpuExecutor(canvas, null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      const formats = [
+        { name: 'R32G32B32A32_TYPELESS', dxgi: 1, bytesPerPixel: 16 },
+        { name: 'R16G16B16A16_TYPELESS', dxgi: 9, bytesPerPixel: 8 },
+        { name: 'R32G32_TYPELESS', dxgi: 15, bytesPerPixel: 8 },
+        { name: 'R10G10B10A2_TYPELESS', dxgi: 23, bytesPerPixel: 4 },
+        { name: 'R8G8B8A8_TYPELESS', dxgi: 27, bytesPerPixel: 4 },
+        { name: 'R16G16_TYPELESS', dxgi: 33, bytesPerPixel: 4 },
+        { name: 'R32_TYPELESS', dxgi: 39, bytesPerPixel: 4 },
+        { name: 'R8G8_TYPELESS', dxgi: 48, bytesPerPixel: 2 },
+        { name: 'R16_TYPELESS', dxgi: 53, bytesPerPixel: 2 },
+        { name: 'R8_TYPELESS', dxgi: 60, bytesPerPixel: 1 },
+        { name: 'B8G8R8X8_UNORM', dxgi: 88, bytesPerPixel: 4 },
+        { name: 'B8G8R8A8_TYPELESS', dxgi: 90, bytesPerPixel: 4 },
+        { name: 'B8G8R8X8_TYPELESS', dxgi: 92, bytesPerPixel: 4 },
+        { name: 'B8G8R8X8_UNORM_SRGB', dxgi: 93, bytesPerPixel: 4 },
+      ];
+      const readbacks = [];
+      for (const [index, format] of formats.entries()) {
+        const rowBytes = 3 * format.bytesPerPixel, rowPitch = rowBytes + 4;
+        const source = new Uint8Array(rowPitch * 2).fill(0xee), expected = [];
+        for (let row = 0; row < 2; row++) {
+          for (let byte = 0; byte < rowBytes; byte++) {
+            const value = (format.dxgi * 3 + row * 67 + byte * 11) & 0xff;
+            source[row * rowPitch + byte] = value;
+            expected.push(value);
+          }
+        }
+        const id = 100 + index;
+        gpu.createTexture(id, 3, 2, 1, 1, format.dxgi, 0, 0, 0);
+        gpu.textureWrite(id, 0, 0, 0, 0, 3, 2, rowPitch, source.length, source);
+        readbacks.push({ name: format.name, expected, bytes: Array.from(await gpu.readBackResource(id)) });
+      }
+      gpu.device.destroy();
+      return { readbacks };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  check('D3D11 typeless and BGRX staging formats preserve packed rows and discard row padding',
+    !typelessReadbackResult.error && typelessReadbackResult.readbacks?.length === 14
+      && typelessReadbackResult.readbacks.every(({ expected, bytes }) => bytes.length === expected.length && bytes.every((value, i) => value === expected[i])),
+    JSON.stringify(typelessReadbackResult));
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));
