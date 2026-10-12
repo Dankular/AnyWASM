@@ -72,8 +72,10 @@ preserved 2-, 4-, and 8-byte rows; R10G10B10A2_UINT and R11G11B10_FLOAT preserve
 The suite reported no WebGPU validation errors. The textured fixture
 passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
-following pixel shader sampled that result. The run reported no WebGPU validation errors or page
-errors. The D3D9 fixed-function fixture also passed pixel checks for stage-0 SELECTARG1/SELECTARG2,
+following pixel shader sampled that result. Texture UAV dispatch/readback also covers every format
+advertised by `D3D11_FEATURE_FORMAT_SUPPORT`: R32 and RG32 float/uint/sint, RGBA8 unorm/snorm/uint/sint,
+RGBA16 float/uint/sint, and RGBA32 float/uint/sint. The run reported no WebGPU validation errors or
+page errors. The D3D9 fixed-function fixture also passed pixel checks for stage-0 SELECTARG1/SELECTARG2,
 MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH, alpha MODULATE2X/MODULATE4X/ADD/SUBTRACT/ADDSMOOTH,
 signed-add and modulate-add operations, DOTPRODUCT3, MULTIPLYADD/LERP with COLORARG0/ALPHAARG0,
 and texture-stage blending with diffuse,
@@ -92,7 +94,9 @@ write-mask check writes red and blue while preserving the cleared green and alph
 depth write-mask check confirms `ZERO` lets a farther later draw pass while `ALL` keeps the nearer
 fragment visible; the depth-disabled control also renders its later draw. Stencil coverage includes
 a partial `0x0f` write that preserves the upper nibble and a `0x0f` read mask that compares only the
-lower nibble.
+lower nibble. Texture dispatch/readback checks every typed UAV format currently advertised by the
+HLE: R32 and RG32 float/uint/sint, RGBA8 unorm/snorm/uint/sint, RGBA16 float/uint/sint, and RGBA32
+float/uint/sint.
 
 | Browser or feature | Evidence and current status |
 |---|---|

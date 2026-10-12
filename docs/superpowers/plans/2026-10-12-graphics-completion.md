@@ -69,8 +69,9 @@
 
 **Files:** D3D11 HLE modules, `web/gpu.js`, `test/browser/run.mjs`, `docs/TARGETS.md`
 
-- [ ] Add tests for remaining typed UAV formats, general staging readback, and query types required by the selected API contract.
-- [ ] Add focused coverage for additional system values and synchronization/order between dispatch, draw, copy, and readback.
+- [x] Enumerate D3D11 typed UAV formats advertised by the HLE and pixel-test all 16 through texture dispatch/readback.
+- [ ] Add general staging readback coverage and query tests required by the selected API contract.
+- [x] Verify `SV_DispatchThreadID`, group system values, dispatch-to-draw/readback visibility, and buffer copies feeding later dispatches.
 - [ ] Implement deferred contexts/command lists and tiled resources, or provide exact feature-capability behavior and tests required by D3D11 compatibility.
 
 **Gate:** Each supported query/UAV/staging feature has typed value assertions and command-order checks; unsupported feature reporting matches implemented behavior.
