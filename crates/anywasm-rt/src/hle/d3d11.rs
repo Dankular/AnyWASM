@@ -1150,4 +1150,92 @@ mod tests {
             vec![0, 2, 1, resource, 32, 16]
         );
     }
+
+    #[test]
+    fn texture_update_and_bounded_copy_emit_the_requested_subresources() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const UPDATE_BOX: u64 = 0x10000;
+        const COPY_BOX: u64 = 0x11000;
+        const UPDATE_DATA: u64 = 0x12000;
+        const STACK: u64 = 0x13000;
+        let mut p = Process::new(Vfs::new());
+        let mut texture = || {
+            let id = p.extra.gpu.new_id();
+            p.extra.com.res.insert(
+                id,
+                ResInfo {
+                    width: 4,
+                    height: 4,
+                    mips: 1,
+                    array: 1,
+                    format: 28, // DXGI_FORMAT_R8G8B8A8_UNORM
+                    ..Default::default()
+                },
+            );
+            (
+                create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id }),
+                id,
+            )
+        };
+        let (dst, dst_id) = texture();
+        let (src, src_id) = texture();
+        drop(texture);
+        for addr in [UPDATE_BOX, COPY_BOX, UPDATE_DATA, STACK] {
+            assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
+        }
+        for (i, value) in [1, 0, 0, 2, 2, 1].into_iter().enumerate() {
+            p.wr32(UPDATE_BOX + 4 * i as u64, value).unwrap();
+        }
+        for (i, value) in [1, 1, 0, 3, 3, 1].into_iter().enumerate() {
+            p.wr32(COPY_BOX + 4 * i as u64, value).unwrap();
+        }
+        let updated_pixels = [0xff, 0xff, 0x00, 0xff, 0x00, 0xff, 0xff, 0xff];
+        p.write_bytes(UPDATE_DATA, &updated_pixels).unwrap();
+        p.cpu.gpr[RSP] = STACK;
+
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = dst;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = UPDATE_BOX;
+        p.wr64(STACK + 8 + 8 * 4, UPDATE_DATA).unwrap();
+        p.wr64(STACK + 8 + 8 * 5, 4).unwrap();
+        let update = method("ID3D11DeviceContext", "UpdateSubresource").unwrap();
+        assert_eq!(update(&mut p).unwrap(), 0);
+
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = dst;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = 0; // DstX
+        p.wr64(STACK + 8 + 8 * 4, 1).unwrap(); // DstY
+        p.wr64(STACK + 8 + 8 * 5, 0).unwrap(); // DstZ
+        p.wr64(STACK + 8 + 8 * 6, src).unwrap();
+        p.wr64(STACK + 8 + 8 * 7, 0).unwrap(); // SrcSubresource
+        p.wr64(STACK + 8 + 8 * 8, COPY_BOX).unwrap();
+        let copy = method("ID3D11DeviceContext", "CopySubresourceRegion").unwrap();
+        assert_eq!(copy(&mut p).unwrap(), 0);
+
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 2);
+        let (update_op, update_payload) = &commands[0];
+        assert_eq!(*update_op, op::TEXTURE_WRITE);
+        let update_words = update_payload[..36]
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(update_words, vec![dst_id, 0, 0, 1, 0, 1, 2, 4, 8]);
+        assert_eq!(&update_payload[36..], &updated_pixels);
+        let (copy_op, copy_payload) = &commands[1];
+        assert_eq!(*copy_op, op::COPY_REGION);
+        let copy_words = copy_payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            copy_words,
+            vec![dst_id, 0, 0, 1, 0, src_id, 0, 1, 1, 1, 0, 3, 3, 1]
+        );
+    }
 }

@@ -373,6 +373,87 @@ try {
   check('CopyResource exposes the source red texel in quad D', near(at2(32, 150), RED, 1), JSON.stringify(at2(32, 150)));
   check('buffer CopyResource exposes the red quad at its copied vertex-buffer position', near(at2(604, 150), RED, 1), JSON.stringify(at2(604, 150)));
 
+  const copyRegionResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28)); // RGBA8 back buffer
+      command(4, words(3, 4, 4, 3, 1, 28, 0x28, 0, 1, 1)); // RGBA8 source texture with mips
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1)); // back-buffer RTV
+      command(12, words(4, 2, 3, 28, 4, 0, 3, 0, 1)); // source SRV, all mip levels
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true);
+      clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
+      clearView.setFloat32(12, 0.2, true); clearView.setFloat32(16, 1, true);
+      command(27, clear);
+      const rowPitch = 20, textureBytes = new Uint8Array(rowPitch * 4);
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+        textureBytes.set([x * 40, y * 40, 0, 255], y * rowPitch + x * 4);
+      }
+      const upload = new Uint8Array(36 + textureBytes.length);
+      upload.set(words(3, 0, 0, 0, 0, 4, 4, rowPitch, textureBytes.length));
+      upload.set(textureBytes, 36);
+      command(5, upload); // UpdateSubresource-style padded texture upload
+      command(39, words(4)); // D3D11 GenerateMips on the all-level SRV
+      command(40, words(9, 0, 10, 10, 0, 3, 0, 1, 1, 1, 0, 3, 3, 1));
+      command(40, words(9, 0, 20, 20, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0)); // copy mip 1 (2x2)
+      command(40, words(9, 0, 24, 24, 0, 3, 2, 0, 0, 0, 0, 0, 0, 0)); // copy mip 2 (1x1)
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x, y) => {
+        const i = (y * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = {
+        width: pixels.width, height: pixels.height,
+        first: at(10, 10), last: at(11, 11),
+        outside: [at(9, 10), at(12, 11)], errors: gpu.stats.errors,
+        mip1: [at(20, 20), at(21, 20), at(20, 21), at(21, 21)], mip2: at(24, 24),
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('UpdateSubresource-style texture upload and CopySubresourceRegion validate without WebGPU errors',
+    copyRegionResult.width === 64 && copyRegionResult.height === 64 && copyRegionResult.errors?.length === 0,
+    JSON.stringify(copyRegionResult));
+  check('CopySubresourceRegion copies both corners from the requested source box',
+    near(copyRegionResult.first, [40, 40, 0, 255], 1) && near(copyRegionResult.last, [80, 80, 0, 255], 1),
+    JSON.stringify(copyRegionResult));
+  check('CopySubresourceRegion leaves pixels outside the destination box untouched',
+    copyRegionResult.outside?.every((pixel) => near(pixel, [0, 0, 51, 255], 1)),
+    JSON.stringify(copyRegionResult.outside));
+  check('GenerateMips box-filters the 4x4 source into four 2x2 colour averages',
+    copyRegionResult.mip1?.every((pixel, i) => near(pixel, [[20, 20, 0, 255], [100, 20, 0, 255], [20, 100, 0, 255], [100, 100, 0, 255]][i], 1)),
+    JSON.stringify(copyRegionResult.mip1));
+  check('GenerateMips reaches the final 1x1 level with the full-image average',
+    near(copyRegionResult.mip2, [60, 60, 0, 255], 1), JSON.stringify(copyRegionResult.mip2));
+
   const computeResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
