@@ -97,20 +97,12 @@ try {
         const gpuStats = await page.evaluate(() => window.__gpuStats);
         assert.ok(gpuStats, `${item.name} missing WebGPU statistics`);
         assert.deepEqual([screenshot.w, screenshot.h], [640, 480], `${item.name} triangle canvas dimensions`);
-        if (gpuStats.errors.length) {
-          // Firefox currently exits the guest despite invalid GPU commands. Keep the exact failure
-          // visible here; once it clears, the strict pixel assertions below become mandatory.
-          assert.equal(item.name, 'Firefox', `${item.name} emitted WebGPU validation errors: ${JSON.stringify(gpuStats.errors)}`);
-          assert.match(gpuStats.errors[0], /expects a BindGroup to be set at index 1/, `${item.name} unexpected WebGPU validation error`);
-          console.log(`${item.name} triangle graphics limitation: ${JSON.stringify({ backBuffer, visibleCanvas: { clear, center }, gpuErrors: gpuStats.errors })}`);
-          graphics.rendering = 'invalid: missing bind group 1; pixels are not valid output';
-        } else {
-          assert.ok(near(backBuffer.clear, [0, 0, 51, 255], 2), `${item.name} back-buffer clear pixel: ${backBuffer.clear}`);
-          assert.ok(near(backBuffer.center, [85, 85, 85, 255], 6), `${item.name} back-buffer center pixel: ${backBuffer.center}`);
-          assert.ok(near(clear, [0, 0, 51, 255], 2), `${item.name} visible canvas clear pixel: ${clear}`);
-          assert.ok(near(center, [85, 85, 85, 255], 6), `${item.name} visible triangle center pixel: ${center}`);
-          graphics.rendering = 'pixel-verified';
-        }
+        assert.deepEqual(gpuStats.errors, [], `${item.name} emitted WebGPU validation errors: ${JSON.stringify(gpuStats.errors)}`);
+        assert.ok(near(backBuffer.clear, [0, 0, 51, 255], 2), `${item.name} back-buffer clear pixel: ${backBuffer.clear}`);
+        assert.ok(near(backBuffer.center, [85, 85, 85, 255], 6), `${item.name} back-buffer center pixel: ${backBuffer.center}`);
+        assert.ok(near(clear, [0, 0, 51, 255], 2), `${item.name} visible canvas clear pixel: ${clear}`);
+        assert.ok(near(center, [85, 85, 85, 255], 6), `${item.name} visible triangle center pixel: ${center}`);
+        graphics.rendering = 'pixel-verified';
         graphics.canvasPixels = { size: `${screenshot.w}x${screenshot.h}`, clear, center };
       } else {
         assert.equal(graphics.status, '3', `${item.name} silently completed without graphics: ${graphics.stat}`);

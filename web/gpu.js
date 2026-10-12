@@ -122,6 +122,7 @@ export class GpuExecutor {
     this.pipelines = new Map();
     this.computePipelines = new Map();
     this.bglCache = new Map();
+    this.emptyBindGroupCache = new WeakMap();
     this.dummyBuffers = new Map();
     this.transientBuffers = [];
     this.instanceExpansionPipeline = null;
@@ -643,6 +644,21 @@ export class GpuExecutor {
     return l;
   }
 
+  emptyBindGroup(layout) {
+    let group = this.emptyBindGroupCache.get(layout);
+    if (!group) {
+      group = this.device.createBindGroup({ layout, entries: [] });
+      this.emptyBindGroupCache.set(layout, group);
+    }
+    return group;
+  }
+
+  resolveBindGroups(layouts, resolved) {
+    return resolved.map((entries, group) => entries.length
+      ? this.device.createBindGroup({ layout: layouts[group], entries })
+      : this.emptyBindGroup(layouts[group]));
+  }
+
   sampleTypeOf(format) {
     if (!format) return 'float';
     if (isDepth(format)) return 'unfilterable-float';
@@ -806,8 +822,9 @@ export class GpuExecutor {
     this.ensurePass(att);
     const pass = this.pass;
     pass.setPipeline(pipe.pipeline);
+    const bindGroups = this.resolveBindGroups(pipe.bgls, resolved);
     for (let g = 0; g < 4; g++) {
-      if (resolved[g].length) pass.setBindGroup(g, this.device.createBindGroup({ layout: pipe.bgls[g], entries: resolved[g] }));
+      pass.setBindGroup(g, bindGroups[g]);
     }
     // Vertex buffers.
     for (const [slot, buffer] of boundVertexBuffers) {
@@ -1106,13 +1123,11 @@ export class GpuExecutor {
       this.stats.pipelines++;
     }
 
-    const bindGroups = resolved.map((entries, group) => entries.length
-      ? this.device.createBindGroup({ layout: cached.bgls[group], entries })
-      : null);
+    const bindGroups = this.resolveBindGroups(cached.bgls, resolved);
     this.endPass();
     const pass = this.encoder().beginComputePass();
     pass.setPipeline(cached.pipeline);
-    for (let group = 0; group < bindGroups.length; group++) if (bindGroups[group]) pass.setBindGroup(group, bindGroups[group]);
+    for (let group = 0; group < bindGroups.length; group++) pass.setBindGroup(group, bindGroups[group]);
     pass.dispatchWorkgroups(x, y, z);
     pass.end();
     for (const copy of storageBufferCopies) {
