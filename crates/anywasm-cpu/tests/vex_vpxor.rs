@@ -1,5 +1,5 @@
 use anywasm_cpu::cpu::Cpu;
-use anywasm_cpu::decode::{decode, Op, Opnd};
+use anywasm_cpu::decode::{decode, FpK, Op, Opnd, Prec};
 use anywasm_cpu::exec::step;
 use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RWX};
 
@@ -7,7 +7,7 @@ use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RWX};
 fn target_vxorpd_decodes_extended_registers() {
     let instruction = decode(&[0xc4, 0x41, 0x29, 0x57, 0xd2], 0x1000).unwrap();
 
-    assert_eq!(instruction.op, Op::Vpxor);
+    assert_eq!(instruction.op, Op::Vfp(FpK::Xor, Prec::Pd));
     assert_eq!(instruction.osz, 16);
     assert_eq!(instruction.len, 5);
     assert_eq!(instruction.ops[0], Opnd::Xmm(10));

@@ -7,8 +7,8 @@ use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RWX};
 fn vex_vinserti128_replaces_selected_ymm_half() {
     const CODE: u64 = 0x29000;
     let code = [
-        0xc4, 0xe3, 0x7d, 0x39, 0xc2, 0x01, // vinserti128 ymm0, ymm0, xmm2, 1
-        0xc4, 0xe3, 0x7d, 0x39, 0xc2, 0x00, // vinserti128 ymm0, ymm0, xmm2, 0
+        0xc4, 0xe3, 0x7d, 0x38, 0xc2, 0x01, // vinserti128 ymm0, ymm0, xmm2, 1
+        0xc4, 0xe3, 0x7d, 0x38, 0xc2, 0x00, // vinserti128 ymm0, ymm0, xmm2, 0
     ];
     let decoded = decode(&code, CODE);
     assert_eq!(decoded.as_ref().map(|i| (i.op, i.osz)), Ok((Op::Vinserti128, 32)));

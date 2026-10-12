@@ -821,6 +821,12 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             cpu.xmm[dst] = half;
             cpu.ymm_hi[dst] = if i.osz == 32 { half } else { 0 };
         }
+        Op::Vbroadcastf128 => {
+            let lane = src_x(cpu, mem, &i.ops[2], 16)?;
+            let dst = dst_n(&i.ops[0])?;
+            cpu.xmm[dst] = lane;
+            cpu.ymm_hi[dst] = lane;
+        }
         Op::Vpbroadcastq => {
             let source = src_x(cpu, mem, &i.ops[2], 8)? as u64 as u128;
             let half = source | (source << 64);

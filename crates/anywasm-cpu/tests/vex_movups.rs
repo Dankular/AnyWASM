@@ -386,7 +386,10 @@ fn decodes_vex2_vmovdqu_load_and_store_encodings() {
     assert_eq!(xor.ops[2], Opnd::Xmm(0));
 
     let xorps = decode(&[0xc5, 0xf0, 0x57, 0xc9], 0x1800_b3b3a).unwrap();
-    assert_eq!((xorps.op, xorps.len, xorps.osz), (Op::Vpxor, 4, 16));
+    assert_eq!(
+        (xorps.op, xorps.len, xorps.osz),
+        (Op::Vfp(FpK::Xor, Prec::Ps), 4, 16)
+    );
     assert_eq!(xorps.ops[0], Opnd::Xmm(1));
     assert_eq!(xorps.ops[1], Opnd::Xmm(1));
     assert_eq!(xorps.ops[2], Opnd::Xmm(1));

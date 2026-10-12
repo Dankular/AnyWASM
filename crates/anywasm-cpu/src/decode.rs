@@ -230,6 +230,7 @@ pub enum Op {
     Vpbroadcastq,
     VShiftQ { left: bool, immediate: bool },
     Vpmovsxdq,
+    Vbroadcastf128,
     Vpaddd,
     Vpi(PiK, u8, bool),
     Vpsllq,
@@ -796,7 +797,7 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         return Ok(i);
     }
     if map == 3 {
-        if opcode == 0x39 && pp == 1 && l && !pfx.w() {
+        if opcode == 0x38 && pp == 1 && l && !pfx.w() {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(Op::Vinserti128);
             i.osz = 32;
@@ -805,6 +806,14 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
                 Opnd::Xmm(vvvv),
                 m.rm_opnd(RK::X, pfx),
             ];
+            i.imm = d.u8()? as i64;
+            return Ok(i);
+        }
+        if opcode == 0x39 && pp == 1 && l && !pfx.w() && vvvv_encoded == 0xf {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vextractf128);
+            i.osz = 32;
+            i.ops = [m.rm_opnd(RK::X, pfx), m.reg_opnd(RK::X, pfx), Opnd::None];
             i.imm = d.u8()? as i64;
             return Ok(i);
         }
@@ -869,6 +878,16 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         return Ok(i);
     }
     if map == 2 {
+        if opcode == 0x1a && pp == 1 && l && !pfx.w() && vvvv_encoded == 0xf {
+            let m = parse_modrm(d, pfx)?;
+            if m.md == 3 {
+                return Err(DecodeError::Unsupported("VBROADCASTF128 requires memory source"));
+            }
+            let mut i = blank(Op::Vbroadcastf128);
+            i.osz = 32;
+            i.ops = [m.reg_opnd(RK::X, pfx), Opnd::None, m.rm_opnd(RK::X, pfx)];
+            return Ok(i);
+        }
         if opcode == 0x25 && pp == 1 && vvvv_encoded == 0xf {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(Op::Vpmovsxdq);
@@ -962,6 +981,12 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         return Ok(i);
     }
     match opcode {
+        0x2e | 0x2f if pp == 1 && vvvv_encoded == 0xf && !l => {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Comi(Prec::Sd, opcode == 0x2f));
+            i.ops = [m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::X, pfx), Opnd::None];
+            Ok(i)
+        }
         0x2e | 0x2f if pp == 0 && vvvv_encoded == 0xf && !l => {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(Op::Comi(Prec::Ss, opcode == 0x2f));
