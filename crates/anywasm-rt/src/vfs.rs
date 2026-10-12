@@ -351,7 +351,9 @@ impl Vfs {
     }
     pub fn remove(&mut self, path: &str) -> bool {
         let path = norm(path);
-        self.files.remove(&path).is_some() || self.assets.remove(&path).is_some()
+        let local = self.files.remove(&path).is_some();
+        let asset = self.assets.remove(&path).is_some();
+        local || asset
     }
     pub fn paths(&self) -> impl Iterator<Item = &String> {
         self.files

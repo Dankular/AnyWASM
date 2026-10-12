@@ -2190,11 +2190,16 @@ fn file_attrs(p: &Process, path: &str) -> u64 {
 
 fn profile_int(p: &mut Process, section: &str, key: &str, default: u32, path: &str) -> R {
     let path = absolute(path, &p.current_directory);
-    let Some(bytes) = p.vfs.get(&path) else {
+    let Some(len) = p.vfs.file_len(&path) else {
         return Ok(default as u64);
     };
+    let len = usize::try_from(len).map_err(|_| Stop::Crash("profile file is too large".into()))?;
+    let bytes = p
+        .vfs
+        .read_range(&path, 0, len)
+        .map_err(|error| Stop::Crash(format!("profile file read failed: {error:?}")))?;
     let mut in_section = false;
-    for line in String::from_utf8_lossy(bytes).lines() {
+    for line in String::from_utf8_lossy(&bytes).lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;

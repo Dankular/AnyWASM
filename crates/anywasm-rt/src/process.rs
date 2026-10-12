@@ -1756,7 +1756,15 @@ impl Process {
             self.vfs.find_by_name(dll).cloned()
         };
         if let Some(f) = file {
-            let data = self.vfs.get(&f).unwrap().clone();
+            let size = self
+                .vfs
+                .file_len(&f)
+                .ok_or_else(|| format!("indexed DLL disappeared from VFS: {f}"))?;
+            let size = usize::try_from(size).map_err(|_| format!("DLL is too large to load: {f}"))?;
+            let data = self
+                .vfs
+                .read_range(&f, 0, size)
+                .map_err(|error| format!("could not read DLL {f}: {error:?}"))?;
             return self.load_image(&data, &f, true);
         }
         let group = hle::group_of(&canonical_dll(dll)).unwrap_or("unknown");

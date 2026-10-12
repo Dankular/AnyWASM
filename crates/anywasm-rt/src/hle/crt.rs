@@ -174,13 +174,15 @@ fn stream_write(p: &mut Process, fp: u64, data: &[u8]) -> Result<usize, Stop> {
                 return Ok(0);
             }
             let (path, at) = (path.clone(), *pos);
-            *pos += data.len();
-            if let Some(file) = p.vfs.get_mut(&path) {
-                if file.len() < at + data.len() {
-                    file.resize(at + data.len(), 0);
-                }
-                file[at..at + data.len()].copy_from_slice(data);
+            let Some(file) = p.vfs.get_mut(&path) else {
+                f.err = true;
+                return Ok(0);
+            };
+            if file.len() < at + data.len() {
+                file.resize(at + data.len(), 0);
             }
+            file[at..at + data.len()].copy_from_slice(data);
+            *pos = at.saturating_add(data.len());
         }
     }
     Ok(data.len())
