@@ -537,8 +537,23 @@ try {
         gpu.textureWrite(id, 0, 0, 0, 0, 3, 2, rowPitch, source.length, source);
         readbacks.push({ name: format.name, expected, bytes: Array.from(await gpu.readBackResource(id)) });
       }
+      const arrayId = 200;
+      gpu.createTexture(arrayId, 3, 2, 2, 2, 61, 0, 0, 0);
+      const subresources = [];
+      for (let subresource = 0; subresource < 4; subresource++) {
+        const mip = subresource % 2, slice = Math.floor(subresource / 2);
+        const width = Math.max(1, 3 >> mip), height = Math.max(1, 2 >> mip);
+        const rowPitch = width + 2, source = new Uint8Array(rowPitch * height).fill(0xee), expected = [];
+        for (let row = 0; row < height; row++) for (let x = 0; x < width; x++) {
+          const value = 10 + subresource * 40 + row * 10 + x;
+          source[row * rowPitch + x] = value;
+          expected.push(value);
+        }
+        gpu.textureWrite(arrayId, mip, slice, 0, 0, width, height, rowPitch, source.length, source);
+        subresources.push({ subresource, expected, bytes: Array.from(await gpu.readBackResource(arrayId, subresource)) });
+      }
       gpu.device.destroy();
-      return { readbacks };
+      return { readbacks, subresources };
     } catch (error) {
       gpu.device?.destroy();
       return { error: String(error) };
@@ -548,6 +563,10 @@ try {
     !typelessReadbackResult.error && typelessReadbackResult.readbacks?.length === 14
       && typelessReadbackResult.readbacks.every(({ expected, bytes }) => bytes.length === expected.length && bytes.every((value, i) => value === expected[i])),
     JSON.stringify(typelessReadbackResult));
+  check('D3D11 staging readback selects all four mip/array subresources with tight rows',
+    typelessReadbackResult.subresources?.length === 4
+      && typelessReadbackResult.subresources.every(({ expected, bytes }) => bytes.length === expected.length && bytes.every((value, i) => value === expected[i])),
+    JSON.stringify(typelessReadbackResult.subresources));
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));

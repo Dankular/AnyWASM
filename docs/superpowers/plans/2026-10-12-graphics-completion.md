@@ -79,7 +79,7 @@
 - [x] Verify `SV_DispatchThreadID`, group system values, dispatch-to-draw/readback visibility, and buffer copies feeding later dispatches.
 - [x] Report the unsupported D3D11.2 `OPTIONS1` capabilities, including tiled-resource tier 0, with a 16-byte HLE regression.
 - [x] Implement deferred contexts and command lists; Rust tests verify deferred-context creation/type/flags, command recording, finish/reset behavior, and execute ordering/state restoration. The browser suite separately verifies that saved WebGPU pipeline state, including nested arrays and maps, restores after clear.
-- [x] Verify executor readback of 14 typeless/BGRX DXGI formats using odd-width, padded rows; depth-stencil and legacy packed 16-bit readback formats remain open.
+- [x] Verify executor readback of 14 typeless/BGRX DXGI formats using odd-width, padded rows, and all four mip/array subresource indices; depth-stencil and legacy packed 16-bit readback formats remain open.
 
 **Gate:** Each supported query/UAV/staging feature has typed value assertions and command-order checks; unsupported feature reporting matches implemented behavior.
 
