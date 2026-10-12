@@ -422,17 +422,64 @@ try {
       command(40, words(9, 0, 20, 20, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0)); // copy mip 1 (2x2)
       command(40, words(9, 0, 24, 24, 0, 3, 2, 0, 0, 0, 0, 0, 0, 0)); // copy mip 2 (1x1)
       gpu.execute(append());
-      const pixels = await gpu.readBackbuffer(1);
-      const at = (x, y) => {
-        const i = (y * pixels.width + x) * 4;
-        return Array.from(pixels.data.slice(i, i + 4));
+      const copiedPixels = await gpu.readBackbuffer(1);
+      const atCopied = (x, y) => {
+        const i = (y * copiedPixels.width + x) * 4;
+        return Array.from(copiedPixels.data.slice(i, i + 4));
       };
       const result = {
-        width: pixels.width, height: pixels.height,
-        first: at(10, 10), last: at(11, 11),
-        outside: [at(9, 10), at(12, 11)], errors: gpu.stats.errors,
-        mip1: [at(20, 20), at(21, 20), at(20, 21), at(21, 21)], mip2: at(24, 24),
+        width: copiedPixels.width, height: copiedPixels.height,
+        first: atCopied(10, 10), last: atCopied(11, 11),
+        outside: [atCopied(9, 10), atCopied(12, 11)], errors: gpu.stats.errors,
+        mip1: [atCopied(20, 20), atCopied(21, 20), atCopied(20, 21), atCopied(21, 21)], mip2: atCopied(24, 24),
       };
+
+      stream.length = 0;
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture2D<float4> source : register(t0);
+        SamplerState linearSampler : register(s0);
+        float4 main() : SV_Target { return source.SampleLevel(linearSampler, float2(0.5, 0.5), 0.5); }
+      `, 'main', 'ps_5_0');
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(4, words(5, 4, 4, 3, 1, 28, 0x28, 0, 1, 1));
+      command(12, words(6, 2, 5, 28, 4, 0, 3, 0, 1));
+      const pattern = new Uint8Array(64);
+      for (let i = 0; i < 16; i++) pattern.set([0, 0, 0, 255], i * 4);
+      for (const [x, y] of [[1, 1], [2, 1], [1, 2], [2, 2]]) {
+        pattern.set([255, 0, 0, 255], (y * 4 + x) * 4);
+      }
+      const patternUpload = new Uint8Array(36 + pattern.length);
+      patternUpload.set(words(5, 0, 0, 0, 0, 4, 4, 16, pattern.length));
+      patternUpload.set(pattern, 36); command(5, patternUpload);
+      command(39, words(6));
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 7, true); samplerView.setUint32(4, 0x15, true);
+      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setFloat32(20, 0, true); samplerView.setUint32(24, 1, true); samplerView.setUint32(28, 8, true);
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 2, true);
+      command(8, sampler);
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(19, words(1, 0, 1, 6)); command(20, words(1, 0, 1, 7));
+      command(16, words(4)); command(21, words(1, 2, 0)); command(29, words(3, 0));
+      gpu.execute(append());
+      const filteredPixels = await gpu.readBackbuffer(1);
+      const filteredAt = (x, y) => {
+        const i = (y * filteredPixels.width + x) * 4;
+        return Array.from(filteredPixels.data.slice(i, i + 4));
+      };
+      result.trilinear = filteredAt(32, 32);
+      result.errors = gpu.stats.errors;
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -453,6 +500,9 @@ try {
     JSON.stringify(copyRegionResult.mip1));
   check('GenerateMips reaches the final 1x1 level with the full-image average',
     near(copyRegionResult.mip2, [60, 60, 0, 255], 1), JSON.stringify(copyRegionResult.mip2));
+  check('linear mip filtering blends LOD 0 and 1 at fractional LOD 0.5',
+    near(copyRegionResult.trilinear, [159, 0, 0, 255], 2) && copyRegionResult.errors.length === 0,
+    JSON.stringify({ pixel: copyRegionResult.trilinear, errors: copyRegionResult.errors }));
 
   const d3d9FixedResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
