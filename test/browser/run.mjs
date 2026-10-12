@@ -1603,6 +1603,15 @@ try {
       signedAlphaTextureUpload.set(words(13, 0, 0, 0, 0, 2, 2, 8, 16));
       signedAlphaTextureUpload.set([115, 115, 115, 192, 115, 115, 115, 192, 115, 115, 115, 192, 115, 115, 115, 192], 36);
       const setupSignedAlphaArgs = () => command(5, signedAlphaTextureUpload);
+      const alphaBlendDiffusePixel = await renderOperation(2, setupSignedAlphaArgs, 12);
+      const alphaBlendTexturePixel = await renderOperation(2, setupSignedAlphaArgs, 13);
+      const setupAlphaBlendFactor = () => {
+        setupSignedAlphaArgs();
+        command(48, words(60, 0x40ffffff));
+      };
+      const alphaBlendFactorPixel = await renderOperation(2, setupAlphaBlendFactor, 14, 0x40ffffff);
+      const alphaBlendTexturePmPixel = await renderOperation(2, setupSignedAlphaArgs, 15);
+      const alphaBlendCurrentPixel = await renderOperation(2, setupSignedAlphaArgs, 16);
       const alphaModulated2xPixel = await renderOperation(2, setupSignedAlphaArgs, 5);
       const alphaModulated4xPixel = await renderOperation(2, setupSignedAlphaArgs, 6);
       const alphaAddedPixel = await renderOperation(2, setupSignedAlphaArgs, 7);
@@ -1625,6 +1634,11 @@ try {
         addSmoothPixel,
         addSignedPixel,
         addSigned2xPixel,
+        alphaBlendDiffusePixel,
+        alphaBlendTexturePixel,
+        alphaBlendFactorPixel,
+        alphaBlendTexturePmPixel,
+        alphaBlendCurrentPixel,
         alphaModulated2xPixel,
         alphaModulated4xPixel,
         alphaAddedPixel,
@@ -1653,17 +1667,27 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 27 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 32 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 27 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 32 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
+  check('D3D9 stage-0 alpha BLENDDIFFUSEALPHA uses interpolated diffuse alpha',
+    near(d3d9TextureResult.alphaBlendDiffusePixel, [115, 115, 115, 79], 2), JSON.stringify(d3d9TextureResult.alphaBlendDiffusePixel));
+  check('D3D9 stage-0 alpha BLENDTEXTUREALPHA uses sampled texture alpha',
+    near(d3d9TextureResult.alphaBlendTexturePixel, [115, 115, 115, 157], 2), JSON.stringify(d3d9TextureResult.alphaBlendTexturePixel));
+  check('D3D9 stage-0 alpha BLENDFACTORALPHA uses the texture-factor alpha byte',
+    near(d3d9TextureResult.alphaBlendFactorPixel, [115, 115, 115, 86], 2), JSON.stringify(d3d9TextureResult.alphaBlendFactorPixel));
+  check('D3D9 stage-0 alpha BLENDTEXTUREALPHAPM handles premultiplied alpha',
+    near(d3d9TextureResult.alphaBlendTexturePmPixel, [115, 115, 115, 205], 2), JSON.stringify(d3d9TextureResult.alphaBlendTexturePmPixel));
+  check('D3D9 stage-0 alpha BLENDCURRENTALPHA uses current alpha',
+    near(d3d9TextureResult.alphaBlendCurrentPixel, [115, 115, 115, 79], 2), JSON.stringify(d3d9TextureResult.alphaBlendCurrentPixel));
   check('D3D9 stage-0 BLENDTEXTUREALPHA mixes texture colour and diffuse colour',
     near(d3d9TextureResult.blendedTextureAlphaPixel, [191, 64, 64, 128], 2), JSON.stringify(d3d9TextureResult.blendedTextureAlphaPixel));
   check('D3D9 stage-0 BLENDDIFFUSEALPHA uses interpolated diffuse alpha',
