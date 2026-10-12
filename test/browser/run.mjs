@@ -1134,6 +1134,77 @@ try {
       && drawMapClearLuminance > drawMapWallLuminance,
     msaaResolveResult.drawMapRenderError || JSON.stringify({ clearSdf: msaaResolveResult.drawMapClearPixel, wallSdf: msaaResolveResult.drawMapWallPixel }));
 
+  const multisampledDepthResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 16; canvas.height = 16;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = (depth) => tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, ${depth}, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const nearVertex = vertex(0.25), farVertex = vertex(0.75);
+      const greenPixel = tool.compileHlsl('float4 main() : SV_Target { return float4(0, 1, 0, 1); }', 'main', 'ps_5_0');
+      const redPixel = tool.compileHlsl('float4 main() : SV_Target { return float4(1, 0, 0, 1); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(4, words(3, 16, 16, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 render target
+      command(12, words(4, 0, 3, 28, 4, 0, 1, 0, 1));
+      command(4, words(5, 16, 16, 1, 1, 44, 0x40, 0, 4, 0)); // 4x typeless D24S8 depth resource
+      command(12, words(6, 1, 5, 45, 3, 0, 1, 0, 1)); // D24S8 DSV
+      command(4, words(7, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      const depthState = new Uint8Array(56), depthView = new DataView(depthState.buffer);
+      depthView.setUint32(0, 8, true); depthView.setUint32(4, 1, true);
+      depthView.setUint32(8, 1, true); depthView.setUint32(12, 2, true); // depth enabled, write ALL, LESS
+      command(11, depthState);
+      shader(9, 0, nearVertex); shader(10, 0, farVertex);
+      shader(11, 1, greenPixel); shader(12, 1, redPixel);
+      command(21, words(1, 4, 6));
+      command(26, words(8, 0));
+      command(27, words(4, 0, 0, 0, 0x3f800000));
+      command(28, words(6, 3, 0x3f800000, 0)); // clear depth and stencil
+      command(17, words(0, 9)); command(17, words(1, 11)); command(29, words(3, 0)); // near green
+      command(17, words(0, 10)); command(17, words(1, 12)); command(29, words(3, 0)); // far red must fail
+      command(47, words(7, 0, 3, 0, 28));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackTexture(7);
+      const center = Array.from(pixels.data.slice((8 * pixels.width + 8) * 4, (8 * pixels.width + 8) * 4 + 4));
+      const result = { center, draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 4x D24S8 depth testing keeps the nearer draw through color resolve',
+    multisampledDepthResult.draws === 2 && multisampledDepthResult.errors?.length === 0
+      && near(multisampledDepthResult.center || [], [0, 255, 0, 255], 1),
+    JSON.stringify(multisampledDepthResult));
+
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
   const texText = await page.textContent('#term');

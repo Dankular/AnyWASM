@@ -88,6 +88,10 @@ the full suite passed with no WebGPU validation errors or page errors. Its 4x MS
 resolve half-alpha red over a blue clear to verify alpha-to-coverage, and verify that sample mask
 `0x5` preserves two of four samples. A two-target pixel check also verifies independent blend
 descriptors by adding red to target 0 while target 1 overwrites its clear colour.
+The suite also checks 4x D24S8 depth/stencil attachments: a near green draw occludes a later far red
+draw, and the 4x RGBA8 color target resolves to the expected green pixel. Rust HLE tests verify
+4x quality-level reports for D32_FLOAT, D24S8, and D16, reject 8x, and accept typeless D24S8
+multisampled depth-resource creation.
 The blend fixture also checks all four D3D11 `SRC1_*` color and alpha factors using the
 second pixel-shader output, including inverse factors and a fractional source alpha. A channel
 write-mask check writes red and blue while preserving the cleared green and alpha channels. A

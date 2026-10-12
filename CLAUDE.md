@@ -247,7 +247,8 @@ register-stack subset):
       MIRROR_ONCE remain open) and an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
-      for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. Staging `Map(READ)`
+      for RGBA8, BGRA8, and RGBA16_FLOAT; 4x D24S8 depth testing with an RGBA8 color resolve; and
+      D3D11.1 constant-buffer ranges. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
       R32_UINT/SINT words,
       R32G32_FLOAT two-channel texels with row pitches, R32G32_UINT/SINT packed channel words,

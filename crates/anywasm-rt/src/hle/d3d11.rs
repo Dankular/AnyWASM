@@ -75,6 +75,12 @@ const DXGI_FORMAT_R32G32B32A32_UINT: u32 = 3;
 const DXGI_FORMAT_R32G32B32A32_SINT: u32 = 4;
 const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
 const DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: u32 = 91;
+const DXGI_FORMAT_R32_TYPELESS: u32 = 39;
+const DXGI_FORMAT_D32_FLOAT: u32 = 40;
+const DXGI_FORMAT_R24G8_TYPELESS: u32 = 44;
+const DXGI_FORMAT_D24_UNORM_S8_UINT: u32 = 45;
+const DXGI_FORMAT_R16_TYPELESS: u32 = 53;
+const DXGI_FORMAT_D16_UNORM: u32 = 55;
 const D3D11_FORMAT_SUPPORT_BUFFER: u32 = 0x1;
 const D3D11_FORMAT_SUPPORT_CPU_LOCKABLE: u32 = 0x0002_0000;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
@@ -91,6 +97,29 @@ fn supports_4x_multisample_render_target(format: u32) -> bool {
             | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
             | DXGI_FORMAT_R16G16B16A16_FLOAT
     )
+}
+
+fn supports_4x_multisample_depth_stencil(format: u32) -> bool {
+    matches!(
+        format,
+        DXGI_FORMAT_D32_FLOAT | DXGI_FORMAT_D24_UNORM_S8_UINT | DXGI_FORMAT_D16_UNORM
+    )
+}
+
+fn supports_4x_multisample_depth_resource(format: u32) -> bool {
+    matches!(
+        format,
+        DXGI_FORMAT_R32_TYPELESS
+            | DXGI_FORMAT_D32_FLOAT
+            | DXGI_FORMAT_R24G8_TYPELESS
+            | DXGI_FORMAT_D24_UNORM_S8_UINT
+            | DXGI_FORMAT_R16_TYPELESS
+            | DXGI_FORMAT_D16_UNORM
+    )
+}
+
+fn supports_4x_multisample_format(format: u32) -> bool {
+    supports_4x_multisample_render_target(format) || supports_4x_multisample_depth_stencil(format)
 }
 
 fn format_support_flags(format: u32) -> u32 {
@@ -278,7 +307,14 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         "CheckMultisampleQualityLevels" => |p| {
             let (format, samples, out) = (p.arg(1) as u32, p.arg(2) as u32, p.arg(3));
-            p.wr32(out, if supports_4x_multisample_render_target(format) && matches!(samples, 1 | 4) { 1 } else { 0 })?;
+            p.wr32(
+                out,
+                if supports_4x_multisample_format(format) && matches!(samples, 1 | 4) {
+                    1
+                } else {
+                    0
+                },
+            )?;
             Ok(S_OK)
         },
         "CheckFeatureSupport" => check_feature_support,
@@ -841,10 +877,22 @@ fn create_texture2d(p: &mut Process) -> R {
     }
     let array = array.max(1);
     let sample_count = samples.max(1);
-    if w == 0 || h == 0
-        || sample_count > 1
-            && (sample_count != 4 || sample_quality != 0 || !supports_4x_multisample_render_target(format) || mips != 1 || array != 1 || init != 0 || usage != 0 || bind != 0x20 || cpu != 0 || misc != 0)
-    {
+    let supported_multisample = match bind {
+        0x20 => supports_4x_multisample_render_target(format),
+        0x40 => supports_4x_multisample_depth_resource(format),
+        _ => false,
+    };
+    let invalid_multisample = sample_count > 1
+        && (sample_count != 4
+            || sample_quality != 0
+            || !supported_multisample
+            || mips != 1
+            || array != 1
+            || init != 0
+            || usage != 0
+            || cpu != 0
+            || misc != 0);
+    if w == 0 || h == 0 || invalid_multisample {
         return Ok(E_INVALIDARG);
     }
     let keep_shadow = cpu != 0;
@@ -2088,9 +2136,9 @@ mod tests {
 
     #[test]
     fn multisample_quality_levels_match_the_supported_resolve_path() {
+        use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
         use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
-        use crate::vfs::Vfs;
 
         const OUT: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -2120,7 +2168,24 @@ mod tests {
         assert_eq!(query(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
 
+        for format in [40u32, 45, 55] {
+            // D32_FLOAT, D24_UNORM_S8_UINT, D16_UNORM
+            p.cpu.gpr[RDX] = format as u64;
+            p.cpu.gpr[R8] = 4;
+            assert_eq!(query(&mut p).unwrap(), S_OK);
+            assert_eq!(
+                p.rd32(OUT).unwrap(),
+                1,
+                "depth format {format} should support 4x MSAA"
+            );
+        }
+
         p.cpu.gpr[RDX] = 54; // DXGI_FORMAT_R16_FLOAT has no typed 4x path.
+        assert_eq!(query(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 0);
+
+        p.cpu.gpr[RDX] = 45;
+        p.cpu.gpr[R8] = 8;
         assert_eq!(query(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 0);
 
@@ -2128,6 +2193,39 @@ mod tests {
         p.cpu.gpr[R8] = 2;
         assert_eq!(query(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_texture2d_accepts_multisampled_depth_stencil_resources() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let mut desc = Vec::new();
+        for value in [8u32, 8, 1, 1, 44, 4, 0, 0, 0x40, 0, 0] {
+            desc.extend(value.to_le_bytes());
+        }
+        p.write_bytes(DESC, &desc).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = OUT;
+
+        assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
+        assert_ne!(p.rd64(OUT).unwrap(), 0);
+        let stream = &p.extra.gpu.buf;
+        assert_eq!(
+            u32::from_le_bytes(stream[0..4].try_into().unwrap()),
+            op::CREATE_TEXTURE2D
+        );
+        assert_eq!(u32::from_le_bytes(stream[28..32].try_into().unwrap()), 44); // typeless D24S8 backing
+        assert_eq!(u32::from_le_bytes(stream[32..36].try_into().unwrap()), 0x40); // depth-stencil bind
+        assert_eq!(u32::from_le_bytes(stream[40..44].try_into().unwrap()), 4); // sample count
     }
 
     #[test]
