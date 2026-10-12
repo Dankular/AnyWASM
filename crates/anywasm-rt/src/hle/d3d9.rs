@@ -1803,7 +1803,9 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
             .u32(stage_state(4, 2)) // D3DTSS_ALPHAOP = D3DTOP_SELECTARG1
             .u32(stage_state(5, 2)) // D3DTSS_ALPHAARG1 = D3DTA_TEXTURE
             .u32(stage_state(6, 1)) // D3DTSS_ALPHAARG2 = D3DTA_CURRENT
-            .u32(p.extra.com.d3d9_render_states.get(&(device, 60)).copied().unwrap_or(u32::MAX)),
+            .u32(p.extra.com.d3d9_render_states.get(&(device, 60)).copied().unwrap_or(u32::MAX))
+            .u32(stage_state(26, 1)) // D3DTSS_COLORARG0 = D3DTA_CURRENT
+            .u32(stage_state(27, 1)) // D3DTSS_ALPHAARG0 = D3DTA_CURRENT
     );
     Ok(S_OK)
 }
@@ -1822,9 +1824,9 @@ fn set_texture_stage_state(p: &mut Process) -> R {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
-        1 => matches!(value, 1..=16 | 18..=21 | 24), // selected add, subtract, blend, modulate-add, and dot-product ops
-        2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
-        4 => matches!(value, 2..=16), // selected, arithmetic, and blend alpha ops
+        1 => matches!(value, 1..=16 | 18..=21 | 24..=26), // selected, blend, modulate-add, dot-product, and triadic ops
+        2 | 3 | 5 | 6 | 26 | 27 => value <= 2, // diffuse/current or texture arguments
+        4 => matches!(value, 2..=16 | 25..=26), // selected, arithmetic, blend, and triadic alpha ops
         _ => false,
     };
     if !valid {
@@ -2345,7 +2347,7 @@ mod tests {
         }
         assert_eq!(method("IDirect3DDevice9", "SetFVF").unwrap()(&mut p).unwrap(), S_OK);
         let set_texture_stage_state = method("IDirect3DDevice9", "SetTextureStageState").unwrap();
-        for color_op in [8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 24] {
+        for color_op in [8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 24, 25, 26] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, color_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }
@@ -2355,9 +2357,9 @@ mod tests {
             let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
                 .expect("SetTextureStageState should update the fixed-function shader state");
             let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
-            assert_eq!(words, [0x144, 64, 64, color_op, 2, 1, 2, 2, 1, u32::MAX]);
+            assert_eq!(words, [0x144, 64, 64, color_op, 2, 1, 2, 2, 1, u32::MAX, 1, 1]);
         }
-        for alpha_op in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
+        for alpha_op in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 25, 26] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 4), (16, alpha_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }
@@ -2367,7 +2369,18 @@ mod tests {
             let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
                 .expect("SetTextureStageState should update the fixed-function shader state");
             let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
-            assert_eq!(words, [0x144, 64, 64, 24, 2, 1, alpha_op, 2, 1, u32::MAX]);
+            assert_eq!(words, [0x144, 64, 64, 26, 2, 1, alpha_op, 2, 1, u32::MAX, 1, 1]);
+        }
+        for (state, value, color_arg0, alpha_arg0) in [(26, 2, 2, 1), (27, 2, 2, 2)] {
+            for (offset, word) in [(4, device as u32), (8, 0), (12, state), (16, value)] {
+                p.wr32(STACK + offset, word).unwrap();
+            }
+            assert_eq!(set_texture_stage_state(&mut p).unwrap(), S_OK, "argument state {state}");
+            let commands = gpu::decode(&p.extra.gpu.buf);
+            let (_, state_payload) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
+                .expect("argument state should update the fixed-function shader state");
+            let words = state_payload.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
+            assert_eq!(words, [0x144, 64, 64, 26, 2, 1, 26, 2, 1, u32::MAX, color_arg0, alpha_arg0]);
         }
     }
 
@@ -2420,7 +2433,7 @@ mod tests {
         assert_eq!(commands.last().unwrap().0, op::SET_FIXED_FUNCTION);
         let state = &commands.last().unwrap().1;
         let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
-        assert_eq!(words, [0x144, 64, 64, 4, 2, 1, 2, 2, 1, texture_factor]);
+        assert_eq!(words, [0x144, 64, 64, 4, 2, 1, 2, 2, 1, texture_factor, 1, 1]);
     }
 
     #[test]
@@ -2596,7 +2609,7 @@ mod tests {
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
                 .collect::<Vec<_>>(),
-            vec![0x44, 640, 480, 4, 2, 1, 2, 2, 1, u32::MAX]
+            vec![0x44, 640, 480, 4, 2, 1, 2, 2, 1, u32::MAX, 1, 1]
         );
         let buffer_id = u32::from_le_bytes(commands[1].1[0..4].try_into().unwrap());
         assert_eq!(

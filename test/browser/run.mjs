@@ -1566,11 +1566,11 @@ try {
       clearView.setUint32(0, 2, true);
       clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
       clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
-      const renderOperation = async (colorOp, setup = null, alphaOp = 2, textureFactor = 0xffffffff) => {
+      const renderOperation = async (colorOp, setup = null, alphaOp = 2, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1) => {
         stream.length = 0;
         setup?.();
         command(27, clear);
-        command(45, words(0x144, 64, 64, colorOp, 2, 1, alphaOp, 2, 1, textureFactor));
+        command(45, words(0x144, 64, 64, colorOp, 2, 1, alphaOp, 2, 1, textureFactor, colorArg0, alphaArg0));
         command(16, words(4)); command(29, words(3, 0));
         gpu.execute(append());
         const pixels = await gpu.readBackbuffer(1);
@@ -1624,6 +1624,10 @@ try {
       const modulateInvAlphaAddColorPixel = await renderOperation(20);
       const modulateInvColorAddAlphaPixel = await renderOperation(21);
       const dotProduct3Pixel = await renderOperation(24, setupSignedArgs);
+      const multiplyAddPixel = await renderOperation(25, setupSignedArgs, 2, 0xffffffff, 2);
+      const lerpPixel = await renderOperation(26, setupSignedArgs, 2, 0xffffffff, 1);
+      const alphaMultiplyAddPixel = await renderOperation(2, setupSignedAlphaArgs, 25, 0xffffffff, 1, 2);
+      const alphaLerpPixel = await renderOperation(2, setupSignedAlphaArgs, 26, 0xffffffff, 1, 2);
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
         modulatedPixel,
@@ -1651,6 +1655,10 @@ try {
         modulateInvAlphaAddColorPixel,
         modulateInvColorAddAlphaPixel,
         dotProduct3Pixel,
+        multiplyAddPixel,
+        lerpPixel,
+        alphaMultiplyAddPixel,
+        alphaLerpPixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
@@ -1667,13 +1675,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 32 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 36 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 32 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 36 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1730,6 +1738,14 @@ try {
     near(d3d9TextureResult.modulateInvColorAddAlphaPixel, [220, 220, 220, 192], 2), JSON.stringify(d3d9TextureResult.modulateInvColorAddAlphaPixel));
   check('D3D9 stage-0 DOTPRODUCT3 computes and clamps the signed RGB dot product',
     near(d3d9TextureResult.dotProduct3Pixel, [45, 45, 45, 128], 2), JSON.stringify(d3d9TextureResult.dotProduct3Pixel));
+  check('D3D9 stage-0 MULTIPLYADD uses COLORARG0 plus the color product',
+    near(d3d9TextureResult.multiplyAddPixel, [138, 138, 138, 128], 2), JSON.stringify(d3d9TextureResult.multiplyAddPixel));
+  check('D3D9 stage-0 LERP interpolates color arguments with COLORARG0',
+    near(d3d9TextureResult.lerpPixel, [64, 64, 64, 128], 2), JSON.stringify(d3d9TextureResult.lerpPixel));
+  check('D3D9 stage-0 alpha MULTIPLYADD uses ALPHAARG0 plus the alpha product',
+    near(d3d9TextureResult.alphaMultiplyAddPixel, [115, 115, 115, 230], 2), JSON.stringify(d3d9TextureResult.alphaMultiplyAddPixel));
+  check('D3D9 stage-0 alpha LERP interpolates alpha arguments with ALPHAARG0',
+    near(d3d9TextureResult.alphaLerpPixel, [115, 115, 115, 157], 2), JSON.stringify(d3d9TextureResult.alphaLerpPixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

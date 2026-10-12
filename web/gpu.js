@@ -395,6 +395,8 @@ export class GpuExecutor {
           dv.byteLength >= 32 ? u(7) : 2,
           dv.byteLength >= 36 ? u(8) : 1,
           dv.byteLength >= 40 ? u(9) : 0xffffffff,
+          dv.byteLength >= 44 ? u(10) : 1,
+          dv.byteLength >= 48 ? u(11) : 1,
         );
         break;
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
@@ -584,7 +586,7 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
-  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff) {
+  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1) {
     if (fvf === 0) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
@@ -598,7 +600,7 @@ export class GpuExecutor {
       this.log(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
-    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}`;
+    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
       const transformed = fvf === 0x44 || fvf === 0x144;
@@ -646,8 +648,10 @@ export class GpuExecutor {
       `;
       const module = this.device.createShaderModule({ code });
       const channelArg = (argument, channel) => argument === 2 ? `texel.${channel}` : `input.color.${channel}`;
+      const color0 = channelArg(colorArg0, 'rgb');
       const colorA = channelArg(colorArg1, 'rgb'), colorB = channelArg(colorArg2, 'rgb');
       const colorAlphaA = channelArg(colorArg1, 'a');
+      const alpha0 = channelArg(alphaArg0, 'a');
       const alphaA = channelArg(alphaArg1, 'a'), alphaB = channelArg(alphaArg2, 'a');
       const textureFactorAlpha = (((textureFactor >>> 24) & 0xff) / 255).toFixed(8);
       const colorExpr = colorOp === 1 ? 'input.color.rgb'
@@ -670,6 +674,8 @@ export class GpuExecutor {
         : colorOp === 20 ? `(${colorA} + ((1.0 - ${colorAlphaA}) * ${colorB}))`
         : colorOp === 21 ? `((vec3<f32>(1.0) - ${colorA}) * ${colorB} + vec3<f32>(${colorAlphaA}))`
         : colorOp === 24 ? `vec3<f32>(clamp(dot((${colorA} * 2.0 - vec3<f32>(1.0)), (${colorB} * 2.0 - vec3<f32>(1.0))), 0.0, 1.0))`
+        : colorOp === 25 ? `(${color0} + (${colorA} * ${colorB}))`
+        : colorOp === 26 ? `((${color0} * ${colorA}) + ((1.0 - ${color0}) * ${colorB}))`
         : 'input.color.rgb';
       const alphaExpr = alphaOp === 2 ? alphaA
         : alphaOp === 3 ? alphaB
@@ -685,6 +691,8 @@ export class GpuExecutor {
         : alphaOp === 13 ? `((${alphaA} * texel.a) + (${alphaB} * (1.0 - texel.a)))`
         : alphaOp === 14 ? `((${alphaA} * ${textureFactorAlpha}) + (${alphaB} * (1.0 - ${textureFactorAlpha})))`
         : alphaOp === 15 ? `(${alphaA} + (${alphaB} * (1.0 - texel.a)))`
+        : alphaOp === 25 ? `(${alpha0} + (${alphaA} * ${alphaB}))`
+        : alphaOp === 26 ? `((${alpha0} * ${alphaA}) + ((1.0 - ${alpha0}) * ${alphaB}))`
         : 'input.color.a';
       const texturedCode = textured ? `${code}
         @group(1) @binding(0) var d3d9Texture: texture_2d<f32>;
