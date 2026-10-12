@@ -174,6 +174,33 @@ static void check_staging_d16_unorm(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     ID3D11Texture2D_Release(source);
 }
 
+static void check_staging_rgba8_srgb(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const BYTE expected[16] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160 };
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init = { expected, 2 * 4, sizeof expected };
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, &init, &source);
+    if (FAILED(hr)) { printf("staging RGBA8_SRGB source hr=%08lx\n", (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const BYTE *values = (const BYTE *)mapped.pData;
+            printf("staging RGBA8_SRGB readback=");
+            for (UINT i = 0; i < 16; i++) printf("%s%u", i ? "," : "", values[i]);
+            printf(" row_pitch=%u\n", mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging RGBA8_SRGB Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging RGBA8_SRGB staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
 static void check_staging_texture3d(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     static const float expected[8] = { 0.125f, 0.25f, 0.375f, 0.5f, 0.625f, 0.75f, 0.875f, 1.0f };
     D3D11_TEXTURE3D_DESC desc = {0};
@@ -421,6 +448,7 @@ int main(void) {
             check_staging_r8_subresources(dev, ctx);
             check_staging_d32_float(dev, ctx);
             check_staging_d16_unorm(dev, ctx);
+            check_staging_rgba8_srgb(dev, ctx);
             check_staging_texture3d(dev, ctx);
             check_staging_bgra8(dev, ctx);
             check_staging_r16_float(dev, ctx);
