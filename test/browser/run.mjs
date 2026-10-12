@@ -2238,6 +2238,15 @@ try {
           return float4(result, 0.0, 0.0, 1.0);
         }
       `, 'main', 'ps_5_0');
+      const anisotropicComparisonPixel = tool.compileHlsl(`
+        Texture2D<float> depthImage : register(t0);
+        SamplerComparisonState anisotropicLessSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = float2(0.95 + (position.x - 4.5) * 0.2, 0.5);
+          float result = depthImage.SampleCmp(anisotropicLessSampler, coordinate, 0.4);
+          return float4(result, 0.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -2285,11 +2294,26 @@ try {
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x, y) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
-      const readComparisonRow = (y) => Array.from({ length: 8 }, (_, i) => at(4 + i * 8, y)[0]);
+      const at = (data, x, y) => Array.from(data.data.slice((y * data.width + x) * 4, (y * data.width + x) * 4 + 4));
+      const readComparisonRow = (y) => Array.from({ length: 8 }, (_, i) => at(pixels, 4 + i * 8, y)[0]);
+      stream.length = 0;
+      const anisotropicSampler = new Uint8Array(56), anisotropicSamplerView = new DataView(anisotropicSampler.buffer);
+      anisotropicSamplerView.setUint32(0, 46, true);
+      anisotropicSamplerView.setUint32(4, 0xd5, true); // 8x anisotropic comparison, linear filters
+      anisotropicSamplerView.setUint32(8, 4, true); anisotropicSamplerView.setUint32(12, 3, true); anisotropicSamplerView.setUint32(16, 3, true);
+      anisotropicSamplerView.setUint32(24, 8, true); anisotropicSamplerView.setUint32(28, 2, true); // max anisotropy 8, LESS comparison
+      anisotropicSamplerView.setFloat32(32, 0.25, true); // BORDER depth
+      command(8, anisotropicSampler);
+      shader(26, 1, anisotropicComparisonPixel);
+      command(17, words(1, 26)); command(20, words(1, 0, 1, 46)); command(29, words(3, 0));
+      const anisotropicSize = stream.reduce((total, part) => total + part.length, 0), anisotropicCommands = new Uint8Array(anisotropicSize);
+      let anisotropicOffset = 0; for (const part of stream) { anisotropicCommands.set(part, anisotropicOffset); anisotropicOffset += part.length; }
+      gpu.execute(anisotropicCommands);
+      const anisotropicPixels = await gpu.readBackbuffer(1);
       const result = {
         levelZeroInside: readComparisonRow(8), levelZeroOutside: readComparisonRow(24),
         sampleCmpEdge: readComparisonRow(40), sampleCmpOutside: readComparisonRow(56),
+        anisotropicSampleCmp: at(anisotropicPixels, 4, 32),
         draws: gpu.stats.draws, errors: gpu.stats.errors, logs,
       };
       gpu.device.destroy();
@@ -2299,11 +2323,12 @@ try {
     }
   });
   check('D3D11 comparison samplers apply all eight compare functions to point and linear BORDER taps',
-    comparisonSamplerResult.draws === 1 && comparisonSamplerResult.errors.length === 0
+    comparisonSamplerResult.draws === 2 && comparisonSamplerResult.errors.length === 0
       && comparisonSamplerResult.levelZeroInside?.every((v, i) => v === [0, 255, 0, 255, 0, 255, 0, 255][i])
       && comparisonSamplerResult.levelZeroOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i])
       && comparisonSamplerResult.sampleCmpEdge?.every((v, i) => v === [0, 102, 102, 102, 153, 153, 153, 255][i])
-      && comparisonSamplerResult.sampleCmpOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i]),
+      && comparisonSamplerResult.sampleCmpOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i])
+      && near(comparisonSamplerResult.anisotropicSampleCmp || [], [110, 0, 0, 255], 3),
     JSON.stringify(comparisonSamplerResult));
 
   const depthCompareResult = await page.evaluate(async () => {
