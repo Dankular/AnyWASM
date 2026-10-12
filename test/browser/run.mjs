@@ -1084,6 +1084,29 @@ try {
         return Array.from(filteredPixels.data.slice(i, i + 4));
       };
       result.trilinear = filteredAt(32, 32);
+
+      stream.length = 0;
+      const source3d = 40, destination3d = 41;
+      gpu.createTexture(source3d, 4, 4, 1, 4, 28, 0, 0, 0, '3d');
+      gpu.createTexture(destination3d, 4, 4, 1, 4, 28, 0, 0, 0, '3d');
+      for (let z = 0; z < 4; z++) {
+        const sourceSlice = new Uint8Array(4 * 4 * 4), destinationSlice = new Uint8Array(4 * 4 * 4);
+        for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+          const offset = (y * 4 + x) * 4;
+          sourceSlice.set([x + 4 * y + 16 * z, 0, 0, 255], offset);
+          destinationSlice.set([9, 8, 7, 255], offset);
+        }
+        gpu.textureWrite(source3d, 0, z, 0, 0, 4, 4, 16, sourceSlice.length, sourceSlice);
+        gpu.textureWrite(destination3d, 0, z, 0, 0, 4, 4, 16, destinationSlice.length, destinationSlice);
+      }
+      command(40, words(destination3d, 0, 0, 1, 1, source3d, 0, 1, 1, 1, 1, 3, 3, 3));
+      gpu.execute(append());
+      const copiedVolume = await gpu.readBackResource(destination3d, 0);
+      const atVolume = (x, y, z) => Array.from(copiedVolume.slice(((z * 4 + y) * 4 + x) * 4, ((z * 4 + y) * 4 + x) * 4 + 4));
+      result.copy3d = {
+        copied: [atVolume(0, 1, 1), atVolume(1, 1, 1), atVolume(0, 2, 2), atVolume(1, 2, 2)],
+        outside: [atVolume(2, 1, 1), atVolume(0, 0, 1), atVolume(0, 1, 0)],
+      };
       result.errors = gpu.stats.errors;
       gpu.device.destroy();
       return result;
@@ -1100,6 +1123,10 @@ try {
   check('CopySubresourceRegion leaves pixels outside the destination box untouched',
     copyRegionResult.outside?.every((pixel) => near(pixel, [0, 0, 51, 255], 1)),
     JSON.stringify(copyRegionResult.outside));
+  check('D3D11 CopySubresourceRegion copies a 3D box across depth and preserves untouched voxels',
+    copyRegionResult.copy3d?.copied?.map((pixel) => pixel[0]).join(',') === '21,22,41,42'
+      && copyRegionResult.copy3d?.outside?.every((pixel) => pixel[0] === 9 && pixel[1] === 8 && pixel[2] === 7 && pixel[3] === 255),
+    JSON.stringify(copyRegionResult.copy3d));
   check('GenerateMips box-filters the 4x4 source into four 2x2 colour averages',
     copyRegionResult.mip1?.every((pixel, i) => near(pixel, [[20, 20, 0, 255], [100, 20, 0, 255], [20, 100, 0, 255], [100, 100, 0, 255]][i], 1)),
     JSON.stringify(copyRegionResult.mip1));
