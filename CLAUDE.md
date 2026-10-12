@@ -266,11 +266,12 @@ register-stack subset):
       flashlight probe now selects an unobstructed SDF ray to a wall within the light range and
       checks local pixels; two fresh Release-bundle launches passed. Target-driven Tab
       map reset is pixel-checked after adding D3D11 `Flush1` event signaling and event-query
-      completion; other query types are not supported. Browser fixtures also cover typed R32/RGBA
-      textures, structured/raw/typed buffer UAV ranges, and a 3D texture UAV. Other UAV formats,
-      geometry/hull/domain shaders, general staging read-back, deferred contexts/command lists,
-      `SV_` system values beyond the basics, tiled resources, and honest feature-level reporting
-      remain open.
+      completion; unsupported query and predicate types now return `E_NOTIMPL`, while invalid types
+      return `E_INVALIDARG`. GPU counters and predication remain unsupported. Browser fixtures also
+      cover typed R32/RGBA textures, structured/raw/typed buffer UAV ranges, and a 3D texture UAV.
+      Other UAV formats, geometry/hull/domain shaders, general staging read-back, deferred
+      contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
+      feature-level reporting remain open.
 - [~] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; a captured
       Diligent GLFW Demo SDF shader now has a regression for its non-finite integer-register bit
       patterns and translates through a runtime bitcast. The target's draw-parameter uniform and UAV

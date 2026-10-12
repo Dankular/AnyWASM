@@ -21,6 +21,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
 const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
 const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
 const D3D11_QUERY_EVENT: u32 = 0;
+const D3D11_QUERY_TYPE_COUNT: u32 = 16;
 const DXGI_FORMAT_UNKNOWN: u32 = 0;
 const DXGI_FORMAT_R32_FLOAT: u32 = 41;
 const DXGI_FORMAT_R32_UINT: u32 = 42;
@@ -172,20 +173,8 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CreateBlendState" | "CreateBlendState1" => |p| create_state(p, op::CREATE_BLEND, 264, "ID3D11BlendState"),
         "CreateRasterizerState" | "CreateRasterizerState1" => |p| create_state(p, op::CREATE_RASTER, 40, "ID3D11RasterizerState"),
         "CreateDepthStencilState" => |p| create_state(p, op::CREATE_DEPTH, 52, "ID3D11DepthStencilState"),
-        "CreateQuery" | "CreatePredicate" => |p| {
-            let out = p.arg(2);
-            let query_type = p.rd32(p.arg(1))?;
-            let q = create(
-                p,
-                "ID3D11Query",
-                Kind::Query {
-                    query_type,
-                    complete: false,
-                },
-            );
-            p.wr64(out, q)?;
-            Ok(S_OK)
-        },
+        "CreateQuery" => |p| create_query(p, false),
+        "CreatePredicate" => |p| create_query(p, true),
         "GetImmediateContext" | "GetImmediateContext1" => |p| {
             let out = p.arg(1);
             let c = p.extra.com.context;
@@ -366,6 +355,44 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         _ => return None,
     })
+}
+
+fn create_query(p: &mut Process, predicate: bool) -> R {
+    let (desc, out) = (p.arg(1), p.arg(2));
+    if out != 0 {
+        p.wr64(out, 0)?;
+    }
+    if desc == 0 {
+        return Ok(E_INVALIDARG);
+    }
+
+    let query_type = p.rd32(desc)?;
+    if query_type >= D3D11_QUERY_TYPE_COUNT {
+        return Ok(E_INVALIDARG);
+    }
+    if predicate {
+        if !matches!(query_type, 5 | 7 | 9 | 11 | 13 | 15) {
+            return Ok(E_INVALIDARG);
+        }
+        return Ok(E_NOTIMPL);
+    }
+    if query_type != D3D11_QUERY_EVENT {
+        return Ok(E_NOTIMPL);
+    }
+    if out == 0 {
+        return Ok(S_OK);
+    }
+
+    let query = create(
+        p,
+        "ID3D11Query",
+        Kind::Query {
+            query_type,
+            complete: false,
+        },
+    );
+    p.wr64(out, query)?;
+    Ok(S_OK)
 }
 
 fn set_query_complete(p: &mut Process, complete: bool) -> R {
@@ -1226,6 +1253,26 @@ mod tests {
         (p, result)
     }
 
+    fn call_create_query(method_name: &str, query_type: u32) -> (Process, u64) {
+        use anywasm_cpu::cpu::{R8, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.wr32(DESC, query_type).unwrap();
+        p.wr32(DESC + 4, 0).unwrap();
+        p.wr64(OUT, u64::MAX).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = OUT;
+        let result = method("ID3D11Device", method_name).unwrap()(&mut p).unwrap();
+        (p, result)
+    }
+
     #[test]
     fn flush1_signals_the_selected_target_idle_event() {
         use anywasm_cpu::cpu::{R8, RCX};
@@ -1283,6 +1330,54 @@ mod tests {
         p.cpu.gpr[R9] = 4;
         assert_eq!(get_data(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
+    }
+
+    #[test]
+    fn create_query_keeps_event_queries_supported() {
+        const OUT: u64 = 0x11000;
+        let (p, result) = call_create_query("CreateQuery", D3D11_QUERY_EVENT);
+        assert_eq!(result, S_OK);
+        let query = p.rd64(OUT).unwrap();
+        assert_ne!(query, 0);
+        assert!(matches!(
+            kind_of(&p, query),
+            Some(Kind::Query {
+                query_type: D3D11_QUERY_EVENT,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn create_query_rejects_known_but_unsupported_query_types() {
+        const OUT: u64 = 0x11000;
+        let (p, result) = call_create_query("CreateQuery", 1); // D3D11_QUERY_OCCLUSION
+        assert_eq!(result, E_NOTIMPL);
+        assert_eq!(p.rd64(OUT).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_query_rejects_values_outside_the_d3d11_query_enum() {
+        const OUT: u64 = 0x11000;
+        let (p, result) = call_create_query("CreateQuery", 16);
+        assert_eq!(result, E_INVALIDARG);
+        assert_eq!(p.rd64(OUT).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_predicate_rejects_valid_but_unsupported_predicates() {
+        const OUT: u64 = 0x11000;
+        let (p, result) = call_create_query("CreatePredicate", 5); // D3D11_QUERY_OCCLUSION_PREDICATE
+        assert_eq!(result, E_NOTIMPL);
+        assert_eq!(p.rd64(OUT).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_predicate_rejects_non_predicate_query_types() {
+        const OUT: u64 = 0x11000;
+        let (p, result) = call_create_query("CreatePredicate", D3D11_QUERY_EVENT);
+        assert_eq!(result, E_INVALIDARG);
+        assert_eq!(p.rd64(OUT).unwrap(), 0);
     }
 
     #[test]
