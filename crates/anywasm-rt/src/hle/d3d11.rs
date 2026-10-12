@@ -387,6 +387,10 @@ fn set_query_complete(p: &mut Process, complete: bool) -> R {
 
 fn get_query_data(p: &mut Process) -> R {
     let query = p.arg(1);
+    let (data, size) = (p.arg(2), p.arg(3) as u32);
+    if data == 0 && size != 0 {
+        return Ok(E_INVALIDARG);
+    }
     let complete = matches!(
         kind_of(p, query),
         Some(Kind::Query {
@@ -397,7 +401,6 @@ fn get_query_data(p: &mut Process) -> R {
     if !complete {
         return Ok(S_FALSE);
     }
-    let (data, size) = (p.arg(2), p.arg(3) as u32);
     if data != 0 && size >= 4 {
         p.wr32(data, 1)?;
     }
@@ -1268,6 +1271,9 @@ mod tests {
         p.cpu.gpr[R9] = 4;
 
         let get_data = method("ID3D11DeviceContext3", "GetData").unwrap();
+        p.cpu.gpr[R8] = 0;
+        assert_eq!(get_data(&mut p).unwrap(), E_INVALIDARG);
+        p.cpu.gpr[R8] = OUT;
         assert_eq!(get_data(&mut p).unwrap(), S_FALSE);
 
         let end = method("ID3D11DeviceContext3", "End").unwrap();
