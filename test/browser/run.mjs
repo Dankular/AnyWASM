@@ -324,6 +324,12 @@ try {
     triText.includes('staging R32G32_UINT readback=12345678,9abcdef0,01020304,ffffffff,00000001,80000000,deadbeef,55aa33cc row_pitch=16'), triText);
   check('D3D11 staging R32G32_SINT Map(READ) preserves signed channel bit patterns',
     triText.includes('staging R32G32_SINT readback=80000000,ffffffff,00000000,00000001,7fffffff,87654321,fffffffe,0000002a row_pitch=16'), triText);
+  check('D3D11 staging R32G32B32A32_FLOAT Map(READ) preserves four-channel rows',
+    triText.includes('staging R32G32B32A32_FLOAT readback=0.125,-0.250,0.500,1.250,-0.500,2.000,-1.000,0.750,3.500,-4.250,5.125,-6.500,7.750,8.500,-9.250,10.000 row_pitch=32'), triText);
+  check('D3D11 staging R32G32B32A32_UINT Map(READ) preserves wide packed channel words',
+    triText.includes('staging R32G32B32A32_UINT readback=12345678,9abcdef0,01020304,ffffffff,00000001,80000000,deadbeef,55aa33cc,00000000,ffffffff,13579bdf,2468ace0,abcdef01,10203040,55667788,99aabbcc row_pitch=32'), triText);
+  check('D3D11 staging R32G32B32A32_SINT Map(READ) preserves wide signed bit patterns',
+    triText.includes('staging R32G32B32A32_SINT readback=80000000,ffffffff,00000000,00000001,7fffffff,87654321,fffffffe,0000002a,ffffffff,80000001,fffffffd,00000003,12345678,edcba987,40000000,c0000000 row_pitch=32'), triText);
   check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
     triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
   check('D3D11 staging BGRA8_UNORM Map(READ) preserves raw channel bytes',

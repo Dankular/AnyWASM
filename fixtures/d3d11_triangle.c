@@ -104,6 +104,82 @@ static void check_staging_r32g32_integers(ID3D11Device *dev, ID3D11DeviceContext
     check_staging_r32g32_integer(dev, ctx, DXGI_FORMAT_R32G32_SINT, "R32G32_SINT", signed_bits);
 }
 
+static void check_staging_rgba32_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const float expected[16] = {
+        0.125f, -0.25f, 0.5f, 1.25f, -0.5f, 2.0f, -1.0f, 0.75f,
+        3.5f, -4.25f, 5.125f, -6.5f, 7.75f, 8.5f, -9.25f, 10.0f
+    };
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init = { expected, 8 * sizeof(float), 16 * sizeof(float) };
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, &init, &source);
+    if (FAILED(hr)) { printf("staging R32G32B32A32_FLOAT source hr=%08lx\n", (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const float *row0 = (const float *)mapped.pData;
+            const float *row1 = (const float *)((const BYTE *)mapped.pData + mapped.RowPitch);
+            printf("staging R32G32B32A32_FLOAT readback=%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f row_pitch=%u\n",
+                row0[0], row0[1], row0[2], row0[3], row0[4], row0[5], row0[6], row0[7],
+                row1[0], row1[1], row1[2], row1[3], row1[4], row1[5], row1[6], row1[7], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging R32G32B32A32_FLOAT Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging R32G32B32A32_FLOAT staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
+static void check_staging_rgba32_integer(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+    UINT format, const char *name, const UINT *expected) {
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = format; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init = { expected, 8 * sizeof(UINT), 16 * sizeof(UINT) };
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, &init, &source);
+    if (FAILED(hr)) { printf("staging %s source hr=%08lx\n", name, (unsigned long)hr); return; }
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const UINT *row0 = (const UINT *)mapped.pData;
+            const UINT *row1 = (const UINT *)((const BYTE *)mapped.pData + mapped.RowPitch);
+            printf("staging %s readback=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x row_pitch=%u\n",
+                name, row0[0], row0[1], row0[2], row0[3], row0[4], row0[5], row0[6], row0[7],
+                row1[0], row1[1], row1[2], row1[3], row1[4], row1[5], row1[6], row1[7], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging %s Map hr=%08lx\n", name, (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging %s staging hr=%08lx\n", name, (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
+static void check_staging_rgba32_integers(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const UINT unsigned_values[16] = {
+        0x12345678, 0x9abcdef0, 0x01020304, 0xffffffff,
+        0x00000001, 0x80000000, 0xdeadbeef, 0x55aa33cc,
+        0x00000000, 0xffffffff, 0x13579bdf, 0x2468ace0,
+        0xabcdef01, 0x10203040, 0x55667788, 0x99aabbcc
+    };
+    static const UINT signed_bits[16] = {
+        0x80000000, 0xffffffff, 0x00000000, 0x00000001,
+        0x7fffffff, 0x87654321, 0xfffffffe, 0x0000002a,
+        0xffffffff, 0x80000001, 0xfffffffd, 0x00000003,
+        0x12345678, 0xedcba987, 0x40000000, 0xc0000000
+    };
+    check_staging_rgba32_integer(dev, ctx, DXGI_FORMAT_R32G32B32A32_UINT, "R32G32B32A32_UINT", unsigned_values);
+    check_staging_rgba32_integer(dev, ctx, DXGI_FORMAT_R32G32B32A32_SINT, "R32G32B32A32_SINT", signed_bits);
+}
+
 static void check_staging_rgba16_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     D3D11_TEXTURE2D_DESC desc = {0};
     desc.Width = 2; desc.Height = 1; desc.MipLevels = 1; desc.ArraySize = 1;
@@ -540,6 +616,8 @@ int main(void) {
             check_staging_r32_float(dev, ctx);
             check_staging_r32g32_float(dev, ctx);
             check_staging_r32g32_integers(dev, ctx);
+            check_staging_rgba32_float(dev, ctx);
+            check_staging_rgba32_integers(dev, ctx);
             check_staging_rgba16_float(dev, ctx);
             check_staging_r8_subresources(dev, ctx);
             check_staging_d32_float(dev, ctx);

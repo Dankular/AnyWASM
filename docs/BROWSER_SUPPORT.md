@@ -49,7 +49,8 @@ hello and D3D11 triangle fixtures successfully (three frames), and passed the em
 cache-pressure probe. Both passed 640x480 back-buffer checks and visible-canvas checks at 640x453;
 each reported clear pixel `[0,0,51,255]`, back-buffer center `[85,86,85,255]`, visible-canvas center
 `[85,85,84,255]`, and no WebGPU validation errors. The D3D11 fixture preserved R32G32_FLOAT values
-with a 16-byte row pitch, R32G32_UINT/SINT packed channel words, and expected BGRA8_SRGB encoded bytes in both browsers. WebKit exited hello, passed cache
+with a 16-byte row pitch, R32G32_UINT/SINT words, and RGBA32_FLOAT/UINT/SINT rows with 32-byte
+pitches, along with expected BGRA8_SRGB encoded bytes in both browsers. WebKit exited hello, passed cache
 pressure, and returned the expected explicit graphics-unavailable status because WebGPU and
 OffscreenCanvas worker transfer are unavailable.
 These results are specific to the installed browser builds and platform.
@@ -58,8 +59,9 @@ Fresh Chromium suite on 2026-10-12: Chrome `154.0.8037.98`, selected through `CH
 x64. `node test/browser/run.mjs` passed the worker, emitted-module, input, D3D11 triangle, textured,
 and compute checks. The `?test=1` triangle back-buffer readback matched barycentric samples at 216
 pixels (worst error 1/255); a separate visible-canvas screenshot verified the clear colour and
-interpolated centre pixel. The triangle fixture preserved the two-row R32G32_FLOAT readback at a
-16-byte pitch, packed R32G32_UINT/SINT channel words, and encoded bytes through RGBA8_SRGB and BGRA8_SRGB staging. The textured fixture
+interpolated centre pixel. The triangle fixture preserved two-row R32G32_FLOAT values at a 16-byte
+pitch; R32G32_UINT/SINT packed words; RGBA32_FLOAT/UINT/SINT rows at a 32-byte pitch; and encoded
+bytes through RGBA8_SRGB and BGRA8_SRGB staging. The textured fixture
 passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
 following pixel shader sampled that result. The run reported no WebGPU validation errors or page
