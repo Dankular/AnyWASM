@@ -27,6 +27,17 @@ check('vs WGSL uses @group(0) @binding(0) uniform', /@group\(0\)\s*@binding\(0\)
 check('ps WGSL uses texture @group(1) and sampler @group(2)', /@group\(1\)\s*@binding\(0\)\s*var\s+\w+:\s*texture_2d/.test(p.wgsl) && /@group\(2\)\s*@binding\(0\)\s*var\s+\w+:\s*sampler/.test(p.wgsl), p.wgsl.slice(0, 600));
 check('vs has @vertex entry with position builtin', /@vertex/.test(v.wgsl) && /@builtin\(position\)/.test(v.wgsl));
 check('ps has @fragment entry', /@fragment/.test(p.wgsl));
+const depthPs = t.translate(t.compileHlsl(`
+  struct PsOut { float4 color : SV_Target; float depth : SV_Depth; };
+  PsOut main() {
+    PsOut output;
+    output.color = float4(1.0, 0.0, 0.0, 1.0);
+    output.depth = 0.25;
+    return output;
+  }
+`, 'main', 'ps_5_0'));
+check('SV_Depth translates to the WGSL fragment-depth builtin',
+  /@builtin\(frag_depth\)\s+\w+:\s*f32/.test(depthPs.wgsl), depthPs.wgsl);
 const drawParamsVs = t.translate(t.compileHlsl(`
   float4 main(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) : SV_Position {
     return float4(float(vertexId + instanceId), 0.0, 0.0, 1.0);

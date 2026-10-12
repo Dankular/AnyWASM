@@ -2768,6 +2768,90 @@ try {
       && near(depthBiasResult.biased, [255, 0, 0, 255], 1),
     JSON.stringify(depthBiasResult));
 
+  const svDepthResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.5, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = (color, depth) => tool.compileHlsl(`
+        struct PsOut { float4 color : SV_Target; float depth : SV_Depth; };
+        PsOut main() {
+          PsOut output;
+          output.color = ${color};
+          output.depth = ${depth};
+          return output;
+        }
+      `, 'main', 'ps_5_0');
+      const green = pixel('float4(0.0, 1.0, 0.0, 1.0)', '0.75');
+      const red = pixel('float4(1.0, 0.0, 0.0, 1.0)', '0.25');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(3, 64, 64, 1, 1, 39, 0x40, 0, 1, 0));
+      command(12, words(4, 1, 3, 39, 3, 0, 1, 0, 1));
+      const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
+      rasterView.setUint32(0, 13, true); rasterView.setUint32(4, 3, true); rasterView.setUint32(8, 1, true);
+      rasterView.setUint32(28, 1, true);
+      command(10, raster);
+      const depthState = new Uint8Array(56), depthView = new DataView(depthState.buffer);
+      depthView.setUint32(0, 15, true); depthView.setUint32(4, 1, true);
+      depthView.setUint32(8, 1, true); depthView.setUint32(12, 2, true);
+      command(11, depthState);
+      shader(7, 0, vertex); shader(8, 1, green); shader(9, 1, red);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(16, words(4)); command(21, words(1, 2, 4));
+      command(25, words(13)); command(26, words(15, 0));
+      const clearColor = new Uint8Array(20), colorView = new DataView(clearColor.buffer);
+      colorView.setUint32(0, 2, true); colorView.setFloat32(16, 1, true); command(27, clearColor);
+      const clearDepth = new Uint8Array(16), depthClearView = new DataView(clearDepth.buffer);
+      depthClearView.setUint32(0, 4, true); depthClearView.setUint32(4, 1, true);
+      depthClearView.setFloat32(8, 1, true); command(28, clearDepth);
+      command(23, words(1, 0, 0, 64, 64)); command(29, words(3, 0));
+      command(17, words(1, 9)); command(29, words(3, 0));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { center: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('SV_Depth output controls later depth testing',
+    !svDepthResult.error && svDepthResult.draws === 2 && svDepthResult.errors.length === 0
+      && near(svDepthResult.center, [255, 0, 0, 255], 1),
+    JSON.stringify(svDepthResult));
+
   const stencilResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
