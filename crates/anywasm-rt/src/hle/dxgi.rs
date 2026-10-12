@@ -230,6 +230,40 @@ mod tests {
         ));
         assert_eq!(get_frame_latency_waitable_object(&mut p).unwrap(), first);
     }
+
+    #[test]
+    fn present_serializes_sync_interval_and_rejects_values_above_four() {
+        use anywasm_cpu::cpu::{R8, RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        let backbuffer = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: 33 });
+        let swap_chain = create(
+            &mut p,
+            "IDXGISwapChain1",
+            Kind::SwapChain { id: 17, backbuffer },
+        );
+        p.cpu.gpr[RCX] = swap_chain;
+        p.cpu.gpr[RDX] = 3;
+        p.cpu.gpr[R8] = 0;
+
+        assert_eq!(present(&mut p).unwrap(), S_OK);
+        assert_eq!(
+            super::super::gpu::decode(&p.extra.gpu.buf),
+            vec![(
+                op::PRESENT,
+                [17u32, 33, 3]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect()
+            )]
+        );
+        assert_eq!(p.yield_request, Some(Stop::Frame));
+
+        p.extra.gpu.buf.clear();
+        p.cpu.gpr[RDX] = 5;
+        assert_eq!(present(&mut p).unwrap(), DXGI_ERROR_INVALID_CALL);
+        assert!(p.extra.gpu.buf.is_empty());
+    }
 }
 
 /// Build a swap chain object (and its backbuffer texture) for a window.
@@ -322,6 +356,10 @@ fn create_swap_chain_for_hwnd(p: &mut Process) -> R {
 
 fn present(p: &mut Process) -> R {
     let this = p.arg(0);
+    let sync_interval = p.arg(1) as u32;
+    if sync_interval > 4 {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    }
     let Some(Kind::SwapChain { id, backbuffer }) = kind_of(p, this) else {
         return Ok(DXGI_ERROR_INVALID_CALL);
     };
@@ -329,7 +367,9 @@ fn present(p: &mut Process) -> R {
         Some(Kind::Texture2D { id }) => id,
         _ => 0,
     };
-    p.extra.gpu.emit(op::PRESENT, Pk::new().u32(id).u32(tex));
+    p.extra
+        .gpu
+        .emit(op::PRESENT, Pk::new().u32(id).u32(tex).u32(sync_interval));
     p.yield_request = Some(Stop::Frame);
     Ok(S_OK)
 }

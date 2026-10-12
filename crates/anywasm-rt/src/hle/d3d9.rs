@@ -1676,7 +1676,10 @@ fn present(p: &mut Process) -> R {
         (Some(com::Kind::SwapChain { id, .. }), Some(com::Kind::Texture2D { id: tex })) => (id, tex),
         _ => return Ok(D3DERR_INVALIDCALL),
     };
-    p.extra.gpu.emit(op::PRESENT, Pk::new().u32(sc_id).u32(tex_id));
+    // D3D9's default presentation interval waits for one vertical blank.
+    p.extra
+        .gpu
+        .emit(op::PRESENT, Pk::new().u32(sc_id).u32(tex_id).u32(1));
     p.yield_request = Some(Stop::Frame);
     Ok(S_OK)
 }

@@ -9,12 +9,12 @@
 import { AnyWasm, Status } from './anywasm.js';
 import { ShaderTool } from './shaders.js';
 import { GpuExecutor } from './gpu.js';
+import { waitForPresentInterval } from './frame-pacing.js';
 
 let w = null, exec = null, stopped = false, wake = null, testMode = false;
 let graphicsUnavailableReason = '';
 const dec = new TextDecoder();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const nextFrame = () => (typeof requestAnimationFrame === 'function' ? new Promise((r) => requestAnimationFrame(() => r())) : sleep(16));
 const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
@@ -89,7 +89,7 @@ async function start({ wasm, bundle, assetUrl, canvas, testMode: requestedTestMo
       frames++;
       if (exec && frames % 30 === 0) postMessage({ type: 'gpu', ...exec.stats, asyncify: w.asyncifyStats });
       const waitStart = performance.now();
-      await nextFrame();
+      await waitForPresentInterval(exec?.lastPresentSyncInterval ?? 1);
       const elapsed100ns = Math.max(0, Math.round((performance.now() - waitStart) * 10_000));
       w.advanceTime100ns(BigInt(elapsed100ns));
     } else if (status === Status.IDLE) await waitForInput();

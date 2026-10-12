@@ -219,6 +219,7 @@ export class GpuExecutor {
     this.ring = null;
     this.ringOff = 0;
     this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, lastComputeUavs: [], errors: [] };
+    this.lastPresentSyncInterval = 1;
     this.st = defaultPipelineState();
   }
 
@@ -437,7 +438,7 @@ export class GpuExecutor {
       case OP.RESOLVE_TEXTURE: this.resolveTexture(u(0), u(1), u(2), u(3), u(4)); break;
       case OP.SWAPCHAIN: this.createSwapchain(u(0), u(2), u(3), u(4), u(5)); break;
       case OP.RESIZE_SWAPCHAIN: this.resizeSwapchain(u(0), u(1), u(2), u(3), u(4)); break;
-      case OP.PRESENT: this.present(u(0), u(1)); break;
+      case OP.PRESENT: this.present(u(0), u(1), bytes.byteLength >= 12 ? u(2) : 1); break;
       case OP.GENERATE_MIPS: this.generateMips(u(0)); break;
       case OP.RELEASE: this.release(u(0)); break;
       case OP.DISPATCH: this.dispatchCompute(u(0), u(1), u(2)); break;
@@ -1724,7 +1725,8 @@ export class GpuExecutor {
     this.createSwapchain(id, texId, w, h, dxgi);
   }
 
-  present(scId, texId) {
+  present(scId, texId, syncInterval = 1) {
+    this.lastPresentSyncInterval = Math.min(syncInterval >>> 0, 4);
     const t = this.res.get(texId);
     if (!t) return;
     this.endPass();

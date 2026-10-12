@@ -1,6 +1,7 @@
 // Drives the real web page in headless Chromium and checks the program output on screen.
 import { chromium } from 'playwright-core';
 import { decodePng } from './png.mjs';
+import { waitForPresentInterval } from '../../web/frame-pacing.js';
 
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -24,6 +25,15 @@ const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoo
 await new Promise((r) => setTimeout(r, 800));
 let failures = 0;
 const check = (n, ok, d = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${n}${ok ? '' : ' :: ' + d}`); if (!ok) failures++; };
+
+const pacedFrames = [];
+let unsynchronizedYields = 0;
+const intervalZeroWaited = await waitForPresentInterval(0, async () => pacedFrames.push('frame'), async () => { unsynchronizedYields++; });
+check('DXGI present interval zero yields without waiting for vblank', intervalZeroWaited === 0 && unsynchronizedYields === 1 && pacedFrames.length === 0,
+  JSON.stringify({ intervalZeroWaited, unsynchronizedYields, pacedFrames: [...pacedFrames] }));
+const intervalThreeWaited = await waitForPresentInterval(3, async () => pacedFrames.push('frame'), async () => { unsynchronizedYields++; });
+check('DXGI present interval three waits for three vblanks', intervalThreeWaited === 3 && pacedFrames.length === 3 && unsynchronizedYields === 1,
+  JSON.stringify({ intervalThreeWaited, unsynchronizedYields, pacedFrames }));
 
 const dir = '/opt/pw-browsers';
 const versioned = process.env.CHROMIUM ? undefined : readdirSync(dir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
@@ -1745,7 +1755,7 @@ try {
       clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true); command(27, clear);
       command(13, words(0, 1, 11, 8, 0));
       command(19, words(1, 0, 1, 5));
-      command(29, words(3, 0)); command(35, words(1, 9));
+      command(29, words(3, 0)); command(35, words(1, 9, 3));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const i = (32 * pixels.width + 32) * 4;
@@ -1755,6 +1765,7 @@ try {
       const uavCenter = uavValues[2 * readback.width + 2];
       const result = {
         pixel: observedPixel,
+        presentSyncInterval: gpu.lastPresentSyncInterval,
         uavCenter,
         uav: { width: readback.width, height: readback.height, format: readback.format, values: uavValues },
         stats: gpu.stats,
@@ -1772,6 +1783,8 @@ try {
   check('compute-written UAV texture is visible to the following pixel shader',
     computeResult.pixel?.every((value, i) => Math.abs(value - [64, 0, 0, 255][i]) <= 1),
     JSON.stringify({ pixel: computeResult.pixel, uavCenter: computeResult.uavCenter, error: computeResult.error }));
+  check('GPU executor preserves the DXGI present sync interval', computeResult.presentSyncInterval === 3,
+    JSON.stringify(computeResult.presentSyncInterval));
   check('R32_FLOAT UAV contains the compute shader value', Math.abs(computeResult.uavCenter - 0.25) < 0.0001,
     JSON.stringify(computeResult.uavCenter));
   check('R32_FLOAT texture readback returns all 16 UAV values',
