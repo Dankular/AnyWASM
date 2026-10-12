@@ -2513,8 +2513,19 @@ try {
         }
         command(11, payload);
       };
-      stencilState(13, 0xff, 8, 3); // always pass and write reference value
-      stencilState(14, 0, 3, 1); // draw only where stored stencil equals reference
+      const operations = [
+        { name: 'keep', op: 1, initial: 5, reference: 9, expected: 5 },
+        { name: 'zero', op: 2, initial: 5, reference: 9, expected: 0 },
+        { name: 'replace', op: 3, initial: 5, reference: 9, expected: 9 },
+        { name: 'increment-clamp', op: 4, initial: 5, reference: 9, expected: 6 },
+        { name: 'decrement-clamp', op: 5, initial: 5, reference: 9, expected: 4 },
+        { name: 'invert', op: 6, initial: 5, reference: 9, expected: 250 },
+        { name: 'increment-wrap', op: 7, initial: 255, reference: 9, expected: 0 },
+        { name: 'decrement-wrap', op: 8, initial: 0, reference: 9, expected: 255 },
+      ];
+      stencilState(13, 0xff, 8, 3); // seed each region with the reference value
+      for (let i = 0; i < operations.length; i++) stencilState(20 + i, 0xff, 8, operations[i].op);
+      stencilState(40, 0, 3, 1); // draw only where stored stencil equals reference
       shader(7, 0, vertex); shader(8, 1, red); shader(9, 1, green);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
@@ -2524,26 +2535,36 @@ try {
       const clearDepth = new Uint8Array(16), clearDepthView = new DataView(clearDepth.buffer);
       clearDepthView.setUint32(0, 4, true); clearDepthView.setUint32(4, 3, true);
       clearDepthView.setFloat32(8, 1, true); command(28, clearDepth);
-      command(26, words(13, 1)); command(23, words(1, 0, 0, 32, 64)); command(29, words(3, 0));
-      command(17, words(1, 9)); command(26, words(14, 1));
-      command(23, words(1, 0, 0, 64, 64)); command(29, words(3, 0));
+      for (let i = 0; i < operations.length; i++) {
+        const operation = operations[i], left = i * 8;
+        const scissor = () => command(23, words(1, left, 0, left + 8, 64));
+        command(26, words(13, operation.initial)); scissor(); command(29, words(3, 0));
+        command(26, words(20 + i, operation.reference)); scissor(); command(29, words(3, 0));
+        command(17, words(1, 9)); command(26, words(40, operation.expected));
+        scissor(); command(29, words(3, 0)); command(17, words(1, 8));
+      }
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y) => {
         const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
       };
-      const result = { written: at(16, 32), rejected: at(48, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const result = {
+        operationNames: operations.map(({ name }) => name),
+        operationPixels: operations.map((_, i) => at(i * 8 + 4, 32)),
+        draws: gpu.stats.draws,
+        errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 stencil replace writes the reference value and equal comparison masks the next draw',
-    stencilResult.draws === 2 && stencilResult.errors.length === 0
-      && near(stencilResult.written, [0, 255, 0, 255], 1)
-      && near(stencilResult.rejected, [0, 0, 0, 255], 1),
+  check('D3D11 stencil pass operations cover keep, zero, replace, saturating and wrapping arithmetic',
+    stencilResult.draws === 24 && stencilResult.errors.length === 0
+      && stencilResult.operationPixels?.length === 8
+      && stencilResult.operationPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1)),
     JSON.stringify(stencilResult));
 
   const reverseBlendResult = await page.evaluate(async () => {
