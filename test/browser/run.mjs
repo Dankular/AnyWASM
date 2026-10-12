@@ -1754,6 +1754,14 @@ try {
         [numthreads(1, 1, 1)]
         void main(uint3 id : SV_DispatchThreadID) { dst[id.xy] = float4(-64.0 / 127.0, -32.0 / 127.0, 32.0 / 127.0, 64.0 / 127.0); }
       `, 'main', 'cs_5_0');
+      const groupSystemValuesCompute = tool.compileHlsl(`
+        RWTexture2D<uint4> dst : register(u0);
+        [numthreads(2, 2, 1)]
+        void main(uint3 dispatchId : SV_DispatchThreadID, uint3 groupId : SV_GroupID,
+                  uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex) {
+          dst[dispatchId.xy] = uint4(groupId.x, groupId.y, groupThreadId.x + groupThreadId.y * 2, groupIndex);
+        }
+      `, 'main', 'cs_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -1860,6 +1868,12 @@ try {
       command(17, words(2, 20));
       command(43, words(0, 1, 144, 0xffffffff));
       command(42, words(4, 4, 1));
+      command(4, words(153, 4, 4, 1, 1, 3, 0x88, 0, 1, 0)); // RGBA32_UINT system-value texture
+      command(12, words(154, 3, 153, 3, 4, 0, 1, 0, 1)); // RGBA32_UINT UAV
+      shader(21, groupSystemValuesCompute);
+      command(17, words(2, 21));
+      command(43, words(0, 1, 154, 0xffffffff));
+      command(42, words(2, 2, 1)); // 2x2 workgroups of 2x2 threads
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -1878,6 +1892,7 @@ try {
       const rgba16UintReadback = await gpu.readBackTexture(124);
       const rgba16SintReadback = await gpu.readBackTexture(134);
       const rgba8SnormReadback = await gpu.readBackTexture(144);
+      const groupSystemValuesReadback = await gpu.readBackTexture(154);
       const result = {
         width: readback.width,
         height: readback.height,
@@ -1911,6 +1926,8 @@ try {
         rgba16SintValues: Array.from(rgba16SintReadback.data),
         rgba8SnormFormat: rgba8SnormReadback.format,
         rgba8SnormValues: Array.from(rgba8SnormReadback.data),
+        groupSystemValuesFormat: groupSystemValuesReadback.format,
+        groupSystemValues: Array.from(groupSystemValuesReadback.data),
         dispatches: gpu.stats.dispatches,
         errors: gpu.stats.errors,
         logs,
@@ -1924,7 +1941,7 @@ try {
   check('typed R32 and RGBA UAV dispatches and readback preserve values',
     typedTextureUavResult.width === 4 && typedTextureUavResult.height === 4
       && typedTextureUavResult.format === 'r32uint'
-      && typedTextureUavResult.dispatches === 15 && typedTextureUavResult.errors.length === 0
+      && typedTextureUavResult.dispatches === 16 && typedTextureUavResult.errors.length === 0
       && typedTextureUavResult.values.every((value, i) => value === i)
       && typedTextureUavResult.signedFormat === 'r32sint'
       && typedTextureUavResult.signedValues.every((value, i) => value === i - 8)
@@ -1965,6 +1982,14 @@ try {
       && typedTextureUavResult.rgba8SnormValues.length === 64
       && typedTextureUavResult.rgba8SnormValues.every((value, i) => value === [-64, -32, 32, 64][i % 4]),
     JSON.stringify(typedTextureUavResult));
+  check('SV_GroupID, SV_GroupThreadID, and SV_GroupIndex identify each compute lane',
+    typedTextureUavResult.groupSystemValuesFormat === 'rgba32uint'
+      && typedTextureUavResult.groupSystemValues.length === 64
+      && typedTextureUavResult.groupSystemValues.every((value, i) => {
+        const pixel = i >> 2, x = pixel % 4, y = Math.floor(pixel / 4);
+        return value === [x >> 1, y >> 1, (x % 2) + (y % 2) * 2, (x % 2) + (y % 2) * 2][i % 4];
+      }),
+    JSON.stringify({ format: typedTextureUavResult.groupSystemValuesFormat, values: typedTextureUavResult.groupSystemValues, errors: typedTextureUavResult.errors }));
 
   const structuredBufferUavResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
