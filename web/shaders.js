@@ -286,7 +286,7 @@ function lowerBufferImagesToStorageBuffers(spirv) {
   };
   const emittedTypeDeclarations = new Set();
   const output = Array.from({ length: 5 }, (_, i) => input.getUint32(i * 4, true));
-  let annotationsEmitted = false, constantsEmitted = false;
+  let annotationsEmitted = false;
   const pushInst = (inst) => output.push(...inst);
   const accessChain = (info, variableId, coordinateId) => {
     const pointerId = nextId++;
@@ -388,14 +388,10 @@ function lowerBufferImagesToStorageBuffers(spirv) {
       }
     }
 
-    if (opcode === 59 && inst[3] !== 7 && !constantsEmitted) {
-      for (const constant of newConstants) pushInst(constant);
-      constantsEmitted = true;
-    }
     pushInst(inst);
   }
   if (!annotationsEmitted) for (const decoration of newDecorations) output.unshift(...decoration);
-  if (!constantsEmitted) {
+  if (newConstants.length) {
     const firstFunction = output.findIndex((word) => (word & 0xffff) === 54);
     if (firstFunction >= 0) output.splice(firstFunction, 0, ...newConstants.flat());
   }

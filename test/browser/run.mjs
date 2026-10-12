@@ -1000,6 +1000,70 @@ try {
       && sentinelsOutsideStructuredView,
     JSON.stringify(structuredBufferUavResult));
 
+  const rawBufferUavResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const logs = [];
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const compute = tool.compileHlsl(`
+        RWByteAddressBuffer output : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) { output.Store(id.x * 4, 123); }
+      `, 'main', 'cs_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, dxbc) => {
+        const head = words(id, 2, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const initial = new Uint32Array(16).fill(0xfeed1234);
+      command(2, words(23, initial.byteLength, 0x80, 0, 0x20, 0)); // raw UAV buffer
+      const write = new Uint8Array(12 + initial.byteLength);
+      write.set(words(23, 0, initial.byteLength)); write.set(new Uint8Array(initial.buffer), 12); command(3, write);
+      command(12, words(24, 3, 23, 39, 1, 2, 3, 1, 0)); // R32_TYPELESS raw view, elements [2, 5)
+      shader(25, compute);
+      command(17, words(2, 25));
+      command(43, words(0, 1, 24, 0xffffffff));
+      command(42, words(3, 1, 1));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
+      gpu.execute(commands);
+
+      const resource = gpu.res.get(23);
+      const readback = gpu.device.createBuffer({ size: initial.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const encoder = gpu.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(resource.gpu, 0, readback, 0, initial.byteLength);
+      gpu.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const values = Array.from(new Uint32Array(readback.getMappedRange().slice(0)));
+      readback.unmap(); readback.destroy(); gpu.device.destroy();
+      return { values, dispatches: gpu.stats.dispatches, errors: gpu.stats.errors, logs };
+    } catch (error) {
+      return { error: String(error), logs };
+    }
+  });
+  const sentinelsOutsideRawView = rawBufferUavResult.values?.every((value, i) =>
+    (i < 2 || i >= 5) ? value === 0xfeed1234 : value === 123);
+  check('D3D11 raw-buffer UAV Store honors FirstElement and NumElements',
+    rawBufferUavResult.dispatches === 1 && rawBufferUavResult.errors.length === 0 && sentinelsOutsideRawView,
+    JSON.stringify(rawBufferUavResult));
+
   const drawParamsResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
