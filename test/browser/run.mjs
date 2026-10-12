@@ -1061,6 +1061,93 @@ try {
       && near(cullResult.pixel, [255, 0, 0, 255], 1),
     JSON.stringify(cullResult));
 
+  const depthBiasResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.5, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const red = tool.compileHlsl('float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const green = tool.compileHlsl('float4 main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const blue = tool.compileHlsl('float4 main() : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(3, 64, 64, 1, 1, 39, 0x40, 0, 1, 0)); // depth32float texture
+      command(12, words(4, 1, 3, 39, 3, 0, 1, 0, 1)); // DSV
+      const raster = (id, bias) => {
+        const payload = new Uint8Array(44), view = new DataView(payload.buffer);
+        view.setUint32(0, id, true); view.setUint32(4, 3, true); view.setUint32(8, 1, true);
+        view.setInt32(16, bias, true); view.setUint32(28, 1, true); view.setUint32(32, 1, true);
+        command(10, payload);
+      };
+      raster(13, 0); raster(14, 100000);
+      const depth = new Uint8Array(56), depthView = new DataView(depth.buffer);
+      depthView.setUint32(0, 15, true); depthView.setUint32(4, 1, true);
+      depthView.setUint32(8, 1, true); depthView.setUint32(12, 4, true); // depth enabled, write all, LESS_EQUAL
+      command(11, depth);
+      shader(7, 0, vertex); shader(8, 1, red); shader(9, 1, green); shader(10, 1, blue);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(7, words(11, 0)); command(15, words(11)); command(16, words(4));
+      command(21, words(1, 2, 4)); command(25, words(13)); command(26, words(15, 0));
+      const clearColor = new Uint8Array(20), colorView = new DataView(clearColor.buffer);
+      colorView.setUint32(0, 2, true); colorView.setFloat32(16, 1, true); command(27, clearColor);
+      const clearDepth = new Uint8Array(16), depthClearView = new DataView(clearDepth.buffer);
+      depthClearView.setUint32(0, 4, true); depthClearView.setUint32(4, 1, true);
+      depthClearView.setFloat32(8, 1, true); command(28, clearDepth);
+      command(23, words(1, 0, 0, 64, 64)); command(29, words(3, 0));
+      command(17, words(1, 9)); command(23, words(1, 0, 0, 32, 64)); command(29, words(3, 0));
+      command(17, words(1, 10)); command(25, words(14)); command(23, words(1, 32, 0, 64, 64)); command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x) => {
+        const i = (32 * pixels.width + x) * 4;
+        return Array.from(pixels.data.slice(i, i + 4));
+      };
+      const result = { unbias: at(16), biased: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 constant depth bias moves an equal-depth draw behind the stored surface',
+    depthBiasResult.draws === 3 && depthBiasResult.errors.length === 0
+      && near(depthBiasResult.unbias, [0, 255, 0, 255], 1)
+      && near(depthBiasResult.biased, [255, 0, 0, 255], 1),
+    JSON.stringify(depthBiasResult));
+
   const stencilResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
