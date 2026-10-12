@@ -669,6 +669,7 @@ export class GpuExecutor {
         : colorOp === 19 ? `((${colorA} * ${colorB}) + vec3<f32>(${colorAlphaA}))`
         : colorOp === 20 ? `(${colorA} + ((1.0 - ${colorAlphaA}) * ${colorB}))`
         : colorOp === 21 ? `((vec3<f32>(1.0) - ${colorA}) * ${colorB} + vec3<f32>(${colorAlphaA}))`
+        : colorOp === 24 ? `vec3<f32>(clamp(dot((${colorA} * 2.0 - vec3<f32>(1.0)), (${colorB} * 2.0 - vec3<f32>(1.0))), 0.0, 1.0))`
         : 'input.color.rgb';
       const alphaExpr = alphaOp === 2 ? alphaA
         : alphaOp === 3 ? alphaB

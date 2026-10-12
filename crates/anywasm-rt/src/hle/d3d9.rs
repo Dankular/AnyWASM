@@ -1822,7 +1822,7 @@ fn set_texture_stage_state(p: &mut Process) -> R {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
-        1 => matches!(value, 1..=16 | 18..=21), // selected add, subtract, blend, and modulate-add ops
+        1 => matches!(value, 1..=16 | 18..=21 | 24), // selected add, subtract, blend, modulate-add, and dot-product ops
         2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
         4 => matches!(value, 2..=4 | 8..=9), // selected and signed-add alpha operations
         _ => false,
@@ -2345,7 +2345,7 @@ mod tests {
         }
         assert_eq!(method("IDirect3DDevice9", "SetFVF").unwrap()(&mut p).unwrap(), S_OK);
         let set_texture_stage_state = method("IDirect3DDevice9", "SetTextureStageState").unwrap();
-        for color_op in [8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21] {
+        for color_op in [8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 24] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, color_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }
@@ -2367,7 +2367,7 @@ mod tests {
             let (_, state) = commands.iter().rev().find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
                 .expect("SetTextureStageState should update the fixed-function shader state");
             let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
-            assert_eq!(words, [0x144, 64, 64, 21, 2, 1, alpha_op, 2, 1, u32::MAX]);
+            assert_eq!(words, [0x144, 64, 64, 24, 2, 1, alpha_op, 2, 1, u32::MAX]);
         }
     }
 

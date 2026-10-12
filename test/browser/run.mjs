@@ -1609,6 +1609,7 @@ try {
       const modulateColorAddAlphaPixel = await renderOperation(19);
       const modulateInvAlphaAddColorPixel = await renderOperation(20);
       const modulateInvColorAddAlphaPixel = await renderOperation(21);
+      const dotProduct3Pixel = await renderOperation(24, setupSignedArgs);
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
         modulatedPixel,
@@ -1625,6 +1626,7 @@ try {
         modulateColorAddAlphaPixel,
         modulateInvAlphaAddColorPixel,
         modulateInvColorAddAlphaPixel,
+        dotProduct3Pixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
@@ -1641,13 +1643,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 21 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 22 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 21 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 22 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1682,6 +1684,8 @@ try {
     near(d3d9TextureResult.modulateInvAlphaAddColorPixel, [128, 128, 128, 192], 2), JSON.stringify(d3d9TextureResult.modulateInvAlphaAddColorPixel));
   check('D3D9 stage-0 MODULATEINVCOLOR_ADDALPHA uses inverse arg1 color',
     near(d3d9TextureResult.modulateInvColorAddAlphaPixel, [220, 220, 220, 192], 2), JSON.stringify(d3d9TextureResult.modulateInvColorAddAlphaPixel));
+  check('D3D9 stage-0 DOTPRODUCT3 computes and clamps the signed RGB dot product',
+    near(d3d9TextureResult.dotProduct3Pixel, [45, 45, 45, 128], 2), JSON.stringify(d3d9TextureResult.dotProduct3Pixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

@@ -74,7 +74,8 @@ passed 18 indexed draws and its tested depth, blend,
 texture, and copy cases. A 4x4 R32_FLOAT dispatch read back all 16 expected UAV values and the
 following pixel shader sampled that result. The run reported no WebGPU validation errors or page
 errors. The D3D9 fixed-function fixture also passed pixel checks for stage-0 SELECTARG1/SELECTARG2,
-MODULATE/MODULATE2X, ADD/SUBTRACT, alpha testing, and blending. It does not add target-game or
+MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH, signed-add and modulate-add operations,
+texture/factor-alpha blending, DOTPRODUCT3, alpha testing, and blending. It does not add target-game or
 non-Chromium pixel coverage beyond the D3D11 triangle.
 
 | Browser or feature | Evidence and current status |
