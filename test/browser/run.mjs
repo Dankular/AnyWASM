@@ -1094,6 +1094,12 @@ try {
       command(29, words(3, 0));
       command(4, words(42, 8, 8, 1, 1, 24, 0x20, 0, 1, 0)); // single-sample R10G10B10A2 resolve target
       command(47, words(42, 0, 40, 0, 24)); // ResolveSubresource(dst, 0, src, 0, R10G10B10A2_UNORM)
+      command(4, words(43, 8, 8, 1, 1, 26, 0x20, 0, 4, 0)); // 4x R11G11B10_FLOAT render target
+      command(12, words(44, 0, 43, 26, 4, 0, 1, 0, 1));
+      command(21, words(1, 44, 0));
+      command(29, words(3, 0));
+      command(4, words(45, 8, 8, 1, 1, 26, 0x20, 0, 1, 0)); // single-sample R11G11B10 resolve target
+      command(47, words(45, 0, 43, 0, 26)); // ResolveSubresource(dst, 0, src, 0, R11G11B10_FLOAT)
       command(4, words(23, 8, 8, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 alpha-to-coverage target
       command(12, words(24, 0, 23, 28, 4, 0, 1, 0, 1));
       command(27, words(24, 0, 0, 0x3f800000, 0x3f800000)); // clear to blue
@@ -1132,6 +1138,15 @@ try {
       const rgb10Word = rgb10View.getUint32((4 * 8 + 4) * 4, true);
       const rgb10Pixel = [rgb10Word & 0x3ff, (rgb10Word >>> 10) & 0x3ff, (rgb10Word >>> 20) & 0x3ff, rgb10Word >>> 30]
         .map((value, channel) => value / (channel === 3 ? 3 : 1023));
+      const r11Pixels = await gpu.readBackResource(45);
+      const r11Word = new DataView(r11Pixels.buffer, r11Pixels.byteOffset, r11Pixels.byteLength).getUint32((4 * 8 + 4) * 4, true);
+      const decodeUnsignedFloat = (bits, mantissaBits) => {
+        const exponent = (bits >>> mantissaBits) & 0x1f, mantissa = bits & ((1 << mantissaBits) - 1);
+        if (exponent === 0) return mantissa * 2 ** (-14 - mantissaBits);
+        if (exponent === 0x1f) return mantissa === 0 ? Infinity : NaN;
+        return (1 + mantissa / 2 ** mantissaBits) * 2 ** (exponent - 15);
+      };
+      const r11Pixel = [decodeUnsignedFloat(r11Word & 0x7ff, 6), decodeUnsignedFloat((r11Word >>> 11) & 0x7ff, 6), decodeUnsignedFloat(r11Word >>> 22, 5)];
       const alphaCoveragePixels = await gpu.readBackTexture(25);
       const alphaCoverageIndex = (4 * alphaCoveragePixels.width + 4) * 4;
       const sampleMaskPixels = await gpu.readBackTexture(28);
@@ -1168,6 +1183,10 @@ try {
         rgb10Samples: gpu.res.get(40)?.samples,
         rgb10ResolveFormat: gpu.res.get(42)?.format,
         rgb10Pixel,
+        r11Format: gpu.res.get(43)?.format,
+        r11Samples: gpu.res.get(43)?.samples,
+        r11ResolveFormat: gpu.res.get(45)?.format,
+        r11Pixel,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
         logs,
@@ -1181,7 +1200,7 @@ try {
     drawMapVertexBytes: Array.from(readFileSync(join(repoRoot, 'fixtures', 'diligent_glfwdemo_drawmap_vs.dxbc'))),
     drawMapPixelBytes: Array.from(readFileSync(join(repoRoot, 'fixtures', 'diligent_glfwdemo_drawmap_ps.dxbc'))),
   });
-  check('4x D3D11 RGBA8/BGRA8/RGBA16F/sRGB/R10G10B10A2 render targets resolve into single-sample textures',
+  check('4x D3D11 RGBA8/BGRA8/RGBA16F/sRGB/R10G10B10A2_UNORM/R11G11B10_FLOAT resolve pixels',
     msaaResolveResult.samples === 4 && msaaResolveResult.width === 8 && msaaResolveResult.height === 8
       && msaaResolveResult.format === 'rgba8unorm' && msaaResolveResult.allPixelsMatch
       && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
@@ -1193,7 +1212,10 @@ try {
       && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.rgb10Format === 'rgb10a2unorm'
       && msaaResolveResult.rgb10Samples === 4 && msaaResolveResult.rgb10ResolveFormat === 'rgb10a2unorm'
       && msaaResolveResult.rgb10Pixel?.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75, 1][i]) <= 0.0015)
-      && msaaResolveResult.draws === 9 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.r11Format === 'rg11b10ufloat' && msaaResolveResult.r11Samples === 4
+      && msaaResolveResult.r11ResolveFormat === 'rg11b10ufloat'
+      && msaaResolveResult.r11Pixel?.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75][i]) <= 0.001)
+      && msaaResolveResult.draws === 10 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('D3D11 OMSetBlendState sample mask restricts 4x MSAA coverage',
     msaaResolveResult.sampleMaskSamples === 4

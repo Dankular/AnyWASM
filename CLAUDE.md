@@ -254,8 +254,8 @@ register-stack subset):
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
-      for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, and R10G10B10A2_UNORM; 4x D24S8
-      depth testing with an RGBA8 color resolve; and
+      for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, R10G10B10A2_UNORM, and
+      R11G11B10_FLOAT; 4x D24S8 depth testing with an RGBA8 color resolve; and
       D3D11.1 constant-buffer ranges. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
       R32_UINT/SINT words,
