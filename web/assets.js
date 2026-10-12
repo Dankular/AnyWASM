@@ -4,6 +4,15 @@ const ASSET_HEADER_SIZE = 24;
 const MAX_ASSET_INDEX_SIZE = 64 * 1024 * 1024;
 const ASSET_READ_AHEAD_BYTES = ASSET_CHUNK_SIZE / 2;
 
+export async function sha256Hex(bytes) {
+  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable; use HTTPS or localhost');
+  const input = bytes instanceof ArrayBuffer
+    ? bytes
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', input));
+  return Array.from(digest, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
 function parseAssetFileRanges(bytes, packageLength) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entryCount = view.getUint32(4, true);
@@ -93,6 +102,8 @@ export class AssetRangeCache {
     fetcher = fetch,
     onProgress = () => {},
     fileRanges = [],
+    maxConcurrentFetches = 4,
+    readAheadChunks = 3,
   } = {}) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < ASSET_CHUNK_SIZE) {
       throw new RangeError(`asset cache limit must be at least ${ASSET_CHUNK_SIZE} bytes`);
@@ -100,11 +111,22 @@ export class AssetRangeCache {
     this.url = url;
     this.packageLength = BigInt(packageLength);
     this.maxBytes = maxBytes;
+    if (!Number.isSafeInteger(maxConcurrentFetches) || maxConcurrentFetches < 1 || maxConcurrentFetches > 32) {
+      throw new RangeError('asset fetch concurrency must be between 1 and 32');
+    }
+    if (!Number.isSafeInteger(readAheadChunks) || readAheadChunks < 0 || readAheadChunks > 16) {
+      throw new RangeError('asset read-ahead must be between 0 and 16 chunks');
+    }
     this.fetcher = fetcher;
     this.onProgress = onProgress;
     this.fileRanges = fileRanges;
     this.cache = new Map();
     this.inflight = new Map();
+    this.queue = [];
+    this.nextQueueOrder = 0;
+    this.activeFetches = 0;
+    this.maxConcurrentFetches = maxConcurrentFetches;
+    this.readAheadChunks = readAheadChunks;
     this.cacheBytes = 0;
     this.fetchedBytes = 0;
     this.lastRead = null;
@@ -132,7 +154,7 @@ export class AssetRangeCache {
     if (this.lastRead && this.lastRead.end === start &&
         this.lastRead.fileRange?.start === fileRange?.start &&
         this.lastRead.fileRange?.end === fileRange?.end) {
-      this.#prefetchNext(end, fileRange);
+      this.#prefetchNext(start, end, fileRange);
     }
     this.lastRead = { end, fileRange };
   }
@@ -184,24 +206,71 @@ export class AssetRangeCache {
     return range && offset < range.end ? range : null;
   }
 
-  #prefetchNext(end, fileRange) {
-    if (!fileRange || this.maxBytes < ASSET_CHUNK_SIZE * 2) return;
+  #prefetchNext(start, end, fileRange) {
+    if (!fileRange || this.readAheadChunks === 0 || this.maxBytes < ASSET_CHUNK_SIZE * 2) return;
     const chunkSize = BigInt(ASSET_CHUNK_SIZE);
     const nextChunk = (end - 1n) / chunkSize + 1n;
     const nextStart = nextChunk * chunkSize;
     if (nextStart >= fileRange.end || nextStart - end > BigInt(ASSET_READ_AHEAD_BYTES)) return;
-    void this.#loadChunk(nextChunk).catch(() => {});
+    const residentChunks = Math.floor(this.maxBytes / ASSET_CHUNK_SIZE);
+    const first = start / chunkSize;
+    const last = (end - 1n) / chunkSize;
+    const inUseChunks = Number(last - first + 1n);
+    const aheadLimit = Math.min(this.readAheadChunks, residentChunks - inUseChunks);
+    if (aheadLimit <= 0) return;
+    for (let ahead = 0; ahead < aheadLimit; ahead++) {
+      const chunk = nextChunk + BigInt(ahead);
+      if (chunk * chunkSize >= fileRange.end) break;
+      void this.#loadChunk(chunk, 1).catch(() => {});
+    }
   }
 
-  #loadChunk(chunk) {
+  #loadChunk(chunk, priority = 0) {
     if (this.cache.has(chunk)) return Promise.resolve(this.#touch(chunk));
-    if (this.inflight.has(chunk)) return this.inflight.get(chunk);
+    const existing = this.inflight.get(chunk);
+    if (existing) {
+      if (priority < existing.priority) {
+        existing.priority = priority;
+        this.#sortQueue();
+        this.#pumpQueue();
+      }
+      return existing.promise;
+    }
     const start = chunk * BigInt(ASSET_CHUNK_SIZE);
     const end = [start + BigInt(ASSET_CHUNK_SIZE), this.packageLength].reduce((a, b) => a < b ? a : b) - 1n;
-    const promise = fetchRange(this.url, start, end, this.packageLength, this.fetcher)
-      .then(({ bytes }) => {
+    let resolveRequest;
+    let rejectRequest;
+    const promise = new Promise((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+    const item = { chunk, start, end, priority, order: this.nextQueueOrder++, resolve: resolveRequest, reject: rejectRequest };
+    this.inflight.set(chunk, { promise, item, get priority() { return item.priority; }, set priority(value) { item.priority = value; } });
+    this.queue.push(item);
+    this.#sortQueue();
+    this.#pumpQueue();
+    return promise;
+  }
+
+  #sortQueue() {
+    this.queue.sort((a, b) => a.priority - b.priority || a.order - b.order);
+  }
+
+  #pumpQueue() {
+    this.#sortQueue();
+    while (this.activeFetches < this.maxConcurrentFetches && this.queue.length) {
+      const item = this.queue.shift();
+      if (this.cache.has(item.chunk)) {
+        item.resolve(this.#touch(item.chunk));
+        this.inflight.delete(item.chunk);
+        continue;
+      }
+      this.activeFetches++;
+      fetchRange(this.url, item.start, item.end, this.packageLength, this.fetcher)
+        .then(({ bytes }) => {
         if (bytes.byteLength > this.maxBytes) throw new Error('asset cache limit is smaller than one fetched chunk');
-        this.cache.set(chunk, bytes);
+        if (this.cache.has(item.chunk)) return this.#touch(item.chunk);
+        this.cache.set(item.chunk, bytes);
         this.cacheBytes += bytes.byteLength;
         this.fetchedBytes += bytes.byteLength;
         this.onProgress({ fetchedBytes: this.fetchedBytes, cacheBytes: this.cacheBytes, packageLength: this.packageLength });
@@ -213,8 +282,13 @@ export class AssetRangeCache {
         }
         return bytes;
       })
-      .finally(() => this.inflight.delete(chunk));
-    this.inflight.set(chunk, promise);
-    return promise;
+        .then(item.resolve, item.reject)
+        .finally(() => {
+          this.inflight.delete(item.chunk);
+          this.activeFetches--;
+          this.#pumpQueue();
+        })
+        .catch(() => {});
+    }
   }
 }

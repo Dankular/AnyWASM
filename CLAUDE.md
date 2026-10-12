@@ -486,17 +486,19 @@ register-stack subset):
       evidence and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
-      `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
-      runtime fetch and confirms the indicator clears once an input fixture reaches its message
-      loop. Single-file/static-site export remains open. These fixtures do not satisfy the
-      real-target acceptance gate above.
+      `unimpl.exe` fixture. It also shows phase-based load progress. The new browser package library
+      reads static catalogs, resolves exact-version dependencies, stores SHA-256 checked AWB bundles
+      in IndexedDB, and keeps AGP data remote; a local GTA catalog install and launch reached guest
+      rendering. Invalid dependency/error cases, reload/removal behavior, per-chunk integrity, mod
+      overlays, and single-file/static-site export remain open. The bounded launch did not establish
+      gameplay acceptance; see `docs/TARGETS.md`.
 - [~] Browser support matrix: Chromium page/worker/input and WebGPU readback behavior, Firefox
       hello plus version-specific graphics availability, and WebKit hello plus its OffscreenCanvas
       limitation are recorded in `docs/BROWSER_SUPPORT.md`. Windows Firefox 141.0 exits the triangle
       fixture after three frames but reports a missing-bind-group validation error and renders black;
       Firefox 140.0.2 lacks WebGPU. The D3D11 triangle canvas blit is screenshot-checked only in
-      Chromium. Large-game memory (4 GB / `memory64`)
-      and asset streaming remain unverified. The
+      Chromium. GTA AGP range streaming has been exercised; 4 GB / `memory64` behavior, a comparable
+      performance result for the latest range scheduler, and per-chunk integrity remain open. The
       `wasm32-unknown-unknown` browser path buffers the full bundle, copies it into WASM memory, then
       duplicates each file into the VFS; this source audit is not a peak-memory measurement.
 - [~] Licensing review of vendored vkd3d-shader (LGPL) and Naga: technical inventory and pre-ship

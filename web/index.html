@@ -30,6 +30,15 @@
   #diagnostic { display:grid; gap:4px; margin-top:10px; padding:12px; border:1px solid var(--bad); border-radius:6px; background:var(--panel); }
   #diagnostic[hidden] { display:none; }
   #diagnostic code { color:var(--bad); font:13px/1.45 ui-monospace, Menlo, Consolas, monospace; overflow-wrap:anywhere; }
+  #package-manager { margin-top:24px; padding:16px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  #package-manager h2 { font-size:17px; margin:0 0 4px; }
+  #package-manager .sub { margin:0 0 12px; }
+  #package-list { display:grid; gap:8px; }
+  .package-card { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:12px; border:1px solid var(--line); border-radius:6px; }
+  .package-card h3 { font-size:14px; margin:0; }
+  .package-card p { margin:3px 0 0; color:var(--dim); }
+  .package-card .package-actions { display:flex; gap:8px; }
+  #package-status { min-height:1.5em; margin:8px 0 0; color:var(--dim); overflow-wrap:anywhere; }
   canvas { display:block; width:100%; max-width:640px; aspect-ratio:4/3; background:#000; border:1px solid var(--line); border-radius:6px; margin-top:16px; }
 </style>
 </head>
@@ -50,6 +59,19 @@
     <button id="stop" disabled>Stop</button>
   </div>
   <p class="sub">The local GTA bundle keeps the compact 1.0 executable and general sound effects; radio, music, and dialogue banks are omitted to fit browser memory.</p>
+
+  <section id="package-manager" aria-labelledby="package-heading">
+    <h2 id="package-heading">Package library</h2>
+    <p class="sub">Install versioned application packages from static catalogs. Game data stays remote and streams in ranges.</p>
+    <form class="row" id="catalog-form">
+      <label for="catalog-url">Catalog URL</label>
+      <input id="catalog-url" type="text" required autocomplete="off" placeholder="https://example.com/anywasm/catalog.json" style="min-width:min(420px,100%); flex:1; padding:7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit">
+      <button type="submit" id="add-catalog">Add catalog</button>
+      <button type="button" id="refresh-catalogs">Refresh</button>
+    </form>
+    <div id="package-list" aria-live="polite"></div>
+    <p id="package-status" role="status" aria-live="polite"></p>
+  </section>
 
   <div id="term" aria-live="polite" role="log"></div>
   <div id="stat"></div>

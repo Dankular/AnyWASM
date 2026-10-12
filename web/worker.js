@@ -27,7 +27,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
-async function start({ wasm, bundle, assetUrl, canvas, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, diagProgress }) {
+async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, diagProgress }) {
   stopped = false;
   disposeRequested = false;
   wake = null;
@@ -61,7 +61,7 @@ async function start({ wasm, bundle, assetUrl, canvas, testMode: requestedTestMo
         lastAssetProgress = fetchedBytes;
         postMessage({ type: 'asset-progress', fetchedBytes, packageLength: Number(packageLength) });
       }
-    });
+    }, assetPackage || null);
   }
   if (sharedCpuRequested) {
     postMessage({ type: 'load-progress', message: 'Starting shared CPU worker…' });

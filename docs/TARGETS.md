@@ -903,6 +903,24 @@ points to guest parsing as the larger remaining loader cost. The existing shared
 was also activated for a bounded replay, but that run remained at 653 presents and did not provide
 a comparable New Game measurement.
 
+The follow-up scheduler caps range requests at four and queues three same-file chunks for look-ahead.
+Its attempted rerun did not pass the harness's 990-present New Game checkpoint: it remained at 653
+presents, startup phase 5, 22 Asyncify yields/resumes, and no pending asset range while the
+instruction counter advanced from 69.3M to 81.8M. This run is not comparable with the New Game
+baseline, so it provides no performance result for the wider look-ahead. The earlier 374,493,314
+instruction capture belongs to the one-chunk read-ahead run.
+
+### Browser package library
+
+The page now accepts static catalog URLs, installs exact-version dependency closures into IndexedDB,
+checks the AWB SHA-256 and AGP header/index SHA-256, and launches the installed entry while keeping
+the AGP payload range-streamed. The local GTA catalog was generated with
+`scripts/pack-gta-sa.ps1 -MetadataOnly`, which checked that the existing local AWB/AGP matched the
+installed file inventory without rewriting the 5,013,432,573-byte AGP. A Chromium install displayed
+the installed GTA package; launching it reached 30 presents with no page or GPU errors before the
+bounded capture ended. This did not reach gameplay. Dependency failure cases, reload persistence,
+removal behavior, and mod overlays remain unverified.
+
 ## Next evidence needed
 
 - A controlled seed-1 maze traversal is now recorded, but it does not establish general gameplay

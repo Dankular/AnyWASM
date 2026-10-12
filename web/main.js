@@ -1,3 +1,5 @@
+import { PackageManager } from './package-manager.js';
+
 const $ = (id) => document.getElementById(id);
 const term = $('term');
 const stat = $('stat');
@@ -46,7 +48,7 @@ function failLoading(label, message) {
   $('stop').disabled = true;
 }
 
-async function run(bundleBytes, label, assetUrl = null) {
+async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
   const reuseWorker = !!worker && stat.dataset.status !== undefined;
   if (worker && !reuseWorker) worker.postMessage({ type: 'dispose' });
   term.textContent = '';
@@ -153,7 +155,7 @@ async function run(bundleBytes, label, assetUrl = null) {
   const diagProgress = new URLSearchParams(location.search).has('diagProgress');
   const jitMinPrefixValue = new URLSearchParams(location.search).get('jitMinPrefix');
   showLoading('Starting guest program…');
-  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, testMode, traceGtaEventvol, diagProgress };
+  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, assetPackage, testMode, traceGtaEventvol, diagProgress };
   if (jitMinPrefixValue !== null) message.jitMinPrefix = Number(jitMinPrefixValue);
   const transfer = [wasm, bundleBytes.buffer];
   if (off) {
@@ -230,6 +232,108 @@ $('demo-tri').addEventListener('click', () => demo('d3d11_triangle'));
 $('demo-tex').addEventListener('click', () => demo('d3d11_textured'));
 $('demo-gta').addEventListener('click', () => demo('gta_sa'));
 $('stop').addEventListener('click', () => { worker?.postMessage({ type: 'stop' }); });
+
+const packageManager = new PackageManager(new URL('./catalog.json', import.meta.url).href);
+const packageList = $('package-list');
+const packageStatus = $('package-status');
+
+async function showPackages() {
+  packageList.replaceChildren();
+  packageStatus.textContent = 'Loading package catalogs…';
+  const [entries, installed] = await Promise.all([packageManager.refreshCatalogs(), packageManager.listInstalled()]);
+  const installedByKey = new Map(installed.map((record) => [record.key, record]));
+  if (packageManager.catalogErrors.length) {
+    const error = document.createElement('p');
+    error.className = 'bad';
+    error.textContent = packageManager.catalogErrors.join('\n');
+    packageList.append(error);
+  }
+  for (const entry of entries) {
+    const card = document.createElement('article');
+    card.className = 'package-card';
+    const info = document.createElement('div');
+    const title = document.createElement('h3');
+    title.textContent = `${entry.name} · ${entry.version}`;
+    const summary = document.createElement('p');
+    summary.textContent = entry.summary || entry.id;
+    info.append(title, summary);
+    const actions = document.createElement('div');
+    actions.className = 'package-actions';
+    const record = installedByKey.get(`${entry.id}@${entry.version}`);
+    if (record) {
+      const launch = document.createElement('button');
+      launch.type = 'button';
+      launch.textContent = 'Launch';
+      launch.addEventListener('click', () => {
+        packageStatus.textContent = `Starting ${record.name}…`;
+        void run(new Uint8Array(record.bundle), `${record.name} ${record.version}`, record.assetPackage?.url || null, record.assetPackage)
+          .catch((error) => { packageStatus.textContent = `Launch failed: ${error.message || error}`; });
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', async () => {
+        remove.disabled = true;
+        try {
+          await packageManager.remove(record.id, record.version);
+          packageStatus.textContent = `Removed ${record.key}.`;
+          await showPackages();
+        } catch (error) {
+          packageStatus.textContent = error.message || String(error);
+          remove.disabled = false;
+        }
+      });
+      actions.append(launch, remove);
+    } else {
+      const install = document.createElement('button');
+      install.type = 'button';
+      install.textContent = 'Install';
+      install.addEventListener('click', async () => {
+        install.disabled = true;
+        packageStatus.textContent = `Resolving and downloading ${entry.id}@${entry.version}…`;
+        try {
+          await packageManager.install(entry.id, entry.version);
+          packageStatus.textContent = `Installed ${entry.id}@${entry.version}.`;
+          await showPackages();
+        } catch (error) {
+          packageStatus.textContent = `Install failed: ${error.message || error}`;
+          install.disabled = false;
+        }
+      });
+      actions.append(install);
+    }
+    card.append(info, actions);
+    packageList.append(card);
+  }
+  if (!entries.length && !packageManager.catalogErrors.length) {
+    const empty = document.createElement('p');
+    empty.className = 'dim';
+    empty.textContent = 'No packages are listed. Add a catalog URL to browse packages.';
+    packageList.append(empty);
+  }
+  packageStatus.textContent = packageManager.catalogErrors.length
+    ? `${entries.length} package version(s) loaded; some catalogs could not be read.`
+    : `${entries.length} package version(s) available · ${installed.length} installed.`;
+}
+
+$('catalog-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = $('add-catalog');
+  button.disabled = true;
+  try {
+    const catalog = await packageManager.addCatalog($('catalog-url').value);
+    $('catalog-url').value = '';
+    packageStatus.textContent = `Added ${catalog.name}.`;
+    await showPackages();
+  } catch (error) {
+    packageStatus.textContent = `Could not add catalog: ${error.message || error}`;
+  } finally {
+    button.disabled = false;
+  }
+});
+$('refresh-catalogs').addEventListener('click', () => { void showPackages(); });
+window.addEventListener('pagehide', () => packageManager.close(), { once: true });
+void showPackages().catch((error) => { packageStatus.textContent = `Package library unavailable: ${error.message || error}`; });
 
 const auto = new URLSearchParams(location.search).get('run');
 if (auto) demo(auto);

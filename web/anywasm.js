@@ -1,7 +1,7 @@
 // AnyWASM runtime glue: loads the WASM module and drives a Windows x64 process inside it.
 // Works unchanged in browsers (main thread or worker) and Node >= 18.
 import { fillCryptoRandom } from './entropy.js';
-import { AssetRangeCache, fetchAssetIndex } from './assets.js';
+import { AssetRangeCache, fetchAssetIndex, sha256Hex } from './assets.js';
 
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
@@ -827,10 +827,16 @@ export class AnyWasm {
   }
 
   /** Attach the `AGP1` index; payload chunks remain in the HTTP-backed host cache. */
-  async attachAssets(url, onProgress = () => {}) {
+  async attachAssets(url, onProgress = () => {}, expected = null) {
     if (typeof url !== 'string' || !url) throw new TypeError('asset package URL must be a nonempty string');
     if (typeof this.x.aw_assets_attach !== 'function') throw new Error('WASM runtime is missing aw_assets_attach; rebuild it');
     const index = await fetchAssetIndex(url);
+    if (expected?.size !== undefined && BigInt(expected.size) !== index.packageLength) {
+      throw new Error(`asset package size mismatch: expected ${expected.size}, received ${index.packageLength}`);
+    }
+    if (expected?.indexSha256 && await sha256Hex(index.bytes) !== expected.indexSha256.toLowerCase()) {
+      throw new Error('asset package header/index SHA-256 mismatch');
+    }
     const ptr = this.x.aw_alloc(index.bytes.byteLength) >>> 0;
     try {
       new Uint8Array(this.x.memory.buffer, ptr, index.bytes.byteLength).set(index.bytes);

@@ -66,6 +66,19 @@ The web loader shows an indeterminate progress indicator while it reads or fetch
 loads the WebAssembly runtime, and starts the worker. It clears the indicator when the worker is
 ready to execute the guest.
 
+## Browser package library
+
+The page can load static AnyWASM catalogs, install version-pinned application bundles into
+IndexedDB, resolve exact-version dependencies, and launch installed versions. Install manifests
+verify the AWB bundle and AGP header/index; large AGP game data stays on the host and is fetched
+through bounded HTTP range requests as the guest reads it. To package a local GTA installation,
+run `scripts/pack-gta-sa.ps1`, then add the generated
+`/demo/gta_sa.catalog.json` URL in the page's Package library. The generated bundle and asset
+package remain local ignored files; only the catalog format and packer are part of the source tree.
+When those artifacts already exist, `scripts/pack-gta-sa.ps1 -MetadataOnly` validates them against
+the installed file inventory and writes the manifest/catalog without rewriting the multi-gigabyte AGP.
+Catalogs hosted on another origin must allow CORS, and their AGP servers must support byte ranges.
+
 ## Tests
 
 ```sh

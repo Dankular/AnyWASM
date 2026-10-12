@@ -257,8 +257,11 @@
   interpolated centre pixel. Other render paths and browser engines remain unverified.
 - Browser input (keyboard/mouse -> window messages) and the idle/frame scheduling in the worker are
   exercised by the Chromium browser suite. The selected GLFW target also verifies W movement and
-  Tab map regeneration after input routing skips its hidden helper window. Firefox/Safari, visible canvas pixels outside the checked
-  triangle case, large-game memory limits, and asset streaming remain unverified. The web build is
+  Tab map regeneration after input routing skips its hidden helper window. Firefox/Safari, visible
+  canvas pixels outside the checked triangle case, and large-game memory limits remain unverified.
+  GTA's AGP header/index and requested byte ranges have been exercised in Chromium; the package
+  library verifies the AWB and index hashes during install and keeps the AGP payload remote. A
+  comparable speed result for the latest bounded range scheduler remains open. The web build is
   `wasm32-unknown-unknown`; the browser buffers the full `.awb`, copies it into WASM memory, and the
   bundle parser duplicates its files into the VFS. This source audit does not measure peak memory;
   see [`BROWSER_SUPPORT.md`](BROWSER_SUPPORT.md).
