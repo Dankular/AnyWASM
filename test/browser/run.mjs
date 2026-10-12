@@ -316,6 +316,10 @@ try {
     stagedPixels?.[0] || triText);
   check('D3D11 staging buffer Map(READ) returns the copied constant-buffer values',
     triText.includes('staging buffer readback=1,1,1,1'), triText);
+  check('D3D11 staging R32_FLOAT Map(READ) preserves two rows of single-precision values',
+    triText.includes('staging R32_FLOAT readback=0.25,0.50,0.75,1.00 row_pitch=8'), triText);
+  check('D3D11 staging RGBA16_FLOAT Map(READ) preserves packed half-float values',
+    triText.includes('staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16'), triText);
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));
@@ -358,12 +362,19 @@ try {
   check('canvas presentation completed without WebGPU validation errors', canvasStats && canvasStats.presents === 3 && canvasStats.errors.length === 0, JSON.stringify(canvasStats));
   const canvasLayout = await page.locator('#screen').evaluate((canvas) => {
     const [width, height] = canvas.style.aspectRatio.split('/').map(Number);
-    return { aspectWidth: width, aspectHeight: height };
+    const style = getComputedStyle(canvas);
+    return {
+      aspectWidth: width, aspectHeight: height,
+      borderWidth: parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth),
+      borderHeight: parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth),
+    };
   });
   const canvasPixels = decodePng(await page.locator('#screen').screenshot());
   const atCanvas = (x, y) => { const i = (y * canvasPixels.w + x) * 4; return Array.from(canvasPixels.data.slice(i, i + 4)); };
+  const canvasContentAspect = (width, height) =>
+    (width - canvasLayout.borderWidth) / (height - canvasLayout.borderHeight);
   check('canvas screenshot preserves the guest window aspect ratio',
-    canvasPixels.w === 640 && Math.abs(canvasPixels.h - canvasPixels.w * canvasLayout.aspectHeight / canvasLayout.aspectWidth) < 1,
+    canvasPixels.w === 640 && Math.abs(canvasContentAspect(canvasPixels.w, canvasPixels.h) - canvasLayout.aspectWidth / canvasLayout.aspectHeight) < 0.01,
     `${canvasPixels.w}x${canvasPixels.h} at ${canvasLayout.aspectWidth}/${canvasLayout.aspectHeight}`);
   check('canvas blit preserves the clear colour', near(atCanvas(10, 10), [0, 0, 51, 255], 2), JSON.stringify(atCanvas(10, 10)));
   const centroidY = Math.round(1 + 288.5 / 480 * (canvasPixels.h - 2));
@@ -372,7 +383,7 @@ try {
   const scaledCanvasPixels = decodePng(await page.locator('#screen').screenshot());
   const atScaledCanvas = (x, y) => { const i = (y * scaledCanvasPixels.w + x) * 4; return Array.from(scaledCanvasPixels.data.slice(i, i + 4)); };
   check('scaled canvas screenshot preserves the guest window aspect ratio',
-    scaledCanvasPixels.w === 320 && Math.abs(scaledCanvasPixels.h - scaledCanvasPixels.w * canvasLayout.aspectHeight / canvasLayout.aspectWidth) < 1,
+    scaledCanvasPixels.w === 320 && Math.abs(canvasContentAspect(scaledCanvasPixels.w, scaledCanvasPixels.h) - canvasLayout.aspectWidth / canvasLayout.aspectHeight) < 0.01,
     `${scaledCanvasPixels.w}x${scaledCanvasPixels.h}`);
   const scaledCentroidY = Math.round(1 + 288.5 / 480 * (scaledCanvasPixels.h - 2));
   check('scaled canvas blit preserves the interpolated triangle', near(atScaledCanvas(160, scaledCentroidY), [85, 85, 85, 255], 6), JSON.stringify(atScaledCanvas(160, scaledCentroidY)));

@@ -71,6 +71,7 @@ try {
         status: document.getElementById('stat').dataset.status,
         exitCode: document.getElementById('stat').dataset.exit,
         stat: document.getElementById('stat').textContent,
+        output: document.getElementById('term').textContent,
       }));
       if (graphics.status === '1') {
         assert.equal(graphics.status, '1', `${item.name} graphics run did not exit: ${graphics.stat}`);
@@ -78,7 +79,12 @@ try {
         const near = (actual, expected, tolerance) => actual.every((value, index) => Math.abs(value - expected[index]) <= tolerance);
         const canvasAspect = await page.locator('#screen').evaluate((canvas) => {
           const [width, height] = canvas.style.aspectRatio.split('/').map(Number);
-          return { width, height };
+          const style = getComputedStyle(canvas);
+          return {
+            width, height,
+            borderWidth: parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth),
+            borderHeight: parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth),
+          };
         });
         await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
         await page.waitForFunction(() => window.__pixels !== null, null, { timeout: 20000 });
@@ -92,6 +98,10 @@ try {
           return { width: pixels.width, height: pixels.height, centerY, error: pixels.error, clear: at(10, 10), center: at(320, centerY) };
         });
         assert.equal(backBuffer.error, undefined, `${item.name} back-buffer readback error: ${backBuffer.error}`);
+        assert.match(graphics.output, /staging R32_FLOAT readback=0\.25,0\.50,0\.75,1\.00 row_pitch=8/,
+          `${item.name} staging R32_FLOAT Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16/,
+          `${item.name} staging RGBA16_FLOAT Map(READ) output: ${graphics.output}`);
         const screenshot = decodePng(await page.locator('#screen').screenshot());
         const pixel = (x, y) => {
           const index = (y * screenshot.w + x) * 4;
@@ -103,7 +113,8 @@ try {
         assert.ok(gpuStats, `${item.name} missing WebGPU statistics`);
         assert.deepEqual([backBuffer.width, backBuffer.height], [640, 480], `${item.name} triangle back-buffer dimensions`);
         assert.equal(screenshot.w, 640, `${item.name} triangle canvas width`);
-        assert.ok(Math.abs(screenshot.h - screenshot.w * canvasAspect.height / canvasAspect.width) < 1,
+        const canvasContentAspect = (screenshot.w - canvasAspect.borderWidth) / (screenshot.h - canvasAspect.borderHeight);
+        assert.ok(Math.abs(canvasContentAspect - canvasAspect.width / canvasAspect.height) < 0.01,
           `${item.name} canvas dimensions ${screenshot.w}x${screenshot.h} do not match the ${canvasAspect.width}/${canvasAspect.height} guest client ratio`);
         assert.deepEqual(gpuStats.errors, [], `${item.name} emitted WebGPU validation errors: ${JSON.stringify(gpuStats.errors)}`);
         assert.ok(near(backBuffer.clear, [0, 0, 51, 255], 2), `${item.name} back-buffer clear pixel: ${backBuffer.clear}`);

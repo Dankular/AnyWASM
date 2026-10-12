@@ -5,9 +5,64 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <stdio.h>
+#include <string.h>
 #include "shaders_triangle.h"
 
 typedef struct { float x, y, z; float r, g, b, a; } Vertex;
+
+static void check_staging_r32_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 2; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32_FLOAT; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &source);
+    if (FAILED(hr)) { printf("staging R32_FLOAT source hr=%08lx\n", (unsigned long)hr); return; }
+    const float expected[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)source, 0, NULL, expected, 2 * sizeof(float), sizeof expected);
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const float *values = (const float *)mapped.pData;
+            printf("staging R32_FLOAT readback=%.2f,%.2f,%.2f,%.2f row_pitch=%u\n",
+                values[0], values[1], values[2], values[3], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging R32_FLOAT Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging R32_FLOAT staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
+
+static void check_staging_rgba16_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width = 2; desc.Height = 1; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    ID3D11Texture2D *source = NULL, *staging = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &source);
+    if (FAILED(hr)) { printf("staging RGBA16_FLOAT source hr=%08lx\n", (unsigned long)hr); return; }
+    const unsigned short expected[8] = { 0x3400, 0x3800, 0x3c00, 0x4000, 0, 0, 0, 0 };
+    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)source, 0, NULL, expected, sizeof expected, sizeof expected);
+    desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(dev, &desc, NULL, &staging);
+    if (SUCCEEDED(hr)) {
+        ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)source);
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(hr)) {
+            const unsigned short *values = (const unsigned short *)mapped.pData;
+            printf("staging RGBA16_FLOAT readback=%04x,%04x,%04x,%04x row_pitch=%u\n",
+                values[0], values[1], values[2], values[3], mapped.RowPitch);
+            ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)staging, 0);
+        } else printf("staging RGBA16_FLOAT Map hr=%08lx\n", (unsigned long)hr);
+        ID3D11Texture2D_Release(staging);
+    } else printf("staging RGBA16_FLOAT staging hr=%08lx\n", (unsigned long)hr);
+    ID3D11Texture2D_Release(source);
+}
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
@@ -115,6 +170,10 @@ int main(void) {
             } else {
                 printf("staging buffer Map hr=%08lx\n", (unsigned long)hr);
             }
+        }
+        if (frames == 0) {
+            check_staging_r32_float(dev, ctx);
+            check_staging_rgba16_float(dev, ctx);
         }
         D3D11_VIEWPORT vp = { 0, 0, 640, 480, 0, 1 };
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
