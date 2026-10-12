@@ -240,13 +240,14 @@ register-stack subset):
 ## 3. Graphics
 - [~] **D3D11 verification gaps**: browser pixel/readback checks cover constant-factor and
       source-alpha blending plus reverse-subtract, add, subtract, min, and max blend operations;
-      texture, vertex-buffer, and index-buffer `CopyResource`; texture `CopySubresourceRegion` and
-      `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`; fractional-LOD linear
-      filtering; an 8x anisotropic sampler request; instance step rates; render-to-texture; multiple
-      render targets; cube, array, and 3D texture sampling; depth/stencil; cull, fill, scissor, and
-      depth bias; 4x MSAA resolve; and D3D11.1 constant-buffer ranges. Remaining gaps include other
-      buffer-copy classes, wider format/resolve combinations, fuller sampler pixel comparisons, and
-      broader combinations of render state.
+      texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture
+      `CopySubresourceRegion` and `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
+      fractional-LOD linear filtering; repeat/clamp sampler address pixels and an 8x anisotropic
+      sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
+      and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
+      for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. General staging and
+      CPU readback, other format/resolve combinations, broader sampler comparisons, and more render
+      state combinations remain open.
 - [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant
       buffer ranges, and emits dispatch commands. The WebGPU executor binds the selected
@@ -282,11 +283,13 @@ register-stack subset):
       real-world shaders, shader/pipeline caching (IndexedDB), and async pipeline creation to avoid
       stalls remain open.
 - [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
-      pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
-      canvas sizes, and browser engines still need coverage.
+      pixel, plus the textured fixture's blended quad and sampled texture colours, are checked from
+      Chromium screenshots without test mode. Other render paths, canvas sizes, and browser engines
+      still need coverage.
 - [~] **Additional graphics APIs**: D3D9 has a pixel-tested fixed-function subset for selected
-      FVF layouts, stage-0 texture selection, triangle fans, and every alpha compare function at its
-      equality boundary; general D3D9 device, shader, and state coverage remains incomplete. D3D12,
+      FVF layouts, stage-0 texture selection/modulation, triangle fans, alpha blending, and every
+      alpha compare function at its equality boundary; general D3D9 device, shader, and state
+      coverage remains incomplete. D3D12,
       DXGI flip-model/fullscreen/resize/vsync
       semantics, OpenGL (WGL), and Vulkan remain open. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
