@@ -16,11 +16,13 @@ const unimplBundle = join(tempDir, 'unimpl.awb');
 const computeBundle = join(tempDir, 'compute.awb');
 const jitStateBundle = join(tempDir, 'jit_state.awb');
 const systemRandomBundle = join(tempDir, 'system_random.awb');
+const texturedBundle = join(tempDir, 'd3d11_textured.awb');
 const cliPath = join(repoRoot, 'target', 'debug', `anywasm${process.platform === 'win32' ? '.exe' : ''}`);
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'unimpl.exe'), '-o', unimplBundle], { cwd: repoRoot, stdio: 'ignore' });
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'compute.exe'), '-o', computeBundle], { cwd: repoRoot, stdio: 'ignore' });
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'jit_state.exe'), '-o', jitStateBundle], { cwd: repoRoot, stdio: 'ignore' });
 execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'system_random_test.exe'), '-o', systemRandomBundle], { cwd: repoRoot, stdio: 'ignore' });
+execFileSync(cliPath, ['pack', join(repoRoot, 'fixtures', 'd3d11_textured.exe'), '-o', texturedBundle], { cwd: repoRoot, stdio: 'ignore' });
 
 const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 800));
@@ -209,6 +211,67 @@ try {
     workerJit.out === jitBrowser.emitted.out && workerJit.err === jitBrowser.emitted.err &&
       workerJit.instructions === jitBrowser.emitted.instr,
     JSON.stringify({ worker: workerJit, page: jitBrowser.emitted }));
+
+  const frameJitWorker = await page.evaluate(async (bundle) => {
+    const wasm = await (await fetch('/anywasm_wasm.wasm')).arrayBuffer();
+    const guest = new Uint8Array(bundle);
+    const canvas = document.createElement('canvas');
+    canvas.width = 640; canvas.height = 480;
+    const offscreen = canvas.transferControlToOffscreen();
+    const worker = new Worker('/worker.js', { type: 'module' });
+    try {
+      return await new Promise((resolve, reject) => {
+        let gpu = null;
+        const framePacing = [];
+        const messages = [];
+        let loadProgressCount = 0;
+        const timeout = setTimeout(() => resolve({ timeout: true, gpu, loadProgressCount, messages }), 60_000);
+        worker.onerror = (event) => { clearTimeout(timeout); reject(new Error(event.message)); };
+        worker.onmessage = ({ data }) => {
+          if (data.type === 'load-progress') loadProgressCount++;
+          messages.push(data.type === 'out'
+            ? { type: data.type, stream: data.stream, text: data.text }
+            : data.type === 'load-progress'
+              ? { type: data.type, message: data.message, trace: data.trace }
+              : { type: data.type });
+          if (messages.length > 12) messages.shift();
+          if (data.type === 'gpu') gpu = data;
+          if (data.type === 'frame-pacing') framePacing.push(data);
+          if (data.type === 'status') {
+            worker.postMessage({ type: 'capture' });
+            worker.__frameStatus = data;
+          } else if (data.type === 'pixels' && worker.__frameStatus) {
+            clearTimeout(timeout);
+            const sample = (x, y) => Array.from(data.data.slice((y * data.width + x) * 4, (y * data.width + x + 1) * 4));
+            resolve({
+              ...worker.__frameStatus,
+              gpu,
+              framePacing,
+              pixels: { width: data.width, height: data.height, clear: sample(10, 10), blended: sample(100, 150), texture: sample(200, 340) },
+            });
+          }
+        };
+        worker.postMessage({ type: 'start', wasm, bundle: guest, canvas: offscreen, testMode: true, jitMinPrefix: 1 },
+          [wasm, guest.buffer, offscreen]);
+      });
+    } finally {
+      worker.terminate();
+    }
+  }, Array.from(readFileSync(texturedBundle)));
+  const framePixelNear = (actual, expected, tolerance = 1) =>
+    actual?.length === expected.length && actual.every((value, index) => Math.abs(value - expected[index]) <= tolerance);
+  check('DXGI frame waits advance the virtual clock by elapsed time in the JIT worker',
+    frameJitWorker.status === jitBrowser.exited && frameJitWorker.exitCode === 0 && frameJitWorker.frames === 3
+      && frameJitWorker.jitStats?.executions > 0 && frameJitWorker.gpu?.draws === 18
+      && frameJitWorker.gpu?.presents === 3 && frameJitWorker.gpu?.errors?.length === 0
+      && frameJitWorker.framePacing?.length === 3
+      && frameJitWorker.framePacing.every(({ syncInterval, vblanksWaited, elapsed100ns, virtualTicksAdded }) =>
+        syncInterval === 1 && vblanksWaited === 1 && elapsed100ns > 0 && virtualTicksAdded === elapsed100ns * 10)
+      && frameJitWorker.pixels?.width === 640 && frameJitWorker.pixels?.height === 480
+      && framePixelNear(frameJitWorker.pixels.clear, [0, 0, 51, 255])
+      && framePixelNear(frameJitWorker.pixels.blended, [128, 0, 26, 255])
+      && framePixelNear(frameJitWorker.pixels.texture, [255, 0, 0, 255]),
+    JSON.stringify(frameJitWorker));
 
   const jitStateBrowser = await page.evaluate(async (bundle) => {
     const { AnyWasm, Status } = await import('/anywasm.js');

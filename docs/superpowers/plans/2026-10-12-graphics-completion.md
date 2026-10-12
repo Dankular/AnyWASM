@@ -135,7 +135,7 @@
 - [x] Verify the worker-transferred OffscreenCanvas blit at 640x480 and after CSS scaling to 320px; Chromium screenshots check the clear and interpolated triangle pixels.
 - [x] Verify visible swapchain blit pixels and backing/CSS dimensions at 32x24, then after ResizeBuffers at 96x64, with two presents and zero WebGPU validation errors.
 - [x] Verify DPR 2 worker-rendered presentation: the guest backing store remains 640x480, the canvas screenshot scales to 1280 physical pixels wide, clear and triangle pixels match, and three presents report zero validation or page errors.
-- [ ] Verify present interval semantics and virtual-clock accounting under JIT and worker scheduling.
+- [x] Verify present interval semantics and virtual-clock accounting under JIT and worker scheduling. The Chromium worker regression runs the D3D11 textured fixture with emitted blocks enabled, checks three Present(1) waits each wait one vblank, confirms elapsed 100 ns values map to ten-times virtual clock ticks (also covered by the Rust `host_frame_elapsed_time_100ns_is_converted_to_virtual_10ns_ticks` unit test), and verifies three clean presents plus clear/blend/texture backbuffer pixels.
 - [ ] Repeat selected-target rendering/input/gameplay checks and update every graphics status/checklist from the resulting evidence.
 
 **Gate:** The graphics source-of-truth checklists contain no unverified completion claims, every remaining limitation has a concrete reason and reproduction, and all intended commits are pushed with remote SHA verification.

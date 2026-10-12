@@ -192,10 +192,12 @@ async function start({ wasm, bundle, assetUrl, canvas, testMode: requestedTestMo
     } else if (status === Status.FRAME) {
       frames++;
       if (exec && frames % 30 === 0) postMessage({ type: 'gpu', ...exec.stats, asyncify: w.asyncifyStats });
+      const syncInterval = exec?.lastPresentSyncInterval ?? 1;
       const waitStart = performance.now();
-      await waitForPresentInterval(exec?.lastPresentSyncInterval ?? 1);
+      const vblanksWaited = await waitForPresentInterval(syncInterval);
       const elapsed100ns = Math.max(0, Math.round((performance.now() - waitStart) * 10_000));
       w.advanceTime100ns(BigInt(elapsed100ns));
+      if (testMode) postMessage({ type: 'frame-pacing', syncInterval, vblanksWaited, elapsed100ns, virtualTicksAdded: elapsed100ns * 10 });
       publishSharedCoordinatorState();
     } else if (status === Status.IDLE) await waitForInput();
     else if (status === Status.RUNNING) await sleep(0);
