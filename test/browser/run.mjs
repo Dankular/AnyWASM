@@ -1726,6 +1726,17 @@ try {
           return image.SampleGrad(anisotropicBorderSampler, float2(0.95, 0.5), float2(0.2, 0.0), float2(0.0, 0.001));
         }
       `, 'main', 'ps_5_0');
+      const anisotropicBorderMethodsPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState anisotropicBorderSampler : register(s5);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float localX = position.x < 32.0 ? position.x : position.x - 36.0;
+          float2 coordinate = float2(0.95 + (localX - 4.5) * 0.2, 0.5);
+          return position.x < 32.0
+            ? image.Sample(anisotropicBorderSampler, coordinate)
+            : image.SampleBias(anisotropicBorderSampler, coordinate, 0.0);
+        }
+      `, 'main', 'ps_5_0');
       const a8BorderPixel = tool.compileHlsl(`
         Texture2D<float4> image : register(t0);
         SamplerState borderSampler : register(s0);
@@ -1807,6 +1818,15 @@ try {
       let anisotropicEdgeOffset = 0; for (const part of stream) { anisotropicEdgeCommands.set(part, anisotropicEdgeOffset); anisotropicEdgeOffset += part.length; }
       gpu.execute(anisotropicEdgeCommands);
       const anisotropicEdgePixels = await gpu.readBackbuffer(1);
+
+      stream.length = 0;
+      shader(42, 1, anisotropicBorderMethodsPixel);
+      command(8, sampler(28, 4, 0x55, [0.25, 0.5, 0.75, 1], 8)); // 8x anisotropic filter with BORDER U
+      command(17, words(1, 42)); command(20, words(1, 5, 1, 28)); command(29, words(3, 0));
+      const anisotropicMethodsSize = stream.reduce((total, part) => total + part.length, 0), anisotropicMethodsCommands = new Uint8Array(anisotropicMethodsSize);
+      let anisotropicMethodsOffset = 0; for (const part of stream) { anisotropicMethodsCommands.set(part, anisotropicMethodsOffset); anisotropicMethodsOffset += part.length; }
+      gpu.execute(anisotropicMethodsCommands);
+      const anisotropicMethodsPixels = await gpu.readBackbuffer(1);
 
       stream.length = 0;
       command(17, words(1, 9));
@@ -1930,6 +1950,8 @@ try {
         mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
         anisotropicBorderOutside: at(anisotropicPixels, 32),
         anisotropicBorderEdge: at(anisotropicEdgePixels, 32),
+        anisotropicBorderSample: at(anisotropicMethodsPixels, 4),
+        anisotropicBorderSampleBias: at(anisotropicMethodsPixels, 40),
         a8BorderOutside: at(a8Pixels, 32),
         linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32),
         r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48),
@@ -1946,7 +1968,7 @@ try {
     }
   });
   check('D3D11 sampler modes, anisotropic BORDER, and R8/RG8/RGB/A8 border defaults match pixels',
-    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 10 : 12) && samplerAddressResult.errors.length === 0
+    samplerAddressResult.draws === (samplerAddressResult.bcSkipped ? 11 : 13) && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1971,6 +1993,10 @@ try {
   check('D3D11 anisotropic BORDER includes edge-crossing SampleGrad taps',
     near(samplerAddressResult.anisotropicBorderEdge || [], [33, 190, 98, 255], 3),
     JSON.stringify(samplerAddressResult.anisotropicBorderEdge));
+  check('D3D11 anisotropic BORDER filters implicit Sample and SampleBias edge-crossing taps',
+    near(samplerAddressResult.anisotropicBorderSample || [], [33, 190, 98, 255], 3)
+      && near(samplerAddressResult.anisotropicBorderSampleBias || [], [33, 190, 98, 255], 3),
+    JSON.stringify({ sample: samplerAddressResult.anisotropicBorderSample, sampleBias: samplerAddressResult.anisotropicBorderSampleBias }));
   check(`D3D11 BC1 BORDER ${samplerAddressResult.bcSkipped ? 'adapter capability check (compressed sampling skipped)' : 'edge and outside pixels'}`,
     samplerAddressResult.bcSkipped || near(samplerAddressResult.bcBorderEdge || [], [255, 32, 64, 159], 2)
       && near(samplerAddressResult.bcBorderOutside || [], [255, 64, 128, 64], 1),
