@@ -256,7 +256,8 @@ register-stack subset):
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
       edge-crossing BORDER pixels. vkd3d rejects the documented float2 DDX/DDY arguments for
       Texture2DArray.SampleGrad with E5002 ([Microsoft HLSL signature](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplegrad));
-      anisotropic array SampleGrad, comparison SampleCmpLevelZero, cube, other sampled dimensions/
+      anisotropic Texture2D comparison SampleCmpLevelZero also returns `[110, 0, 0, 255]` for the
+      same edge-crossing LESS footprint. Anisotropic array SampleGrad, cube, other sampled dimensions/
       formats, remaining Shader Model 6.8 comparison methods, and other anisotropic cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,

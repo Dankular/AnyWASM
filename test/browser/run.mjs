@@ -2273,6 +2273,15 @@ try {
           return float4(result, 0.0, 0.0, 1.0);
         }
       `, 'main', 'ps_5_0');
+      const anisotropicComparisonLevelZeroPixel = tool.compileHlsl(`
+        Texture2D<float> depthImage : register(t0);
+        SamplerComparisonState anisotropicLessSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = float2(0.95 + (position.x - 4.5) * 0.2, 0.5);
+          float result = depthImage.SampleCmpLevelZero(anisotropicLessSampler, coordinate, 0.4);
+          return float4(result, 0.0, 0.0, 1.0);
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -2336,10 +2345,18 @@ try {
       let anisotropicOffset = 0; for (const part of stream) { anisotropicCommands.set(part, anisotropicOffset); anisotropicOffset += part.length; }
       gpu.execute(anisotropicCommands);
       const anisotropicPixels = await gpu.readBackbuffer(1);
+      stream.length = 0;
+      shader(27, 1, anisotropicComparisonLevelZeroPixel);
+      command(17, words(1, 27)); command(29, words(3, 0));
+      const anisotropicLevelZeroSize = stream.reduce((total, part) => total + part.length, 0), anisotropicLevelZeroCommands = new Uint8Array(anisotropicLevelZeroSize);
+      let anisotropicLevelZeroOffset = 0; for (const part of stream) { anisotropicLevelZeroCommands.set(part, anisotropicLevelZeroOffset); anisotropicLevelZeroOffset += part.length; }
+      gpu.execute(anisotropicLevelZeroCommands);
+      const anisotropicLevelZeroPixels = await gpu.readBackbuffer(1);
       const result = {
         levelZeroInside: readComparisonRow(8), levelZeroOutside: readComparisonRow(24),
         sampleCmpEdge: readComparisonRow(40), sampleCmpOutside: readComparisonRow(56),
         anisotropicSampleCmp: at(anisotropicPixels, 4, 32),
+        anisotropicSampleCmpLevelZero: at(anisotropicLevelZeroPixels, 4, 32),
         draws: gpu.stats.draws, errors: gpu.stats.errors, logs,
       };
       gpu.device.destroy();
@@ -2349,12 +2366,13 @@ try {
     }
   });
   check('D3D11 comparison samplers apply all eight compare functions to point and linear BORDER taps',
-    comparisonSamplerResult.draws === 2 && comparisonSamplerResult.errors.length === 0
+    comparisonSamplerResult.draws === 3 && comparisonSamplerResult.errors.length === 0
       && comparisonSamplerResult.levelZeroInside?.every((v, i) => v === [0, 255, 0, 255, 0, 255, 0, 255][i])
       && comparisonSamplerResult.levelZeroOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i])
       && comparisonSamplerResult.sampleCmpEdge?.every((v, i) => v === [0, 102, 102, 102, 153, 153, 153, 255][i])
       && comparisonSamplerResult.sampleCmpOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i])
-      && near(comparisonSamplerResult.anisotropicSampleCmp || [], [110, 0, 0, 255], 3),
+      && near(comparisonSamplerResult.anisotropicSampleCmp || [], [110, 0, 0, 255], 3)
+      && near(comparisonSamplerResult.anisotropicSampleCmpLevelZero || [], [110, 0, 0, 255], 3),
     JSON.stringify(comparisonSamplerResult));
 
   const depthCompareResult = await page.evaluate(async () => {

@@ -481,7 +481,7 @@ function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode)
 }
 
 function anisotropicBorderSampleWgsl(sampleName, textureName, textureType, samplerIndex,
-  addressModes, borderColor, settings, arrayTexture, textureFormat) {
+  addressModes, borderColor, settings, arrayTexture, textureFormat, fixedLevelZero = false) {
   const comparison = !!settings?.comparison;
   const depthTexture = textureType.kind.startsWith('texture_depth_');
   if (!['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(textureType.kind)
@@ -519,6 +519,10 @@ function anisotropicBorderSampleWgsl(sampleName, textureName, textureType, sampl
   const arrayArgs = arrayTexture ? ', layer' : '';
   const compareParam = comparison ? ', reference: f32' : '';
   const compareArg = comparison ? ', reference' : '';
+  const sampleLod = fixedLevelZero ? '' : `let _lod = log2(max(_minorLength, 0.000001)) + sourceBias;`;
+  const sampleCall = fixedLevelZero
+    ? `${sampleName}(_tapCoord${arrayArgs}, 0, true${compareArg})`
+    : `${sampleName}(_tapCoord${arrayArgs}, _lod${compareArg})`;
   const name = `aniso_border_sample_${textureName}_${samplerIndex}`;
   const source = `fn ${name}(coord: vec2<f32>${arrayParams}, derivativeX: vec2<f32>, derivativeY: vec2<f32>, sourceBias: f32${compareParam}) -> ${resultType} {
   let _size = vec2<f32>(textureDimensions(${textureName}, 0));
@@ -528,13 +532,13 @@ function anisotropicBorderSampleWgsl(sampleName, textureName, textureType, sampl
   let _minorLength = min(_lengthX, _lengthY);
   let _majorGradient = select(derivativeY, derivativeX, _lengthX >= _lengthY);
   let _tapCount = clamp(i32(ceil(_majorLength / max(_minorLength, 0.000001))), 1, ${maxAnisotropy});
-  let _lod = log2(max(_minorLength, 0.000001)) + sourceBias;
+  ${sampleLod}
   var _sum: ${resultType} = ${zero};
   for (var _tap = 0; _tap < ${maxAnisotropy}; _tap = _tap + 1) {
     if (_tap < _tapCount) {
       let _offset = (f32(_tap) + 0.5) / f32(_tapCount) - 0.5;
       let _tapCoord = coord + _majorGradient * _offset;
-      let _sample = ${sampleName}(_tapCoord${arrayArgs}, _lod${compareArg});
+      let _sample = ${sampleCall};
       _sum = _sum + select(_sample, ${borderResult}, ${outsideExpr});
     }
   }
@@ -739,12 +743,13 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
         ? borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat)
         : null;
       if (helper) {
+        const fixedLevelZero = settings?.comparison && mode === 'compareLevel';
         const anisotropicSample = settings?.comparison
-          ? mode === 'compare'
+          ? mode === 'compare' || fixedLevelZero
           : ['implicit', 'grad', 'bias'].includes(mode);
         if (settings?.anisotropic && anisotropicSample) {
-          const anisotropicHelper = anisotropicBorderSampleWgsl(helper.name, textureName, textureType,
-            samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat);
+          const anisotropicHelper = anisotropicBorderSampleWgsl(fixedLevelZero ? `${helper.name}_at_level` : helper.name,
+            textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat, fixedLevelZero);
           if (anisotropicHelper) {
             borderHelpers.set(helper.name, helper.source);
             borderHelpers.set(anisotropicHelper.name, anisotropicHelper.source);
