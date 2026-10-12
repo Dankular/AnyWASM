@@ -241,14 +241,15 @@ register-stack subset):
 - [~] **D3D11 verification gaps**: browser pixel/readback checks cover source/destination alpha
       and color, source-alpha-saturate, and blend-constant factors with inverse forms; they also cover
       reverse-subtract, add, subtract, min, and max blend operations;
-      texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture
-      `CopySubresourceRegion` and `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
+      texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture and
+      buffer `CopySubresourceRegion` plus `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
       fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
       BORDER verifies configured color for point and linear taps in 2D RGBA8 Sample, SampleLevel,
       SampleGrad, and SampleBias paths, plus 2D-array and 3D RGBA8 SampleLevel paths. D32_FLOAT
-      comparison BORDER verifies all eight comparison functions on fully outside SampleCmpLevelZero
-      taps and a linear GREATER SampleCmp edge footprint. Other dimensions/formats and comparison
-      sampling variants, gather/cube/anisotropic BORDER cases remain open;
+      comparison BORDER verifies all eight comparison functions for fully outside point-filtered
+      SampleCmpLevelZero taps and for edge-straddling and fully outside linearly filtered SampleCmp
+      footprints. Other dimensions/formats, Shader Model 6.8 bias/gradient comparison methods, and
+      gather/cube/anisotropic BORDER cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves

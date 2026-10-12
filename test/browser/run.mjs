@@ -1729,28 +1729,59 @@ try {
         SamplerComparisonState notEqualSampler : register(s5);
         SamplerComparisonState greaterEqualSampler : register(s6);
         SamplerComparisonState alwaysSampler : register(s7);
+        SamplerComparisonState neverLinearSampler : register(s8);
+        SamplerComparisonState lessLinearSampler : register(s9);
+        SamplerComparisonState equalLinearSampler : register(s10);
+        SamplerComparisonState lessEqualLinearSampler : register(s11);
+        SamplerComparisonState greaterLinearSampler : register(s12);
+        SamplerComparisonState notEqualLinearSampler : register(s13);
+        SamplerComparisonState greaterEqualLinearSampler : register(s14);
+        SamplerComparisonState alwaysLinearSampler : register(s15);
         float4 main(float4 position : SV_Position) : SV_Target {
-          float reference = position.y < 32.0 ? 0.4 : 0.6;
-          float2 coordinate = position.y < 32.0 ? float2(0.5, 0.5) : float2(2.0, 0.5);
-          float result;
-          float borderOutside = 0.0;
-          float borderStraddleSample = depthImage.SampleCmp(greaterSampler, float2(0.9, 0.5), reference);
-          float borderOutsideSample = depthImage.SampleCmp(greaterSampler, float2(2.0, 0.5), reference);
-          if (position.x < 8.0) result = depthImage.SampleCmpLevelZero(neverSampler, coordinate, reference);
-          else if (position.x < 16.0) result = depthImage.SampleCmpLevelZero(lessSampler, coordinate, reference);
-          else if (position.x < 24.0) result = depthImage.SampleCmpLevelZero(equalSampler, coordinate, reference);
-          else if (position.x < 32.0) result = depthImage.SampleCmpLevelZero(lessEqualSampler, coordinate, reference);
-          else if (position.x < 40.0) {
-            if (position.y < 32.0) result = depthImage.SampleCmpLevelZero(greaterSampler, float2(0.5, 0.5), reference);
-            else {
-              result = borderStraddleSample;
-              borderOutside = borderOutsideSample;
-            }
-          }
-          else if (position.x < 48.0) result = depthImage.SampleCmpLevelZero(notEqualSampler, coordinate, reference);
-          else if (position.x < 56.0) result = depthImage.SampleCmpLevelZero(greaterEqualSampler, coordinate, reference);
-          else result = depthImage.SampleCmpLevelZero(alwaysSampler, coordinate, reference);
-          return float4(result, borderOutside, 0.0, 1.0);
+          float reference = position.y < 16.0 ? 0.4 : 0.6;
+          float2 coordinate = position.y < 16.0 ? float2(0.5, 0.5) : float2(2.0, 0.5);
+          float levelZeroResult;
+          if (position.x < 8.0) levelZeroResult = depthImage.SampleCmpLevelZero(neverSampler, coordinate, reference);
+          else if (position.x < 16.0) levelZeroResult = depthImage.SampleCmpLevelZero(lessSampler, coordinate, reference);
+          else if (position.x < 24.0) levelZeroResult = depthImage.SampleCmpLevelZero(equalSampler, coordinate, reference);
+          else if (position.x < 32.0) levelZeroResult = depthImage.SampleCmpLevelZero(lessEqualSampler, coordinate, reference);
+          else if (position.x < 40.0) levelZeroResult = depthImage.SampleCmpLevelZero(greaterSampler, coordinate, reference);
+          else if (position.x < 48.0) levelZeroResult = depthImage.SampleCmpLevelZero(notEqualSampler, coordinate, reference);
+          else if (position.x < 56.0) levelZeroResult = depthImage.SampleCmpLevelZero(greaterEqualSampler, coordinate, reference);
+          else levelZeroResult = depthImage.SampleCmpLevelZero(alwaysSampler, coordinate, reference);
+
+          float2 edgeCoordinate = float2(0.9, 0.5);
+          float2 outsideCoordinate = float2(2.0, 0.5);
+          float neverEdge = depthImage.SampleCmp(neverLinearSampler, edgeCoordinate, 0.6);
+          float lessEdge = depthImage.SampleCmp(lessLinearSampler, edgeCoordinate, 0.6);
+          float equalEdge = depthImage.SampleCmp(equalLinearSampler, edgeCoordinate, 0.6);
+          float lessEqualEdge = depthImage.SampleCmp(lessEqualLinearSampler, edgeCoordinate, 0.6);
+          float greaterEdge = depthImage.SampleCmp(greaterLinearSampler, edgeCoordinate, 0.6);
+          float notEqualEdge = depthImage.SampleCmp(notEqualLinearSampler, edgeCoordinate, 0.6);
+          float greaterEqualEdge = depthImage.SampleCmp(greaterEqualLinearSampler, edgeCoordinate, 0.6);
+          float alwaysEdge = depthImage.SampleCmp(alwaysLinearSampler, edgeCoordinate, 0.6);
+          float neverOutside = depthImage.SampleCmp(neverLinearSampler, outsideCoordinate, 0.6);
+          float lessOutside = depthImage.SampleCmp(lessLinearSampler, outsideCoordinate, 0.6);
+          float equalOutside = depthImage.SampleCmp(equalLinearSampler, outsideCoordinate, 0.6);
+          float lessEqualOutside = depthImage.SampleCmp(lessEqualLinearSampler, outsideCoordinate, 0.6);
+          float greaterOutside = depthImage.SampleCmp(greaterLinearSampler, outsideCoordinate, 0.6);
+          float notEqualOutside = depthImage.SampleCmp(notEqualLinearSampler, outsideCoordinate, 0.6);
+          float greaterEqualOutside = depthImage.SampleCmp(greaterEqualLinearSampler, outsideCoordinate, 0.6);
+          float alwaysOutside = depthImage.SampleCmp(alwaysLinearSampler, outsideCoordinate, 0.6);
+
+          float sampleCmpEdge;
+          float sampleCmpOutside;
+          if (position.x < 8.0) { sampleCmpEdge = neverEdge; sampleCmpOutside = neverOutside; }
+          else if (position.x < 16.0) { sampleCmpEdge = lessEdge; sampleCmpOutside = lessOutside; }
+          else if (position.x < 24.0) { sampleCmpEdge = equalEdge; sampleCmpOutside = equalOutside; }
+          else if (position.x < 32.0) { sampleCmpEdge = lessEqualEdge; sampleCmpOutside = lessEqualOutside; }
+          else if (position.x < 40.0) { sampleCmpEdge = greaterEdge; sampleCmpOutside = greaterOutside; }
+          else if (position.x < 48.0) { sampleCmpEdge = notEqualEdge; sampleCmpOutside = notEqualOutside; }
+          else if (position.x < 56.0) { sampleCmpEdge = greaterEqualEdge; sampleCmpOutside = greaterEqualOutside; }
+          else { sampleCmpEdge = alwaysEdge; sampleCmpOutside = alwaysOutside; }
+
+          float result = position.y < 32.0 ? levelZeroResult : position.y < 48.0 ? sampleCmpEdge : sampleCmpOutside;
+          return float4(result, 0.0, 0.0, 1.0);
         }
       `, 'main', 'ps_5_0');
       const stream = [];
@@ -1776,16 +1807,18 @@ try {
       command(12, words(22, 2, 20, 40, 4, 0, 1, 0, 1)); // shader-resource view
       command(28, words(21, 1, 0x3f000000, 0)); // clear stored depth to 0.5
       const samplerIds = [];
-      for (let comparison = 1; comparison <= 8; comparison++) {
+      const borderValues = [0.25, 0.75, 0.6, 0.75, 0.75, 0.6, 0.75, 0.25];
+      for (let register = 0; register < 16; register++) {
         const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
-        const samplerId = 30 + comparison;
+        const comparison = register % 8 + 1;
+        const samplerId = 30 + register;
         samplerIds.push(samplerId);
         samplerView.setUint32(0, samplerId, true);
-        samplerView.setUint32(4, comparison === 5 ? 0x95 : 0x80, true); // linear greater border filter, point otherwise
+        samplerView.setUint32(4, register < 8 ? 0x80 : 0x95, true); // point level-zero samplers, linear implicit-LOD samplers
         samplerView.setUint32(8, 4, true);
         samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
         samplerView.setUint32(24, 1, true); samplerView.setUint32(28, comparison, true);
-        samplerView.setFloat32(32, comparison === 5 ? 0.75 : 0.25, true);
+        samplerView.setFloat32(32, borderValues[comparison - 1], true);
         samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
         command(8, sampler);
       }
@@ -1799,20 +1832,24 @@ try {
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
-      const left = samplerIds.map((_, i) => at(4 + i * 8, 16)[0]);
-      const right = samplerIds.map((_, i) => at(4 + i * 8, 48)[0]);
-      const result = { left, right, borderOutside: at(36, 48)[1], borderStraddle: at(36, 48)[0], draws: gpu.stats.draws, errors: gpu.stats.errors, logs };
+      const readComparisonRow = (y) => Array.from({ length: 8 }, (_, i) => at(4 + i * 8, y)[0]);
+      const result = {
+        levelZeroInside: readComparisonRow(8), levelZeroOutside: readComparisonRow(24),
+        sampleCmpEdge: readComparisonRow(40), sampleCmpOutside: readComparisonRow(56),
+        draws: gpu.stats.draws, errors: gpu.stats.errors, logs,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 comparison samplers apply all eight compare functions to BORDER taps and linearly filter GREATER results',
+  check('D3D11 comparison samplers apply all eight compare functions to point and linear BORDER taps',
     comparisonSamplerResult.draws === 1 && comparisonSamplerResult.errors.length === 0
-      && comparisonSamplerResult.left?.every((v, i) => v === [0, 255, 0, 255, 0, 255, 0, 255][i])
-      && comparisonSamplerResult.right?.every((v, i) => v === [0, 0, 0, 0, 153, 255, 255, 255][i])
-      && comparisonSamplerResult.borderOutside === 0,
+      && comparisonSamplerResult.levelZeroInside?.every((v, i) => v === [0, 255, 0, 255, 0, 255, 0, 255][i])
+      && comparisonSamplerResult.levelZeroOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i])
+      && comparisonSamplerResult.sampleCmpEdge?.every((v, i) => v === [0, 102, 102, 102, 153, 153, 153, 255][i])
+      && comparisonSamplerResult.sampleCmpOutside?.every((v, i) => v === [0, 255, 255, 255, 0, 0, 0, 255][i]),
     JSON.stringify(comparisonSamplerResult));
 
   const depthCompareResult = await page.evaluate(async () => {
