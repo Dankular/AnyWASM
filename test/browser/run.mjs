@@ -326,6 +326,8 @@ try {
     triText.includes('staging R16_FLOAT readback=3400,3800,3c00,4000,4200,4400 row_pitch=6'), triText);
   check('D3D11 staging R10G10B10A2_UNORM Map(READ) preserves packed words',
     triText.includes('staging R10G10B10A2_UNORM readback=12345678,9abcdef0,55aa33cc,ffffffff row_pitch=8'), triText);
+  check('D3D11 staging R8G8_UNORM Map(READ) preserves two-channel row packing',
+    triText.includes('staging R8G8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120 row_pitch=6'), triText);
   check('D3D11 staging R8_UNORM Map(READ) repacks odd-width rows tightly',
     triText.includes('staging R8_UNORM subresource0=11,12,13,21,22,23 row_pitch=3'), triText);
   check('D3D11 staging R8_UNORM Map(READ) selects the requested mip and array slice',

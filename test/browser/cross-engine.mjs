@@ -116,6 +116,8 @@ try {
           `${item.name} staging R16_FLOAT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R10G10B10A2_UNORM readback=12345678,9abcdef0,55aa33cc,ffffffff row_pitch=8/,
           `${item.name} staging R10G10B10A2_UNORM Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R8G8_UNORM readback=10,20,30,40,50,60,70,80,90,100,110,120 row_pitch=6/,
+          `${item.name} staging R8G8_UNORM Map(READ) output: ${graphics.output}`);
         const screenshot = decodePng(await page.locator('#screen').screenshot());
         const pixel = (x, y) => {
           const index = (y * screenshot.w + x) * 4;
