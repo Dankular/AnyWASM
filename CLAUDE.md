@@ -277,8 +277,9 @@ register-stack subset):
       patterns and translates through a runtime bitcast. The target's draw-parameter uniform and UAV
       binding collision is fixed and pixel-tested. Diligent DrawMap vertex/pixel shader fixtures
       cover constant buffers, texture sampling, and ray loops; Chromium validates their WebGPU
-      pipeline. More failing real-world shaders, shader/pipeline caching (IndexedDB), and async
-      pipeline creation to avoid stalls remain open.
+      pipeline and checks ray-marching response to clear-space versus wall SDF samples. More failing
+      real-world shaders, shader/pipeline caching (IndexedDB), and async pipeline creation to avoid
+      stalls remain open.
 - [~] **Canvas blit pixels**: the visible D3D11 triangle's clear colour and interpolated centre
       pixel are checked from a 640x480 Chromium screenshot without test mode. Other render paths,
       canvas sizes, and browser engines still need coverage.

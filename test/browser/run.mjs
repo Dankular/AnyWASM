@@ -395,10 +395,73 @@ try {
           layout: 'auto',
           vertex: { module: drawMapVertexModule, entryPoint: 'main' },
           fragment: { module: drawMapPixelModule, entryPoint: 'main', targets: [{ format: 'rgba8unorm' }] },
-          primitive: { topology: 'triangle-list' },
+          primitive: { topology: 'triangle-strip' },
         });
       } catch (error) { drawMapPipelineError = String(error); }
       const drawMapValidation = await gpu.device.popErrorScope();
+      let drawMapClearPixel = null, drawMapWallPixel = null, drawMapRenderError = '';
+      if (drawMapPipeline) try {
+        const mapConstants = gpu.device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const playerConstants = gpu.device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const drawParameters = gpu.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        gpu.device.queue.writeBuffer(mapConstants, 0, new Float32Array([
+          -1, 1, 1, -1, // screen rectangle
+          4, 4, 0.25, 0.25, // map-to-screen scale
+          100, 100, 1, 0.2, // teleport outside the test view
+        ]));
+        gpu.device.queue.writeBuffer(playerConstants, 0, new Float32Array([
+          0, 0, 0.25, 4, // player position/radius and ambient-light radius
+          1, 0, 0, 10, // flashlight direction/power/range
+        ]));
+        gpu.device.queue.writeBuffer(drawParameters, 0, new Int32Array(4));
+        const sdfTexture = gpu.device.createTexture({
+          size: { width: 1, height: 1 }, format: 'rgba8unorm',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        const sampler = gpu.device.createSampler({ magFilter: 'nearest', minFilter: 'nearest', mipmapFilter: 'nearest' });
+        const groups = [
+          gpu.device.createBindGroup({ layout: drawMapPipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: mapConstants } },
+            { binding: 1, resource: { buffer: playerConstants } },
+          ] }),
+          gpu.device.createBindGroup({ layout: drawMapPipeline.getBindGroupLayout(1), entries: [
+            { binding: 0, resource: sdfTexture.createView() },
+          ] }),
+          gpu.device.createBindGroup({ layout: drawMapPipeline.getBindGroupLayout(2), entries: [
+            { binding: 0, resource: sampler },
+          ] }),
+          gpu.device.createBindGroup({ layout: drawMapPipeline.getBindGroupLayout(3), entries: [
+            { binding: 0, resource: { buffer: drawParameters } },
+          ] }),
+        ];
+        const target = gpu.device.createTexture({
+          size: { width: 16, height: 16 }, format: 'rgba8unorm',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
+        const readback = gpu.device.createBuffer({ size: 16 * 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const renderSdfSample = async (red) => {
+          gpu.device.queue.writeTexture({ texture: sdfTexture }, new Uint8Array([red, 0, 0, 255]),
+            { bytesPerRow: 4, rowsPerImage: 1 }, { width: 1, height: 1, depthOrArrayLayers: 1 });
+          const encoder = gpu.device.createCommandEncoder();
+          const pass = encoder.beginRenderPass({ colorAttachments: [{
+            view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store',
+          }] });
+          pass.setPipeline(drawMapPipeline);
+          groups.forEach((group, index) => pass.setBindGroup(index, group));
+          pass.draw(4, 1, 0, 0);
+          pass.end();
+          encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow: 256, rowsPerImage: 16 }, { width: 16, height: 16, depthOrArrayLayers: 1 });
+          gpu.device.queue.submit([encoder.finish()]);
+          await readback.mapAsync(GPUMapMode.READ);
+          const pixels = new Uint8Array(readback.getMappedRange());
+          const centerPixel = Array.from(pixels.slice(8 * 256 + 8 * 4, 8 * 256 + 8 * 4 + 4));
+          readback.unmap();
+          return centerPixel;
+        };
+        drawMapClearPixel = await renderSdfSample(255);
+        drawMapWallPixel = await renderSdfSample(0);
+        for (const resource of [mapConstants, playerConstants, drawParameters, sdfTexture, target, readback]) resource.destroy();
+      } catch (error) { drawMapRenderError = String(error); }
       const vertexShader = tool.compileHlsl(`
         float4 main(uint vertexId : SV_VertexID) : SV_Position {
           float x = vertexId == 2 ? 3.0 : -1.0;
@@ -457,6 +520,9 @@ try {
         allPixelsMatch: pixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
         drawMapPipelineValidated: !!drawMapPipeline && !drawMapValidation && !drawMapPipelineError && drawMapShaderErrors.length === 0,
         drawMapPipelineError: drawMapPipelineError || drawMapValidation?.message || drawMapShaderErrors.join('\n'),
+        drawMapClearPixel,
+        drawMapWallPixel,
+        drawMapRenderError,
         bgraFormat: bgraPixels.format,
         bgraPixelsMatch: bgraPixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
         draws: gpu.stats.draws,
@@ -480,6 +546,12 @@ try {
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));
+  const drawMapClearLuminance = msaaResolveResult.drawMapClearPixel?.slice(0, 3).reduce((sum, channel) => sum + channel, 0) ?? 0;
+  const drawMapWallLuminance = msaaResolveResult.drawMapWallPixel?.slice(0, 3).reduce((sum, channel) => sum + channel, 0) ?? 0;
+  check('Diligent DrawMap ray marching darkens its center for a zero-distance wall sample',
+    msaaResolveResult.drawMapClearPixel?.[3] === 255 && msaaResolveResult.drawMapWallPixel?.[3] === 255
+      && drawMapClearLuminance > drawMapWallLuminance,
+    msaaResolveResult.drawMapRenderError || JSON.stringify({ clearSdf: msaaResolveResult.drawMapClearPixel, wallSdf: msaaResolveResult.drawMapWallPixel }));
 
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
   await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });

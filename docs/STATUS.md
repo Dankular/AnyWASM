@@ -41,7 +41,8 @@
   regression for integer-register bit patterns that vkd3d emits as non-finite f32 constants; it now
   translates via an in-function integer load and bitcast. DXBC fixtures generated from the target's
   `DrawMap.hlsl` exercise its vertex and ray-marching pixel shaders, including their descriptors and
-  control flow; Chromium validates the resulting WebGPU render pipeline.
+  control flow; Chromium validates the resulting WebGPU render pipeline and checks that a wall SDF
+  sample shades darker than a clear-space sample.
 - Cached-block execution benchmark (Node 24.16.0, Windows x64, release WASM; two runs, six rounds
   per workload): median 32.2 M instr/s for `compute.exe`, 26.1 for call-heavy, 28.1 for
   memory-heavy, and 38.5 for SSE-float. The cached executor translates NOP-like, MOV and LEA

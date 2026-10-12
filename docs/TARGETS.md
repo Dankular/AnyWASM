@@ -500,8 +500,10 @@ bytes (SHA-256 `1052ec7d432a92ac675edcac4a91c0ffa1b04f40d43dcfc7fae599e71392fb78
 
 `test/shaders.mjs` checks the constant buffers, texture and sampler descriptors, stage outputs, and
 ray-loop translation. `test/browser/run.mjs` compiles both translated WGSL modules and creates their
-WebGPU render pipeline in Chromium; shader compilation and pipeline validation report no errors.
-This covers translation and pipeline creation, not rendered pixels from the DrawMap shader.
+WebGPU render pipeline in Chromium. It then renders a 16x16 target twice with controlled uniforms,
+using a clear-space SDF value and a zero-distance wall value; the center pixel is darker for the wall.
+Shader compilation and pipeline validation report no errors. This checks SDF-dependent shading but
+does not compare the rendered image with a native Diligent capture.
 
 The reusable target smoke replay is `test/browser/target.mjs`. It temporarily serves the worker with
 a 1,000,000,000-instruction run slice and per-frame GPU reporting, then captures the first reported
