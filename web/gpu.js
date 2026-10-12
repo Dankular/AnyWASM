@@ -1570,7 +1570,11 @@ export class GpuExecutor {
       vertex: { module: vs.module, entryPoint: vs.entry, buffers },
       primitive: { topology: TOPOLOGY[topology] || 'triangle-list' },
     };
-    desc.multisample = { count: att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1 };
+    const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
+    desc.multisample = {
+      count: sampleCount,
+      alphaToCoverageEnabled: sampleCount > 1 && !!blend?.getUint32(0, true),
+    };
     if (ps) desc.fragment = { module: ps.module, entryPoint: ps.entry, targets };
     else if (targets.some(Boolean)) desc.fragment = undefined;
     if (indexed && (topology === 3 || topology === 5)) desc.primitive.stripIndexFormat = st.ib.format === 42 ? 'uint32' : 'uint16';

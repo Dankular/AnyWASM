@@ -32,9 +32,9 @@
 
 **Files:** `CLAUDE.md`, `docs/STATUS.md`, `docs/BROWSER_SUPPORT.md`, `docs/TARGETS.md`
 
-- [ ] Compare each open checkbox with current source and test names; mark only evidence-backed work complete.
-- [ ] Carry the pushed D3D9 operation coverage into the current checklist without staging unrelated CPU/runtime edits from shared documentation files.
-- [ ] Preserve a list of remaining requirements in this plan and link each to its owning task below.
+- [x] Compare each open checkbox with current source and test names; mark only evidence-backed work complete.
+- [x] Carry the pushed D3D9 operation coverage into the current checklist without staging unrelated CPU/runtime edits from shared documentation files.
+- [x] Preserve a list of remaining requirements in this plan and link each to its owning task below.
 
 **Verification:** Search the four source-of-truth documents and confirm every open graphics bullet maps to Tasks 2–9.
 
@@ -55,6 +55,7 @@
 - [ ] Enumerate the untested format/resolve combinations, copy classes, sampler/render-state combinations, and staging layouts from section 3.
 - [ ] Add boundary-focused pixel/readback cases for each open behavior, including preservation outside copied/cleared regions.
 - [ ] Implement only the failing HLE/executor behavior and rerun the affected browser checks plus the full Chromium suite.
+- [x] Forward D3D11 alpha-to-coverage into multisampled WebGPU pipelines; the 4x RGBA8 resolve regression verifies partial red/blue sample coverage from a half-alpha draw in Chromium.
 
 **Gate:** Every render-state, copy, resolve, packing, and staging item listed open by the checklist has a named passing regression.
 

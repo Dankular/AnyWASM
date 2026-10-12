@@ -81,6 +81,11 @@ texture, factor, premultiplied-texture, and current-alpha inputs for color and a
 and render-target blending are also checked. It does not add target-game or
 non-Chromium pixel coverage beyond the D3D11 triangle.
 
+On 2026-10-12, `node test/browser/run.mjs` was rerun on Windows x64 with Chrome `151.0.7922.34`;
+the full suite passed with no WebGPU validation errors or page errors. It includes a 4x MSAA D3D11
+alpha-to-coverage regression that resolves half-alpha red over a blue clear and checks partial
+red/blue sample coverage.
+
 | Browser or feature | Evidence and current status |
 |---|---|
 | Chromium, headless | **Partial, exercised by the browser suite.** It drives the real page and worker; checks load progress and accessible unimplemented-import diagnostics; verifies keyboard input, CSS-to-guest mouse scaling, `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`, and compares opt-in emitted execution with cached execution. The selected maze replay checks W/S/A/D, cursor-aimed movement in all four directions, and a flashlight response for one seed. |

@@ -664,6 +664,8 @@ try {
           return output;
         }
       `, 'main', 'ps_5_0');
+      const alphaCoveragePixelShader = tool.compileHlsl(
+        'float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 0.5); }', 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -730,6 +732,22 @@ try {
       command(29, words(3, 0));
       command(4, words(35, 8, 8, 1, 1, 91, 0x20, 0, 1, 0)); // single-sample BGRA8 sRGB resolve target
       command(47, words(35, 0, 33, 0, 91)); // ResolveSubresource(dst, 0, src, 0, BGRA8_UNORM_SRGB)
+      command(4, words(23, 8, 8, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 alpha-to-coverage target
+      command(12, words(24, 0, 23, 28, 4, 0, 1, 0, 1));
+      command(27, words(24, 0, 0, 0x3f800000, 0x3f800000)); // clear to blue
+      command(4, words(25, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      const alphaCoverageBlend = new Uint8Array(268), alphaCoverageBlendView = new DataView(alphaCoverageBlend.buffer);
+      alphaCoverageBlendView.setUint32(0, 13, true); // state id
+      alphaCoverageBlendView.setUint32(4, 1, true); // AlphaToCoverageEnable
+      alphaCoverageBlendView.setUint32(40, 0xf, true); // RenderTarget[0].RenderTargetWriteMask
+      command(9, alphaCoverageBlend);
+      shader(13, 1, alphaCoveragePixelShader);
+      command(17, words(1, 13));
+      command(21, words(1, 24, 0));
+      command(22, words(1, 0, 0, 0x41000000, 0x41000000, 0, 0x3f800000)); // 8x8 viewport
+      command(24, words(13, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xffffffff));
+      command(29, words(3, 0));
+      command(47, words(25, 0, 23, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -739,6 +757,8 @@ try {
       const coveragePixels = await gpu.readBackTexture(22);
       const rgbaSrgbPixels = await gpu.readBackTexture(32);
       const bgraSrgbPixels = await gpu.readBackTexture(35);
+      const alphaCoveragePixels = await gpu.readBackTexture(25);
+      const alphaCoverageIndex = (4 * alphaCoveragePixels.width + 4) * 4;
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
@@ -757,6 +777,8 @@ try {
         float16Format: float16Pixels.format,
         float16PixelsMatch: float16Pixels.data.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75, 1.0][i % 4]) <= 0.001),
         coveragePixelsMatch: coveragePixels.data.every((value, i) => Math.abs(value - [128, 0, 0, 255][i % 4]) <= 1),
+        alphaCoverageSamples: gpu.res.get(23)?.samples,
+        alphaCoveragePixel: Array.from(alphaCoveragePixels.data.slice(alphaCoverageIndex, alphaCoverageIndex + 4)),
         rgbaSrgbSamples: gpu.res.get(30)?.samples,
         rgbaSrgbFormat: rgbaSrgbPixels.format,
         rgbaSrgbPixelsMatch: rgbaSrgbPixels.data.every((value, i) => Math.abs(value - [137, 188, 225, 255][i % 4]) <= 1),
@@ -785,7 +807,13 @@ try {
       && msaaResolveResult.coveragePixelsMatch && msaaResolveResult.rgbaSrgbSamples === 4
       && msaaResolveResult.rgbaSrgbFormat === 'rgba8unorm-srgb' && msaaResolveResult.rgbaSrgbPixelsMatch
       && msaaResolveResult.bgraSrgbSamples === 4 && msaaResolveResult.bgraSrgbFormat === 'bgra8unorm-srgb'
-      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.draws === 6 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.draws === 7 && msaaResolveResult.errors?.length === 0,
+    JSON.stringify(msaaResolveResult));
+  check('D3D11 alpha-to-coverage resolves a partial sample mask over preserved clear pixels',
+    msaaResolveResult.alphaCoverageSamples === 4
+      && msaaResolveResult.alphaCoveragePixel?.[0] > 0 && msaaResolveResult.alphaCoveragePixel[0] < 255
+      && msaaResolveResult.alphaCoveragePixel?.[2] > 0 && msaaResolveResult.alphaCoveragePixel[2] < 255
+      && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));
