@@ -3352,7 +3352,7 @@ try {
         float4 main(uint vertexId : SV_VertexID) : SV_Position {
           float x = vertexId == 2 ? 3.0 : -1.0;
           float y = vertexId == 1 ? 3.0 : -1.0;
-          return float4(x, y, 0.0, 1.0);
+          return float4(x, y, 0.5, 1.0);
         }
       `, 'main', 'vs_5_0');
       const red = tool.compileHlsl('float4 main() : SV_Target { return float4(1.0, 0.0, 0.0, 1.0); }', 'main', 'ps_5_0');
@@ -3389,17 +3389,17 @@ try {
       rasterView.setUint32(28, 1, true); // depth clip enabled
       rasterView.setUint32(32, 1, true); // scissor enabled
       command(10, raster);
-      const stencilState = (id, writeMask, compare, passOp, readMask = 0xff) => {
+      const stencilState = (id, writeMask, compare, passOp, readMask = 0xff, options = {}) => {
         const payload = new Uint8Array(56), view = new DataView(payload.buffer);
         view.setUint32(0, id, true);
-        view.setUint32(4, 0, true); // depth disabled
-        view.setUint32(8, 0, true);
-        view.setUint32(12, 8, true); // depth compare: always
+        view.setUint32(4, options.depthEnable ?? 0, true);
+        view.setUint32(8, options.depthWrite ?? 0, true);
+        view.setUint32(12, options.depthCompare ?? 8, true);
         view.setUint32(16, 1, true); // stencil enabled
         view.setUint8(20, readMask); view.setUint8(21, writeMask);
         for (const face of [24, 40]) {
-          view.setUint32(face, 1, true); // fail: keep
-          view.setUint32(face + 4, 1, true); // depth fail: keep
+          view.setUint32(face, options.failOp ?? 1, true);
+          view.setUint32(face + 4, options.depthFailOp ?? 1, true);
           view.setUint32(face + 8, passOp, true);
           view.setUint32(face + 12, compare, true);
         }
@@ -3445,6 +3445,36 @@ try {
       };
       const operationPixels = operations.map((_, i) => at(operationFrame, i * 8 + 4, 32));
 
+      const drawFailureOperations = (mode) => {
+        stream.length = 0;
+        const depthClear = new Uint8Array(16), depthClearView = new DataView(depthClear.buffer);
+        depthClearView.setUint32(0, 4, true); depthClearView.setUint32(4, 3, true);
+        depthClearView.setFloat32(8, mode === 'depth-fail' ? 0.25 : 1, true);
+        command(27, clearColor); command(28, depthClear);
+        for (let i = 0; i < operations.length; i++) {
+          const operation = operations[i], left = i * 8;
+          const scissor = () => command(23, words(1, left, 0, left + 8, 64));
+          command(26, words(13, operation.initial)); scissor(); command(29, words(3, 0));
+          const stateId = (mode === 'fail' ? 70 : 90) + i;
+          if (mode === 'fail') {
+            stencilState(stateId, operation.writeMask ?? 0xff, 1, 1, 0xff, { failOp: operation.op });
+          } else {
+            stencilState(stateId, operation.writeMask ?? 0xff, 8, 1, 0xff, {
+              depthEnable: 1, depthCompare: 2, depthFailOp: operation.op,
+            });
+          }
+          command(17, words(1, 9)); command(26, words(stateId, operation.reference)); scissor(); command(29, words(3, 0));
+          command(17, words(1, 9)); command(26, words(40, operation.expected)); scissor(); command(29, words(3, 0));
+          command(17, words(1, 8));
+        }
+        gpu.execute(append());
+        return gpu.readBackbuffer(1);
+      };
+      const failFrame = await drawFailureOperations('fail');
+      const failPixels = operations.map((_, i) => at(failFrame, i * 8 + 4, 32));
+      const depthFailFrame = await drawFailureOperations('depth-fail');
+      const depthFailPixels = operations.map((_, i) => at(depthFailFrame, i * 8 + 4, 32));
+
       const comparisonValues = [4, 5, 6], comparisonNames = ['never', 'less', 'equal', 'less-equal', 'greater', 'not-equal', 'greater-equal', 'always'];
       stream.length = 0;
       command(27, clearColor); command(28, clearDepth);
@@ -3466,6 +3496,8 @@ try {
       const result = {
         operationNames: operations.map(({ name }) => name),
         operationPixels,
+        failPixels,
+        depthFailPixels,
         comparisonNames,
         comparisonPixels: comparisonNames.map((_, func) => comparisonValues.map((__, value) => {
           const top = Math.floor(value * 64 / 3), bottom = Math.floor((value + 1) * 64 / 3);
@@ -3486,9 +3518,13 @@ try {
     [true, false, false], [true, false, true], [true, true, false], [true, true, true],
   ];
   check('D3D11 stencil operations and all comparison functions match boundary values',
-    stencilResult.draws === 77 && stencilResult.errors.length === 0
+    stencilResult.draws === 131 && stencilResult.errors.length === 0
       && stencilResult.operationPixels?.length === 9
       && stencilResult.operationPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1))
+      && stencilResult.failPixels?.length === 9
+      && stencilResult.failPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1))
+      && stencilResult.depthFailPixels?.length === 9
+      && stencilResult.depthFailPixels.every((pixel) => near(pixel, [0, 255, 0, 255], 1))
       && stencilResult.comparisonPixels?.length === 8
       && stencilResult.comparisonPixels.every((row, func) => row.length === 3
         && row.every((pixel, value) => near(pixel, stencilComparisonPasses[func][value] ? [0, 255, 0, 255] : [255, 0, 0, 255], 1)))
