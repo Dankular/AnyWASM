@@ -248,7 +248,8 @@ register-stack subset):
       SampleGrad, and SampleBias paths, plus 2D-array and 3D RGBA8 SampleLevel paths. D32_FLOAT
       comparison BORDER verifies all eight comparison functions for fully outside point-filtered
       SampleCmpLevelZero taps and for edge-straddling and fully outside linearly filtered SampleCmp
-      footprints. Other dimensions/formats, Shader Model 6.8 bias/gradient comparison methods, and
+      footprints; R8_UNORM, RG8_UNORM, B5G6R5_UNORM, BC1, and BC4 BORDER tests verify SRV channel
+      defaults. Other dimensions/formats, Shader Model 6.8 bias/gradient comparison methods, and
       gather/cube/anisotropic BORDER cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
