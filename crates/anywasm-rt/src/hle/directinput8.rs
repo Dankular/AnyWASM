@@ -329,7 +329,7 @@ fn set_property(p: &mut Process) -> R {
 }
 
 fn get_property(p: &mut Process) -> R {
-    let (this, property) = (p.arg(0), p.arg(2));
+    let (this, property_guid, property) = (p.arg(0), p.arg(1), p.arg(2));
     if device_properties(p, this).is_none() {
         return Ok(E_NOINTERFACE);
     }
@@ -340,8 +340,13 @@ fn get_property(p: &mut Process) -> R {
     if size < 20 {
         return Ok(E_INVALIDARG);
     }
+    let property_id = guid(p, property_guid)?;
     // DIPROP_AXISMODE is property ID 2; DirectInput defaults to relative axes.
-    if p.rd32(property + 16)? == 2 {
+    if property_id == "00000002-0000-0000-c000-000000000046" {
+        p.wr32(property + 16, 1)?;
+    } else if property_id == "00000001-0000-0000-c000-000000000046" {
+        p.wr32(property + 16, 0)?;
+    } else if property_id == "00000004-0000-0000-c000-000000000046" {
         p.wr32(property + 16, 1)?;
     }
     Ok(S_OK)

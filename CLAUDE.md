@@ -122,9 +122,10 @@ and 32-bit or 64-bit GPR-immediate and GPR-to-GPR MOV instructions at a block en
       and compares the same bundle with the default cached-only path and `{ jit: false }` for status,
       exit code, stdout/stderr, and retired count. A forced host compile failure also falls back
       safely. The Chrome suite also explicitly runs the emitted path and compares its compute output
-      and retired count with cached-only execution. A dedicated `jit_state.exe` starts with a NOP
-      followed by six emitted GPR MOVs. Its forced seven-instruction prefix stores their values
-      through guest memory and checks them; the WASM smoke compares emitted, cached-only, and
+      and retired count with cached-only execution. Chromium also runs the dedicated `jit_state.exe`
+      page-realm check against cached-only. The fixture sets ZF before a
+      branch to a seven-instruction NOP/MOV prefix, then checks ZF and the MOV-produced values after
+      guest memory stores. The WASM smoke compares emitted, cached-only, and
       interpreter status, exit code, output, and retired
       count, while Windows also runs the same fixture natively. This verifies those MOV-produced
       registers and checked memory values, but not arbitrary final process state or a full

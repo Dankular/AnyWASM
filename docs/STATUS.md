@@ -120,10 +120,11 @@
   fallback and preserve output/count parity. A dedicated browser-worker run forces the emitter,
   confirms register-register execution without fallback, and matches the page-realm output and
   retired count. The standard worker, input, and WebGPU checks pass with the default gate. A
-  `jit_state.exe` fixture emits a leading NOP and six GPR MOVs as one forced seven-instruction
-  prefix, stores their values to guest memory, and fails if those values differ; the WASM smoke
+  `jit_state.exe` fixture sets ZF before branching to a NOP plus six GPR MOVs as one forced
+  seven-instruction prefix, then checks ZF and the stored register values; the WASM smoke
   compares emitted, cached-only, and interpreter status, exit code, output, errors, and retired
-  count, while Windows also runs the fixture natively.
+  count. Headless Chromium compares the emitted page-realm run with cached-only status and counts;
+  Windows also runs the fixture natively.
   This checks the fixture-observed MOV state and memory only; a full final-state differential remains
   open. This is a
   mechanism prototype, not a throughput win: emission requires explicit opt-in; partial-width and
