@@ -245,8 +245,10 @@ register-stack subset):
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
       for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels with row
-      pitch, packed RGBA16_FLOAT values, odd-width R8_UNORM row packing plus mip/array subresource
-      selection, and depth-only D32_FLOAT values. Comparison samplers pixel-test all eight
+      pitch, packed RGBA16_FLOAT and R16_FLOAT values, raw BGRA8_UNORM and R10G10B10A2_UNORM bytes,
+      R8G8_UNORM two-channel texels, odd-width R8_UNORM row packing plus mip/array subresource
+      selection, depth-only D32_FLOAT values, and Texture3D R32_FLOAT row/depth pitches. Comparison
+      samplers pixel-test all eight
       comparison functions against depth values on both sides of the reference; depth-state
       comparisons pixel-test all eight functions at equality. Other staging formats and subresource
       layouts, other format/resolve combinations, and more render-state combinations remain open.
