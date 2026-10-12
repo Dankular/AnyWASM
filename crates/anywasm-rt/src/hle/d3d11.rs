@@ -1112,6 +1112,13 @@ fn update_subresource(p: &mut Process) -> R {
 }
 
 fn map(p: &mut Process) -> R {
+    map_with_readback(p, request_gpu_readback)
+}
+
+fn map_with_readback(
+    p: &mut Process,
+    request_readback: impl FnOnce(&[u8], u32, u32, &mut [u8]) -> i32,
+) -> R {
     // (this, pResource, Subresource, MapType, MapFlags, D3D11_MAPPED_SUBRESOURCE*)
     let (res, sub, ty, out) = (p.arg(1), p.arg(2) as u32, p.arg(3) as u32, p.arg(5));
     let Some(id) = obj_id_opt(p, res) else { return Ok(E_INVALIDARG) };
@@ -1134,7 +1141,7 @@ fn map(p: &mut Process) -> R {
     if cpu_readable_staging {
         let commands = std::mem::take(&mut p.extra.gpu.buf);
         let mut bytes = vec![0; len as usize];
-        match request_gpu_readback(&commands, id, sub, &mut bytes) {
+        match request_readback(&commands, id, sub, &mut bytes) {
             1 => p.write_bytes(addr, &bytes)?,
             0 => {
                 p.extra.gpu.buf = commands;
@@ -1345,6 +1352,56 @@ mod tests {
         p.cpu.gpr[R8] = OUT;
         let result = method("ID3D11Device", method_name).unwrap()(&mut p).unwrap();
         (p, result)
+    }
+
+    #[test]
+    fn map_readback_for_3d_rgba8_preserves_packed_data_and_depth_pitches() {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x14000;
+        const STACK: u64 = 0x20000;
+        let mut p = Process::new(Vfs::new());
+        for address in [OUT, STACK] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let id = p.extra.gpu.new_id();
+        p.extra.com.res.insert(id, ResInfo {
+            width: 2,
+            height: 2,
+            depth: 2,
+            is_3d: true,
+            mips: 1,
+            array: 1,
+            format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            usage: 3,
+            cpu: 0x0002_0000, // D3D11_CPU_ACCESS_READ
+            ..Default::default()
+        });
+        let texture = create(&mut p, "ID3D11Texture3D", Kind::Texture3D { id });
+        let stack = STACK + PAGE_SIZE - 0x100;
+        p.cpu.gpr[RSP] = stack;
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = 1; // D3D11_MAP_READ
+        p.wr64(stack + 48, OUT).unwrap();
+        let expected = (0..32).collect::<Vec<u8>>();
+        let result = map_with_readback(&mut p, |commands, resource, subresource, output| {
+            assert!(commands.is_empty());
+            assert_eq!(resource, id);
+            assert_eq!(subresource, 0);
+            assert_eq!(output.len(), expected.len());
+            output.copy_from_slice(&expected);
+            1
+        }).unwrap();
+
+        assert_eq!(result, S_OK);
+        let mapped = p.rd64(OUT).unwrap();
+        assert_eq!(p.rd32(OUT + 8).unwrap(), 8); // 2 RGBA8 texels per row
+        assert_eq!(p.rd32(OUT + 12).unwrap(), 16); // two rows per depth slice
+        assert_eq!(p.read_bytes(mapped, expected.len()).unwrap(), expected);
     }
 
     #[test]
