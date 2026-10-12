@@ -647,6 +647,7 @@ export class GpuExecutor {
       const module = this.device.createShaderModule({ code });
       const channelArg = (argument, channel) => argument === 2 ? `texel.${channel}` : `input.color.${channel}`;
       const colorA = channelArg(colorArg1, 'rgb'), colorB = channelArg(colorArg2, 'rgb');
+      const colorAlphaA = channelArg(colorArg1, 'a');
       const alphaA = channelArg(alphaArg1, 'a'), alphaB = channelArg(alphaArg2, 'a');
       const textureFactorAlpha = (((textureFactor >>> 24) & 0xff) / 255).toFixed(8);
       const colorExpr = colorOp === 1 ? 'input.color.rgb'
@@ -664,6 +665,10 @@ export class GpuExecutor {
         : colorOp === 13 ? `((${colorA} * texel.a) + (${colorB} * (1.0 - texel.a)))`
         : colorOp === 14 ? `((${colorA} * ${textureFactorAlpha}) + (${colorB} * (1.0 - ${textureFactorAlpha})))`
         : colorOp === 15 ? `(${colorA} + (${colorB} * (1.0 - texel.a)))`
+        : colorOp === 18 ? `(${colorA} + (${colorAlphaA} * ${colorB}))`
+        : colorOp === 19 ? `((${colorA} * ${colorB}) + vec3<f32>(${colorAlphaA}))`
+        : colorOp === 20 ? `(${colorA} + ((1.0 - ${colorAlphaA}) * ${colorB}))`
+        : colorOp === 21 ? `((vec3<f32>(1.0) - ${colorA}) * ${colorB} + vec3<f32>(${colorAlphaA}))`
         : 'input.color.rgb';
       const alphaExpr = alphaOp === 2 ? alphaA
         : alphaOp === 3 ? alphaB

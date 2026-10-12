@@ -1605,6 +1605,10 @@ try {
       const setupSignedAlphaArgs = () => command(5, signedAlphaTextureUpload);
       const alphaAddSignedPixel = await renderOperation(2, setupSignedAlphaArgs, 8);
       const alphaAddSigned2xPixel = await renderOperation(2, setupSignedAlphaArgs, 9);
+      const modulateAlphaAddColorPixel = await renderOperation(18);
+      const modulateColorAddAlphaPixel = await renderOperation(19);
+      const modulateInvAlphaAddColorPixel = await renderOperation(20);
+      const modulateInvColorAddAlphaPixel = await renderOperation(21);
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
         modulatedPixel,
@@ -1617,6 +1621,10 @@ try {
         addSigned2xPixel,
         alphaAddSignedPixel,
         alphaAddSigned2xPixel,
+        modulateAlphaAddColorPixel,
+        modulateColorAddAlphaPixel,
+        modulateInvAlphaAddColorPixel,
+        modulateInvColorAddAlphaPixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
@@ -1633,13 +1641,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 17 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 21 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 17 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 21 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1666,6 +1674,14 @@ try {
     near(d3d9TextureResult.blendFactorAlphaPixel, [223, 32, 32, 128], 2), JSON.stringify(d3d9TextureResult.blendFactorAlphaPixel));
   check('D3D9 stage-0 BLENDFACTORALPHA changes when the render-state factor changes',
     near(d3d9TextureResult.blendFactorAlphaHighPixel, [159, 96, 96, 128], 2), JSON.stringify(d3d9TextureResult.blendFactorAlphaHighPixel));
+  check('D3D9 stage-0 MODULATEALPHA_ADDCOLOR uses arg1 alpha times arg2 color',
+    near(d3d9TextureResult.modulateAlphaAddColorPixel, [153, 153, 153, 192], 2), JSON.stringify(d3d9TextureResult.modulateAlphaAddColorPixel));
+  check('D3D9 stage-0 MODULATECOLOR_ADDALPHA uses arg1 alpha as the addend',
+    near(d3d9TextureResult.modulateColorAddAlphaPixel, [215, 215, 215, 192], 2), JSON.stringify(d3d9TextureResult.modulateColorAddAlphaPixel));
+  check('D3D9 stage-0 MODULATEINVALPHA_ADDCOLOR uses inverse arg1 alpha',
+    near(d3d9TextureResult.modulateInvAlphaAddColorPixel, [128, 128, 128, 192], 2), JSON.stringify(d3d9TextureResult.modulateInvAlphaAddColorPixel));
+  check('D3D9 stage-0 MODULATEINVCOLOR_ADDALPHA uses inverse arg1 color',
+    near(d3d9TextureResult.modulateInvColorAddAlphaPixel, [220, 220, 220, 192], 2), JSON.stringify(d3d9TextureResult.modulateInvColorAddAlphaPixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
