@@ -264,6 +264,8 @@ mod rtl_pc_to_file_header_tests {
             ordinals: HashMap::new(),
             exception_table_rva: 0,
             runtime_functions: Vec::new(),
+            resource_rva: 0,
+            resource_size: 0,
             hle_group: None,
         });
         process

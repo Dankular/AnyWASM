@@ -7,12 +7,15 @@ pub mod advapi32;
 pub mod com;
 pub mod crt;
 pub mod d3d11;
+pub mod ddraw;
+pub mod dsound;
 pub mod dxgi;
 pub mod gdi;
 pub mod gpu;
 pub mod heap;
 pub mod kernel32;
 pub mod ntdll;
+pub mod ole32;
 pub mod printf;
 pub mod shell32;
 pub mod shlwapi;
@@ -33,6 +36,7 @@ pub struct Extra {
     pub data_cells: HashMap<String, u64>,
     pub data_next: u64,
     pub sleep_adjust: u64,
+    pub ddraw_mode: Option<(u32, u32, u32)>,
     pub argv: u64,
     pub argc: u32,
     pub errno_cell: u64,
@@ -75,6 +79,15 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         "shlwapi" => Some("shlwapi"),
         "winmm" => Some("winmm"),
         "d3d11" => Some("d3d11"),
+        // GTA San Andreas probes for d3d8.dll as a DirectX runtime-presence gate before it
+        // continues to its D3D9 startup path; this maps the module load only, not D3D8 exports.
+        "d3d8" => Some("d3d8"),
+        "dsound" => Some("dsound"),
+        // GTA loads this DirectPlay helper as part of its DirectX runtime check. No exports are
+        // supplied until a guest call demonstrates that the game needs one.
+        "dpnhpast" => Some("dpnhpast"),
+        "d3d9" => Some("d3d9"),
+        "ddraw" => Some("ddraw"),
         "dxgi" => Some("dxgi"),
         "gdi32" => Some("gdi32"),
         "advapi32" => Some("advapi32"),
@@ -90,6 +103,7 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         // kernel32 re-exports a few ntdll functions and vice versa; try both.
         "kernel32" => kernel32::lookup(name).or_else(|| ntdll::lookup(name)),
         "ntdll" => ntdll::lookup(name).or_else(|| crt::lookup(name)),
+        "ole32" => ole32::lookup(name),
         "crt" => crt::lookup(name),
         "advapi32" => advapi32::lookup(name),
         "user32" => user32::lookup(name),
@@ -98,6 +112,8 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "shlwapi" => shlwapi::lookup(name),
         "winmm" => user32::lookup_winmm(name),
         "d3d11" => d3d11::lookup(name),
+        "dsound" => dsound::lookup(name),
+        "ddraw" => ddraw::lookup(name),
         "dxgi" => dxgi::lookup(name),
         "com" => com::lookup(name),
         _ => None,

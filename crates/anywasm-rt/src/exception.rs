@@ -1147,6 +1147,8 @@ mod tests {
                 end_address: 0x120,
                 unwind_info_address: 0x300,
             }],
+            resource_rva: 0,
+            resource_size: 0,
             hle_group: None,
         }
     }

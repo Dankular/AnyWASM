@@ -5,6 +5,7 @@
 //! (e.g. `0F 11`) are swapped by the decoder so `ops[0]` is always the destination.
 
 use std::fmt;
+use crate::cpu::CpuMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prec {
@@ -380,6 +381,7 @@ impl<'a> Dec<'a> {
 #[derive(Clone, Copy, Default)]
 struct Pfx {
     rex: u8,
+    mode32: bool,
     opsz: bool, // 0x66
     adsz: bool, // 0x67
     rep: u8,    // 1=F3, 2=F2
@@ -428,7 +430,7 @@ fn parse_modrm(d: &mut Dec, pfx: &Pfx) -> R<ModRm> {
         scale: 0,
         disp: 0,
         seg: pfx.seg,
-        addr32: pfx.adsz,
+        addr32: pfx.mode32 != pfx.adsz,
     };
     let mut rip_rel = false;
     if rm_low == 4 {
@@ -446,7 +448,7 @@ fn parse_modrm(d: &mut Dec, pfx: &Pfx) -> R<ModRm> {
             mem.base = base | pfx.b();
         }
     } else if rm_low == 5 && md == 0 {
-        rip_rel = true;
+        rip_rel = !pfx.mode32 && !pfx.adsz;
         mem.disp = d.i32()?;
     } else {
         mem.base = rm_low | pfx.b();
@@ -542,8 +544,14 @@ const SHIFT: [Op; 8] = [
 
 /// Decode one instruction located at `rip`.
 pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
+    decode_mode(bytes, rip, CpuMode::X86_64)
+}
+
+/// Decode one instruction using the selected x86 execution mode.
+pub fn decode_mode(bytes: &[u8], rip: u64, mode: CpuMode) -> Result<Inst, DecodeError> {
+    let mode32 = mode == CpuMode::X86_32;
     let mut d = Dec { b: bytes, p: 0 };
-    let mut pfx = Pfx::default();
+    let mut pfx = Pfx { mode32, ..Pfx::default() };
     // ── prefixes ──
     let mut opc;
     loop {
@@ -563,9 +571,14 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
             return Err(DecodeError::Unsupported("prefix run too long"));
         }
     }
-    if (0x40..=0x4f).contains(&opc) {
+    if !mode32 && (0x40..=0x4f).contains(&opc) {
         pfx.rex = opc;
         opc = d.u8()?;
+    }
+    if mode32 && pfx.adsz {
+        return Err(DecodeError::Unsupported(
+            "16-bit addressing in 32-bit mode",
+        ));
     }
     if opc == 0xc5 || opc == 0xc4 {
         if pfx.rex != 0 || pfx.lock || pfx.opsz || pfx.adsz || pfx.rep != 0 || pfx.seg != 0 {
@@ -578,6 +591,7 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
                 vex,
                 Pfx {
                     rex: if vex & 0x80 == 0 { 0x04 } else { 0 },
+                    mode32,
                     ..Pfx::default()
                 },
             )
@@ -597,6 +611,7 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
                 vex,
                 Pfx {
                     rex,
+                    mode32,
                     ..Pfx::default()
                 },
             )
@@ -604,7 +619,7 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
         let opcode = d.u8()?;
         let mut i = decode_vex(&mut d, &vex_pfx, map, opcode, vex)?;
         i.len = d.p as u8;
-        let next = rip.wrapping_add(i.len as u64);
+        let next = next_ip(rip, i.len, mode);
         for o in i.ops.iter_mut() {
             if let Opnd::Mem(m) = o {
                 if m.base == 0xfe {
@@ -625,7 +640,7 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
     let mut i = if opc == 0x0f {
         decode_0f(&mut d, &pfx, osz)?
     } else {
-        decode_1byte(&mut d, &pfx, opc, osz, rip)?
+        decode_1byte(&mut d, &pfx, opc, osz, rip, mode)?
     };
     i.lock = pfx.lock;
     i.rexw = pfx.w();
@@ -638,7 +653,7 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
     };
     i.len = d.p as u8;
     // Resolve RIP-relative memory operands now that the length is known.
-    let next = rip.wrapping_add(i.len as u64);
+    let next = next_ip(rip, i.len, mode);
     for o in i.ops.iter_mut() {
         if let Opnd::Mem(m) = o {
             if m.base == 0xfe {
@@ -652,9 +667,24 @@ pub fn decode(bytes: &[u8], rip: u64) -> Result<Inst, DecodeError> {
         i.op,
         Op::Jmp | Op::Jcc | Op::Call | Op::Loop | Op::Loope | Op::Loopne | Op::Jrcxz
     ) {
-        i.imm = next.wrapping_add(i.imm as u64) as i64;
+        let target = next.wrapping_add(i.imm as u64);
+        i.imm = if mode32 {
+            (target as u32 as u64) as i64
+        } else {
+            target as i64
+        };
     }
     Ok(i)
+}
+
+#[inline]
+fn next_ip(rip: u64, len: u8, mode: CpuMode) -> u64 {
+    let next = rip.wrapping_add(len as u64);
+    if mode == CpuMode::X86_32 {
+        next as u32 as u64
+    } else {
+        next
+    }
 }
 
 fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
@@ -919,8 +949,22 @@ fn imm_z(d: &mut Dec, osz: u8) -> R<i64> {
     }
 }
 
-fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> {
+fn decode_1byte(
+    d: &mut Dec,
+    pfx: &Pfx,
+    opc: u8,
+    osz: u8,
+    _rip: u64,
+    mode: CpuMode,
+) -> R<Inst> {
     let g = RK::G;
+    let stack_osz = if pfx.opsz {
+        2
+    } else if mode == CpuMode::X86_32 {
+        4
+    } else {
+        8
+    };
     // ALU block 00..3F
     if opc < 0x40 && (opc & 7) < 6 {
         let op = ALU[(opc >> 3) as usize];
@@ -956,17 +1000,28 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
     i.osz = osz;
     i.ssz = osz;
     match opc {
+        0x40..=0x47 if mode == CpuMode::X86_32 => {
+            i.op = Op::Inc;
+            i.ops[0] = Opnd::Gpr(opc & 7);
+        }
+        0x48..=0x4f if mode == CpuMode::X86_32 => {
+            i.op = Op::Dec;
+            i.ops[0] = Opnd::Gpr(opc & 7);
+        }
         0x50..=0x57 => {
             i.op = Op::Push;
-            i.osz = if pfx.opsz { 2 } else { 8 };
+            i.osz = stack_osz;
             i.ops[0] = Opnd::Gpr((opc & 7) | pfx.b());
         }
         0x58..=0x5f => {
             i.op = Op::Pop;
-            i.osz = if pfx.opsz { 2 } else { 8 };
+            i.osz = stack_osz;
             i.ops[0] = Opnd::Gpr((opc & 7) | pfx.b());
         }
         0x63 => {
+            if mode == CpuMode::X86_32 {
+                return Err(DecodeError::Unsupported("ARPL"));
+            }
             let m = parse_modrm(d, pfx)?;
             i.op = Op::Movsxd;
             i.ssz = 4;
@@ -974,13 +1029,13 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
         }
         0x68 => {
             i.op = Op::Push;
-            i.osz = if pfx.opsz { 2 } else { 8 };
+            i.osz = stack_osz;
             i.ops[0] = Opnd::Imm;
             i.imm = imm_z(d, i.osz.min(4))?;
         }
         0x6a => {
             i.op = Op::Push;
-            i.osz = if pfx.opsz { 2 } else { 8 };
+            i.osz = stack_osz;
             i.ops[0] = Opnd::Imm;
             i.imm = d.i8()?;
         }
@@ -1045,7 +1100,7 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
                 return Err(DecodeError::Undefined(opc));
             }
             i.op = Op::Pop;
-            i.osz = if pfx.opsz { 2 } else { 8 };
+            i.osz = stack_osz;
             i.ops[0] = m.rm_opnd(g, pfx);
         }
         0x90 => {
@@ -1067,17 +1122,20 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
         0x9b => i.op = Op::Nop,
         0x9c => {
             i.op = Op::Pushf;
-            i.osz = 8;
+            i.osz = stack_osz;
         }
         0x9d => {
             i.op = Op::Popf;
-            i.osz = 8;
+            i.osz = stack_osz;
         }
         0x9e => i.op = Op::Sahf,
         0x9f => i.op = Op::Lahf,
         0xa0..=0xa3 => {
-            // mov moffs: 64-bit absolute address
-            let addr = d.i64()?;
+            let (addr, addr32) = if pfx.mode32 || pfx.adsz {
+                (d.i32()?, true)
+            } else {
+                (d.i64()?, false)
+            };
             let byte = opc & 1 == 0;
             i.osz = if byte { 1 } else { osz };
             i.ssz = i.osz;
@@ -1088,7 +1146,7 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
                 scale: 0,
                 disp: addr,
                 seg: pfx.seg,
-                addr32: false,
+                addr32,
             });
             i.ops = if opc < 0xa2 {
                 [Opnd::Gpr(0), mem, Opnd::None]
@@ -1113,7 +1171,7 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
                 scale: 0,
                 disp: 0,
                 seg: pfx.seg,
-                addr32: pfx.adsz,
+                addr32: pfx.mode32 != pfx.adsz,
             });
         }
         0xa8 => {
@@ -1209,7 +1267,7 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
         0xe0 | 0xe1 | 0xe2 | 0xe3 => {
             i.op = [Op::Loopne, Op::Loope, Op::Loop, Op::Jrcxz][(opc & 3) as usize];
             i.imm = d.i8()?;
-            i.ssz = if pfx.adsz { 4 } else { 8 };
+            i.ssz = if pfx.mode32 || pfx.adsz { 4 } else { 8 };
         }
         0xe8 => {
             i.op = Op::Call;
@@ -1271,15 +1329,15 @@ fn decode_1byte(d: &mut Dec, pfx: &Pfx, opc: u8, osz: u8, _rip: u64) -> R<Inst> 
                 1 => i.op = Op::Dec,
                 2 => {
                     i.op = Op::CallInd;
-                    i.osz = 8;
+                    i.osz = stack_osz;
                 }
                 4 => {
                     i.op = Op::JmpInd;
-                    i.osz = 8;
+                    i.osz = stack_osz;
                 }
                 6 => {
                     i.op = Op::Push;
-                    i.osz = if pfx.opsz { 2 } else { 8 };
+                    i.osz = stack_osz;
                 }
                 _ => return Err(DecodeError::Unsupported("far call/jmp")),
             }
@@ -2035,6 +2093,7 @@ fn decode_0f3a(d: &mut Dec, pfx: &Pfx) -> R<Inst> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::CpuMode;
 
     fn dec(b: &[u8]) -> Inst {
         decode(b, 0x1000).unwrap()
@@ -2111,6 +2170,40 @@ mod tests {
         assert_eq!(decode(&[0x48], 0).unwrap_err(), DecodeError::Truncated);
         assert_eq!(decode(&[0x0f, 0x0b], 0).unwrap().op, Op::Ud2);
         assert!(decode(&[0x06], 0).is_err()); // push es: invalid in 64-bit mode
+    }
+
+    #[test]
+    fn x86_mode_decodes_legacy_inc_and_32_bit_stack_operations() {
+        let inc = decode_mode(&[0x40], 0x401000, CpuMode::X86_32).unwrap();
+        assert_eq!(inc.op, Op::Inc);
+        assert_eq!(inc.osz, 4);
+        assert_eq!(inc.ops[0], Opnd::Gpr(0));
+
+        let push = decode_mode(&[0x50], 0x401001, CpuMode::X86_32).unwrap();
+        assert_eq!((push.op, push.osz), (Op::Push, 4));
+        let ret = decode_mode(&[0xc3], 0x401002, CpuMode::X86_32).unwrap();
+        assert_eq!((ret.op, ret.osz), (Op::Ret, 4));
+    }
+
+    #[test]
+    fn x86_mode_uses_absolute_32_bit_modrm_addresses_and_wraps_branches() {
+        let mov = decode_mode(
+            &[0x8b, 0x05, 0x78, 0x56, 0x34, 0x12],
+            0x401000,
+            CpuMode::X86_32,
+        )
+        .unwrap();
+        match mov.ops[1] {
+            Opnd::Mem(mem) => {
+                assert_eq!(mem.base, 0xff);
+                assert_eq!(mem.disp, 0x1234_5678);
+                assert!(mem.addr32);
+            }
+            other => panic!("expected memory operand, got {other:?}"),
+        }
+
+        let branch = decode_mode(&[0xeb, 0x02], 0xffff_fffe, CpuMode::X86_32).unwrap();
+        assert_eq!(branch.imm as u32, 2);
     }
 
     #[test]

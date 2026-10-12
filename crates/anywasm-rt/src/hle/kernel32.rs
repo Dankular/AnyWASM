@@ -3,8 +3,9 @@
 use super::*;
 use crate::process::*;
 use crate::vfs::{absolute, norm, CreateDirError};
+use anywasm_cpu::CpuMode;
 use anywasm_cpu::cpu::RSP;
-use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_X};
+use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_W, PROT_RW, PROT_RWX, PROT_X};
 
 const INVALID_HANDLE: u64 = u64::MAX;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -59,12 +60,20 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(1)
         },
         "GetProcessId" => |_| Ok(0x1000),
+        "IsBadWritePtr" => |p| Ok(is_bad_memory_range(p, p.arg(0), p.arg(1), PROT_W) as u64),
+        "IsBadReadPtr" => |p| Ok(is_bad_memory_range(p, p.arg(0), p.arg(1), PROT_R) as u64),
+        "IsBadCodePtr" => |p| Ok(is_bad_memory_range(p, p.arg(0), 1, PROT_X) as u64),
         "InitializeSListHead" => |p| {
             // Win64 SLIST_HEADER is a 16-byte, 16-byte-aligned opaque structure.
             p.write_bytes(p.arg(0), &[0; 16])?;
             Ok(0)
         },
-        "GetLastError" => |p| Ok(p.rd32(TEB_ADDR + 0x68)? as u64),
+        "GetLastError" => |p| {
+            let offset = if p.cpu.mode == CpuMode::X86_32 { 0x34 } else { 0x68 };
+            Ok(p.rd32(TEB_ADDR + offset)? as u64)
+        },
+        "GetPrivateProfileIntA" => get_private_profile_int_a,
+        "GetPrivateProfileIntW" => get_private_profile_int_w,
         "SetLastError" => |p| {
             let v = p.arg(0) as u32;
             p.set_last_error(v);
@@ -96,6 +105,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RtlCaptureContext" => ntdll::rtl_capture_context,
         "IsProcessorFeaturePresent" => is_processor_feature_present,
         "GetSystemInfo" | "GetNativeSystemInfo" => get_system_info,
+        "GlobalMemoryStatus" => global_memory_status,
         "GlobalMemoryStatusEx" => global_memory_status_ex,
         "GetVersion" => |_| Ok(0x4A61_0A00),
         "GetVersionExA" | "GetVersionExW" => get_version_ex,
@@ -147,6 +157,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "VirtualQuery" => virtual_query,
         "VirtualLock" | "VirtualUnlock" => |_| Ok(1),
         "FlushInstructionCache" => |_| Ok(1),
+        "FindResourceA" => find_resource_a,
+        "LoadResource" => load_resource,
+        "LockResource" => lock_resource,
+        "SizeofResource" => sizeof_resource,
         // console / files
         "GetStdHandle" => |p| {
             Ok(match p.arg(0) as u32 {
@@ -159,6 +173,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetStdHandle" => |_| Ok(1),
         "WriteFile" => write_file,
         "ReadFile" => read_file,
+        "GetOverlappedResult" => get_overlapped_result,
         "WriteConsoleA" => write_console_a,
         "WriteConsoleW" => write_console_w,
         "ReadConsoleA" | "ReadConsoleW" => |p| {
@@ -192,6 +207,14 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "CreateFileA" => |p| create_file(p, false),
         "CreateFileW" => |p| create_file(p, true),
+        "CreateFileMappingA" => create_file_mapping,
+        "MapViewOfFile" => map_view_of_file,
+        "UnmapViewOfFile" => unmap_view_of_file,
+        "FindFirstFileA" => |p| find_first_file(p, false),
+        "FindFirstFileW" => |p| find_first_file(p, true),
+        "FindNextFileA" => |p| find_next_file(p, false),
+        "FindNextFileW" => |p| find_next_file(p, true),
+        "FindClose" => |p| find_close(p),
         "CloseHandle" => |p| {
             let h = p.arg(0);
             Ok(p.handles.remove(&h).is_some() as u64
@@ -285,6 +308,19 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(s.len() as u64)
         },
+        "GetDiskFreeSpaceA" | "GetDiskFreeSpaceW" => |p| {
+            for (address, value) in [
+                (p.arg(1), 8),
+                (p.arg(2), 512),
+                (p.arg(3), 0x10_0000),
+                (p.arg(4), 0x20_0000),
+            ] {
+                if address != 0 {
+                    p.wr32(address, value)?;
+                }
+            }
+            Ok(1)
+        },
         "GetFullPathNameA" => |p| full_path(p, false),
         "GetFullPathNameW" => |p| full_path(p, true),
         "GetModuleFileNameA" => |p| module_file_name(p, false),
@@ -293,8 +329,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetCommandLineW" => get_command_line_w,
         "GetStartupInfoA" | "GetStartupInfoW" => |p| {
             let a = p.arg(0);
-            p.write_bytes(a, &[0u8; 104])?;
-            p.wr32(a, 104)?;
+            let size = if p.cpu.mode == CpuMode::X86_32 { 68 } else { 104 };
+            p.write_bytes(a, &vec![0u8; size])?;
+            p.wr32(a, size as u32)?;
             Ok(0)
         },
         "GetEnvironmentStringsW" => get_environment_strings_w,
@@ -1142,17 +1179,68 @@ fn is_processor_feature_present(p: &mut Process) -> R {
 
 fn get_system_info(p: &mut Process) -> R {
     let a = p.arg(0);
-    let mut b = [0u8; 48];
-    b[0..2].copy_from_slice(&9u16.to_le_bytes()); // PROCESSOR_ARCHITECTURE_AMD64
-    b[4..8].copy_from_slice(&4096u32.to_le_bytes());
-    b[8..16].copy_from_slice(&0x10000u64.to_le_bytes());
-    b[16..24].copy_from_slice(&0x7fff_fffe_ffffu64.to_le_bytes());
-    b[24..32].copy_from_slice(&1u64.to_le_bytes());
-    b[32..36].copy_from_slice(&1u32.to_le_bytes());
-    b[36..40].copy_from_slice(&8664u32.to_le_bytes());
-    b[40..44].copy_from_slice(&0x10000u32.to_le_bytes());
-    b[44..46].copy_from_slice(&6u16.to_le_bytes());
-    p.write_bytes(a, &b)?;
+    if p.cpu.mode == CpuMode::X86_32 {
+        let mut b = [0u8; 36];
+        b[0..2].copy_from_slice(&0u16.to_le_bytes()); // PROCESSOR_ARCHITECTURE_INTEL
+        b[4..8].copy_from_slice(&4096u32.to_le_bytes());
+        b[8..12].copy_from_slice(&0x10000u32.to_le_bytes());
+        b[12..16].copy_from_slice(&0x7ffe_ffffu32.to_le_bytes());
+        b[16..20].copy_from_slice(&1u32.to_le_bytes());
+        b[20..24].copy_from_slice(&1u32.to_le_bytes());
+        b[24..28].copy_from_slice(&586u32.to_le_bytes()); // PROCESSOR_INTEL_PENTIUM
+        b[28..32].copy_from_slice(&0x10000u32.to_le_bytes());
+        b[32..34].copy_from_slice(&6u16.to_le_bytes());
+        b[34..36].copy_from_slice(&0x3a09u16.to_le_bytes());
+        p.write_bytes(a, &b)?;
+    } else {
+        let mut b = [0u8; 48];
+        b[0..2].copy_from_slice(&9u16.to_le_bytes()); // PROCESSOR_ARCHITECTURE_AMD64
+        b[4..8].copy_from_slice(&4096u32.to_le_bytes());
+        b[8..16].copy_from_slice(&0x10000u64.to_le_bytes());
+        b[16..24].copy_from_slice(&0x7fff_fffe_ffffu64.to_le_bytes());
+        b[24..32].copy_from_slice(&1u64.to_le_bytes());
+        b[32..36].copy_from_slice(&1u32.to_le_bytes());
+        b[36..40].copy_from_slice(&8664u32.to_le_bytes());
+        b[40..44].copy_from_slice(&0x10000u32.to_le_bytes());
+        b[44..46].copy_from_slice(&6u16.to_le_bytes());
+        p.write_bytes(a, &b)?;
+    }
+    Ok(0)
+}
+
+fn global_memory_status(p: &mut Process) -> R {
+    let a = p.arg(0);
+    if p.cpu.mode == CpuMode::X86_32 {
+        let mut b = [0u8; 32];
+        for (i, value) in [
+            32u32,
+            50,
+            2 << 30,
+            1 << 30,
+            u32::MAX,
+            2 << 30,
+            0x7ffe_0000,
+            0x7000_0000,
+        ]
+        .iter()
+        .enumerate()
+        {
+            b[4 * i..4 * i + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        p.write_bytes(a, &b)?;
+    } else {
+        let mut b = [0u8; 64];
+        b[0..4].copy_from_slice(&64u32.to_le_bytes());
+        b[4..8].copy_from_slice(&50u32.to_le_bytes());
+        let total = 8u64 << 30;
+        for (i, value) in [total, total / 2, total * 2, total, 1u64 << 47, (1u64 << 47) - (1 << 30)]
+            .iter()
+            .enumerate()
+        {
+            b[8 + 8 * i..16 + 8 * i].copy_from_slice(&value.to_le_bytes());
+        }
+        p.write_bytes(a, &b)?;
+    }
     Ok(0)
 }
 
@@ -1449,6 +1537,177 @@ fn virtual_query(p: &mut Process) -> R {
     Ok(48)
 }
 
+#[derive(Clone)]
+enum ResourceKey {
+    Id(u16),
+    Name(String),
+}
+
+fn resource_module(p: &Process, hmodule: u64) -> Option<(u64, u32, u32)> {
+    let module = if hmodule == 0 {
+        p.modules.iter().find(|module| !module.is_dll)
+    } else {
+        p.modules.iter().find(|module| module.base == hmodule)
+    }?;
+    (module.resource_rva != 0 && module.resource_size >= 16)
+        .then_some((module.base, module.resource_rva, module.resource_size))
+}
+
+fn resource_key_a(p: &Process, value: u64) -> Result<ResourceKey, Stop> {
+    if value <= 0xffff {
+        Ok(ResourceKey::Id(value as u16))
+    } else {
+        Ok(ResourceKey::Name(p.read_cstr(value)?))
+    }
+}
+
+fn resource_name(p: &Process, root: u64, size: u32, offset: u32) -> Result<Option<String>, Stop> {
+    if offset as u64 + 2 > size as u64 {
+        return Ok(None);
+    }
+    let address = root + offset as u64;
+    let length = p.rd16(address)? as u32;
+    if length > 1024 || offset as u64 + 2 + length as u64 * 2 > size as u64 {
+        return Ok(None);
+    }
+    let mut units = Vec::with_capacity(length as usize);
+    for i in 0..length {
+        units.push(p.rd16(address + 2 + i as u64 * 2)?);
+    }
+    Ok(Some(String::from_utf16_lossy(&units)))
+}
+
+/// Return the target offset and directory bit for a resource-directory child.
+fn resource_child(
+    p: &Process,
+    root: u64,
+    size: u32,
+    directory_offset: u32,
+    key: Option<&ResourceKey>,
+) -> Result<Option<(u32, bool)>, Stop> {
+    if directory_offset as u64 + 16 > size as u64 {
+        return Ok(None);
+    }
+    let directory = root + directory_offset as u64;
+    let count = p.rd16(directory + 12)? as u32 + p.rd16(directory + 14)? as u32;
+    let entries_offset = directory_offset as u64 + 16;
+    if entries_offset + count as u64 * 8 > size as u64 {
+        return Ok(None);
+    }
+    for index in 0..count {
+        let entry = root + entries_offset + index as u64 * 8;
+        let raw_name = p.rd32(entry)?;
+        let matches = match key {
+            None => true,
+            Some(ResourceKey::Id(id)) => raw_name & 0x8000_0000 == 0 && raw_name as u16 == *id,
+            Some(ResourceKey::Name(name)) if raw_name & 0x8000_0000 != 0 => resource_name(
+                p,
+                root,
+                size,
+                raw_name & 0x7fff_ffff,
+            )?
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name)),
+            Some(ResourceKey::Name(_)) => false,
+        };
+        if matches {
+            let target = p.rd32(entry + 4)?;
+            let offset = target & 0x7fff_ffff;
+            if offset as u64 >= size as u64 {
+                return Ok(None);
+            }
+            return Ok(Some((offset, target & 0x8000_0000 != 0)));
+        }
+    }
+    Ok(None)
+}
+
+fn find_resource_a(p: &mut Process) -> R {
+    let hmodule = p.arg(0);
+    let Some((base, resource_rva, resource_size)) = resource_module(p, hmodule) else {
+        return Ok(0);
+    };
+    let root = base + resource_rva as u64;
+    let resource_type = resource_key_a(p, p.arg(2))?;
+    let resource_name = resource_key_a(p, p.arg(1))?;
+    let Some((type_offset, type_is_dir)) = resource_child(
+        p,
+        root,
+        resource_size,
+        0,
+        Some(&resource_type),
+    )? else {
+        return Ok(0);
+    };
+    if !type_is_dir {
+        return Ok(0);
+    }
+    let Some((mut data_offset, mut is_dir)) = resource_child(
+        p,
+        root,
+        resource_size,
+        type_offset,
+        Some(&resource_name),
+    )? else {
+        return Ok(0);
+    };
+    // A named resource normally has one more directory level for language selection.
+    for _ in 0..3 {
+        if !is_dir {
+            break;
+        }
+        let Some((next_offset, next_is_dir)) =
+            resource_child(p, root, resource_size, data_offset, None)?
+        else {
+            return Ok(0);
+        };
+        data_offset = next_offset;
+        is_dir = next_is_dir;
+    }
+    if is_dir || data_offset as u64 + 16 > resource_size as u64 {
+        return Ok(0);
+    }
+    Ok(root + data_offset as u64)
+}
+
+fn resource_data_info(p: &Process, resource: u64) -> Result<Option<(u64, u32)>, Stop> {
+    for module in &p.modules {
+        if module.resource_rva == 0 || module.resource_size < 16 {
+            continue;
+        }
+        let root = module.base + module.resource_rva as u64;
+        let end = root + module.resource_size as u64;
+        if resource >= root && resource.saturating_add(16) <= end {
+            let rva = p.rd32(resource)?;
+            let size = p.rd32(resource + 4)?;
+            if rva as u64 + size as u64 <= module.size {
+                return Ok(Some((module.base + rva as u64, size)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn load_resource(p: &mut Process) -> R {
+    let resource = p.arg(1);
+    Ok(if resource_data_info(p, resource)?.is_some() {
+        resource
+    } else {
+        0
+    })
+}
+
+fn lock_resource(p: &mut Process) -> R {
+    Ok(resource_data_info(p, p.arg(0))?
+        .map(|(address, _)| address)
+        .unwrap_or(0))
+}
+
+fn sizeof_resource(p: &mut Process) -> R {
+    Ok(resource_data_info(p, p.arg(1))?
+        .map(|(_, size)| size as u64)
+        .unwrap_or(0))
+}
+
 // files / console --------------------------------------------------------------------------
 
 fn emit(p: &mut Process, handle: u64, data: &[u8]) -> Option<usize> {
@@ -1524,6 +1783,38 @@ fn read_file(p: &mut Process) -> R {
     p.write_bytes(buf, &data)?;
     if read != 0 {
         p.wr32(read, data.len() as u32)?;
+    }
+    Ok(1)
+}
+
+fn get_overlapped_result(p: &mut Process) -> R {
+    let (handle, overlapped, transferred) = (p.arg(0), p.arg(1), p.arg(2));
+    if !p.handles.contains_key(&handle) {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    }
+    if overlapped == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+
+    let (internal, completed) = if p.cpu.mode == CpuMode::X86_32 {
+        (p.rd32(overlapped)?, p.rd32(overlapped + 4)?)
+    } else {
+        (p.rd64(overlapped)? as u32, p.rd64(overlapped + 8)? as u32)
+    };
+    if internal == 0x103 {
+        // The runtime currently completes file I/O synchronously, so it cannot make forward
+        // progress while waiting for a pending overlapped operation.
+        p.set_last_error(996); // ERROR_IO_INCOMPLETE
+        return Ok(0);
+    }
+    if internal != 0 {
+        p.set_last_error(internal);
+        return Ok(0);
+    }
+    if transferred != 0 {
+        p.wr32(transferred, completed)?;
     }
     Ok(1)
 }
@@ -1605,10 +1896,262 @@ fn create_file(p: &mut Process, wide: bool) -> R {
     }))
 }
 
+fn create_file_mapping(p: &mut Process) -> R {
+    let (file, protection, size_high, size_low, name_ptr) = (
+        p.arg(0),
+        p.arg(2),
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5),
+    );
+    let requested_size = ((size_high as u64) << 32) | size_low as u64;
+    let file_path = if file as u32 == u32::MAX {
+        None
+    } else {
+        match p.handles.get(&file) {
+            Some(Handle::File { path, .. }) => Some(path.clone()),
+            _ => {
+                p.set_last_error(ERROR_INVALID_HANDLE);
+                return Ok(0);
+            }
+        }
+    };
+    if name_ptr != 0 {
+        // Named mappings are currently independent volatile mappings.
+        let _ = p.read_cstr(name_ptr)?;
+    }
+    let size = if requested_size == 0 {
+        file_path
+            .as_ref()
+            .and_then(|path| p.vfs.get(path))
+            .map(|data| data.len() as u64)
+            .unwrap_or(0)
+    } else {
+        requested_size
+    };
+    if size == 0 || usize::try_from(size).is_err() {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let handle = p.new_handle(Handle::Mapping {
+        size,
+        file_path,
+        protection: prot_from_win(protection),
+    });
+    p.set_last_error(0);
+    Ok(handle)
+}
+
+fn map_view_of_file(p: &mut Process) -> R {
+    let (mapping, access, offset_high, offset_low, requested_len) = (
+        p.arg(0),
+        p.arg(1),
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4),
+    );
+    let (size, file_path, _protection) = match p.handles.get(&mapping) {
+        Some(Handle::Mapping {
+            size,
+            file_path,
+            protection,
+        }) => (*size, file_path.clone(), *protection),
+        _ => {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            return Ok(0);
+        }
+    };
+    let offset = ((offset_high as u64) << 32) | offset_low as u64;
+    if offset >= size {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let len = if requested_len == 0 {
+        size - offset
+    } else {
+        requested_len
+    };
+    if len == 0 || len > size - offset || usize::try_from(len).is_err() {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let guest_protection = if access & 0x2 != 0 || access & 0x1 != 0 {
+        PROT_RW
+    } else if access & 0x20 != 0 {
+        PROT_R | PROT_X
+    } else {
+        PROT_R
+    };
+    let address = p.alloc_virtual(len, guest_protection);
+    if let Some(path) = file_path {
+        if let Some(contents) = p.vfs.get(&path) {
+            let start = usize::try_from(offset).unwrap_or(usize::MAX);
+            if start < contents.len() {
+                let end = contents.len().min(start.saturating_add(len as usize));
+                p.mem
+                    .write_force(address, &contents[start..end])
+                    .map_err(|e| Stop::Crash(format!("mapped file initialization failed: {e:?}")))?;
+            }
+        }
+    }
+    p.set_last_error(0);
+    Ok(address)
+}
+
+fn unmap_view_of_file(p: &mut Process) -> R {
+    let address = p.arg(0);
+    let Some((len, _)) = p.vmem.remove(&address) else {
+        return Ok(0);
+    };
+    p.mem.unmap(address, len);
+    Ok(1)
+}
+
+fn is_bad_memory_range(p: &Process, address: u64, size: u64, permission: u8) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let Some(last) = address.checked_add(size - 1) else {
+        return true;
+    };
+    let mut page = address >> 12;
+    let last_page = last >> 12;
+    loop {
+        if p.mem
+            .prot_of(page << 12)
+            .is_none_or(|prot| prot & permission == 0)
+        {
+            return true;
+        }
+        if page == last_page {
+            return false;
+        }
+        let Some(next) = page.checked_add(1) else {
+            return true;
+        };
+        page = next;
+    }
+}
+
 fn file_len(p: &Process, h: u64) -> Option<u64> {
     match p.handles.get(&h) {
         Some(Handle::File { path, .. }) => p.vfs.get(path).map(|f| f.len() as u64),
         _ => None,
+    }
+}
+
+fn wildcard_matches(pattern: &str, name: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let pattern = if pattern == "*.*" { "*" } else { &pattern };
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.to_ascii_lowercase().chars().collect();
+    let (mut pi, mut ni, mut star, mut retry) = (0, 0, None, 0);
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            retry = ni;
+        } else if let Some(star_at) = star {
+            retry += 1;
+            ni = retry;
+            pi = star_at + 1;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+fn write_find_data(p: &mut Process, out: u64, entry: &FindEntry, wide: bool) -> Result<(), Stop> {
+    let mut data = vec![0u8; if wide { 592 } else { 320 }];
+    data[0..4].copy_from_slice(&0x80u32.to_le_bytes()); // FILE_ATTRIBUTE_NORMAL
+    data[32..36].copy_from_slice(&((entry.size >> 32) as u32).to_le_bytes());
+    data[36..40].copy_from_slice(&(entry.size as u32).to_le_bytes());
+    if wide {
+        for (i, unit) in entry.name.encode_utf16().take(259).enumerate() {
+            data[44 + i * 2..46 + i * 2].copy_from_slice(&unit.to_le_bytes());
+        }
+    } else {
+        let name = entry.name.as_bytes();
+        let n = name.len().min(259);
+        data[44..44 + n].copy_from_slice(&name[..n]);
+    }
+    p.write_bytes(out, &data)
+}
+
+fn find_first_file(p: &mut Process, wide: bool) -> R {
+    let (pattern, out) = (p.arg(0), p.arg(1));
+    if pattern == 0 || out == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(INVALID_HANDLE);
+    }
+    let raw = if wide { p.read_wstr(pattern)? } else { p.read_cstr(pattern)? };
+    let pattern = norm(&absolute(&raw, &p.current_directory));
+    let (directory, leaf) = pattern.rsplit_once('\\').unwrap_or(("", pattern.as_str()));
+    let mut entries: Vec<FindEntry> = p
+        .vfs
+        .paths()
+        .filter_map(|path| {
+            let (parent, name) = path.rsplit_once('\\').unwrap_or(("", path.as_str()));
+            (parent == directory && wildcard_matches(leaf, name)).then(|| FindEntry {
+                name: name.to_string(),
+                size: p.vfs.get(path).map_or(0, |bytes| bytes.len() as u64),
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let Some(first) = entries.first().cloned() else {
+        p.set_last_error(ERROR_FILE_NOT_FOUND);
+        return Ok(INVALID_HANDLE);
+    };
+    write_find_data(p, out, &first, wide)?;
+    p.set_last_error(0);
+    let handle = p.new_handle(Handle::Find {
+        entries,
+        next_index: 1,
+    });
+    Ok(handle)
+}
+
+fn find_next_file(p: &mut Process, wide: bool) -> R {
+    let (handle, out) = (p.arg(0), p.arg(1));
+    let entry = match p.handles.get_mut(&handle) {
+        Some(Handle::Find {
+            entries,
+            next_index,
+        }) if *next_index < entries.len() => {
+            let entry = entries[*next_index].clone();
+            *next_index += 1;
+            entry
+        }
+        _ => {
+            p.set_last_error(if p.handles.contains_key(&handle) {
+                18 // ERROR_NO_MORE_FILES
+            } else {
+                ERROR_INVALID_HANDLE
+            });
+            return Ok(0);
+        }
+    };
+    write_find_data(p, out, &entry, wide)?;
+    p.set_last_error(0);
+    Ok(1)
+}
+
+fn find_close(p: &mut Process) -> R {
+    let handle = p.arg(0);
+    if matches!(p.handles.get(&handle), Some(Handle::Find { .. })) {
+        p.handles.remove(&handle);
+        Ok(1)
+    } else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        Ok(0)
     }
 }
 
@@ -1621,6 +2164,61 @@ fn file_attrs(p: &Process, path: &str) -> u64 {
     } else {
         0xffff_ffff
     }
+}
+
+fn profile_int(p: &mut Process, section: &str, key: &str, default: u32, path: &str) -> R {
+    let path = absolute(path, &p.current_directory);
+    let Some(bytes) = p.vfs.get(&path) else {
+        return Ok(default as u64);
+    };
+    let mut in_section = false;
+    for line in String::from_utf8_lossy(bytes).lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = line[1..line.len() - 1].trim().eq_ignore_ascii_case(section);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let value = value.trim();
+        let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+            i64::from_str_radix(hex, 16).ok()
+        } else {
+            value.parse::<i64>().ok()
+        };
+        return Ok(parsed.map(|n| n as u32).unwrap_or(default) as u64);
+    }
+    Ok(default as u64)
+}
+
+fn get_private_profile_int_a(p: &mut Process) -> R {
+    let (section, key, default, file) = (
+        p.read_cstr(p.arg(0))?,
+        p.read_cstr(p.arg(1))?,
+        p.arg(2) as u32,
+        p.read_cstr(p.arg(3))?,
+    );
+    profile_int(p, &section, &key, default, &file)
+}
+
+fn get_private_profile_int_w(p: &mut Process) -> R {
+    let (section, key, default, file) = (
+        p.read_wstr(p.arg(0))?,
+        p.read_wstr(p.arg(1))?,
+        p.arg(2) as u32,
+        p.read_wstr(p.arg(3))?,
+    );
+    profile_int(p, &section, &key, default, &file)
 }
 
 fn create_directory(p: &mut Process, path: &str) -> R {
@@ -1910,6 +2508,10 @@ fn load_library(p: &mut Process, name: &str) -> R {
     } else {
         format!("{name}.dll")
     };
+    if p.trace_imports || p.trace_modules_only {
+        p.stderr
+            .extend_from_slice(format!("[module] LoadLibrary {n}\n").as_bytes());
+    }
     if let Some(i) = p.module_by_name(&n) {
         return Ok(p.modules[i].base);
     }
@@ -1976,6 +2578,10 @@ fn get_proc_address(p: &mut Process) -> R {
     } else {
         p.read_cstr(name_ptr)?
     };
+    if p.trace_imports || p.trace_modules_only {
+        p.stderr
+            .extend_from_slice(format!("[module] GetProcAddress {}!{name}\n", m.name).as_bytes());
+    }
     if let Some(g) = m.hle_group {
         if crate::hle::lookup(g, &name).is_some() {
             return Ok(p.thunk_for(g, &name, true).unwrap());
@@ -2281,7 +2887,7 @@ fn lc_map_string_w(p: &mut Process) -> R {
 #[cfg(test)]
 mod lc_map_string_tests {
     use super::*;
-    use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+    use anywasm_cpu::cpu::{CpuMode, R8, R9, RCX, RDX, RSP};
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
     #[test]
@@ -2293,6 +2899,63 @@ mod lc_map_string_tests {
         assert_eq!(fls_alloc(&mut p), Ok(0));
         assert_eq!(tls_alloc(&mut p), Ok(1));
         assert_eq!(fls_alloc(&mut p), Ok(1));
+    }
+
+    #[test]
+    fn startup_info_uses_the_guest_bitness_layout_and_preserves_adjacent_stack_data() {
+        const BASE: u64 = 0x40000;
+        const BUFFER: u64 = BASE + 0x100;
+        const STACK: u64 = BASE + 0x800;
+        for (mode, expected_size) in [(CpuMode::X86_32, 68u32), (CpuMode::X86_64, 104u32)] {
+            let mut p = Process::new(crate::vfs::Vfs::new());
+            assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+            p.cpu.mode = mode;
+            p.cpu.gpr[RSP] = STACK;
+            p.mem.write_force(BUFFER, &[0xa5; 128]).unwrap();
+            if mode == CpuMode::X86_32 {
+                p.wr32(STACK, 0).unwrap();
+                p.wr32(STACK + 4, BUFFER as u32).unwrap();
+            } else {
+                p.cpu.gpr[RCX] = BUFFER;
+            }
+
+            lookup("GetStartupInfoA").unwrap()(&mut p).unwrap();
+
+            assert_eq!(p.rd32(BUFFER).unwrap(), expected_size);
+            assert_eq!(p.mem.read_u8(BUFFER + expected_size as u64).unwrap(), 0xa5);
+        }
+    }
+
+    #[test]
+    fn get_disk_free_space_writes_win32_output_fields() {
+        const BASE: u64 = 0x50000;
+        const STACK: u64 = BASE + 0x800;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        for (index, value) in [
+            0,
+            0,
+            (BASE + 0x100) as u32,
+            (BASE + 0x104) as u32,
+            (BASE + 0x108) as u32,
+            (BASE + 0x10c) as u32,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            p.wr32(STACK + index as u64 * 4, value).unwrap();
+        }
+        let Some(get_disk_free_space) = lookup("GetDiskFreeSpaceA") else {
+            panic!("GetDiskFreeSpaceA should be implemented");
+        };
+
+        assert_eq!(get_disk_free_space(&mut p), Ok(1));
+        assert_eq!(p.rd32(BASE + 0x100).unwrap(), 8);
+        assert_eq!(p.rd32(BASE + 0x104).unwrap(), 512);
+        assert_eq!(p.rd32(BASE + 0x108).unwrap(), 0x10_0000);
+        assert_eq!(p.rd32(BASE + 0x10c).unwrap(), 0x20_0000);
     }
 
     #[test]

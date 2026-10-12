@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::cpu::*;
-use crate::decode::{decode, DecodeError, Inst, MemOp, Op, Opnd};
+use crate::decode::{decode_mode, DecodeError, Inst, MemOp, Op, Opnd};
 use crate::mem::{Fault, MemResult, Memory};
 
 /// Why execution of an instruction did not complete normally.
@@ -68,6 +68,25 @@ pub fn ea(cpu: &Cpu, m: &MemOp) -> u64 {
         2 => a.wrapping_add(cpu.gs_base),
         _ => a,
     }
+}
+
+#[inline]
+fn ip_value(mode: CpuMode, value: u64) -> u64 {
+    if mode == CpuMode::X86_32 {
+        value as u32 as u64
+    } else {
+        value
+    }
+}
+
+#[inline]
+fn next_ip(cpu: &Cpu, len: u8) -> u64 {
+    ip_value(cpu.mode, cpu.rip.wrapping_add(len as u64))
+}
+
+#[inline]
+fn stack_size(cpu: &Cpu) -> u8 {
+    if cpu.mode == CpuMode::X86_32 { 4 } else { 8 }
 }
 
 pub fn read_mem(mem: &Memory, a: u64, sz: u8) -> MemResult<u64> {
@@ -312,7 +331,7 @@ fn double_shift(cpu: &mut Cpu, left: bool, dst: u64, src: u64, count: u64, sz: u
 }
 
 fn push(cpu: &mut Cpu, mem: &mut Memory, v: u64, sz: u8) -> ExecResult<()> {
-    let sp = cpu.gpr[RSP].wrapping_sub(sz as u64);
+    let sp = ip_value(cpu.mode, cpu.gpr[RSP].wrapping_sub(sz as u64));
     write_mem(mem, sp, sz, v)?;
     cpu.gpr[RSP] = sp;
     Ok(())
@@ -320,7 +339,7 @@ fn push(cpu: &mut Cpu, mem: &mut Memory, v: u64, sz: u8) -> ExecResult<()> {
 
 fn pop(cpu: &mut Cpu, mem: &Memory, sz: u8) -> ExecResult<u64> {
     let v = read_mem(mem, cpu.gpr[RSP], sz)?;
-    cpu.gpr[RSP] = cpu.gpr[RSP].wrapping_add(sz as u64);
+    cpu.gpr[RSP] = ip_value(cpu.mode, cpu.gpr[RSP].wrapping_add(sz as u64));
     Ok(v)
 }
 
@@ -389,14 +408,14 @@ fn str4(s: &[u8; 20]) -> [u32; 4] {
 pub fn step(cpu: &mut Cpu, mem: &mut Memory) -> ExecResult<()> {
     let mut buf = [0u8; 15];
     let n = mem.fetch(cpu.rip, &mut buf)?;
-    let inst = decode(&buf[..n], cpu.rip).map_err(Exit::Decode)?;
+    let inst = decode_mode(&buf[..n], cpu.rip, cpu.mode).map_err(Exit::Decode)?;
     exec(cpu, mem, &inst)
 }
 
 /// Execute a decoded instruction. On `Err`, architectural state is unchanged except for the
 /// partial effects documented per instruction (REP string ops are restartable).
 pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
-    let next = cpu.rip.wrapping_add(i.len as u64);
+    let next = next_ip(cpu, i.len);
     let sz = i.osz;
     macro_rules! r {
         ($n:expr) => {
@@ -448,9 +467,9 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
             let v = pop(cpu, mem, i.osz)?;
             w!(0, v);
         }
-        Op::Pushf => push(cpu, mem, cpu.rflags & !(1 << 16) | 0x2, 8)?,
+        Op::Pushf => push(cpu, mem, cpu.rflags & !(1 << 16) | 0x2, i.osz)?,
         Op::Popf => {
-            let v = pop(cpu, mem, 8)?;
+            let v = pop(cpu, mem, i.osz)?;
             cpu.rflags = (cpu.rflags & !USER_FLAGS) | (v & USER_FLAGS) | 0x2;
         }
         Op::Lahf => {
@@ -896,55 +915,59 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
 
         // ── control flow ──
         Op::Jmp => {
-            cpu.rip = i.imm as u64;
+            cpu.rip = ip_value(cpu.mode, i.imm as u64);
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
         }
         Op::JmpInd => {
             let t = r!(0);
-            cpu.rip = t;
+            cpu.rip = ip_value(cpu.mode, t);
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
         }
         Op::Jcc => {
-            cpu.rip = if cond(cpu.rflags, i.cc) {
+            cpu.rip = ip_value(cpu.mode, if cond(cpu.rflags, i.cc) {
                 i.imm as u64
             } else {
                 next
-            };
+            });
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
         }
         Op::Call => {
-            push(cpu, mem, next, 8)?;
-            cpu.rip = i.imm as u64;
+            push(cpu, mem, next, stack_size(cpu))?;
+            cpu.rip = ip_value(cpu.mode, i.imm as u64);
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
         }
         Op::CallInd => {
             let t = r!(0);
-            push(cpu, mem, next, 8)?;
-            cpu.rip = t;
+            push(cpu, mem, next, stack_size(cpu))?;
+            cpu.rip = ip_value(cpu.mode, t);
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
         }
         Op::Ret | Op::RetImm => {
-            let t = pop(cpu, mem, 8)?;
+            let t = pop(cpu, mem, stack_size(cpu))?;
             if i.op == Op::RetImm {
-                cpu.gpr[RSP] = cpu.gpr[RSP].wrapping_add(i.imm as u64);
+                cpu.gpr[RSP] = ip_value(cpu.mode, cpu.gpr[RSP].wrapping_add(i.imm as u64));
             }
-            cpu.rip = t;
+            cpu.rip = ip_value(cpu.mode, t);
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
         }
         Op::Loop | Op::Loope | Op::Loopne | Op::Jrcxz => {
-            let m = if i.ssz == 4 { 0xffff_ffff } else { u64::MAX };
+            let m = if cpu.mode == CpuMode::X86_32 || i.ssz == 4 {
+                0xffff_ffff
+            } else {
+                u64::MAX
+            };
             let mut take;
             if i.op == Op::Jrcxz {
                 take = cpu.gpr[RCX] & m == 0;
@@ -958,7 +981,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
                     _ => {}
                 }
             }
-            cpu.rip = if take { i.imm as u64 } else { next };
+            cpu.rip = ip_value(cpu.mode, if take { i.imm as u64 } else { next });
             cpu.icount += 1;
             cpu.tsc += 1;
             return Ok(());
@@ -978,13 +1001,13 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst) -> ExecResult<()> {
         }
         Op::Leave => {
             cpu.gpr[RSP] = cpu.gpr[RBP];
-            let v = pop(cpu, mem, 8)?;
+            let v = pop(cpu, mem, stack_size(cpu))?;
             cpu.gpr[RBP] = v;
         }
         Op::Enter => {
-            push(cpu, mem, cpu.gpr[RBP], 8)?;
+            push(cpu, mem, cpu.gpr[RBP], stack_size(cpu))?;
             cpu.gpr[RBP] = cpu.gpr[RSP];
-            cpu.gpr[RSP] = cpu.gpr[RSP].wrapping_sub(i.imm as u64);
+            cpu.gpr[RSP] = ip_value(cpu.mode, cpu.gpr[RSP].wrapping_sub(i.imm as u64));
         }
 
         // ── string operations ──
@@ -1149,7 +1172,7 @@ fn adv(reg: u64, delta: u64, am: u64) -> u64 {
 
 /// Direct-mapped cache of decoded instructions, valid while `Memory::code_epoch` is unchanged.
 pub struct DecodeCache {
-    entries: Vec<(u64, u64, Inst)>,
+    entries: Vec<(u64, u64, CpuMode, Inst)>,
 }
 
 const DC_BITS: usize = 15;
@@ -1162,9 +1185,9 @@ impl Default for DecodeCache {
 
 impl DecodeCache {
     pub fn new() -> Self {
-        let dummy = crate::decode::decode(&[0x90], 0).unwrap();
+        let dummy = decode_mode(&[0x90], 0, CpuMode::X86_64).unwrap();
         DecodeCache {
-            entries: vec![(u64::MAX, u64::MAX, dummy); 1 << DC_BITS],
+            entries: vec![(u64::MAX, u64::MAX, CpuMode::X86_64, dummy); 1 << DC_BITS],
         }
     }
 
@@ -1174,13 +1197,13 @@ impl DecodeCache {
         let rip = cpu.rip;
         let idx = ((rip ^ (rip >> DC_BITS)) as usize) & ((1 << DC_BITS) - 1);
         let e = &mut self.entries[idx];
-        if e.0 != rip || e.1 != mem.code_epoch {
+        if e.0 != rip || e.1 != mem.code_epoch || e.2 != cpu.mode {
             let mut buf = [0u8; 15];
             let n = mem.fetch(rip, &mut buf)?;
-            let inst = decode(&buf[..n], rip).map_err(Exit::Decode)?;
-            *e = (rip, mem.code_epoch, inst);
+            let inst = decode_mode(&buf[..n], rip, cpu.mode).map_err(Exit::Decode)?;
+            *e = (rip, mem.code_epoch, cpu.mode, inst);
         }
-        let inst = e.2;
+        let inst = e.3;
         exec(cpu, mem, &inst)
     }
 }
@@ -1205,6 +1228,7 @@ pub struct DecodedBlock {
 /// Cache of decoded basic blocks, invalidated whenever executable memory changes.
 pub struct BlockCache {
     code_epoch: Option<u64>,
+    mode: Option<CpuMode>,
     blocks: HashMap<u64, CachedBlock>,
     #[cfg(target_arch = "wasm32")]
     next_jit_id: u32,
@@ -1256,6 +1280,7 @@ impl BlockCache {
     pub fn new() -> Self {
         Self {
             code_epoch: None,
+            mode: None,
             blocks: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             next_jit_id: 1,
@@ -1276,7 +1301,7 @@ impl BlockCache {
     /// The block includes the first control-flow or terminal instruction. A linear block that
     /// reaches [`MAX_BLOCK_INSTRUCTIONS`] is returned with `terminated == false`.
     pub fn get_block(&mut self, start: u64, mem: &Memory) -> ExecResult<&DecodedBlock> {
-        Ok(&self.get_cached_block(start, mem)?.decoded)
+        Ok(&self.get_cached_block(start, mem, CpuMode::X86_64)?.decoded)
     }
 
     /// Execute a decoded block up to `max_instructions` retired guest instructions.
@@ -1306,7 +1331,7 @@ impl BlockCache {
             return (0, Ok(()));
         }
 
-        let block = match self.get_cached_block(cpu.rip, mem) {
+        let block = match self.get_cached_block(cpu.rip, mem, cpu.mode) {
             Ok(block) => block,
             Err(error) => return (0, Err(error)),
         };
@@ -1338,7 +1363,7 @@ impl BlockCache {
             }
             executed += 1;
 
-            let sequential_rip = before_rip.wrapping_add(cached.inst.len as u64);
+            let sequential_rip = ip_value(cpu.mode, before_rip.wrapping_add(cached.inst.len as u64));
             if mem.code_epoch != before_epoch
                 || ends_basic_block(cached.inst.op)
                 || cpu.rip != sequential_rip
@@ -1349,16 +1374,22 @@ impl BlockCache {
         (executed, Ok(()))
     }
 
-    fn get_cached_block(&mut self, start: u64, mem: &Memory) -> ExecResult<&CachedBlock> {
-        if self.code_epoch != Some(mem.code_epoch) {
+    fn get_cached_block(
+        &mut self,
+        start: u64,
+        mem: &Memory,
+        mode: CpuMode,
+    ) -> ExecResult<&CachedBlock> {
+        if self.code_epoch != Some(mem.code_epoch) || self.mode != Some(mode) {
             self.blocks.clear();
             self.code_epoch = Some(mem.code_epoch);
+            self.mode = Some(mode);
         }
         if !self.blocks.contains_key(&start) {
             if self.blocks.len() >= MAX_CACHED_BLOCKS {
                 self.blocks.clear();
             }
-            let decoded = decode_block(start, mem)?;
+            let decoded = decode_block(start, mem, mode)?;
             let instructions = decoded
                 .instructions
                 .iter()
@@ -1366,7 +1397,7 @@ impl BlockCache {
                 .map(translate_instruction)
                 .collect();
             #[cfg(target_arch = "wasm32")]
-            let emitted = if self.min_jit_prefix > decoded.instructions.len() {
+            let emitted = if mode == CpuMode::X86_32 || self.min_jit_prefix > decoded.instructions.len() {
                 None
             } else {
                 crate::jit::emit_mov_block(
@@ -1443,13 +1474,13 @@ fn execute_cached(cpu: &mut Cpu, mem: &mut Memory, cached: &CachedInstruction) -
         CachedOp::Interpreter => return exec(cpu, mem, &cached.inst),
     }
 
-    cpu.rip = cpu.rip.wrapping_add(cached.inst.len as u64);
+    cpu.rip = ip_value(cpu.mode, cpu.rip.wrapping_add(cached.inst.len as u64));
     cpu.icount += 1;
     cpu.tsc += 1;
     Ok(())
 }
 
-fn decode_block(start: u64, mem: &Memory) -> ExecResult<DecodedBlock> {
+fn decode_block(start: u64, mem: &Memory, mode: CpuMode) -> ExecResult<DecodedBlock> {
     let mut rip = start;
     let mut instructions = Vec::with_capacity(MAX_BLOCK_INSTRUCTIONS);
     for _ in 0..MAX_BLOCK_INSTRUCTIONS {
@@ -1461,14 +1492,14 @@ fn decode_block(start: u64, mem: &Memory) -> ExecResult<DecodedBlock> {
             }
             Err(fault) => return Err(Exit::Fault(fault)),
         };
-        let inst = match decode(&buf[..n], rip) {
+        let inst = match decode_mode(&buf[..n], rip, mode) {
             Ok(inst) => inst,
             Err(error) if !instructions.is_empty() => {
                 return Ok(partial_block(start, instructions, rip, Exit::Decode(error)));
             }
             Err(error) => return Err(Exit::Decode(error)),
         };
-        rip = rip.wrapping_add(inst.len as u64);
+        rip = ip_value(mode, rip.wrapping_add(inst.len as u64));
         let terminated = ends_basic_block(inst.op);
         instructions.push(inst);
         if terminated {
@@ -1520,4 +1551,70 @@ fn ends_basic_block(op: Op) -> bool {
             | Op::Ud2
             | Op::Syscall
     )
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn x86_mode_executes_32_bit_register_and_stack_semantics() {
+        let mut mem = Memory::new();
+        assert!(mem.map(0x1000, 0x1000, crate::mem::PROT_RWX));
+        assert!(mem.map(0x2000, 0x1000, crate::mem::PROT_RW));
+        // mov eax, -1; inc eax; push eax; pop ebx
+        mem.write_force(0x1000, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0x40, 0x50, 0x5b])
+            .unwrap();
+
+        let mut cpu = Cpu::new();
+        cpu.mode = CpuMode::X86_32;
+        cpu.rip = 0x1000;
+        cpu.gpr[RSP] = 0x2800;
+        let mut cache = DecodeCache::new();
+        for _ in 0..4 {
+            cache.step(&mut cpu, &mut mem).unwrap();
+        }
+
+        assert_eq!(cpu.gpr[RAX], 0);
+        assert_eq!(cpu.gpr[RBX], 0);
+        assert_eq!(cpu.gpr[RSP], 0x2800);
+        assert!(cpu.flag(ZF));
+        assert_eq!(cpu.rip, 0x1008);
+    }
+
+    #[test]
+    fn x86_mode_wraps_instruction_pointer_at_32_bits() {
+        let mut mem = Memory::new();
+        assert!(mem.map(0xffff_f000, 0x1000, crate::mem::PROT_RWX));
+        mem.write_force(0xffff_ffff, &[0x90]).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.mode = CpuMode::X86_32;
+        cpu.rip = 0xffff_ffff;
+        let mut cache = DecodeCache::new();
+
+        cache.step(&mut cpu, &mut mem).unwrap();
+
+        assert_eq!(cpu.rip, 0);
+    }
+
+    #[test]
+    fn x86_pushfd_and_popfd_use_four_byte_stack_slots() {
+        let mut mem = Memory::new();
+        assert!(mem.map(0x1000, 0x1000, crate::mem::PROT_RWX));
+        assert!(mem.map(0x2000, 0x1000, crate::mem::PROT_RW));
+        mem.write_force(0x1000, &[0x9c, 0x9d]).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.mode = CpuMode::X86_32;
+        cpu.rip = 0x1000;
+        cpu.gpr[RSP] = 0x2800;
+        cpu.rflags = 0x202;
+        let mut cache = DecodeCache::new();
+
+        cache.step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.gpr[RSP], 0x27fc);
+        assert_eq!(mem.read_u32(0x27fc).unwrap(), 0x202);
+        cache.step(&mut cpu, &mut mem).unwrap();
+        assert_eq!(cpu.gpr[RSP], 0x2800);
+        assert_eq!(cpu.rflags & USER_FLAGS, 0x202 & USER_FLAGS);
+    }
 }

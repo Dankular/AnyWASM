@@ -8,6 +8,8 @@
 use super::gpu::{op, Pk};
 use super::*;
 use crate::process::*;
+use anywasm_cpu::mem::PROT_RW;
+use anywasm_cpu::CpuMode;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const WM_CREATE: u64 = 0x0001;
@@ -41,6 +43,52 @@ const TME_LEAVE: u32 = 0x0000_0002;
 const TME_CANCEL: u32 = 0x8000_0000;
 const HWND_BASE: u64 = 0x0001_0010;
 const WS_CHILD: u32 = 0x4000_0000;
+
+fn set_windows_hook(p: &mut Process) -> R {
+    let (hook_type, callback, module, thread_id) = (
+        p.arg(0) as u32 as i32,
+        p.arg(1),
+        p.arg(2),
+        p.arg(3) as u32,
+    );
+    if callback == 0 || !(-1..=14).contains(&hook_type) {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(0);
+    }
+    let sequence = p.extra.win.next_hook.wrapping_add(1).max(1);
+    p.extra.win.next_hook = sequence;
+    let handle = 0x5000_0000 | sequence as u64;
+    p.extra.win.hooks.insert(
+        handle,
+        Hook {
+            hook_type,
+            callback,
+            module,
+            thread_id,
+        },
+    );
+    Ok(handle)
+}
+
+fn register_window_message(p: &mut Process, wide: bool) -> R {
+    let ptr = p.arg(0);
+    let name = if wide {
+        p.read_wstr(ptr)?
+    } else {
+        p.read_cstr(ptr)?
+    };
+    if let Some(&id) = p.extra.win.registered_messages.get(&name) {
+        return Ok(id as u64);
+    }
+    let id = p.extra.win.next_registered_message.max(0xc000);
+    if id > 0xffff {
+        p.set_last_error(8); // ERROR_NOT_ENOUGH_MEMORY
+        return Ok(0);
+    }
+    p.extra.win.next_registered_message = id + 1;
+    p.extra.win.registered_messages.insert(name, id);
+    Ok(id as u64)
+}
 
 #[derive(Clone)]
 pub struct Class {
@@ -78,6 +126,14 @@ pub struct Msg {
     pub pt: (i32, i32),
 }
 
+#[derive(Clone, Copy)]
+pub struct Hook {
+    pub hook_type: i32,
+    pub callback: u64,
+    pub module: u64,
+    pub thread_id: u32,
+}
+
 #[derive(Default)]
 pub struct WinState {
     pub classes: HashMap<String, Class>,
@@ -95,6 +151,10 @@ pub struct WinState {
     pub main_window: u64,
     pub timers: Vec<(u64, u64, u32, u64)>,
     pub props: HashMap<(u64, String), u64>,
+    pub hooks: HashMap<u64, Hook>,
+    next_hook: u32,
+    pub registered_messages: HashMap<String, u32>,
+    next_registered_message: u32,
 }
 
 fn lc(s: &str) -> String {
@@ -129,7 +189,14 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RegisterClassW" => |p| register_class(p, true, false),
         "RegisterClassExA" => |p| register_class(p, false, true),
         "RegisterClassExW" => |p| register_class(p, true, true),
+        "wsprintfA" => wsprintf_a,
+        "CharUpperA" => |p| char_case_a(p, true, false),
+        "CharLowerA" => |p| char_case_a(p, false, false),
+        "CharUpperBuffA" => |p| char_case_a(p, true, true),
+        "CharLowerBuffA" => |p| char_case_a(p, false, true),
         "UnregisterClassA" | "UnregisterClassW" => |_| Ok(1),
+        "RegisterWindowMessageA" => |p| register_window_message(p, false),
+        "RegisterWindowMessageW" => |p| register_window_message(p, true),
         "CreateWindowExA" => |p| create_window(p, false),
         "CreateWindowExW" => |p| create_window(p, true),
         "DestroyWindow" => |p| {
@@ -147,6 +214,14 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(0)
         },
         "GetWindowPlacement" => get_window_placement,
+        "GetKeyboardType" => |p| {
+            Ok(match p.arg(0) {
+                0 => 4, // enhanced 101/102-key keyboard
+                1 => 0,
+                2 => 12,
+                _ => 0,
+            })
+        },
         "SetWindowPlacement" => set_window_placement,
         "UpdateWindow" => |p| {
             let h = p.arg(0);
@@ -347,6 +422,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let vk = (p.arg(0) & 0xff) as usize;
             Ok(p.extra.win.keys.get(vk).map(|&d| if d != 0 { 0x8000u64 } else { 0 }).unwrap_or(0))
         },
+        "GetKeyboardLayout" => |_| Ok(0x0409_0409), // US English HKL for the current thread.
+        "SetWindowsHookExA" | "SetWindowsHookExW" => set_windows_hook,
+        "UnhookWindowsHookEx" => |p| Ok(p.extra.win.hooks.remove(&p.arg(0)).is_some() as u64),
+        "CallNextHookEx" => |_| Ok(0),
         "GetKeyboardState" => |p| {
             let a = p.arg(0);
             let mut k = p.extra.win.keys.clone();
@@ -915,16 +994,78 @@ fn copy_rect(p: &mut Process) -> R {
 
 fn register_class(p: &mut Process, wide: bool, ex: bool) -> R {
     let a = p.arg(0);
-    // WNDCLASSEX has cbSize first, shifting every field by 8 bytes relative to WNDCLASS.
-    let off = if ex { 8 } else { 0 };
-    let wndproc = p.rd64(a + off)?;
-    let name_ptr = p.rd64(a + 56 + off)?;
+    // WNDCLASS and WNDCLASSEX have different field offsets in PE32. In PE32+,
+    // the pointer-sized fields and alignment move the same fields again.
+    let x86 = p.cpu.mode == CpuMode::X86_32;
+    let wndproc_off = if ex || !x86 { 8 } else { 4 };
+    let name_off = match (x86, ex) {
+        (true, false) => 36,
+        (true, true) => 40,
+        (false, _) => 64,
+    };
+    let wndproc = p.rdptr(a + wndproc_off)?;
+    let name_ptr = p.rdptr(a + name_off)?;
     let name = lc(&class_name(p, name_ptr, wide)?);
     p.extra.win.next_atom += 1;
     let atom = 0xc000 + p.extra.win.next_atom;
     p.extra.win.atoms.insert(atom, name.clone());
     p.extra.win.classes.insert(name.clone(), Class { wndproc, name, unicode: wide });
     Ok(atom as u64)
+}
+
+fn wsprintf_a(p: &mut Process) -> R {
+    let (buffer, format_ptr) = (p.arg(0), p.arg(1));
+    let format = p.read_cstr(format_ptr)?;
+    let output = printf::format(
+        p,
+        format.as_bytes(),
+        &mut printf::SlotArgs(2),
+        false,
+    )?;
+    p.write_bytes(buffer, &output)?;
+    p.wr8(buffer + output.len() as u64, 0)?;
+    Ok(output.len() as u64)
+}
+
+fn char_case_a(p: &mut Process, upper: bool, buffered: bool) -> R {
+    let pointer = p.arg(0);
+    if pointer == 0 {
+        return Ok(0);
+    }
+    if !buffered && pointer <= 0xffff {
+        let byte = pointer as u8;
+        return Ok(if upper {
+            byte.to_ascii_uppercase() as u64
+        } else {
+            byte.to_ascii_lowercase() as u64
+        });
+    }
+    let bytes = if buffered {
+        p.read_bytes(pointer, usize::try_from(p.arg(1)).unwrap_or(usize::MAX))?
+    } else {
+        let mut bytes = Vec::new();
+        for offset in 0..(1 << 20) {
+            let byte = p.rd8(pointer + offset)?;
+            if byte == 0 {
+                break;
+            }
+            bytes.push(byte);
+        }
+        bytes
+    };
+    let bytes: Vec<u8> = bytes
+        .into_iter()
+        .map(|byte| if upper { byte.to_ascii_uppercase() } else { byte.to_ascii_lowercase() })
+        .collect();
+    if buffered {
+        let len = bytes.len();
+        p.write_bytes(pointer, &bytes)?;
+        Ok(len as u64)
+    } else {
+        p.write_bytes(pointer, &bytes)?;
+        p.wr8(pointer + bytes.len() as u64, 0)?;
+        Ok(pointer)
+    }
 }
 
 fn create_window(p: &mut Process, wide: bool) -> R {
@@ -1172,11 +1313,68 @@ fn input_target_window(win: &WinState) -> u64 {
 /// 0 key down (a=vk), 1 key up, 2 char (a=utf16), 3 mouse move (a=x,b=y), 4 button down (a=btn 0/1/2,b=x,c=y),
 /// 5 button up, 6 wheel (a=delta, b=x, c=y), 7 resize (a=w,b=h), 8 focus (a=1/0), 9 close request,
 /// 10 mouse leave.
-pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
-    let h = input_target_window(&p.extra.win);
-    if h == 0 {
-        return;
+fn invoke_low_level_hooks(
+    p: &mut Process,
+    hook_type: i32,
+    wparam: u64,
+    point: (i32, i32),
+    value: u32,
+    flags: u32,
+) -> Result<bool, Stop> {
+    let hooks: Vec<Hook> = p
+        .extra
+        .win
+        .hooks
+        .values()
+        .copied()
+        .filter(|hook| {
+            hook.hook_type == hook_type
+                && (hook.thread_id == 0 || hook.thread_id == p.current_thread_id)
+        })
+        .collect();
+    if hooks.is_empty() {
+        return Ok(false);
     }
+
+    let is_x86 = p.cpu.mode == CpuMode::X86_32;
+    let pointer_bytes = if is_x86 { 4 } else { 8 };
+    let now = ((p.cpu.icount + p.extra.sleep_adjust) / 100_000) as u32;
+    let (size, data) = if hook_type == 14 {
+        // MSLLHOOKSTRUCT: POINT, mouseData, flags, time, ULONG_PTR dwExtraInfo.
+        let extra_offset = if is_x86 { 20 } else { 24 };
+        let mut bytes = vec![0; extra_offset + pointer_bytes];
+        bytes[0..4].copy_from_slice(&(point.0 as u32).to_le_bytes());
+        bytes[4..8].copy_from_slice(&(point.1 as u32).to_le_bytes());
+        bytes[8..12].copy_from_slice(&value.to_le_bytes());
+        bytes[12..16].copy_from_slice(&flags.to_le_bytes());
+        bytes[16..20].copy_from_slice(&now.to_le_bytes());
+        (bytes.len(), bytes)
+    } else {
+        // KBDLLHOOKSTRUCT: vkCode, scanCode, flags, time, ULONG_PTR dwExtraInfo.
+        let extra_offset = 16;
+        let mut bytes = vec![0; extra_offset + pointer_bytes];
+        bytes[0..4].copy_from_slice(&value.to_le_bytes());
+        bytes[4..8].copy_from_slice(&map_virtual_key(value, 0).to_le_bytes());
+        bytes[8..12].copy_from_slice(&flags.to_le_bytes());
+        bytes[12..16].copy_from_slice(&now.to_le_bytes());
+        (bytes.len(), bytes)
+    };
+    let event = p.alloc_virtual(size as u64, PROT_RW);
+    p.write_bytes(event, &data)?;
+    let mut suppress = false;
+    for hook in hooks {
+        if p.call_guest(hook.callback, &[0, wparam, event])? != 0 {
+            suppress = true;
+            break;
+        }
+    }
+    p.mem.unmap(event, 0x1000);
+    p.vmem.remove(&event);
+    Ok(suppress)
+}
+
+pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result<(), Stop> {
+    let h = input_target_window(&p.extra.win);
     let packed = |x: i64, y: i64| ((y as u64 & 0xffff) << 16) | (x as u64 & 0xffff);
     match kind {
         0 | 1 => {
@@ -1184,12 +1382,24 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
                 p.extra.win.keys.resize(256, 0);
             }
             p.extra.win.keys[(a & 0xff) as usize] = (kind == 0) as u8;
-            post(p, h, if kind == 0 { WM_KEYDOWN } else { WM_KEYUP }, a as u64, if kind == 0 { 1 } else { 0xc000_0001 });
+            let up = kind == 1;
+            let msg = if up { WM_KEYUP } else { WM_KEYDOWN };
+            let key_flags = if up { 0x80 } else { 0 };
+            if invoke_low_level_hooks(p, 13, msg, (0, 0), a as u32, key_flags)? || h == 0 {
+                return Ok(());
+            }
+            post(p, h, msg, a as u64, if up { 0xc000_0001 } else { 1 });
         }
-        2 => post(p, h, WM_CHAR, a as u64, 1),
+        2 => {
+            if h != 0 {
+                post(p, h, WM_CHAR, a as u64, 1);
+            }
+        }
         3 => {
             p.extra.win.cursor = (a as i32, b as i32);
-            post(p, h, WM_MOUSEMOVE, 0, packed(a, b));
+            if !invoke_low_level_hooks(p, 14, WM_MOUSEMOVE, (a as i32, b as i32), 0, 0)? && h != 0 {
+                post(p, h, WM_MOUSEMOVE, 0, packed(a, b));
+            }
         }
         4 | 5 => {
             let (m_down, m_up) = match a {
@@ -1202,22 +1412,33 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) {
                 p.extra.win.keys.resize(256, 0);
             }
             p.extra.win.keys[vk] = (kind == 4) as u8;
-            post(p, h, if kind == 4 { m_down } else { m_up }, 0, packed(b, c));
+            let msg = if kind == 4 { m_down } else { m_up };
+            if !invoke_low_level_hooks(p, 14, msg, (b as i32, c as i32), 0, 0)? && h != 0 {
+                post(p, h, msg, 0, packed(b, c));
+            }
         }
-        6 => post(p, h, WM_MOUSEWHEEL, ((a as u64) & 0xffff) << 16, packed(b, c)),
+        6 => {
+            let mouse_data = (a as i32 as u32) << 16;
+            if !invoke_low_level_hooks(p, 14, WM_MOUSEWHEEL, (b as i32, c as i32), mouse_data, 0)? && h != 0 {
+                post(p, h, WM_MOUSEWHEEL, ((a as u64) & 0xffff) << 16, packed(b, c));
+            }
+        }
         7 => {
             if let Some(w) = p.extra.win.windows.get_mut(&h) {
                 w.w = a as i32;
                 w.h = b as i32;
             }
-            post(p, h, WM_SIZE, 0, packed(a, b));
+            if h != 0 {
+                post(p, h, WM_SIZE, 0, packed(a, b));
+            }
         }
-        8 => post(p, h, if a != 0 { WM_SETFOCUS } else { WM_KILLFOCUS }, 0, 0),
-        9 => post(p, h, WM_CLOSE, 0, 0),
-        10 if p.extra.win.mouse_tracking.remove(&h) => post(p, h, WM_MOUSELEAVE, 0, 0),
+        8 if h != 0 => post(p, h, if a != 0 { WM_SETFOCUS } else { WM_KILLFOCUS }, 0, 0),
+        9 if h != 0 => post(p, h, WM_CLOSE, 0, 0),
+        10 if h != 0 && p.extra.win.mouse_tracking.remove(&h) => post(p, h, WM_MOUSELEAVE, 0, 0),
         10 => {}
         _ => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]

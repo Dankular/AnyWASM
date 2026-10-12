@@ -1,5 +1,12 @@
 //! Architectural state of one x86-64 user-mode thread.
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CpuMode {
+    X86_32,
+    #[default]
+    X86_64,
+}
+
 pub const RAX: usize = 0;
 pub const RCX: usize = 1;
 pub const RDX: usize = 2;
@@ -28,6 +35,7 @@ pub const ARITH_FLAGS: u64 = CF | PF | AF | ZF | SF | OF;
 
 #[derive(Clone, Debug)]
 pub struct Cpu {
+    pub mode: CpuMode,
     pub gpr: [u64; 16],
     pub rip: u64,
     pub rflags: u64,
@@ -53,6 +61,7 @@ pub struct Cpu {
 impl Default for Cpu {
     fn default() -> Self {
         Cpu {
+            mode: CpuMode::X86_64,
             gpr: [0; 16],
             rip: 0,
             rflags: 0x202,

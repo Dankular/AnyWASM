@@ -1,4 +1,4 @@
-use crate::process::{HleFn, Process};
+use crate::process::{Handle, HleFn, Process};
 use crate::Stop;
 
 #[cfg(windows)]
@@ -22,9 +22,29 @@ extern "C" {
 pub fn lookup(name: &str) -> Option<HleFn> {
     match name {
         "RegOpenKeyExA" => Some(reg_open_key_ex_a),
+        "RegCreateKeyExA" => Some(reg_create_key_ex_a),
+        "RegSetValueExA" => Some(reg_set_value_ex_a),
+        "RegQueryValueExA" => Some(reg_query_value_ex_a),
+        "RegCloseKey" => Some(reg_close_key),
         "SystemFunction036" => Some(system_function_036),
         _ => None,
     }
+}
+
+const PREDEFINED_ROOTS: [u32; 5] = [
+    0x8000_0000, // HKEY_CLASSES_ROOT
+    0x8000_0001, // HKEY_CURRENT_USER
+    0x8000_0002, // HKEY_LOCAL_MACHINE
+    0x8000_0003, // HKEY_USERS
+    0x8000_0005, // HKEY_CURRENT_CONFIG
+];
+
+fn is_predefined_root(key: u64) -> bool {
+    PREDEFINED_ROOTS.contains(&(key as u32))
+}
+
+fn is_registry_handle(process: &Process, key: u64) -> bool {
+    is_predefined_root(key) || matches!(process.handles.get(&key), Some(Handle::Other))
 }
 
 /// Opens the predefined registry roots supported by the runtime.
@@ -38,14 +58,6 @@ fn reg_open_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
     const ERROR_INVALID_HANDLE: u64 = 6;
     const ERROR_INVALID_PARAMETER: u64 = 87;
     const REG_OPTION_OPEN_LINK: u64 = 8;
-    const PREDEFINED_ROOTS: [u64; 5] = [
-        0xffff_ffff_8000_0000, // HKEY_CLASSES_ROOT
-        0xffff_ffff_8000_0001, // HKEY_CURRENT_USER
-        0xffff_ffff_8000_0002, // HKEY_LOCAL_MACHINE
-        0xffff_ffff_8000_0003, // HKEY_USERS
-        0xffff_ffff_8000_0005, // HKEY_CURRENT_CONFIG
-    ];
-
     let root = process.arg(0);
     let subkey_ptr = process.arg(1);
     let options = process.arg(2) as u32 as u64;
@@ -66,17 +78,123 @@ fn reg_open_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
         );
     }
 
-    if !PREDEFINED_ROOTS.contains(&root) {
+    if !is_registry_handle(process, root) {
         return Ok(ERROR_INVALID_HANDLE);
     }
     if result_ptr == 0 || (options != 0 && options != REG_OPTION_OPEN_LINK) {
         return Ok(ERROR_INVALID_PARAMETER);
     }
     if subkey.is_empty() {
-        process.wr64(result_ptr, root)?;
+        process.wrptr(result_ptr, root)?;
+        return Ok(ERROR_SUCCESS);
+    }
+    if !is_predefined_root(root) {
+        let child = process.new_handle(Handle::Other);
+        process.wrptr(result_ptr, child)?;
         return Ok(ERROR_SUCCESS);
     }
     Ok(ERROR_FILE_NOT_FOUND)
+}
+
+fn reg_create_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
+    const ERROR_SUCCESS: u64 = 0;
+    const ERROR_INVALID_HANDLE: u64 = 6;
+    const ERROR_INVALID_PARAMETER: u64 = 87;
+    const REG_OPTION_NON_VOLATILE: u64 = 0;
+    const REG_OPTION_VOLATILE: u64 = 1;
+    const REG_CREATED_NEW_KEY: u32 = 1;
+
+    let (root, subkey_ptr, reserved, class_ptr, options, result_ptr, disposition_ptr) = (
+        process.arg(0),
+        process.arg(1),
+        process.arg(2),
+        process.arg(3),
+        process.arg(4),
+        process.arg(7),
+        process.arg(8),
+    );
+    if !is_registry_handle(process, root) {
+        return Ok(ERROR_INVALID_HANDLE);
+    }
+    if reserved != 0
+        || !matches!(options, REG_OPTION_NON_VOLATILE | REG_OPTION_VOLATILE)
+        || result_ptr == 0
+    {
+        return Ok(ERROR_INVALID_PARAMETER);
+    }
+    let subkey = if subkey_ptr == 0 {
+        String::new()
+    } else {
+        process.read_cstr(subkey_ptr)?
+    };
+    if process.trace_imports {
+        process.stderr.extend_from_slice(
+            format!("[registry] RegCreateKeyExA root={root:#x} subkey={subkey:?} options={options:#x}\n")
+                .as_bytes(),
+        );
+    }
+    // Registry state is intentionally volatile for now. This supports applications that create
+    // optional device/configuration keys while allowing reads to fall back to their defaults.
+    let key = process.new_handle(Handle::Other);
+    process.wrptr(result_ptr, key)?;
+    if disposition_ptr != 0 {
+        process.wr32(disposition_ptr, REG_CREATED_NEW_KEY)?;
+    }
+    let _ = class_ptr;
+    Ok(ERROR_SUCCESS)
+}
+
+fn reg_set_value_ex_a(process: &mut Process) -> Result<u64, Stop> {
+    const ERROR_SUCCESS: u64 = 0;
+    const ERROR_INVALID_HANDLE: u64 = 6;
+    const ERROR_INVALID_PARAMETER: u64 = 87;
+    let (key, reserved) = (process.arg(0), process.arg(2));
+    if !is_registry_handle(process, key) {
+        return Ok(ERROR_INVALID_HANDLE);
+    }
+    if reserved != 0 {
+        return Ok(ERROR_INVALID_PARAMETER);
+    }
+    Ok(ERROR_SUCCESS)
+}
+
+fn reg_query_value_ex_a(process: &mut Process) -> Result<u64, Stop> {
+    const ERROR_FILE_NOT_FOUND: u64 = 2;
+    const ERROR_INVALID_HANDLE: u64 = 6;
+    const ERROR_INVALID_PARAMETER: u64 = 87;
+    let (key, reserved, type_ptr, size_ptr) = (
+        process.arg(0),
+        process.arg(2),
+        process.arg(3),
+        process.arg(5),
+    );
+    if !is_registry_handle(process, key) {
+        return Ok(ERROR_INVALID_HANDLE);
+    }
+    if reserved != 0 {
+        return Ok(ERROR_INVALID_PARAMETER);
+    }
+    if type_ptr != 0 {
+        process.wr32(type_ptr, 0)?;
+    }
+    if size_ptr != 0 {
+        process.wr32(size_ptr, 0)?;
+    }
+    Ok(ERROR_FILE_NOT_FOUND)
+}
+
+fn reg_close_key(process: &mut Process) -> Result<u64, Stop> {
+    const ERROR_SUCCESS: u64 = 0;
+    const ERROR_INVALID_HANDLE: u64 = 6;
+    let key = process.arg(0);
+    if is_predefined_root(key) {
+        return Ok(ERROR_SUCCESS);
+    }
+    Ok(if process.handles.remove(&key).is_some() {
+        ERROR_SUCCESS
+    } else {
+        ERROR_INVALID_HANDLE
+    })
 }
 
 fn system_function_036(process: &mut Process) -> Result<u64, Stop> {

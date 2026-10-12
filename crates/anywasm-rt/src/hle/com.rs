@@ -8,6 +8,7 @@
 use super::gpu::{op, Pk};
 use super::*;
 use crate::process::*;
+use anywasm_cpu::CpuMode;
 use std::collections::HashMap;
 
 pub const S_OK: u64 = 0;
@@ -64,6 +65,9 @@ pub enum Kind {
         query_type: u32,
         complete: bool,
     },
+    DirectDraw,
+    DirectSound,
+    SoundBuffer { memory: u64, size: u32 },
 }
 
 impl Kind {
@@ -157,7 +161,7 @@ pub fn canonical(iface: &str) -> &str {
 pub fn create(p: &mut Process, iface: &'static str, kind: Kind) -> u64 {
     let vt = vtable_for(p, iface);
     let block = kernel32::alloc_block(p, 32, true);
-    let _ = p.wr64(block, vt);
+    let _ = p.wrptr(block, vt);
     if let Some(id) = kind.host_id() {
         *p.extra.com.id_refs.entry(id).or_insert(0) += 1;
     }
@@ -178,10 +182,11 @@ fn vtable_for(p: &mut Process, iface: &'static str) -> u64 {
         return v;
     }
     let methods = vtables::methods(iface).unwrap_or(&["QueryInterface", "AddRef", "Release"]);
-    let vt = kernel32::alloc_block(p, methods.len() as u64 * 8 + 8, true);
+    let pointer_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
+    let vt = kernel32::alloc_block(p, methods.len() as u64 * pointer_size + pointer_size, true);
     for (i, m) in methods.iter().enumerate() {
         let a = p.thunk_for("com", &format!("{iface}::{m}"), true).unwrap();
-        let _ = p.wr64(vt + 8 * i as u64, a);
+        let _ = p.wrptr(vt + pointer_size * i as u64, a);
     }
     p.extra.com.vtables.insert(iface, vt);
     vt
@@ -194,7 +199,7 @@ pub fn kind_of(p: &Process, this: u64) -> Option<Kind> {
 /// Write an interface pointer to `*out` (if non-null).
 pub fn out_ptr(p: &mut Process, out: u64, obj: u64) -> Result<(), Stop> {
     if out != 0 {
-        p.wr64(out, obj)?;
+        p.wrptr(out, obj)?;
     }
     Ok(())
 }
@@ -267,6 +272,9 @@ fn supports(kind: &Kind, want: &str) -> bool {
             "ID3D11DeviceChild",
         ],
         Kind::Query { .. } => &["ID3D11Query", "ID3D11DeviceChild"],
+        Kind::DirectDraw => &["IDirectDraw7"],
+        Kind::DirectSound => &["IDirectSound8"],
+        Kind::SoundBuffer { .. } => &["IDirectSoundBuffer8"],
     };
     fam.iter().any(|f| *f == w)
 }
@@ -333,6 +341,9 @@ const ALL_NAMES: &[&str] = &[
     "ID3D11Query",
     "ID3D10Blob",
     "ID3DBlob",
+    "IDirectDraw7",
+    "IDirectSound8",
+    "IDirectSoundBuffer8",
 ];
 
 pub fn query_interface(p: &mut Process) -> R {
@@ -352,14 +363,14 @@ pub fn query_interface(p: &mut Process) -> R {
                 .as_bytes(),
             );
         }
-        p.wr64(out, 0)?;
+        p.wrptr(out, 0)?;
         return Ok(E_NOINTERFACE);
     };
     if !supports(&kind, name) {
         if p.trace_imports {
             p.stderr.extend_from_slice(format!("[com] QueryInterface this={this:#x} iface={} iid={iid} want={name} -> unsupported\n", obj.iface).as_bytes());
         }
-        p.wr64(out, 0)?;
+        p.wrptr(out, 0)?;
         return Ok(E_NOINTERFACE);
     }
     if p.trace_imports {
@@ -372,13 +383,13 @@ pub fn query_interface(p: &mut Process) -> R {
         );
     }
     if name == "IUnknown" || name == own {
-        p.wr64(out, this)?;
+        p.wrptr(out, this)?;
         add_ref_obj(p, this);
         return Ok(S_OK);
     }
     if canonical(name) == canonical(own) {
         let Some(iface) = static_iface(name) else {
-            p.wr64(out, 0)?;
+            p.wrptr(out, 0)?;
             return Ok(E_NOINTERFACE);
         };
         // Interface versions share a prefix-compatible vtable. If the guest asks for a newer
@@ -386,18 +397,18 @@ pub fn query_interface(p: &mut Process) -> R {
         // newly added methods do not dispatch through zero-filled slots.
         if interface_version(iface) > interface_version(own) {
             let vt = vtable_for(p, iface);
-            p.wr64(this, vt)?;
+            p.wrptr(this, vt)?;
             if let Some(obj) = p.extra.com.objs.get_mut(&this) {
                 obj.iface = iface;
             }
         }
-        p.wr64(out, this)?;
+        p.wrptr(out, this)?;
         add_ref_obj(p, this);
         return Ok(S_OK);
     }
     // A different interface of the same object: make a sibling wrapper sharing the host state.
     let Some(iface) = static_iface(name) else {
-        p.wr64(out, 0)?;
+        p.wrptr(out, 0)?;
         return Ok(E_NOINTERFACE);
     };
     // Keep versioned D3D11 interfaces on their shared vtable, but use a separate vtable for
@@ -410,12 +421,12 @@ pub fn query_interface(p: &mut Process) -> R {
     };
     if let Some(s) = singleton.filter(|&s| s != 0) {
         // Same pointer works for any version of the interface because vtables are prefix-compatible.
-        p.wr64(out, s)?;
+        p.wrptr(out, s)?;
         add_ref_obj(p, s);
         return Ok(S_OK);
     }
     let o = create(p, iface, kind);
-    p.wr64(out, o)?;
+    p.wrptr(out, o)?;
     Ok(S_OK)
 }
 
@@ -465,6 +476,9 @@ pub fn release(p: &mut Process) -> R {
                 p.extra.gpu.emit(op::RELEASE, Pk::new().u32(id));
             }
         }
+        if let Kind::SoundBuffer { memory, .. } = o.kind {
+            kernel32::free_block(p, memory);
+        }
         kernel32::free_block(p, o.block);
     }
     Ok(refs as u64)
@@ -490,7 +504,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetPrivateData" => |_| Ok(DXGI_ERROR_NOT_FOUND),
         "SetPrivateData" | "SetPrivateDataInterface" | "SetEvictionPriority" => |_| Ok(S_OK),
         "GetEvictionPriority" => |_| Ok(0x8000_0000),
-        _ => return d3d11::method(iface, m).or_else(|| dxgi::method(iface, m)),
+        _ => {
+            return d3d11::method(iface, m)
+                .or_else(|| dxgi::method(iface, m))
+                .or_else(|| ddraw::method(iface, m))
+                .or_else(|| dsound::method(iface, m))
+        }
     })
 }
 

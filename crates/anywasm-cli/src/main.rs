@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! anywasm analyze <exe> [--json]          compatibility report (which imports are implemented)
-//! anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports] [--max-steps N] [-- args...]
+//! anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]
 //! anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args "..."]
 //! ```
 
@@ -349,6 +349,7 @@ struct Opts {
     dir: Option<PathBuf>,
     out: Option<PathBuf>,
     trace: bool,
+    trace_modules: bool,
     json: bool,
     max_steps: u64,
     args: Vec<String>,
@@ -362,6 +363,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         dir: None,
         out: None,
         trace: false,
+        trace_modules: false,
         json: false,
         max_steps: 20_000_000_000,
         args: vec![],
@@ -375,6 +377,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--dir" => o.dir = Some(it.next().ok_or("--dir needs a value")?.into()),
             "-o" | "--out" => o.out = Some(it.next().ok_or("-o needs a value")?.into()),
             "--trace-imports" => o.trace = true,
+            "--trace-modules" => o.trace_modules = true,
             "--json" => o.json = true,
             "--max-steps" => {
                 o.max_steps = it
@@ -459,7 +462,13 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
     let mut p = Process::new(vfs);
     p.current_directory = cwd;
     p.trace_imports = o.trace;
-    p.load_exe(&name, Some(&cmd))?;
+    p.trace_modules_only = o.trace_modules;
+    if let Err(error) = p.load_exe(&name, Some(&cmd)) {
+        if o.trace || o.trace_modules {
+            std::io::stderr().write_all(&p.take_stderr()).ok();
+        }
+        return Err(error);
+    }
     let mut left = o.max_steps;
     let stop = loop {
         if left == 0 {
@@ -495,9 +504,19 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             Ok(ExitCode::from(121))
         }
         Stop::StepLimit => {
+            let module = p.module_for(p.cpu.rip).unwrap_or("?");
             eprintln!(
-                "\nanywasm: step limit reached after {} instructions",
-                o.max_steps
+                "\nanywasm: step limit reached after {} retired instructions at {module}+{:#x} (RIP={:#x}, thread={})",
+                p.retired_instructions,
+                p.cpu.rip.saturating_sub(
+                    p.modules
+                        .iter()
+                        .find(|m| m.hle_group.is_none() && m.name == module)
+                        .map(|m| m.base)
+                        .unwrap_or(0)
+                ),
+                p.cpu.rip,
+                p.current_thread_id
             );
             Ok(ExitCode::from(122))
         }
@@ -552,7 +571,7 @@ fn pack(o: &Opts) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args \"cmdline\"]";
+    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args \"cmdline\"]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);

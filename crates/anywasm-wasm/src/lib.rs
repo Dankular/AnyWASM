@@ -19,6 +19,7 @@ struct State {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     gpu: Vec<u8>,
+    pending_stop: Option<Stop>,
 }
 
 static mut STATE: Option<State> = None;
@@ -67,11 +68,11 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     });
     match res {
         Ok(p) => {
-            STATE = Some(State { p, message: Vec::new(), exit_code: 0, stdout: Vec::new(), stderr: Vec::new(), gpu: Vec::new() });
+            STATE = Some(State { p, message: Vec::new(), exit_code: 0, stdout: Vec::new(), stderr: Vec::new(), gpu: Vec::new(), pending_stop: None });
             0
         }
         Err(e) => {
-            STATE = Some(State { p: Process::new(anywasm_rt::Vfs::new()), message: e.into_bytes(), exit_code: 0, stdout: vec![], stderr: vec![], gpu: vec![] });
+            STATE = Some(State { p: Process::new(anywasm_rt::Vfs::new()), message: e.into_bytes(), exit_code: 0, stdout: vec![], stderr: vec![], gpu: vec![], pending_stop: None });
             1
         }
     }
@@ -80,6 +81,25 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
 #[no_mangle]
 pub extern "C" fn aw_run(steps: u64) -> i32 {
     let Some(s) = state() else { return 3 };
+    if let Some(stop) = s.pending_stop.take() {
+        s.stdout.extend(s.p.take_stdout());
+        s.stderr.extend(s.p.take_stderr());
+        s.gpu.extend(std::mem::take(&mut s.p.extra.gpu.buf));
+        return match stop {
+            Stop::Unimplemented { dll, name } => {
+                s.message = format!("unimplemented import {dll}!{name} from input callback").into_bytes();
+                2
+            }
+            Stop::Crash(message) => {
+                s.message = format!("input callback crashed: {message}").into_bytes();
+                3
+            }
+            other => {
+                s.message = format!("input callback stopped guest: {other:?}").into_bytes();
+                3
+            }
+        };
+    }
     let r = s.p.run(steps);
     s.stdout.extend(s.p.take_stdout());
     s.stderr.extend(s.p.take_stderr());
@@ -166,7 +186,9 @@ buf_api!(aw_gpu_ptr, aw_gpu_len, aw_gpu_clear, gpu);
 #[no_mangle]
 pub extern "C" fn aw_input(kind: u32, a: i64, b: i64, c: i64) {
     if let Some(s) = state() {
-        anywasm_rt::hle::user32::input_event(&mut s.p, kind, a, b, c);
+        if let Err(stop) = anywasm_rt::hle::user32::input_event(&mut s.p, kind, a, b, c) {
+            s.pending_stop = Some(stop);
+        }
     }
 }
 

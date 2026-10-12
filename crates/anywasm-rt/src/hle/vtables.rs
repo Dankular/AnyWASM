@@ -3,6 +3,9 @@
 pub fn methods(interface: &str) -> Option<&'static [&'static str]> {
     Some(match interface {
         "ID3D10Blob" => &["QueryInterface", "AddRef", "Release", "GetBufferPointer", "GetBufferSize"],
+        "IDirectDraw7" => &["QueryInterface", "AddRef", "Release", "Compact", "CreateClipper", "CreatePalette", "CreateSurface", "DuplicateSurface", "EnumDisplayModes", "EnumSurfaces", "FlipToGDISurface", "GetCaps", "GetDisplayMode", "GetFourCCCodes", "GetGDISurface", "GetMonitorFrequency", "GetScanLine", "GetVerticalBlankStatus", "Initialize", "RestoreDisplayMode", "SetCooperativeLevel", "SetDisplayMode", "WaitForVerticalBlank", "GetAvailableVidMem", "GetSurfaceFromDC", "RestoreAllSurfaces", "TestCooperativeLevel", "GetDeviceIdentifier", "StartModeTest", "EvaluateMode"],
+        "IDirectSound8" => &["QueryInterface", "AddRef", "Release", "CreateSoundBuffer", "GetCaps", "DuplicateSoundBuffer", "SetCooperativeLevel", "Compact", "GetSpeakerConfig", "SetSpeakerConfig", "Initialize", "VerifyCertification"],
+        "IDirectSoundBuffer8" => &["QueryInterface", "AddRef", "Release", "GetCaps", "GetCurrentPosition", "GetFormat", "GetVolume", "GetPan", "GetFrequency", "GetStatus", "Initialize", "Lock", "Play", "SetCurrentPosition", "SetFormat", "SetVolume", "SetPan", "SetFrequency", "Stop", "Unlock", "Restore", "SetFX", "AcquireResources", "GetObjectInPath"],
         "ID3D11Asynchronous" => &["QueryInterface", "AddRef", "Release", "GetDevice", "GetPrivateData", "SetPrivateData", "SetPrivateDataInterface", "GetDataSize"],
         "ID3D11AuthenticatedChannel" => &["QueryInterface", "AddRef", "Release", "GetDevice", "GetPrivateData", "SetPrivateData", "SetPrivateDataInterface", "GetCertificateSize", "GetCertificate", "GetChannelHandle"],
         "ID3D11BlendState" => &["QueryInterface", "AddRef", "Release", "GetDevice", "GetPrivateData", "SetPrivateData", "SetPrivateDataInterface", "GetDesc"],
@@ -144,6 +147,9 @@ pub fn iid_name(iid: &str) -> Option<&'static str> {
         "0c711683-2853-4846-9bb0-f3e60639e46a" => "ID3D11Texture3D1",
         "0d9658ae-ed45-469e-a61d-970ec583cab4" => "ID3D12QueryHeap",
         "0ec870a6-5d7e-4c22-8cfc-5baae07616ed" => "ID3D12CommandQueue",
+        "15e65ec0-3b9c-11d2-b92f-00609797ea5b" => "IDirectDraw7",
+        "c50a7e93-f395-4834-9ef6-7fa99de50966" => "IDirectSound8",
+        "6825a449-7524-4d82-920f-50e36ab3ab1e" => "IDirectSoundBuffer8",
         "10ec4d5b-975a-4689-b9e4-d0aac30fe333" => "ID3D11VideoDevice",
         "11ec5a5f-51dc-4945-ab34-6e8c21300ea5" => "ID3D11VideoProcessorInputView",
         "1217d7a6-5039-418c-b042-9cbe256afd6e" => "ID3D11RasterizerState1",
@@ -266,6 +272,9 @@ pub fn iid_name(iid: &str) -> Option<&'static str> {
 pub fn base_of(interface: &str) -> Option<&'static str> {
     Some(match interface {
         "ID3D10Blob" => "IUnknown",
+        "IDirectDraw7" => "IUnknown",
+        "IDirectSound8" => "IUnknown",
+        "IDirectSoundBuffer8" => "IUnknown",
         "ID3D11Asynchronous" => "ID3D11DeviceChild",
         "ID3D11AuthenticatedChannel" => "ID3D11DeviceChild",
         "ID3D11BlendState" => "ID3D11DeviceChild",

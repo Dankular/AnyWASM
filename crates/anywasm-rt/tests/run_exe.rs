@@ -1,6 +1,68 @@
 //! End-to-end: load real Windows x64 executables (built by fixtures/build.sh) and run them.
 use anywasm_cpu::mem::{PAGE_SIZE, PROT_RWX};
+use anywasm_cpu::cpu::{RAX, RSP, CpuMode};
 use anywasm_rt::{Process, Stop, Vfs};
+use anywasm_rt::process::{EXIT_MAGIC, TEB_ADDR};
+
+fn minimal_pe32(code: &[u8]) -> Vec<u8> {
+    assert!(code.len() <= 0x200);
+    let mut pe = vec![0u8; 0x400];
+    let put16 = |b: &mut [u8], at: usize, v: u16| b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    let put32 = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    pe[..2].copy_from_slice(b"MZ");
+    put32(&mut pe, 0x3c, 0x80);
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    let coff = 0x84;
+    put16(&mut pe, coff, 0x014c);
+    put16(&mut pe, coff + 2, 1);
+    put16(&mut pe, coff + 16, 224);
+    put16(&mut pe, coff + 18, 0x0102);
+    let opt = coff + 20;
+    put16(&mut pe, opt, 0x010b);
+    put32(&mut pe, opt + 16, 0x1000);
+    put32(&mut pe, opt + 28, 0x0040_0000);
+    put32(&mut pe, opt + 32, 0x1000);
+    put32(&mut pe, opt + 36, 0x200);
+    put32(&mut pe, opt + 56, 0x2000);
+    put32(&mut pe, opt + 60, 0x200);
+    put16(&mut pe, opt + 68, 3);
+    put32(&mut pe, opt + 72, 0x100000);
+    put32(&mut pe, opt + 76, 0x1000);
+    put32(&mut pe, opt + 80, 0x100000);
+    put32(&mut pe, opt + 84, 0x1000);
+    put32(&mut pe, opt + 92, 16);
+    let sec = opt + 224;
+    pe[sec..sec + 5].copy_from_slice(b".text");
+    put32(&mut pe, sec + 8, 0x200);
+    put32(&mut pe, sec + 12, 0x1000);
+    put32(&mut pe, sec + 16, 0x200);
+    put32(&mut pe, sec + 20, 0x200);
+    put32(&mut pe, sec + 36, 0x60000020);
+    pe[0x200..0x200 + code.len()].copy_from_slice(code);
+    pe
+}
+
+#[test]
+fn pe32_x86_entry_executes_and_win32_import_uses_stdcall_stack_cleanup() {
+    let mut vfs = Vfs::new();
+    vfs.insert("x86_test.exe", minimal_pe32(&[0xc3]));
+    let mut process = Process::new(vfs);
+    process.load_exe("x86_test.exe", None).unwrap();
+    assert_eq!(process.cpu.mode, CpuMode::X86_32);
+
+    let stack = 0x7eff_0000;
+    let thunk = process.thunk_for("kernel32", "SetLastError", true).unwrap();
+    process.mem.write_u32(stack, 0x0040_1000).unwrap();
+    process.mem.write_u32(stack + 4, 123).unwrap();
+    process.mem.write_u32(stack + 8, EXIT_MAGIC as u32).unwrap();
+    process.cpu.gpr[RSP] = stack;
+    process.cpu.gpr[RAX] = 1;
+    process.cpu.rip = thunk;
+
+    assert_eq!(process.run_to_end(100), Stop::Exit(0));
+    assert_eq!(process.mem.read_u32(TEB_ADDR + 0x34).unwrap(), 123);
+    assert_eq!(process.cpu.gpr[RSP], stack + 12);
+}
 
 fn fixture(name: &str) -> Vec<u8> {
     let p = format!("{}/../../fixtures/{name}", env!("CARGO_MANIFEST_DIR"));

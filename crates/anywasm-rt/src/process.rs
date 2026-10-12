@@ -4,11 +4,11 @@ use crate::hle;
 use crate::vfs::Vfs;
 use anywasm_cpu::cpu::*;
 use anywasm_cpu::mem::{PROT_R, PROT_RW, PROT_RWX, PROT_X};
-use anywasm_cpu::{BlockCache, Cpu, DecodeCache, Exit, Memory};
+use anywasm_cpu::{BlockCache, Cpu, CpuMode, DecodeCache, Exit, Memory};
 use anywasm_pe::{canonical_dll, ImportName, Pe};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-pub const THUNK_BASE: u64 = 0x7ffe_0000_0000;
+pub const THUNK_BASE: u64 = 0x7100_0000;
 pub const THUNK_BYTES: u64 = 0x10_0000;
 /// Returning here ends a nested `call_guest`.
 pub const RET_MAGIC: u64 = THUNK_BASE + THUNK_BYTES - 0x10;
@@ -17,12 +17,12 @@ pub const EXIT_MAGIC: u64 = THUNK_BASE + THUNK_BYTES - 0x20;
 /// Return address installed on a newly created guest thread's stack.
 pub const THREAD_RETURN_MAGIC: u64 = THUNK_BASE + THUNK_BYTES - 0x30;
 
-pub const PEB_ADDR: u64 = 0x7ffd_0000_0000;
-pub const TEB_ADDR: u64 = 0x7ffd_0001_0000;
-pub const PARAMS_ADDR: u64 = 0x7ffd_0002_0000;
-pub const LDR_ADDR: u64 = 0x7ffd_0003_0000;
-pub const STACK_TOP: u64 = 0x7ff0_0010_0000;
-pub const HLE_MODULE_BASE: u64 = 0x7ffc_0000_0000;
+pub const PEB_ADDR: u64 = 0x7ffc_0000;
+pub const TEB_ADDR: u64 = 0x7ffc_1000;
+pub const PARAMS_ADDR: u64 = 0x7ffc_4000;
+pub const LDR_ADDR: u64 = 0x7ffd_0000;
+pub const STACK_TOP: u64 = 0x7f00_0000;
+pub const HLE_MODULE_BASE: u64 = 0x6000_0000;
 const CALLBACK_BUDGET_EXHAUSTED: &str =
     "synchronous guest callback exhausted the run budget; its continuation cannot be resumed";
 
@@ -148,6 +148,8 @@ pub struct Module {
     /// PE32+ exception directory and its validated, sorted `.pdata` entries.
     pub exception_table_rva: u32,
     pub runtime_functions: Vec<anywasm_pe::RuntimeFunction>,
+    pub resource_rva: u32,
+    pub resource_size: u32,
     /// Provided by the host (reimplemented library); `group` selects the function table.
     pub hle_group: Option<&'static str>,
 }
@@ -165,6 +167,15 @@ pub enum Handle {
         path: String,
         pos: usize,
         write: bool,
+    },
+    Mapping {
+        size: u64,
+        file_path: Option<String>,
+        protection: u8,
+    },
+    Find {
+        entries: Vec<FindEntry>,
+        next_index: usize,
     },
     Event {
         signaled: bool,
@@ -187,6 +198,12 @@ pub enum Handle {
     },
     Module(u64),
     Other,
+}
+
+#[derive(Clone, Debug)]
+pub struct FindEntry {
+    pub name: String,
+    pub size: u64,
 }
 
 pub struct Process {
@@ -236,6 +253,8 @@ pub struct Process {
     pub exit_code: Option<u32>,
     pub rng: u64,
     pub trace_imports: bool,
+    pub trace_modules_only: bool,
+    trace_export_returns: Vec<(u64, u64, u64)>,
     pub nested: u32,
     /// Set by an HLE function that has rewritten RSP/RIP itself (longjmp): skip the normal return.
     pub skip_ret: bool,
@@ -248,6 +267,156 @@ pub struct Process {
 
 fn align_up(v: u64, a: u64) -> u64 {
     (v + a - 1) & !(a - 1)
+}
+
+/// Number of stack argument bytes removed by an x86 Win32 callee. CRT and Vorbis C APIs use
+/// caller cleanup. Keep this table explicit so an unknown signature cannot silently corrupt ESP.
+fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
+    if group == "crt" || group == "vorbisfile" || name == "wsprintfA" {
+        return 0;
+    }
+    if group == "kernel32" && name == "IsBadCodePtr" {
+        return 4;
+    }
+    if group == "kernel32" {
+        match name {
+            "FindResourceA" | "FindResourceW" => return 12,
+            "FindResourceExA" | "FindResourceExW" => return 16,
+            "SizeofResource" => return 8,
+            _ => {}
+        }
+    }
+    if group == "user32" && matches!(name, "CharUpperA" | "CharLowerA") {
+        return 4;
+    }
+    if group == "user32" && matches!(name, "CharUpperBuffA" | "CharLowerBuffA") {
+        return 8;
+    }
+    if group == "user32" {
+        let args = match name {
+            "ReleaseCapture"
+            | "GetMessageTime"
+            | "GetInputState"
+            | "GetForegroundWindow"
+            | "GetDesktopWindow"
+            | "GetActiveWindow" => Some(0),
+            "GetWindowThreadProcessId"
+            | "GetCursorPos"
+            | "GetSystemMetrics"
+            | "GetAsyncKeyState"
+            | "GetKeyboardType"
+            | "GetKeyboardLayout"
+            | "IsRectEmpty"
+            | "GetKeyState"
+            | "CharUpperA"
+            | "CharLowerA" => Some(1),
+            "GetWindowLongA"
+            | "GetWindowPlacement"
+            | "GetWindowRect"
+            | "GetClientRect"
+            | "FindWindowA"
+            | "ClientToScreen"
+            | "SetCursorPos"
+            | "ClipCursor"
+            | "SetWindowTextA"
+            | "GetPropA"
+            | "RemovePropA" => Some(2),
+            "SetWindowLongA"
+            | "SetPropA"
+            | "IntersectRect"
+            | "SubtractRect"
+            | "MapVirtualKeyExA"
+            | "GetKeyNameTextA"
+            | "GetKeyNameTextW" => Some(3),
+            "SetWindowsHookExA"
+            | "PostMessageA"
+            | "PostMessageW"
+            | "PostThreadMessageA"
+            | "SendMessageA"
+            | "SendMessageW"
+            | "SendNotifyMessageA"
+            | "CallNextHookEx"
+            | "DefWindowProcA"
+            | "MapWindowPoints"
+            | "SystemParametersInfoA"
+            | "LoadStringA"
+            | "KeybdEvent"
+            | "keybd_event" => Some(4),
+            "MsgWaitForMultipleObjects"
+            | "PeekMessageA"
+            | "CallWindowProcA"
+            | "MouseEvent"
+            | "mouse_event" => Some(5),
+            "ToAsciiEx" => Some(6),
+            _ => None,
+        };
+        if let Some(args) = args {
+            return args * 4;
+        }
+    }
+    let signatures: &[(&[&str], u64)] = match group {
+        "kernel32" => &[
+            (&["GetOEMCP", "GetACP", "GetTickCount", "GetLastError", "GetCurrentThread", "GetCurrentThreadId", "GetUserDefaultLCID", "GetCurrentProcessId", "GetSystemDefaultLCID", "GetEnvironmentStrings", "GetEnvironmentStringsW", "GetCurrentProcess", "GetProcessHeap", "GetConsoleCP", "GetConsoleOutputCP", "GetVersion", "TlsAlloc", "GetCommandLineA"], 0),
+            (&["IsValidCodePage", "GetModuleHandleA", "GetModuleHandleW", "LoadLibraryA", "LoadLibraryW", "CloseHandle", "LocalFree", "GetThreadPriority", "Sleep", "SetLastError", "DeleteFileA", "GetFileAttributesA", "FreeLibrary", "OutputDebugStringA", "GetLocalTime", "SetCurrentDirectoryA", "GetSystemTimeAsFileTime", "QueryPerformanceCounter", "QueryPerformanceFrequency", "EncodePointer", "DecodePointer", "EncodeSystemPointer", "DecodeSystemPointer", "GetFileType", "GetStdHandle", "SetHandleCount", "FlushFileBuffers", "SetUnhandledExceptionFilter", "TlsGetValue", "TlsFree", "FlsAlloc", "FlsFree", "FlsGetValue", "GetStartupInfoA", "GetStartupInfoW", "GetVersionExA", "GetVersionExW", "FindClose", "GetDriveTypeA", "LockResource", "UnmapViewOfFile", "GetSystemInfo", "IsProcessorFeaturePresent", "ReleaseMutex", "FreeEnvironmentStringsA", "FreeEnvironmentStringsW", "UnhandledExceptionFilter", "HeapDestroy", "ExitProcess", "GetTimeZoneInformation", "SetEndOfFile", "GlobalMemoryStatus", "DeleteCriticalSection", "SuspendThread", "ResumeThread", "LeaveCriticalSection", "EnterCriticalSection", "InitializeCriticalSection", "DisableThreadLibraryCalls", "lstrlenA", "lstrlenW", "InterlockedIncrement", "InterlockedDecrement"], 1),
+            (&["GetCPInfo", "GetFileSize", "GetProcAddress", "WaitForSingleObject", "SetStdHandle", "SetErrorMode", "GetSystemDirectoryA", "SetConsoleCtrlHandler", "SetEnvironmentVariableA", "lstrcatA", "LoadResource", "FatalAppExitA", "CreateDirectoryA", "GetLogicalDriveStringsA", "EnumSystemLocalesA", "GetCurrentDirectoryA", "lstrcpyA", "FindFirstFileA", "FindNextFileA", "SetCursorPos", "InitializeCriticalSectionAndSpinCount", "TlsSetValue", "FlsSetValue", "SetThreadPriority", "LocalAlloc", "GlobalAlloc", "GetConsoleMode", "TerminateProcess", "InterlockedExchange", "InterlockedExchange64", "InterlockedExchangeAdd", "InterlockedExchangeAdd64", "InterlockedExchangePointer", "FreeLibraryAndExitThread", "IsBadWritePtr", "IsBadReadPtr"], 2),
+            (&["VirtualQuery", "ReleaseSemaphore", "CreateMutexA", "GetModuleFileNameA", "GetModuleFileNameW", "VirtualFree", "HeapCreate", "HeapSize", "HeapFree", "SizeofResource", "HeapAlloc"], 3),
+            (&["VirtualProtect", "WaitForSingleObjectEx", "CreateSemaphoreA", "CreateEventA", "SetFilePointer", "GetLocaleInfoA", "GetLocaleInfoW", "GetEnvironmentVariableA", "GetEnvironmentVariableW", "VirtualAlloc", "HeapReAlloc", "GetFullPathNameA", "GetOverlappedResult", "GetPrivateProfileIntA", "GetPrivateProfileIntW", "RtlUnwind", "RaiseException"], 4),
+            (&["GetStringTypeA", "GetStringTypeW", "ReadFile", "WriteFile", "WriteConsoleW", "ReadConsoleW", "MapViewOfFile", "GetDiskFreeSpaceA", "ReadFileEx", "WriteFileEx"], 5),
+            (&["CreateThread", "MultiByteToWideChar", "LCMapStringA", "LCMapStringW", "CreateFileMappingA", "CompareStringA", "CompareStringW", "GetDateFormatA", "GetTimeFormatA"], 6),
+            (&["CreateFileA", "CreateFileW"], 7),
+            (&["WideCharToMultiByte", "GetVolumeInformationA"], 8),
+        ],
+        "advapi32" => &[
+            (&["RegCloseKey"], 1),
+            (&["RegOpenKeyA"], 3),
+            (&["RegOpenKeyExA"], 5),
+            (&["RegQueryValueExA", "RegSetValueExA"], 6),
+            (&["RegCreateKeyExA"], 9),
+        ],
+        "user32" => &[
+            (&["ReleaseCapture", "PostQuitMessage", "SetCursor", "ShowCursor", "SetCapture", "UpdateWindow", "GetKeyState", "SetForegroundWindow", "DispatchMessageA", "TranslateMessage", "SetFocus", "GetMenu", "GetKeyboardLayout", "SetCursorPos", "UnhookWindowsHookEx", "RegisterWindowMessageA", "RegisterWindowMessageW", "RegisterClassA", "RegisterClassW", "RegisterClassExA", "RegisterClassExW"], 1),
+            (&["GetWindowLongA", "DestroyWindow", "ShowWindow", "LoadIconA", "LoadCursorA", "GetWindowPlacement", "ClipCursor", "GetDlgItem", "GetWindowRect", "GetClientRect", "FindWindowA", "EndDialog", "MapVirtualKeyA", "ClientToScreen", "SetWindowTextA"], 2),
+            (&["AdjustWindowRect"], 3),
+            (&["AdjustWindowRectEx", "SystemParametersInfoA", "SetTimer", "DefWindowProcA", "SendMessageA", "MessageBoxA", "SetWindowsHookExA", "SetWindowsHookExW", "CallNextHookEx"], 4),
+            (&["PeekMessageA", "DialogBoxParamA"], 5),
+            (&["SetWindowLongA"], 3),
+            (&["SetWindowPos"], 7),
+            (&["CreateWindowExA"], 12),
+        ],
+        "ole32" => &[( &["CoCreateInstance", "CoGetClassObject"], 5), (&["CoInitializeEx"], 2), (&["CoInitialize"], 1), (&["CoUninitialize"], 0)],
+        "d3d9" => &[( &["Direct3DCreate9"], 1)],
+        "dinput8" => &[( &["DirectInput8Create"], 5)],
+        "ddraw" => &[( &["DirectDrawCreateEx"], 4)],
+        "dsound" => &[( &["#11"], 3)],
+        "gdi32" => &[( &["DeleteObject"], 1)],
+        "winmm" => &[( &["timeBeginPeriod", "timeEndPeriod"], 1), (&["timeGetDevCaps"], 2)],
+        "com" => &[
+            (&["IDirectDraw7::QueryInterface", "IDirectSound8::QueryInterface", "IDirectSoundBuffer8::QueryInterface"], 3),
+            (&["IDirectDraw7::AddRef", "IDirectDraw7::Release", "IDirectDraw7::Compact", "IDirectDraw7::FlipToGDISurface", "IDirectDraw7::RestoreDisplayMode", "IDirectDraw7::RestoreAllSurfaces", "IDirectDraw7::TestCooperativeLevel"], 1),
+            (&["IDirectDraw7::GetDisplayMode", "IDirectDraw7::GetGDISurface", "IDirectDraw7::GetMonitorFrequency", "IDirectDraw7::GetScanLine", "IDirectDraw7::GetVerticalBlankStatus", "IDirectDraw7::Initialize"], 2),
+            (&["IDirectDraw7::GetFourCCCodes", "IDirectDraw7::SetCooperativeLevel", "IDirectDraw7::GetSurfaceFromDC", "IDirectDraw7::GetDeviceIdentifier", "IDirectDraw7::EvaluateMode", "IDirectDraw7::DuplicateSurface", "IDirectDraw7::GetCaps", "IDirectDraw7::WaitForVerticalBlank"], 3),
+            (&["IDirectDraw7::CreateClipper", "IDirectDraw7::CreateSurface", "IDirectDraw7::GetAvailableVidMem", "IDirectDraw7::StartModeTest"], 4),
+            (&["IDirectDraw7::EnumDisplayModes", "IDirectDraw7::EnumSurfaces", "IDirectDraw7::CreatePalette"], 5),
+            (&["IDirectDraw7::SetDisplayMode"], 6),
+            (&["IDirectSound8::AddRef", "IDirectSound8::Release", "IDirectSound8::Compact"], 1),
+            (&["IDirectSoundBuffer8::AddRef", "IDirectSoundBuffer8::Release", "IDirectSoundBuffer8::Stop", "IDirectSoundBuffer8::Restore"], 1),
+            (&["IDirectSound8::GetCaps", "IDirectSound8::GetSpeakerConfig", "IDirectSound8::SetSpeakerConfig", "IDirectSound8::Initialize", "IDirectSound8::VerifyCertification"], 2),
+            (&["IDirectSound8::DuplicateSoundBuffer", "IDirectSound8::SetCooperativeLevel"], 3),
+            (&["IDirectSound8::CreateSoundBuffer"], 4),
+            (&["IDirectSoundBuffer8::GetCaps", "IDirectSoundBuffer8::GetVolume", "IDirectSoundBuffer8::GetPan", "IDirectSoundBuffer8::GetFrequency", "IDirectSoundBuffer8::GetStatus", "IDirectSoundBuffer8::SetCurrentPosition", "IDirectSoundBuffer8::SetFormat", "IDirectSoundBuffer8::SetVolume", "IDirectSoundBuffer8::SetPan", "IDirectSoundBuffer8::SetFrequency"], 2),
+            (&["IDirectSoundBuffer8::GetCurrentPosition", "IDirectSoundBuffer8::Initialize"], 3),
+            (&["IDirectSoundBuffer8::GetFormat", "IDirectSoundBuffer8::Play", "IDirectSoundBuffer8::SetFX", "IDirectSoundBuffer8::AcquireResources"], 4),
+            (&["IDirectSoundBuffer8::Unlock"], 5),
+            (&["IDirectSoundBuffer8::Lock"], 8),
+            (&["IDirectSoundBuffer8::GetObjectInPath"], 5),
+        ],
+        _ => &[],
+    };
+    let args = signatures
+        .iter()
+        .find_map(|(names, count)| names.contains(&name).then_some(*count))
+        .unwrap_or(0);
+    args * 4
 }
 
 impl Process {
@@ -310,6 +479,8 @@ impl Process {
             exit_code: None,
             rng: 0x2545_F491_4F6C_DD1D,
             trace_imports: false,
+            trace_modules_only: false,
+            trace_export_returns: Vec::new(),
             nested: 0,
             skip_ret: false,
             yield_request: None,
@@ -343,6 +514,13 @@ impl Process {
             .read_u64(a)
             .map_err(|e| Stop::Crash(format!("read fault {:#x}: {e:?}", a)))
     }
+    pub fn rdptr(&self, a: u64) -> Result<u64, Stop> {
+        if self.cpu.mode == CpuMode::X86_32 {
+            Ok(self.rd32(a)? as u64)
+        } else {
+            self.rd64(a)
+        }
+    }
     pub fn wr8(&mut self, a: u64, v: u8) -> Result<(), Stop> {
         self.mem
             .write_u8(a, v)
@@ -362,6 +540,13 @@ impl Process {
         self.mem
             .write_u64(a, v)
             .map_err(|e| Stop::Crash(format!("write fault {:#x}: {e:?}", a)))
+    }
+    pub fn wrptr(&mut self, a: u64, v: u64) -> Result<(), Stop> {
+        if self.cpu.mode == CpuMode::X86_32 {
+            self.wr32(a, v as u32)
+        } else {
+            self.wr64(a, v)
+        }
     }
     pub fn read_bytes(&self, a: u64, n: usize) -> Result<Vec<u8>, Stop> {
         self.mem
@@ -398,8 +583,14 @@ impl Process {
 
     // ── calling convention ───────────────────────────────────────────────────
 
-    /// Integer/pointer argument `n` of the HLE call currently in progress (Win64 ABI).
+    /// Integer/pointer argument `n` of the HLE call currently in progress.
     pub fn arg(&self, n: usize) -> u64 {
+        if self.cpu.mode == CpuMode::X86_32 {
+            return self
+                .mem
+                .read_u32(self.cpu.gpr[RSP].wrapping_add(4 + 4 * n as u64))
+                .unwrap_or(0) as u64;
+        }
         match n {
             0 => self.cpu.gpr[RCX],
             1 => self.cpu.gpr[RDX],
@@ -422,7 +613,8 @@ impl Process {
     }
 
     pub fn set_last_error(&mut self, e: u32) {
-        let _ = self.mem.write_u32(TEB_ADDR + 0x68, e);
+        let offset = if self.cpu.mode == CpuMode::X86_32 { 0x34 } else { 0x68 };
+        let _ = self.mem.write_u32(TEB_ADDR + offset, e);
     }
 
     pub fn now_ticks(&self) -> u64 {
@@ -448,12 +640,18 @@ impl Process {
         let stack_limit = self.alloc_virtual(0x10000, PROT_RW);
         let stack_base = stack_limit + 0x10000;
         let stack_pointer = stack_base - 8;
-        self.wr64(stack_pointer, THREAD_RETURN_MAGIC)?;
+        self.wrptr(stack_pointer, THREAD_RETURN_MAGIC)?;
         let mut cpu = Cpu::new();
+        cpu.mode = self.cpu.mode;
         cpu.rip = start;
         cpu.gpr[RSP] = stack_pointer;
-        cpu.gpr[RCX] = parameter;
-        cpu.gs_base = TEB_ADDR;
+        if cpu.mode == CpuMode::X86_32 {
+            self.wr32(stack_pointer + 4, parameter as u32)?;
+            cpu.fs_base = TEB_ADDR;
+        } else {
+            cpu.gpr[RCX] = parameter;
+            cpu.gs_base = TEB_ADDR;
+        }
         let teb_tls_vector = self.build_static_tls_vector()?;
         let state = if suspended {
             ThreadState::Suspended
@@ -515,12 +713,18 @@ impl Process {
         if matches!(self.current_thread_state, ThreadState::Exited(_)) {
             return Ok(());
         }
+        let (stack_base_offset, stack_limit_offset, tls_vector_offset, last_error_offset) =
+            if self.cpu.mode == CpuMode::X86_32 {
+                (0x04, 0x08, 0x2c, 0x34)
+            } else {
+                (0x08, 0x10, 0x58, 0x68)
+            };
         let context = GuestThread {
             cpu: self.cpu.clone(),
-            stack_base: self.rd64(TEB_ADDR + 0x08)?,
-            stack_limit: self.rd64(TEB_ADDR + 0x10)?,
-            teb_tls_vector: self.rd64(TEB_ADDR + 0x58)?,
-            last_error: self.rd32(TEB_ADDR + 0x68)?,
+            stack_base: self.rdptr(TEB_ADDR + stack_base_offset)?,
+            stack_limit: self.rdptr(TEB_ADDR + stack_limit_offset)?,
+            teb_tls_vector: self.rdptr(TEB_ADDR + tls_vector_offset)?,
+            last_error: self.rd32(TEB_ADDR + last_error_offset)?,
             tls: std::mem::take(&mut self.tls_slots),
             fls: std::mem::take(&mut self.fls),
             state: self.current_thread_state.clone(),
@@ -551,12 +755,23 @@ impl Process {
         self.current_thread_saved = false;
         self.tls_slots = context.tls;
         self.fls = context.fls;
-        self.wr64(TEB_ADDR + 0x08, context.stack_base)?;
-        self.wr64(TEB_ADDR + 0x10, context.stack_limit)?;
-        self.wr64(TEB_ADDR + 0x58, context.teb_tls_vector)?;
-        self.wr64(TEB_ADDR + 0x48, id as u64)?;
-        self.wr32(TEB_ADDR + 0x68, context.last_error)?;
-        self.cpu.gs_base = TEB_ADDR;
+        if self.cpu.mode == CpuMode::X86_32 {
+            self.wr32(TEB_ADDR + 0x04, context.stack_base as u32)?;
+            self.wr32(TEB_ADDR + 0x08, context.stack_limit as u32)?;
+            self.wr32(TEB_ADDR + 0x2c, context.teb_tls_vector as u32)?;
+            self.wr32(TEB_ADDR + 0x24, id)?;
+            self.wr32(TEB_ADDR + 0x34, context.last_error)?;
+            self.cpu.fs_base = TEB_ADDR;
+            self.cpu.gs_base = 0;
+        } else {
+            self.wr64(TEB_ADDR + 0x08, context.stack_base)?;
+            self.wr64(TEB_ADDR + 0x10, context.stack_limit)?;
+            self.wr64(TEB_ADDR + 0x58, context.teb_tls_vector)?;
+            self.wr64(TEB_ADDR + 0x48, id as u64)?;
+            self.wr32(TEB_ADDR + 0x68, context.last_error)?;
+            self.cpu.gs_base = TEB_ADDR;
+            self.cpu.fs_base = 0;
+        }
         Ok(())
     }
 
@@ -1019,6 +1234,8 @@ impl Process {
             ordinals: HashMap::new(),
             exception_table_rva: 0,
             runtime_functions: Vec::new(),
+            resource_rva: 0,
+            resource_size: 0,
             hle_group: Some(group),
         });
         self.modules.len() - 1
@@ -1031,6 +1248,20 @@ impl Process {
             .get(path)
             .ok_or_else(|| format!("{path}: not in VFS"))?
             .clone();
+        let pe = Pe::parse(&data).map_err(|e| format!("{path}: {e}"))?;
+        self.cpu.mode = match (pe.is_64, pe.machine) {
+            (true, anywasm_pe::MACHINE_AMD64) => CpuMode::X86_64,
+            (false, anywasm_pe::MACHINE_I386) => CpuMode::X86_32,
+            _ => {
+                return Err(format!(
+                    "{path}: unsupported PE machine/magic combination (machine {:#x}, PE32+={})",
+                    pe.machine, pe.is_64
+                ));
+            }
+        };
+        if self.cpu.mode == CpuMode::X86_32 {
+            self.vmem_next = 0x2000_0000;
+        }
         self.image_path = if path.contains(':') {
             path.to_string()
         } else {
@@ -1042,25 +1273,40 @@ impl Process {
         self.setup_teb_peb();
         let idx = self.load_image(&data, &self.image_path.clone(), false)?;
         let m = self.modules[idx].clone();
-        self.mem
-            .write_u64(PEB_ADDR + 0x10, m.base)
-            .map_err(|e| format!("{e:?}"))?;
+        if self.cpu.mode == CpuMode::X86_32 {
+            self.mem
+                .write_u32(PEB_ADDR + 0x08, m.base as u32)
+                .map_err(|e| format!("{e:?}"))?;
+        } else {
+            self.mem
+                .write_u64(PEB_ADDR + 0x10, m.base)
+                .map_err(|e| format!("{e:?}"))?;
+        }
         // Stack
-        let pe = Pe::parse(&data).map_err(|e| e.to_string())?;
         let reserve = pe.stack_reserve.clamp(0x10_0000, 0x100_0000);
         let stack_base = STACK_TOP - reserve;
         self.mem.map(stack_base, reserve, PROT_RW);
-        let rsp = STACK_TOP - 0x28;
-        self.cpu.gpr[RSP] = rsp;
-        self.mem.write_u64(TEB_ADDR + 0x08, STACK_TOP).unwrap();
-        self.mem.write_u64(TEB_ADDR + 0x10, stack_base).unwrap();
-        // Return address of the entry point: exit with whatever it returned.
-        self.cpu.gpr[RSP] -= 8;
-        self.mem.write_u64(self.cpu.gpr[RSP], EXIT_MAGIC).unwrap();
+        if self.cpu.mode == CpuMode::X86_32 {
+            self.cpu.gpr[RSP] = STACK_TOP - 4;
+            self.cpu.gpr[RSP] -= 4;
+            self.mem
+                .write_u32(self.cpu.gpr[RSP], EXIT_MAGIC as u32)
+                .unwrap();
+            self.mem.write_u32(TEB_ADDR + 0x04, STACK_TOP as u32).unwrap();
+            self.mem.write_u32(TEB_ADDR + 0x08, stack_base as u32).unwrap();
+            self.cpu.fs_base = TEB_ADDR;
+            self.cpu.gs_base = 0;
+        } else {
+            self.cpu.gpr[RSP] = STACK_TOP - 0x28;
+            self.mem.write_u64(TEB_ADDR + 0x08, STACK_TOP).unwrap();
+            self.mem.write_u64(TEB_ADDR + 0x10, stack_base).unwrap();
+            self.cpu.gpr[RSP] -= 8;
+            self.mem.write_u64(self.cpu.gpr[RSP], EXIT_MAGIC).unwrap();
+            self.cpu.gs_base = TEB_ADDR;
+            self.cpu.fs_base = 0;
+        }
         self.cpu.rip = m.entry;
-        self.cpu.gpr[RCX] = PEB_ADDR;
-        self.cpu.gs_base = TEB_ADDR;
-        self.cpu.fs_base = 0;
+        self.cpu.gpr[RCX] = if self.cpu.mode == CpuMode::X86_64 { PEB_ADDR } else { 0 };
         self.run_dll_inits(idx)?;
         self.cpu.rip = m.entry;
         Ok(())
@@ -1077,49 +1323,82 @@ impl Process {
         }
         let m = &mut self.mem;
         m.write_u8(PEB_ADDR + 0x02, 0).unwrap(); // BeingDebugged = 0
-        m.write_u64(PEB_ADDR + 0x18, LDR_ADDR).unwrap();
-        m.write_u64(PEB_ADDR + 0x20, PARAMS_ADDR).unwrap();
-        m.write_u32(PEB_ADDR + 0xb8, 1).unwrap(); // NumberOfProcessors
-        m.write_u32(PEB_ADDR + 0x118, 10).unwrap(); // Windows 10.0.19045
-        m.write_u32(PEB_ADDR + 0x11c, 0).unwrap();
-        m.write_u16(PEB_ADDR + 0x120, 19045).unwrap();
-        m.write_u32(PEB_ADDR + 0x124, 2).unwrap(); // VER_PLATFORM_WIN32_NT
-        m.write_u64(TEB_ADDR + 0x30, TEB_ADDR).unwrap();
-        m.write_u64(TEB_ADDR + 0x40, 0x1000).unwrap(); // ClientId.UniqueProcess
-        m.write_u64(TEB_ADDR + 0x48, 0x1004).unwrap(); // ClientId.UniqueThread
-        m.write_u64(TEB_ADDR + 0x60, PEB_ADDR).unwrap();
-        // PEB_LDR_DATA with three empty circular lists.
-        m.write_u32(LDR_ADDR, 0x58).unwrap();
-        m.write_u8(LDR_ADDR + 4, 1).unwrap();
-        for off in [0x10u64, 0x20, 0x30] {
-            m.write_u64(LDR_ADDR + off, LDR_ADDR + off).unwrap();
-            m.write_u64(LDR_ADDR + off + 8, LDR_ADDR + off).unwrap();
+        if self.cpu.mode == CpuMode::X86_32 {
+            m.write_u32(PEB_ADDR + 0x0c, LDR_ADDR as u32).unwrap();
+            m.write_u32(PEB_ADDR + 0x10, PARAMS_ADDR as u32).unwrap();
+            m.write_u32(PEB_ADDR + 0x18, self.heap.process_heap as u32).unwrap();
+            m.write_u32(PEB_ADDR + 0x64, 1).unwrap(); // NumberOfProcessors
+            m.write_u32(PEB_ADDR + 0xa4, 10).unwrap(); // Windows 10.0.19045
+            m.write_u32(PEB_ADDR + 0xa8, 0).unwrap();
+            m.write_u16(PEB_ADDR + 0xac, 19045).unwrap();
+            m.write_u32(PEB_ADDR + 0xb0, 2).unwrap(); // VER_PLATFORM_WIN32_NT
+            m.write_u32(TEB_ADDR + 0x18, TEB_ADDR as u32).unwrap();
+            m.write_u32(TEB_ADDR + 0x20, 0x1000).unwrap(); // ClientId.UniqueProcess
+            m.write_u32(TEB_ADDR + 0x24, 0x1004).unwrap(); // ClientId.UniqueThread
+            m.write_u32(TEB_ADDR + 0x2c, 0).unwrap(); // ThreadLocalStoragePointer
+            m.write_u32(TEB_ADDR + 0x30, PEB_ADDR as u32).unwrap();
+            m.write_u32(TEB_ADDR + 0x34, 0).unwrap(); // LastErrorValue
+            m.write_u32(LDR_ADDR, 0x30).unwrap();
+            m.write_u8(LDR_ADDR + 4, 1).unwrap();
+            for off in [0x0cu64, 0x14, 0x1c] {
+                m.write_u32(LDR_ADDR + off, (LDR_ADDR + off) as u32).unwrap();
+                m.write_u32(LDR_ADDR + off + 4, (LDR_ADDR + off) as u32).unwrap();
+            }
+            m.write_u32(PARAMS_ADDR, 0x1000).unwrap();
+            m.write_u32(PARAMS_ADDR + 4, 0x400).unwrap();
+        } else {
+            m.write_u64(PEB_ADDR + 0x18, LDR_ADDR).unwrap();
+            m.write_u64(PEB_ADDR + 0x20, PARAMS_ADDR).unwrap();
+            m.write_u32(PEB_ADDR + 0xb8, 1).unwrap(); // NumberOfProcessors
+            m.write_u32(PEB_ADDR + 0x118, 10).unwrap(); // Windows 10.0.19045
+            m.write_u32(PEB_ADDR + 0x11c, 0).unwrap();
+            m.write_u16(PEB_ADDR + 0x120, 19045).unwrap();
+            m.write_u32(PEB_ADDR + 0x124, 2).unwrap(); // VER_PLATFORM_WIN32_NT
+            m.write_u64(TEB_ADDR + 0x30, TEB_ADDR).unwrap();
+            m.write_u64(TEB_ADDR + 0x40, 0x1000).unwrap(); // ClientId.UniqueProcess
+            m.write_u64(TEB_ADDR + 0x48, 0x1004).unwrap(); // ClientId.UniqueThread
+            m.write_u64(TEB_ADDR + 0x60, PEB_ADDR).unwrap();
+            m.write_u32(LDR_ADDR, 0x58).unwrap();
+            m.write_u8(LDR_ADDR + 4, 1).unwrap();
+            for off in [0x10u64, 0x20, 0x30] {
+                m.write_u64(LDR_ADDR + off, LDR_ADDR + off).unwrap();
+                m.write_u64(LDR_ADDR + off + 8, LDR_ADDR + off).unwrap();
+            }
+            m.write_u32(PARAMS_ADDR, 0x1000).unwrap();
+            m.write_u32(PARAMS_ADDR + 4, 0x400).unwrap();
+            m.write_u64(PEB_ADDR + 0x30, self.heap.process_heap).unwrap();
         }
-        // RTL_USER_PROCESS_PARAMETERS: strings are filled in lazily by `finish_params`.
-        m.write_u32(PARAMS_ADDR, 0x1000).unwrap();
-        m.write_u32(PARAMS_ADDR + 4, 0x400).unwrap();
-        // Heap bookkeeping needs a process heap handle.
-        let h = self.heap.process_heap;
-        self.mem.write_u64(PEB_ADDR + 0x30, h).unwrap();
         self.finish_params();
     }
 
     fn finish_params(&mut self) {
         let img = self.image_path.clone();
         let cmd = self.cmdline.clone();
-        let strs: [(u64, &str); 3] = [(0x60, &img), (0x70, &cmd), (0x38, "C:\\")];
+        let (strs, handles): ([(u64, &str); 3], [u64; 3]) = if self.cpu.mode == CpuMode::X86_32 {
+            ([(0x38, &img), (0x40, &cmd), (0x28, "C:\\")], [0x18, 0x1c, 0x20])
+        } else {
+            ([(0x60, &img), (0x70, &cmd), (0x38, "C:\\")], [0x20, 0x28, 0x30])
+        };
         for (i, (off, s)) in strs.iter().enumerate() {
             let buf = PARAMS_ADDR + 0x400 + (i as u64) * 0x400;
             let _ = self.write_wstr(buf, s);
             let bytes = (s.encode_utf16().count() * 2) as u16;
             let _ = self.mem.write_u16(PARAMS_ADDR + off, bytes);
             let _ = self.mem.write_u16(PARAMS_ADDR + off + 2, bytes + 2);
-            let _ = self.mem.write_u64(PARAMS_ADDR + off + 8, buf);
+            if self.cpu.mode == CpuMode::X86_32 {
+                let _ = self.mem.write_u32(PARAMS_ADDR + off + 4, buf as u32);
+            } else {
+                let _ = self.mem.write_u64(PARAMS_ADDR + off + 8, buf);
+            }
         }
         // Standard handles (pseudo handles recognised by our HLE).
-        let _ = self.mem.write_u64(PARAMS_ADDR + 0x20, 0x10);
-        let _ = self.mem.write_u64(PARAMS_ADDR + 0x28, 0x14);
-        let _ = self.mem.write_u64(PARAMS_ADDR + 0x30, 0x18);
+        for (offset, handle) in handles.into_iter().zip([0x10u32, 0x14, 0x18]) {
+            if self.cpu.mode == CpuMode::X86_32 {
+                let _ = self.mem.write_u32(PARAMS_ADDR + offset, handle);
+            } else {
+                let _ = self.mem.write_u64(PARAMS_ADDR + offset, handle as u64);
+            }
+        }
     }
 
     /// Map a PE64 image. Returns the module index.
@@ -1130,22 +1409,37 @@ impl Process {
         as_dll_hint: bool,
     ) -> Result<usize, String> {
         let pe = Pe::parse(data).map_err(|e| format!("{path}: {e}"))?;
-        if !pe.is_64 || pe.machine != anywasm_pe::MACHINE_AMD64 {
+        let supported_mode = match (pe.is_64, pe.machine) {
+            (true, anywasm_pe::MACHINE_AMD64) => CpuMode::X86_64,
+            (false, anywasm_pe::MACHINE_I386) => CpuMode::X86_32,
+            _ => {
+                return Err(format!(
+                    "{path}: unsupported PE machine/magic combination (machine {:#x}, PE32+={})",
+                    pe.machine, pe.is_64
+                ));
+            }
+        };
+        if supported_mode != self.cpu.mode {
             return Err(format!(
-                "{path}: not a PE32+ x86-64 image (machine {:#x})",
-                pe.machine
+                "{path}: image bitness does not match process mode ({:?})",
+                self.cpu.mode,
             ));
         }
         let runtime_functions = pe
             .runtime_functions()
             .map_err(|error| format!("{path}: {error}"))?;
         let exception_table_rva = pe.dirs[anywasm_pe::DIR_EXCEPTION].rva;
+        let resource_rva = pe.dirs[anywasm_pe::DIR_RESOURCE].rva;
+        let resource_size = pe.dirs[anywasm_pe::DIR_RESOURCE].size;
         let size = align_up(pe.size_of_image as u64, 0x1000);
         let base = if self.range_free(pe.image_base, size) {
             pe.image_base
         } else if pe.has_relocs() {
             self.mem
-                .find_free(0x1_8000_0000, size + 0x1_0000)
+                .find_free(
+                    if self.cpu.mode == CpuMode::X86_32 { 0x1000_0000 } else { 0x1_8000_0000 },
+                    size + 0x1_0000,
+                )
                 .ok_or("no address space for image")?
         } else {
             return Err(format!(
@@ -1235,6 +1529,8 @@ impl Process {
             ordinals,
             exception_table_rva,
             runtime_functions,
+            resource_rva,
+            resource_size,
             hle_group: None,
         });
         self.add_ldr_entry(idx);
@@ -1243,9 +1539,16 @@ impl Process {
             let provider = self.resolve_dll(&imp.dll)?;
             for e in &imp.entries {
                 let addr = self.bind_import(provider, &imp.dll, &e.name)?;
-                self.mem
-                    .write_force(base + e.iat_rva as u64, &addr.to_le_bytes())
-                    .map_err(|er| format!("{er:?}"))?;
+                let iat = base + e.iat_rva as u64;
+                if self.cpu.mode == CpuMode::X86_32 {
+                    self.mem
+                        .write_force(iat, &(addr as u32).to_le_bytes())
+                        .map_err(|er| format!("{er:?}"))?;
+                } else {
+                    self.mem
+                        .write_force(iat, &addr.to_le_bytes())
+                        .map_err(|er| format!("{er:?}"))?;
+                }
             }
         }
         // forwarded exports are resolved after imports
@@ -1311,30 +1614,52 @@ impl Process {
         if slot + 0x200 > LDR_ADDR + 0x1_0000 {
             return;
         }
-        let _ = self.mem.write_u64(slot + 0x30, m.base);
-        let _ = self.mem.write_u64(slot + 0x38, m.entry);
-        let _ = self.mem.write_u32(slot + 0x40, m.size as u32);
         let full = slot + 0x80;
         let base_s = slot + 0x140;
         let _ = self.write_wstr(full, &m.path);
         let _ = self.write_wstr(base_s, &m.name);
         let fl = (m.path.encode_utf16().count() * 2) as u16;
         let bl = (m.name.encode_utf16().count() * 2) as u16;
-        let _ = self.mem.write_u16(slot + 0x48, fl);
-        let _ = self.mem.write_u16(slot + 0x4a, fl + 2);
-        let _ = self.mem.write_u64(slot + 0x50, full);
-        let _ = self.mem.write_u16(slot + 0x58, bl);
-        let _ = self.mem.write_u16(slot + 0x5a, bl + 2);
-        let _ = self.mem.write_u64(slot + 0x60, base_s);
+        let lists = if self.cpu.mode == CpuMode::X86_32 {
+            let _ = self.mem.write_u32(slot + 0x18, m.base as u32);
+            let _ = self.mem.write_u32(slot + 0x1c, m.entry as u32);
+            let _ = self.mem.write_u32(slot + 0x20, m.size as u32);
+            let _ = self.mem.write_u16(slot + 0x24, fl);
+            let _ = self.mem.write_u16(slot + 0x26, fl + 2);
+            let _ = self.mem.write_u32(slot + 0x28, full as u32);
+            let _ = self.mem.write_u16(slot + 0x2c, bl);
+            let _ = self.mem.write_u16(slot + 0x2e, bl + 2);
+            let _ = self.mem.write_u32(slot + 0x30, base_s as u32);
+            vec![(0x0cu64, 0x00u64), (0x14, 0x08)]
+        } else {
+            let _ = self.mem.write_u64(slot + 0x30, m.base);
+            let _ = self.mem.write_u64(slot + 0x38, m.entry);
+            let _ = self.mem.write_u32(slot + 0x40, m.size as u32);
+            let _ = self.mem.write_u16(slot + 0x48, fl);
+            let _ = self.mem.write_u16(slot + 0x4a, fl + 2);
+            let _ = self.mem.write_u64(slot + 0x50, full);
+            let _ = self.mem.write_u16(slot + 0x58, bl);
+            let _ = self.mem.write_u16(slot + 0x5a, bl + 2);
+            let _ = self.mem.write_u64(slot + 0x60, base_s);
+            vec![(0x10u64, 0x00u64), (0x20, 0x10)]
+        };
         // Insert at the tail of the load-order and memory-order lists.
-        for (head_off, link_off) in [(0x10u64, 0x00u64), (0x20, 0x10)] {
+        for (head_off, link_off) in lists {
             let head = LDR_ADDR + head_off;
             let node = slot + link_off;
-            let tail = self.mem.read_u64(head + 8).unwrap_or(head);
-            let _ = self.mem.write_u64(node, head);
-            let _ = self.mem.write_u64(node + 8, tail);
-            let _ = self.mem.write_u64(tail, node);
-            let _ = self.mem.write_u64(head + 8, node);
+            if self.cpu.mode == CpuMode::X86_32 {
+                let tail = self.mem.read_u32(head + 4).unwrap_or(head as u32) as u64;
+                let _ = self.mem.write_u32(node, head as u32);
+                let _ = self.mem.write_u32(node + 4, tail as u32);
+                let _ = self.mem.write_u32(tail, node as u32);
+                let _ = self.mem.write_u32(head + 4, node as u32);
+            } else {
+                let tail = self.mem.read_u64(head + 8).unwrap_or(head);
+                let _ = self.mem.write_u64(node, head);
+                let _ = self.mem.write_u64(node + 8, tail);
+                let _ = self.mem.write_u64(tail, node);
+                let _ = self.mem.write_u64(head + 8, node);
+            }
         }
     }
 
@@ -1511,6 +1836,31 @@ impl Process {
     /// Call a guest function with integer args and run until it returns. Re-entrant.
     pub fn call_guest(&mut self, addr: u64, args: &[u64]) -> Result<u64, Stop> {
         let saved = self.cpu.clone();
+        if self.cpu.mode == CpuMode::X86_32 {
+            let sp = (self.cpu.gpr[RSP].wrapping_sub((args.len() as u64 + 1) * 4)) & !3;
+            self.wr32(sp, RET_MAGIC as u32)?;
+            for (index, argument) in args.iter().enumerate() {
+                self.wr32(sp + 4 + index as u64 * 4, *argument as u32)?;
+            }
+            self.cpu.gpr[RSP] = sp;
+            self.cpu.rip = addr as u32 as u64;
+            self.cpu.fs_base = TEB_ADDR;
+            self.nested += 1;
+            let r = self.run_until_magic();
+            self.nested -= 1;
+            let ret = self.cpu.gpr[RAX] as u32 as u64;
+            let keep_exit = self.exit_code;
+            self.cpu = saved;
+            return match r {
+                Ok(()) => Ok(ret),
+                Err(Stop::StepLimit) => Err(Stop::Crash(CALLBACK_BUDGET_EXHAUSTED.into())),
+                Err(Stop::Exit(c)) => {
+                    self.exit_code = keep_exit.or(Some(c));
+                    Err(Stop::Exit(c))
+                }
+                Err(e) => Err(e),
+            };
+        }
         // Build a Win64 frame below the current stack pointer: [shadow 0x20][stack args][ret addr].
         let nstack = args.len().saturating_sub(4) as u64;
         let mut sp = self.cpu.gpr[RSP].wrapping_sub(0x200) & !0xf;
@@ -1544,14 +1894,46 @@ impl Process {
     }
 
     fn run_until_magic(&mut self) -> Result<(), Stop> {
+        let mut recent = VecDeque::with_capacity(128);
         loop {
             if self.cpu.rip == RET_MAGIC {
                 return Ok(());
             }
             self.ensure_run_budget(1)?;
-            match self.step_once()? {
-                None => {}
-                Some(stop) => return Err(stop),
+            if self.trace_imports && self.cpu.mode == CpuMode::X86_32 {
+                let rip = self.cpu.rip as u32 as u64;
+                let bytes = (0..8)
+                    .map(|offset| self.mem.read_u8(rip.wrapping_add(offset)).ok())
+                    .take_while(Option::is_some)
+                    .flatten()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if recent.len() == 128 {
+                    recent.pop_front();
+                }
+                recent.push_back(format!(
+                    "  rip={rip:#010x} rsp={:#010x} ebp={:#010x} eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} code=[{bytes}]",
+                    self.cpu.gpr[RSP] as u32,
+                    self.cpu.gpr[RBP] as u32,
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RBX] as u32,
+                    self.cpu.gpr[RCX] as u32,
+                    self.cpu.gpr[RDX] as u32,
+                    self.cpu.gpr[RSI] as u32,
+                    self.cpu.gpr[RDI] as u32
+                ));
+            }
+            match self.step_once() {
+                Ok(None) => {}
+                Ok(Some(stop)) => return Err(stop),
+                Err(Stop::Crash(message)) if !recent.is_empty() => {
+                    let trace = recent.into_iter().collect::<Vec<_>>().join("\n");
+                    return Err(Stop::Crash(format!(
+                        "{message}\nrecent x86 instructions:\n{trace}"
+                    )));
+                }
+                Err(stop) => return Err(stop),
             }
         }
     }
@@ -1559,6 +1941,69 @@ impl Process {
     /// Execute one instruction or one HLE call. `Ok(Some(stop))` only for terminal conditions.
     fn step_once(&mut self) -> Result<Option<Stop>, Stop> {
         let rip = self.cpu.rip;
+        let opcode = self.mem.read_u8(rip).unwrap_or(0);
+        let trace_api_boundary = self.trace_modules_only
+            && self.cpu.mode == CpuMode::X86_32
+            && matches!(opcode, 0xe8 | 0xff | 0xc2 | 0xc3);
+        let from_module = trace_api_boundary
+            .then(|| self.module_for(rip).map(str::to_owned))
+            .flatten();
+        let stack_args = if trace_api_boundary && matches!(opcode, 0xe8 | 0xff) {
+            let sp = self.cpu.gpr[RSP] as u32 as u64;
+            (0..6)
+                .map(|index| self.rd32(sp + index * 4).unwrap_or(0))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if self.trace_modules_only && self.cpu.mode == CpuMode::X86_32 {
+            let rip32 = rip as u32 as u64;
+            let sp = self.cpu.gpr[RSP] as u32 as u64;
+            if let Some(index) = self
+                .trace_export_returns
+                .iter()
+                .position(|(return_address, entry_sp, _)| {
+                    *return_address == rip32 && sp > *entry_sp
+                })
+            {
+                let (_, _, output_address) = self.trace_export_returns.remove(index);
+                let output = self.rd32(output_address).unwrap_or(0);
+                self.stderr.extend_from_slice(
+                    format!(
+                        "[guest-export] DirectInput8Create return eax={:#x} out@{:#x}={:#x} esp={sp:#x}\n",
+                        self.cpu.gpr[RAX] as u32,
+                        output_address,
+                        output
+                    )
+                    .as_bytes(),
+                );
+            }
+            let export_entry = self
+                .modules
+                .iter()
+                .find(|module| {
+                    module.name.eq_ignore_ascii_case("dinput8.dll")
+                        && module.exports.get("DirectInput8Create") == Some(&rip32)
+                })
+                .is_some();
+            if export_entry {
+                let return_address = self.rd32(sp).unwrap_or(0) as u64;
+                let hinstance = self.rd32(sp + 4).unwrap_or(0);
+                let version = self.rd32(sp + 8).unwrap_or(0);
+                let riid = self.rd32(sp + 12).unwrap_or(0);
+                let output_address = self.rd32(sp + 16).unwrap_or(0) as u64;
+                let outer = self.rd32(sp + 20).unwrap_or(0);
+                let prior_output = self.rd32(output_address).unwrap_or(0);
+                self.stderr.extend_from_slice(
+                    format!(
+                        "[guest-export] DirectInput8Create entry rip={rip32:#x} esp={sp:#x} ret={return_address:#x} hinst={hinstance:#x} version={version:#x} riid={riid:#x} ppv={output_address:#x} prior={prior_output:#x} outer={outer:#x}\n"
+                    )
+                    .as_bytes(),
+                );
+                self.trace_export_returns
+                    .push((return_address, sp, output_address));
+            }
+        }
         if rip >= THUNK_BASE && rip < THUNK_BASE + THUNK_BYTES {
             self.charge_retired(1)?;
             self.dispatch_thunk(rip)?;
@@ -1566,6 +2011,29 @@ impl Process {
         }
         match self.dcache.step(&mut self.cpu, &mut self.mem) {
             Ok(()) => {
+                if trace_api_boundary {
+                    let target = self.cpu.rip as u32 as u64;
+                    let to_module = self.module_for(target).map(str::to_owned);
+                    let crosses_dinput = from_module
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("dinput8.dll"))
+                        || to_module
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("dinput8.dll"));
+                    if crosses_dinput && from_module != to_module {
+                        self.stderr.extend_from_slice(
+                            format!(
+                                "[module-call] {}+{rip:#x} -> {}+{target:#x} eax={:#x} ecx={:#x} edx={:#x} stack={stack_args:?}\n",
+                                from_module.as_deref().unwrap_or("?"),
+                                to_module.as_deref().unwrap_or("?"),
+                                self.cpu.gpr[RAX] as u32,
+                                self.cpu.gpr[RCX] as u32,
+                                self.cpu.gpr[RDX] as u32
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                }
                 self.charge_retired(1)?;
                 Ok(None)
             }
@@ -1601,6 +2069,46 @@ impl Process {
             self.dispatch_thunk(rip)?;
             return Ok((1, self.yield_request.take()));
         }
+        if self.trace_imports && self.cpu.mode == CpuMode::X86_32 {
+            let mut recent = VecDeque::with_capacity(128);
+            let mut executed = 0;
+            while executed < max_instructions {
+                let rip = self.cpu.rip as u32 as u64;
+                let bytes = (0..8)
+                    .map(|offset| self.mem.read_u8(rip.wrapping_add(offset)).ok())
+                    .take_while(Option::is_some)
+                    .flatten()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if recent.len() == 128 {
+                    recent.pop_front();
+                }
+                recent.push_back(format!(
+                    "  rip={rip:#010x} rsp={:#010x} ebp={:#010x} eax={:#010x} ebx={:#010x} ecx={:#010x} edx={:#010x} esi={:#010x} edi={:#010x} code=[{bytes}]",
+                    self.cpu.gpr[RSP] as u32,
+                    self.cpu.gpr[RBP] as u32,
+                    self.cpu.gpr[RAX] as u32,
+                    self.cpu.gpr[RBX] as u32,
+                    self.cpu.gpr[RCX] as u32,
+                    self.cpu.gpr[RDX] as u32,
+                    self.cpu.gpr[RSI] as u32,
+                    self.cpu.gpr[RDI] as u32
+                ));
+                match self.step_once() {
+                    Ok(Some(stop)) => return Ok((executed + 1, Some(stop))),
+                    Ok(None) => executed += 1,
+                    Err(Stop::Crash(message)) => {
+                        let trace = recent.into_iter().collect::<Vec<_>>().join("\n");
+                        return Err(Stop::Crash(format!(
+                            "{message}\nrecent x86 instructions:\n{trace}"
+                        )));
+                    }
+                    Err(stop) => return Err(stop),
+                }
+            }
+            return Ok((executed, None));
+        }
         let (executed, result) =
             self.block_cache
                 .execute_counted(&mut self.cpu, &mut self.mem, max_instructions);
@@ -1614,12 +2122,21 @@ impl Process {
     fn describe_exit(&self, e: Exit) -> Stop {
         let c = &self.cpu;
         let stack = if self.trace_imports {
-            let words = (0..8)
-                .map(|index| self.rd64(c.gpr[RSP].saturating_add(index * 8)).unwrap_or(0))
-                .map(|word| format!("{word:#x}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(" stack=[{words}]")
+            if c.mode == CpuMode::X86_32 {
+                let words = (0..8)
+                    .map(|index| self.rd32((c.gpr[RSP] as u32).wrapping_add(index * 4) as u64).unwrap_or(0))
+                    .map(|word| format!("{word:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" stack32=[{words}]")
+            } else {
+                let words = (0..8)
+                    .map(|index| self.rd64(c.gpr[RSP].saturating_add(index * 8)).unwrap_or(0))
+                    .map(|word| format!("{word:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" stack=[{words}]")
+            }
         } else {
             String::new()
         };
@@ -1657,10 +2174,36 @@ impl Process {
             )));
         };
         let (group, name, func) = (t.group, t.name.clone(), t.func);
-        if self.trace_imports {
+        let x86_frame = if self.cpu.mode == CpuMode::X86_32 {
+            let sp = self.cpu.gpr[RSP] as u32 as u64;
+            let ra = self.rd32(sp)? as u64;
+            Some((self.cpu.clone(), sp, ra))
+        } else {
+            None
+        };
+        if x86_frame.is_some() {
+            for (index, register) in [RCX, RDX, R8, R9].into_iter().enumerate() {
+                self.cpu.gpr[register] = self.arg(index) as u32 as u64;
+            }
+        }
+        if self.trace_imports && !self.trace_modules_only {
+            if self.cpu.mode == CpuMode::X86_32 {
+                let sp = self.cpu.gpr[RSP] as u32 as u64;
+                let caller = self.rd32(sp).unwrap_or(0);
+                let args = (0..4)
+                    .map(|index| format!("{:#x}", self.rd32(sp + 4 + index * 4).unwrap_or(0)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.stderr.extend_from_slice(
+                    format!("[import32] {group}!{name} sp={sp:#x} ret={caller:#x} args=[{args}]\n")
+                        .as_bytes(),
+                );
+            }
             let traced_args = match (group, name.as_str()) {
                 ("kernel32", "HeapAlloc") => Some(3),
                 ("kernel32", "TlsGetValue") => Some(1),
+                ("kernel32", "GetModuleHandleA") => Some(1),
+                ("kernel32", "GetProcAddress") => Some(2),
                 _ => None,
             };
             let line = if let Some(arg_count) = traced_args {
@@ -1668,7 +2211,7 @@ impl Process {
                     .map(|index| format!("{:#x}", self.arg(index)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let caller = self.rd64(self.cpu.gpr[RSP]).unwrap_or(0);
+                let caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);
                 let module = self
                     .modules
                     .iter()
@@ -1685,15 +2228,29 @@ impl Process {
             };
             self.stderr.extend_from_slice(line.as_bytes());
         }
+        if self.trace_modules_only
+            && group == "com"
+            && (name.starts_with("IDirectDraw7::")
+                || name.starts_with("IDirectSound8::")
+                || name.starts_with("IDirectSoundBuffer8::"))
+        {
+            let args = (0..8)
+                .map(|index| format!("{:#x}", self.arg(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.stderr.extend_from_slice(
+                format!("[com-call] {name} args=[{args}]\n").as_bytes(),
+            );
+        }
         let Some(f) = func else {
             self.unimplemented_log
                 .push((group.to_string(), name.clone()));
-            if self.trace_imports {
+            if self.trace_imports && !self.trace_modules_only {
                 let args = (0..8)
                     .map(|index| format!("{:#x}", self.arg(index)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let caller = self.rd64(self.cpu.gpr[RSP]).unwrap_or(0);
+                let caller = self.rdptr(self.cpu.gpr[RSP]).unwrap_or(0);
                 self.stderr.extend_from_slice(
                     format!("[unimplemented] {group}!{name} args=[{args}] caller={caller:#x}\n")
                         .as_bytes(),
@@ -1709,6 +2266,13 @@ impl Process {
         self.refresh_waiters();
         if self.skip_ret {
             self.skip_ret = false;
+            return Ok(());
+        }
+        if let Some((saved_cpu, sp, ra)) = x86_frame {
+            self.cpu = saved_cpu;
+            self.cpu.gpr[RAX] = ret as u32 as u64;
+            self.cpu.gpr[RSP] = sp + 4 + stdcall_stack_bytes(group, &name);
+            self.cpu.rip = ra as u32 as u64;
             return Ok(());
         }
         // Return to the caller: rax = result, rip = [rsp], rsp += 8.
@@ -1836,6 +2400,32 @@ mod scheduler_tests {
     use super::*;
 
     const CALLBACK_ADDR: u64 = 0x20_000;
+
+    #[test]
+    fn x86_stdcall_signatures_remove_argument_bytes_for_spin_count_and_tls_set() {
+        assert_eq!(stdcall_stack_bytes("kernel32", "InitializeCriticalSectionAndSpinCount"), 8);
+        assert_eq!(stdcall_stack_bytes("kernel32", "TlsSetValue"), 8);
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetCurrentThreadId"), 0);
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetVersionExA"), 4);
+    }
+
+    #[test]
+    fn x86_import_trace_includes_recent_guest_instructions_when_a_fault_occurs() {
+        let mut process = Process::new(Vfs::new());
+        assert!(process.mem.map(CALLBACK_ADDR, 0x1000, PROT_RWX));
+        process.mem.write_u8(CALLBACK_ADDR, 0x90).unwrap();
+        process.mem.write_u8(CALLBACK_ADDR + 1, 0x0f).unwrap();
+        process.mem.write_u8(CALLBACK_ADDR + 2, 0x0b).unwrap();
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.rip = CALLBACK_ADDR;
+        process.trace_imports = true;
+
+        let Stop::Crash(message) = process.run(10) else {
+            panic!("expected an x86 decode fault");
+        };
+        assert!(message.contains("recent x86 instructions"), "{message}");
+        assert!(message.contains("rip=0x00020000"), "{message}");
+    }
 
     fn frame_after_callback(process: &mut Process) -> Result<u64, Stop> {
         process.call_guest(CALLBACK_ADDR, &[])?;
@@ -1977,6 +2567,8 @@ mod scheduler_tests {
             ordinals: HashMap::new(),
             exception_table_rva: 0,
             runtime_functions: Vec::new(),
+            resource_rva: 0,
+            resource_size: 0,
             hle_group: None,
         });
         let thunk = process.thunk_for("kernel32", "TlsGetValue", false).unwrap();
