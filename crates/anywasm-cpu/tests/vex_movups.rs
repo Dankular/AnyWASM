@@ -14,7 +14,9 @@ fn decodes_target_vcmpeqss_and_preserves_three_operand_sources() {
     assert_eq!(instruction.ops[2], Opnd::Xmm(1));
     assert_eq!(instruction.imm, 0);
 
-    assert!(decode(&[0xc5, 0xea, 0xc2, 0xc1, 0x01], 0x1000).is_err()); // unsupported predicate
+    let predicate = decode(&[0xc5, 0xea, 0xc2, 0xc1, 0x01], 0x1000).unwrap();
+    assert_eq!(predicate.op, Op::VcmpSs(1));
+    assert_eq!(predicate.imm, 1);
     assert!(decode(&[0xc5, 0xee, 0xc2, 0xc1, 0x00], 0x1000).is_err()); // L=1
 }
 

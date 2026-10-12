@@ -224,12 +224,14 @@ pub enum Op {
     Vmovdqa,
     Vextractf128,
     Vinserti128,
+    Vunpack(Prec, bool),
     Vpxor,
     Vpbroadcastd,
     Vpbroadcastq,
     VShiftQ { left: bool, immediate: bool },
     Vpmovsxdq,
     Vpaddd,
+    Vpi(PiK, u8, bool),
     Vpsllq,
     Vpaddq,
     Vpsrldq,
@@ -238,10 +240,12 @@ pub enum Op {
     Vblendvps,
     Vroundss,
     Vcmpeqss,
+    VcmpSs(u8),
     VcvtSi2Ss,
     VcvtSi2Sd,
     VcvtSs2Sd,
     VcvtSd2Ss,
+    VcvtPd2Ps,
     Vzeroupper,
     Movss,
     Movsd,
@@ -723,13 +727,56 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         };
         let mut i = blank(op);
         i.osz = if l { 32 } else { 16 };
-        i.ops = [m.rm_opnd(RK::X, pfx), Opnd::Xmm(vvvv), Opnd::None];
+        i.ops = [Opnd::Xmm(vvvv), m.rm_opnd(RK::X, pfx), Opnd::None];
         i.imm = d.u8()? as i64;
+        return Ok(i);
+    }
+    if map == 1 && matches!(opcode, 0x14 | 0x15) && matches!(pp, 0 | 1) {
+        let m = parse_modrm(d, pfx)?;
+        let mut i = blank(Op::Vunpack(
+            if pp == 0 { Prec::Ps } else { Prec::Pd },
+            opcode == 0x15,
+        ));
+        i.osz = if l { 32 } else { 16 };
+        i.ops = [
+            m.reg_opnd(RK::X, pfx),
+            Opnd::Xmm(vvvv),
+            m.rm_opnd(RK::X, pfx),
+        ];
         return Ok(i);
     }
     if map == 1 && opcode == 0xd4 && pp == 1 {
         let m = parse_modrm(d, pfx)?;
         let mut i = blank(Op::Vpaddq);
+        i.osz = if l { 32 } else { 16 };
+        i.ops = [
+            m.reg_opnd(RK::X, pfx),
+            Opnd::Xmm(vvvv),
+            m.rm_opnd(RK::X, pfx),
+        ];
+        return Ok(i);
+    }
+    if map == 1 && opcode == 0x76 && pp == 1 {
+        let m = parse_modrm(d, pfx)?;
+        let mut i = blank(Op::Vpi(PiK::Cmpeq, 4, true));
+        i.osz = if l { 32 } else { 16 };
+        i.ops = [
+            m.reg_opnd(RK::X, pfx),
+            Opnd::Xmm(vvvv),
+            m.rm_opnd(RK::X, pfx),
+        ];
+        return Ok(i);
+    }
+    if map == 1 && opcode == 0x5a && pp == 1 && vvvv_encoded == 0xf {
+        let m = parse_modrm(d, pfx)?;
+        let mut i = blank(Op::VcvtPd2Ps);
+        i.osz = if l { 32 } else { 16 };
+        i.ops = [m.reg_opnd(RK::X, pfx), m.rm_opnd(RK::X, pfx), Opnd::None];
+        return Ok(i);
+    }
+    if map == 1 && opcode == 0x54 && pp == 0 {
+        let m = parse_modrm(d, pfx)?;
+        let mut i = blank(Op::Vfp(FpK::And, Prec::Ps));
         i.osz = if l { 32 } else { 16 };
         i.ops = [
             m.reg_opnd(RK::X, pfx),
@@ -840,6 +887,17 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             i.ops = [m.reg_opnd(RK::X, pfx), Opnd::None, m.rm_opnd(RK::X, pfx)];
             return Ok(i);
         }
+        if opcode == 0x02 && pp == 1 {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Vpi(PiK::Hadd, 4, true));
+            i.osz = if l { 32 } else { 16 };
+            i.ops = [
+                m.reg_opnd(RK::X, pfx),
+                Opnd::Xmm(vvvv),
+                m.rm_opnd(RK::X, pfx),
+            ];
+            return Ok(i);
+        }
         if l {
             return Err(DecodeError::Unsupported("VEX3 0F38 instruction"));
         }
@@ -936,11 +994,12 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         }
         0xc2 if pp == 2 && !l && !pfx.w() => {
             let m = parse_modrm(d, pfx)?;
-            let predicate = d.u8()?;
-            if predicate != 0 {
-                return Err(DecodeError::Unsupported("VCMPSS predicate"));
-            }
-            let mut i = blank(Op::Vcmpeqss);
+            let predicate = d.u8()? & 0x1f;
+            let mut i = blank(if predicate == 0 {
+                Op::Vcmpeqss
+            } else {
+                Op::VcmpSs(predicate)
+            });
             i.ops = [
                 m.reg_opnd(RK::X, pfx),
                 Opnd::Xmm(vvvv),
@@ -1009,6 +1068,25 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             i.ops = [m.rm_opnd(RK::X, pfx), m.reg_opnd(RK::X, pfx), Opnd::None];
             Ok(i)
         }
+        0x54..=0x57 if pp <= 1 => {
+            let m = parse_modrm(d, pfx)?;
+            let kind = match opcode {
+                0x54 => FpK::And,
+                0x55 => FpK::Andn,
+                0x56 => FpK::Or,
+                0x57 => FpK::Xor,
+                _ => unreachable!(),
+            };
+            let precision = if pp == 0 { Prec::Ps } else { Prec::Pd };
+            let mut i = blank(Op::Vfp(kind, precision));
+            i.osz = if l { 32 } else { 16 };
+            i.ops = [
+                m.reg_opnd(RK::X, pfx),
+                Opnd::Xmm(vvvv),
+                m.rm_opnd(RK::X, pfx),
+            ];
+            Ok(i)
+        }
         0x51 | 0x58 | 0x59 | 0x5c | 0x5d | 0x5e | 0x5f if pp == 3 && !l => {
             let m = parse_modrm(d, pfx)?;
             let k = match opcode {
@@ -1039,9 +1117,10 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
             ];
             Ok(i)
         }
-        0x51 if pp == 2 && !l => {
+        0x51 | 0x52 if pp == 2 && !l => {
             let m = parse_modrm(d, pfx)?;
-            let mut i = blank(Op::Vfp(FpK::Sqrt, Prec::Ss));
+            let kind = if opcode == 0x51 { FpK::Sqrt } else { FpK::Rsqrt };
+            let mut i = blank(Op::Vfp(kind, Prec::Ss));
             i.ops = [
                 m.reg_opnd(RK::X, pfx),
                 Opnd::Xmm(vvvv),

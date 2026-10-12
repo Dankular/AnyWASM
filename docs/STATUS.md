@@ -110,9 +110,11 @@
   non-default MXCSR rounding/DAZ/FTZ controls and zero, subnormal, infinite, or NaN operands.
   Other instructions, including x87 and unsupported SSE forms, remain interpreted.
   The generated module imports the runtime memory and runs through anywasm.run_emitted_block in
-  web/anywasm.js. Its 624-byte call state holds the integer CPU snapshot, memory/TLB pointers,
-  counters and scratch, XMM values, and MXCSR. GPR and XMM values are block-local Wasm locals
-  flushed on exit. Rust commits copied CPU state only after an exact valid instruction count;
+  web/anywasm.js. Its 976-byte call state holds every current CPU field plus memory/TLB pointers,
+  counters, and scratch. GPR and XMM values are block-local Wasm locals flushed on exit. Rust
+  commits the full copied CPU state only after an exact valid instruction count. A feature-gated
+  smoke API compares all CPU fields and mapped guest pages across emitted, cached-only, and
+  interpreter execution for compute and `jit_state.exe` fixtures;
   compile, trap, invalid-count, and guarded-operation failures retry against the untouched snapshot.
   The JS wrapper caches up to 256 modules and uses a balanced RIP lookup tree to chain among
   registered emitted block starts.

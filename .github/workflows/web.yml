@@ -16,7 +16,7 @@ jobs:
       run: npm ci
     - name: Build wasm module and CLI
       run: |
-        cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
+        cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release --features jit-test-api
         node scripts/asyncify-wasm.mjs
         cargo build -p anywasm-cli
     - name: Run executables through the WASM build under Node

@@ -95,11 +95,12 @@ direct JMP/Jcc exits, and guarded packed-double SSE operations):
       module ID is reused. `{ jitMinPrefix: 1 }` explicitly opts in; the default threshold is 65,
       above the 64-instruction block limit. There is no general throughput win; the current local
       benchmark is faster on SSE-float and slower on the other four fixtures.
-- [~] **State model (MVP)**: generated code receives a 624-byte `repr(C)` state with the integer
-      CPU snapshot, memory/TLB pointers, counters, scratch, XMM registers, and MXCSR. GPR/XMM values
-      are block-local and flushed at block exit. 32-bit ADD writes arithmetic flags. Rust commits
-      state only when the returned retired count matches the budget and emitted prefix. Lazy flags
-      and complete arbitrary-state differential checks remain open.
+- [~] **State model (MVP)**: generated code receives a 976-byte `repr(C)` state with every current
+      `Cpu` field, memory/TLB pointers, counters, and chain scratch. GPR/XMM values are block-local
+      and flushed at block exit. 32-bit ADD writes arithmetic flags. Rust commits the full snapshot
+      only after a valid retired count. The `jit-test-api` smoke build compares all CPU fields and
+      mapped memory for compute and `jit_state.exe`; arbitrary-program differential coverage and
+      lazy flags remain open.
 - [~] **Memory access**: selected 32-bit/64-bit MOV and full-width XMM memory moves use inline probes
       of the one-entry read/write TLBs for plain, unsegmented 64-bit addresses. Accesses must stay
       within one mapped page with compatible permissions; misses, faults, and page crossings retry

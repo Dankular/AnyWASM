@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "x86-64 user-mode CPU core (decoder + interpreter) with paged, permission-checked guest memory"
 
+[features]
+jit-test-api = []
+
 [dev-dependencies]
 libc = "0.2"

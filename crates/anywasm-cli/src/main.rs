@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! anywasm analyze <exe> [--json]          compatibility report (which imports are implemented)
-//! anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]
-//! anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args "..."]
+//! anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]
+//! anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--args "..."]
 //! ```
 
 use anywasm_pe::{canonical_dll, ImportName, Pe};
@@ -323,30 +323,57 @@ fn print_report(r: &Report, json: bool) {
     }
 }
 
-fn load_dir(vfs: &mut Vfs, dir: &Path) -> std::io::Result<()> {
-    fn walk(vfs: &mut Vfs, root: &Path, cur: &Path) -> std::io::Result<()> {
+fn load_dir(vfs: &mut Vfs, dir: &Path, excludes: &[String]) -> std::io::Result<()> {
+    fn walk(vfs: &mut Vfs, root: &Path, cur: &Path, excludes: &[String]) -> std::io::Result<()> {
+        let relative_dir = cur
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        if !relative_dir.is_empty()
+            && excludes.iter().any(|excluded| {
+                relative_dir == *excluded || relative_dir.starts_with(&format!("{excluded}\\"))
+            })
+        {
+            return Ok(());
+        }
         for e in std::fs::read_dir(cur)? {
             let e = e?;
             let p = e.path();
             if p.is_dir() {
-                walk(vfs, root, &p)?;
+                walk(vfs, root, &p, excludes)?;
             } else {
                 let rel = p
                     .strip_prefix(root)
                     .unwrap()
                     .to_string_lossy()
                     .replace('/', "\\");
+                if excludes.iter().any(|excluded| {
+                    rel.eq_ignore_ascii_case(excluded)
+                        || rel
+                            .get(..excluded.len() + 1)
+                            .is_some_and(|head| head.eq_ignore_ascii_case(&format!("{excluded}\\")))
+                }) {
+                    continue;
+                }
                 vfs.insert(&rel, std::fs::read(&p)?);
             }
         }
         Ok(())
     }
-    walk(vfs, dir, dir)
+    let excludes = excludes
+        .iter()
+        .map(|path| path.replace('/', "\\").trim_matches('\\').to_ascii_lowercase())
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    walk(vfs, dir, dir, &excludes)
 }
 
 struct Opts {
     exe: PathBuf,
     dir: Option<PathBuf>,
+    excludes: Vec<String>,
     out: Option<PathBuf>,
     trace: bool,
     trace_modules: bool,
@@ -361,6 +388,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts {
         exe: PathBuf::new(),
         dir: None,
+        excludes: vec![],
         out: None,
         trace: false,
         trace_modules: false,
@@ -375,6 +403,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dir" => o.dir = Some(it.next().ok_or("--dir needs a value")?.into()),
+            "--exclude" => o.excludes.push(it.next().ok_or("--exclude needs a relative path")?.clone()),
             "-o" | "--out" => o.out = Some(it.next().ok_or("-o needs a value")?.into()),
             "--trace-imports" => o.trace = true,
             "--trace-modules" => o.trace_modules = true,
@@ -408,7 +437,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 fn build_vfs(o: &Opts) -> Result<(Vfs, String), String> {
     let mut vfs = Vfs::new();
     if let Some(d) = &o.dir {
-        load_dir(&mut vfs, d).map_err(|e| format!("{}: {e}", d.display()))?;
+        load_dir(&mut vfs, d, &o.excludes).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let name = o
         .exe
@@ -587,7 +616,7 @@ fn pack(o: &Opts) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--cwd GUEST_DIR] [--args \"cmdline\"]";
+    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--args \"cmdline\"]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);

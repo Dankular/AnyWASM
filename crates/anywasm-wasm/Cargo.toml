@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "WebAssembly build of the AnyWASM runtime with a plain C ABI (no wasm-bindgen)"
 
+[features]
+jit-test-api = ["anywasm-rt/jit-test-api"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Win64 process runtime: PE64 loader, TEB/PEB, import thunks and reimplemented system libraries on the anywasm-cpu core"
 
+[features]
+jit-test-api = ["anywasm-cpu/jit-test-api"]
+
 [dependencies]
 anywasm-cpu.workspace = true
 anywasm-pe.workspace = true

@@ -3,7 +3,7 @@
 //! The generated module imports the runtime's memory and receives a pointer to a copied CPU
 //! snapshot. This keeps a trapped or rejected module from partially changing the live CPU.
 
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, CpuMode};
 use crate::decode::{FpK, Inst, MemOp, Op, Opnd, Prec};
 #[cfg(target_arch = "wasm32")]
 use crate::mem::Memory;
@@ -26,9 +26,15 @@ const ADD_LHS_LOCAL: u32 = 5;
 const ADD_RHS_LOCAL: u32 = 6;
 const ADD_RESULT_LOCAL: u32 = 7;
 const ADD_FLAGS_LOCAL: u32 = 8;
+const ALU64_LHS_LOCAL: u32 = 60;
+const ALU64_RHS_LOCAL: u32 = 61;
+const ALU64_RESULT_LOCAL: u32 = 62;
 const GPR_LOCAL_BASE: u32 = 9;
 const XMM_OFFSET: u32 = 352;
 const MXCSR_OFFSET: u32 = 608;
+const CPU_MODE_OFFSET: u32 = 612;
+const FS_BASE_OFFSET: u32 = 616;
+const GS_BASE_OFFSET: u32 = 624;
 const XMM_LOCAL_BASE: u32 = 25;
 const RIP_LOCAL: u32 = 57;
 const ICOUNT_LOCAL: u32 = 58;
@@ -57,9 +63,18 @@ struct JitState {
     chain_scratch: [u8; 160],
     xmm: [u128; 16],
     mxcsr: u32,
+    cpu_mode: u32,
+    fs_base: u64,
+    gs_base: u64,
+    ymm_hi: [u128; 16],
+    fpu_st: [u64; 8],
+    fpu_top: u32,
+    fpu_cw: u32,
+    fpu_sw: u32,
+    fpu_tw: u32,
 }
 
-const _: [(); 624] = [(); std::mem::size_of::<JitState>()];
+const _: [(); 976] = [(); std::mem::size_of::<JitState>()];
 const _: [(); GPR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, gpr)];
 const _: [(); RIP_OFFSET as usize] = [(); std::mem::offset_of!(JitState, rip)];
 const _: [(); RFLAGS_OFFSET as usize] = [(); std::mem::offset_of!(JitState, rflags)];
@@ -78,6 +93,9 @@ const _: [(); CHAIN_REGREG_HITS_OFFSET as usize] =
 const _: [(); CHAIN_SCRATCH_OFFSET as usize] = [(); std::mem::offset_of!(JitState, chain_scratch)];
 const _: [(); XMM_OFFSET as usize] = [(); std::mem::offset_of!(JitState, xmm)];
 const _: [(); MXCSR_OFFSET as usize] = [(); std::mem::offset_of!(JitState, mxcsr)];
+const _: [(); CPU_MODE_OFFSET as usize] = [(); std::mem::offset_of!(JitState, cpu_mode)];
+const _: [(); FS_BASE_OFFSET as usize] = [(); std::mem::offset_of!(JitState, fs_base)];
+const _: [(); GS_BASE_OFFSET as usize] = [(); std::mem::offset_of!(JitState, gs_base)];
 
 impl From<&Cpu> for JitState {
     fn from(cpu: &Cpu) -> Self {
@@ -98,20 +116,46 @@ impl From<&Cpu> for JitState {
             chain_scratch: [0; 160],
             xmm: cpu.xmm,
             mxcsr: cpu.mxcsr,
+            cpu_mode: u32::from(cpu.mode == CpuMode::X86_32),
+            fs_base: cpu.fs_base,
+            gs_base: cpu.gs_base,
+            ymm_hi: cpu.ymm_hi,
+            fpu_st: cpu.fpu_st.map(f64::to_bits),
+            fpu_top: cpu.fpu_top as u32,
+            fpu_cw: cpu.fpu_cw as u32,
+            fpu_sw: cpu.fpu_sw as u32,
+            fpu_tw: cpu.fpu_tw as u32,
         }
     }
 }
 
 impl JitState {
-    #[cfg(target_arch = "wasm32")]
-    fn copy_to(self, cpu: &mut Cpu) {
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn copy_to(self, cpu: &mut Cpu) -> bool {
+        if self.cpu_mode > 1 {
+            return false;
+        }
+        cpu.mode = if self.cpu_mode == 0 {
+            CpuMode::X86_64
+        } else {
+            CpuMode::X86_32
+        };
         cpu.gpr = self.gpr;
         cpu.rip = self.rip;
         cpu.rflags = self.rflags;
+        cpu.fs_base = self.fs_base;
+        cpu.gs_base = self.gs_base;
         cpu.icount = self.icount;
         cpu.tsc = self.tsc;
         cpu.xmm = self.xmm;
+        cpu.ymm_hi = self.ymm_hi;
         cpu.mxcsr = self.mxcsr;
+        cpu.fpu_st = self.fpu_st.map(f64::from_bits);
+        cpu.fpu_top = self.fpu_top as u8;
+        cpu.fpu_cw = self.fpu_cw as u16;
+        cpu.fpu_sw = self.fpu_sw as u16;
+        cpu.fpu_tw = self.fpu_tw as u16;
+        true
     }
 }
 
@@ -136,7 +180,7 @@ enum StoreSource {
 
 #[derive(Clone, Copy)]
 enum AddSource {
-    Immediate(u32),
+    Immediate(u64),
     Register(u8),
 }
 
@@ -170,6 +214,29 @@ enum JitInstruction {
     Add {
         dst: u8,
         source: AddSource,
+        width: u8,
+        len: u8,
+    },
+    Xor {
+        dst: u8,
+        source: u8,
+        width: u8,
+        len: u8,
+    },
+    Cmp {
+        lhs: u8,
+        source: AddSource,
+        width: u8,
+        len: u8,
+    },
+    Lea {
+        dst: u8,
+        address: MemOp,
+        len: u8,
+    },
+    MemoryAdd {
+        address: MemOp,
+        source: u8,
         len: u8,
     },
     XmmMove {
@@ -207,6 +274,7 @@ pub struct EmittedBlock {
     wasm: Vec<u8>,
     instructions: usize,
     first_register_register: Option<u32>,
+    ends_with_store: bool,
 }
 
 impl EmittedBlock {
@@ -252,8 +320,10 @@ impl EmittedBlock {
         if executed <= 0 || (executed as usize) < expected || executed as u64 > budget as u64 {
             return None;
         }
-        let chain_handoff = state.chain_transitions != 0;
-        state.copy_to(cpu);
+        let chain_handoff = state.chain_transitions != 0 || self.ends_with_store;
+        if !state.copy_to(cpu) {
+            return None;
+        }
         Some((executed as usize, chain_handoff))
     }
 }
@@ -273,13 +343,16 @@ pub fn emit_mov_block(
         return None;
     }
     let mut emitted = Vec::new();
+    let mut ends_with_store = false;
     for inst in instructions.iter().copied() {
         let Some(instruction) = translate_instruction(inst) else {
             break;
         };
         let is_store = matches!(
             instruction,
-            JitInstruction::Store(_) | JitInstruction::XmmStore { .. }
+            JitInstruction::Store(_)
+                | JitInstruction::XmmStore { .. }
+                | JitInstruction::MemoryAdd { .. }
         );
         let is_exit = matches!(
             instruction,
@@ -289,6 +362,7 @@ pub fn emit_mov_block(
         // A direct store is observable before Rust commits the copied CPU state. Keep it last so
         // no later TLB miss can discard the CPU snapshot and replay this memory side effect.
         if is_store || is_exit {
+            ends_with_store = is_store;
             break;
         }
     }
@@ -307,6 +381,7 @@ pub fn emit_mov_block(
         wasm: emit_module(start, &emitted),
         instructions: emitted.len(),
         first_register_register,
+        ends_with_store,
     })
 }
 
@@ -335,28 +410,91 @@ fn translate_instruction(inst: Inst) -> Option<JitInstruction> {
     }
     translate_mov(inst)
         .or_else(|| translate_add(inst))
+        .or_else(|| translate_xor(inst))
+        .or_else(|| translate_cmp(inst))
+        .or_else(|| translate_lea(inst))
         .or_else(|| translate_sse(inst))
 }
 
 fn translate_add(inst: Inst) -> Option<JitInstruction> {
-    if inst.op != Op::Add || inst.osz != 4 {
+    if inst.op != Op::Add || !matches!(inst.osz, 4 | 8) {
         return None;
     }
     match (inst.ops[0], inst.ops[1]) {
         (Opnd::Gpr(dst), Opnd::Imm) if dst < 16 => Some(JitInstruction::Add {
             dst,
-            source: AddSource::Immediate(inst.imm as u32),
+            source: AddSource::Immediate(inst.imm as u64),
+            width: inst.osz,
             len: inst.len,
         }),
         (Opnd::Gpr(dst), Opnd::Gpr(source)) if dst < 16 && source < 16 => {
             Some(JitInstruction::Add {
                 dst,
                 source: AddSource::Register(source),
+                width: inst.osz,
+                len: inst.len,
+            })
+        }
+        (Opnd::Mem(address), Opnd::Gpr(source))
+            if inst.osz == 8 && inline_address(address) && source < 16 =>
+        {
+            Some(JitInstruction::MemoryAdd {
+                address,
+                source,
                 len: inst.len,
             })
         }
         _ => None,
     }
+}
+
+fn translate_xor(inst: Inst) -> Option<JitInstruction> {
+    if inst.op != Op::Xor || !matches!(inst.osz, 4 | 8) {
+        return None;
+    }
+    let (Opnd::Gpr(dst), Opnd::Gpr(source)) = (inst.ops[0], inst.ops[1]) else {
+        return None;
+    };
+    (dst < 16 && source < 16).then_some(JitInstruction::Xor {
+        dst,
+        source,
+        width: inst.osz,
+        len: inst.len,
+    })
+}
+
+fn translate_cmp(inst: Inst) -> Option<JitInstruction> {
+    if inst.op != Op::Cmp || inst.osz != 8 {
+        return None;
+    }
+    let Opnd::Gpr(lhs) = inst.ops[0] else {
+        return None;
+    };
+    let source = match inst.ops[1] {
+        Opnd::Imm => AddSource::Immediate(inst.imm as u64),
+        Opnd::Gpr(index) if index < 16 => AddSource::Register(index),
+        _ => return None,
+    };
+    (lhs < 16).then_some(JitInstruction::Cmp {
+        lhs,
+        source,
+        width: inst.osz,
+        len: inst.len,
+    })
+}
+
+fn translate_lea(inst: Inst) -> Option<JitInstruction> {
+    if inst.op != Op::Lea || inst.osz != 8 {
+        return None;
+    }
+    let (Opnd::Gpr(dst), Opnd::Mem(address)) = (inst.ops[0], inst.ops[1]) else {
+        return None;
+    };
+    (dst < 16 && inline_address(address)).then_some(JitInstruction::Lea {
+        dst,
+        address,
+        len: inst.len,
+    })
 }
 
 fn translate_sse(inst: Inst) -> Option<JitInstruction> {
@@ -466,9 +604,10 @@ fn inline_address(address: MemOp) -> bool {
 
 fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
     let mut code = Vec::new();
-    // Locals: execution scratch, GPRs, both XMM lanes, RIP, retired count, and TSC.
+    // Locals: execution scratch, GPRs, both XMM lanes, RIP/count/TSC, and 64-bit ALU scratch.
     code.extend_from_slice(&[
-        0x07, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03, 0x7e,
+        0x08, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03, 0x7e,
+        0x03, 0x7e,
     ]);
     let (initial_gprs, written_gprs, initial_xmms, written_xmms) = register_masks(instructions);
     for register in 0..16 {
@@ -494,6 +633,10 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
             JitInstruction::Load { len, .. } => *len,
             JitInstruction::Store(store) => store.len,
             JitInstruction::Add { len, .. } => *len,
+            JitInstruction::Xor { len, .. }
+            | JitInstruction::Cmp { len, .. }
+            | JitInstruction::Lea { len, .. }
+            | JitInstruction::MemoryAdd { len, .. } => *len,
             JitInstruction::XmmMove { len, .. }
             | JitInstruction::XmmStore { len, .. }
             | JitInstruction::XmmFp { len, .. } => *len,
@@ -556,7 +699,61 @@ fn emit_module(start: u64, instructions: &[JitInstruction]) -> Vec<u8> {
                 }
                 uleb(0, &mut code);
             }
-            JitInstruction::Add { dst, source, .. } => emit_add32(*dst, *source, &mut code),
+            JitInstruction::Add {
+                dst, source, width, ..
+            } => {
+                if *width == 4 {
+                    emit_add32(*dst, *source, &mut code);
+                } else {
+                    emit_add64_gpr(*dst, *source, &mut code);
+                }
+            }
+            JitInstruction::Xor {
+                dst, source, width, ..
+            } => emit_xor_gpr(*dst, *source, *width, &mut code),
+            JitInstruction::Cmp {
+                lhs, source, width, ..
+            } => emit_cmp_gpr(*lhs, *source, *width, &mut code),
+            JitInstruction::Lea { dst, address, .. } => {
+                emit_effective_address(*address, &mut code);
+                code.push(0x20);
+                uleb(3, &mut code);
+                code.push(0x21);
+                uleb(gpr_local(*dst), &mut code);
+            }
+            JitInstruction::MemoryAdd {
+                address, source, ..
+            } => {
+                emit_effective_address(*address, &mut code);
+                emit_tlb_guard(false, 8, &mut code);
+                emit_effective_address(*address, &mut code);
+                emit_tlb_guard(true, 8, &mut code);
+                emit_frame_address(&mut code);
+                code.push(0x20);
+                uleb(4, &mut code);
+                code.push(0x29); // i64.load old destination
+                uleb(3, &mut code);
+                uleb(0, &mut code);
+                code.push(0x21);
+                uleb(ALU64_LHS_LOCAL, &mut code);
+                code.push(0x20);
+                uleb(gpr_local(*source), &mut code);
+                code.push(0x21);
+                uleb(ALU64_RHS_LOCAL, &mut code);
+                emit_add64_values(
+                    ALU64_LHS_LOCAL,
+                    ALU64_RHS_LOCAL,
+                    ALU64_RESULT_LOCAL,
+                    &mut code,
+                );
+                code.push(0x20);
+                uleb(4, &mut code);
+                code.push(0x20);
+                uleb(ALU64_RESULT_LOCAL, &mut code);
+                code.push(0x37); // i64.store updated destination
+                uleb(3, &mut code);
+                uleb(0, &mut code);
+            }
             JitInstruction::XmmMove { dst, source, .. } => match source {
                 XmmSource::Register(src) => emit_xmm_register_move(*dst, *src, &mut code),
                 XmmSource::Memory(address) => {
@@ -906,6 +1103,325 @@ fn emit_add32(dst: u8, source: AddSource, code: &mut Vec<u8>) {
         code.push(0x45); // x86 PF is set for even parity
     });
 
+    emit_commit_arithmetic_flags(code);
+}
+
+fn emit_add64_gpr(dst: u8, source: AddSource, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(gpr_local(dst), code);
+    code.push(0x21);
+    uleb(ALU64_LHS_LOCAL, code);
+    match source {
+        AddSource::Immediate(value) => {
+            code.push(0x42);
+            sleb(value as i64, code);
+        }
+        AddSource::Register(index) => {
+            code.push(0x20);
+            uleb(gpr_local(index), code);
+        }
+    }
+    code.push(0x21);
+    uleb(ALU64_RHS_LOCAL, code);
+    emit_add64_values(ALU64_LHS_LOCAL, ALU64_RHS_LOCAL, ALU64_RESULT_LOCAL, code);
+    code.push(0x20);
+    uleb(ALU64_RESULT_LOCAL, code);
+    code.push(0x21);
+    uleb(gpr_local(dst), code);
+}
+
+fn emit_add64_values(lhs: u32, rhs: u32, result: u32, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(lhs, code);
+    code.push(0x20);
+    uleb(rhs, code);
+    code.push(0x7c); // i64.add
+    code.push(0x21);
+    uleb(result, code);
+    code.push(0x41);
+    sleb(0, code);
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
+
+    emit_add_flag(code, crate::cpu::CF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x20);
+        uleb(lhs, code);
+        code.push(0x54); // i64.lt_u: carry iff result wrapped below lhs
+    });
+    emit_add_flag(code, crate::cpu::ZF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x50); // i64.eqz
+    });
+    emit_add_flag(code, crate::cpu::SF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x42);
+        sleb(0, code);
+        code.push(0x53); // i64.lt_s
+    });
+    emit_add_flag(code, crate::cpu::OF as u32, |code| {
+        code.push(0x20);
+        uleb(lhs, code);
+        code.push(0x20);
+        uleb(rhs, code);
+        code.push(0x85); // lhs ^ rhs
+        code.push(0x42);
+        sleb(-1, code);
+        code.push(0x85); // ~(lhs ^ rhs)
+        code.push(0x20);
+        uleb(lhs, code);
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x85); // lhs ^ result
+        code.push(0x83); // i64.and
+        code.push(0x42);
+        sleb(i64::MIN, code);
+        code.push(0x83);
+        code.push(0x50);
+        code.push(0x45); // nonzero sign bit means overflow
+    });
+    emit_add_flag(code, crate::cpu::AF as u32, |code| {
+        code.push(0x20);
+        uleb(lhs, code);
+        code.push(0x20);
+        uleb(rhs, code);
+        code.push(0x85);
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x85);
+        code.push(0x42);
+        sleb(0x10, code);
+        code.push(0x83);
+        code.push(0x50);
+        code.push(0x45); // carry out of bit 3
+    });
+    emit_parity_flag64(result, code);
+    emit_commit_arithmetic_flags(code);
+}
+
+fn emit_cmp_gpr(lhs: u8, source: AddSource, width: u8, code: &mut Vec<u8>) {
+    debug_assert_eq!(width, 8);
+    code.push(0x20);
+    uleb(gpr_local(lhs), code);
+    code.push(0x21);
+    uleb(ALU64_LHS_LOCAL, code);
+    match source {
+        AddSource::Immediate(value) => {
+            code.push(0x42);
+            sleb(value as i64, code);
+        }
+        AddSource::Register(index) => {
+            code.push(0x20);
+            uleb(gpr_local(index), code);
+        }
+    }
+    code.push(0x21);
+    uleb(ALU64_RHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ALU64_LHS_LOCAL, code);
+    code.push(0x20);
+    uleb(ALU64_RHS_LOCAL, code);
+    code.push(0x7d); // i64.sub
+    code.push(0x21);
+    uleb(ALU64_RESULT_LOCAL, code);
+    code.push(0x41);
+    sleb(0, code);
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
+
+    emit_add_flag(code, crate::cpu::CF as u32, |code| {
+        code.push(0x20);
+        uleb(ALU64_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_RHS_LOCAL, code);
+        code.push(0x54); // unsigned borrow
+    });
+    emit_add_flag(code, crate::cpu::ZF as u32, |code| {
+        code.push(0x20);
+        uleb(ALU64_RESULT_LOCAL, code);
+        code.push(0x50);
+    });
+    emit_add_flag(code, crate::cpu::SF as u32, |code| {
+        code.push(0x20);
+        uleb(ALU64_RESULT_LOCAL, code);
+        code.push(0x42);
+        sleb(0, code);
+        code.push(0x53);
+    });
+    emit_add_flag(code, crate::cpu::OF as u32, |code| {
+        code.push(0x20);
+        uleb(ALU64_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_RHS_LOCAL, code);
+        code.push(0x85);
+        code.push(0x20);
+        uleb(ALU64_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_RESULT_LOCAL, code);
+        code.push(0x85);
+        code.push(0x83);
+        code.push(0x42);
+        sleb(i64::MIN, code);
+        code.push(0x83);
+        code.push(0x50);
+        code.push(0x45);
+    });
+    emit_add_flag(code, crate::cpu::AF as u32, |code| {
+        code.push(0x20);
+        uleb(ALU64_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_RHS_LOCAL, code);
+        code.push(0x85);
+        code.push(0x20);
+        uleb(ALU64_RESULT_LOCAL, code);
+        code.push(0x85);
+        code.push(0x42);
+        sleb(0x10, code);
+        code.push(0x83);
+        code.push(0x50);
+        code.push(0x45);
+    });
+    emit_parity_flag64(ALU64_RESULT_LOCAL, code);
+    emit_commit_arithmetic_flags(code);
+}
+
+fn emit_xor_gpr(dst: u8, source: u8, width: u8, code: &mut Vec<u8>) {
+    if width == 4 {
+        code.push(0x20);
+        uleb(gpr_local(dst), code);
+        code.push(0xa7);
+        code.push(0x21);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(gpr_local(source), code);
+        code.push(0xa7);
+        code.push(0x73); // i32.xor
+        code.push(0x21);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_RESULT_LOCAL, code);
+        code.push(0xad);
+        code.push(0x21);
+        uleb(gpr_local(dst), code);
+        emit_logic_flags32(ADD_RESULT_LOCAL, code);
+    } else {
+        code.push(0x20);
+        uleb(gpr_local(dst), code);
+        code.push(0x21);
+        uleb(ALU64_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(gpr_local(source), code);
+        code.push(0x21);
+        uleb(ALU64_RHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_RHS_LOCAL, code);
+        code.push(0x85); // i64.xor
+        code.push(0x21);
+        uleb(ALU64_RESULT_LOCAL, code);
+        code.push(0x20);
+        uleb(ALU64_RESULT_LOCAL, code);
+        code.push(0x21);
+        uleb(gpr_local(dst), code);
+        emit_logic_flags64(ALU64_RESULT_LOCAL, code);
+    }
+}
+
+fn emit_logic_flags32(result: u32, code: &mut Vec<u8>) {
+    code.push(0x41);
+    sleb(0, code);
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
+    emit_add_flag(code, crate::cpu::ZF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x45);
+    });
+    emit_add_flag(code, crate::cpu::SF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x41);
+        sleb(0, code);
+        code.push(0x48); // i32.lt_s
+    });
+    emit_parity_flag32(result, code);
+    emit_commit_arithmetic_flags(code);
+}
+
+fn emit_logic_flags64(result: u32, code: &mut Vec<u8>) {
+    code.push(0x41);
+    sleb(0, code);
+    code.push(0x21);
+    uleb(ADD_FLAGS_LOCAL, code);
+    emit_add_flag(code, crate::cpu::ZF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x50);
+    });
+    emit_add_flag(code, crate::cpu::SF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x42);
+        sleb(0, code);
+        code.push(0x53);
+    });
+    emit_parity_flag64(result, code);
+    emit_commit_arithmetic_flags(code);
+}
+
+fn emit_parity_flag32(result: u32, code: &mut Vec<u8>) {
+    emit_add_flag(code, crate::cpu::PF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0x41);
+        sleb(0xff, code);
+        code.push(0x71);
+        code.push(0x21);
+        uleb(ADD_LHS_LOCAL, code);
+        emit_parity_reduce32(code);
+    });
+}
+
+fn emit_parity_flag64(result: u32, code: &mut Vec<u8>) {
+    emit_add_flag(code, crate::cpu::PF as u32, |code| {
+        code.push(0x20);
+        uleb(result, code);
+        code.push(0xa7); // low byte is enough for parity
+        code.push(0x41);
+        sleb(0xff, code);
+        code.push(0x71);
+        code.push(0x21);
+        uleb(ADD_LHS_LOCAL, code);
+        emit_parity_reduce32(code);
+    });
+}
+
+fn emit_parity_reduce32(code: &mut Vec<u8>) {
+    for shift in [4, 2, 1] {
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x20);
+        uleb(ADD_LHS_LOCAL, code);
+        code.push(0x41);
+        sleb(shift, code);
+        code.push(0x76); // i32.shr_u
+        code.push(0x73); // i32.xor
+        code.push(0x21);
+        uleb(ADD_LHS_LOCAL, code);
+    }
+    code.push(0x20);
+    uleb(ADD_LHS_LOCAL, code);
+    code.push(0x41);
+    sleb(1, code);
+    code.push(0x71);
+    code.push(0x45); // PF is set for even parity
+}
+
+fn emit_commit_arithmetic_flags(code: &mut Vec<u8>) {
     code.push(0x20);
     uleb(0, code);
     code.push(0x20);
@@ -1163,6 +1679,29 @@ fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
                 initialized |= 1 << *dst;
                 written |= 1 << *dst;
             }
+            JitInstruction::Xor { dst, source, .. } => {
+                require_initial_register(*dst, initialized, &mut initial_reads);
+                require_initial_register(*source, initialized, &mut initial_reads);
+                initialized |= 1 << *dst;
+                written |= 1 << *dst;
+            }
+            JitInstruction::Cmp { lhs, source, .. } => {
+                require_initial_register(*lhs, initialized, &mut initial_reads);
+                if let AddSource::Register(index) = source {
+                    require_initial_register(*index, initialized, &mut initial_reads);
+                }
+            }
+            JitInstruction::Lea { dst, address, .. } => {
+                address_initial_registers(*address, initialized, &mut initial_reads);
+                initialized |= 1 << *dst;
+                written |= 1 << *dst;
+            }
+            JitInstruction::MemoryAdd {
+                address, source, ..
+            } => {
+                address_initial_registers(*address, initialized, &mut initial_reads);
+                require_initial_register(*source, initialized, &mut initial_reads);
+            }
             JitInstruction::Load { dst, address, .. } => {
                 address_initial_registers(*address, initialized, &mut initial_reads);
                 initialized |= 1 << dst;
@@ -1288,7 +1827,75 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::CpuMode;
     use crate::decode::decode;
+
+    #[test]
+    fn jit_state_round_trips_every_architectural_cpu_field() {
+        let mut cpu = Cpu::new();
+        cpu.mode = CpuMode::X86_32;
+        cpu.gpr = std::array::from_fn(|index| 0x1111_0000_0000_0000 | index as u64);
+        cpu.rip = 0x1234_5678_9abc_def0;
+        cpu.rflags = 0x0ed7;
+        cpu.fs_base = 0x1111_2222_3333_4444;
+        cpu.gs_base = 0x5555_6666_7777_8888;
+        cpu.xmm = std::array::from_fn(|index| (index as u128) << 96 | 0x1234);
+        cpu.ymm_hi = std::array::from_fn(|index| (index as u128) << 80 | 0x5678);
+        cpu.mxcsr = 0x9fc0;
+        cpu.fpu_st = std::array::from_fn(|index| (index as f64 + 0.25) * -3.5);
+        cpu.fpu_top = 6;
+        cpu.fpu_cw = 0x0b7f;
+        cpu.fpu_sw = 0x4d20;
+        cpu.fpu_tw = 0x1357;
+        cpu.tsc = 0x0102_0304_0506_0708;
+        cpu.icount = 0x1112_1314_1516_1718;
+
+        let state = JitState::from(&cpu);
+        assert_eq!(state.cpu_mode, 1);
+        assert_eq!(state.fs_base, cpu.fs_base);
+        assert_eq!(state.gs_base, cpu.gs_base);
+        assert_eq!(state.ymm_hi, cpu.ymm_hi);
+        assert_eq!(state.fpu_st, cpu.fpu_st.map(f64::to_bits));
+        assert_eq!(state.fpu_top, cpu.fpu_top as u32);
+        assert_eq!(state.fpu_cw, cpu.fpu_cw as u32);
+        assert_eq!(state.fpu_sw, cpu.fpu_sw as u32);
+        assert_eq!(state.fpu_tw, cpu.fpu_tw as u32);
+
+        let mut restored = Cpu::new();
+        assert!(state.copy_to(&mut restored));
+        assert_eq!(restored.mode, cpu.mode);
+        assert_eq!(restored.gpr, cpu.gpr);
+        assert_eq!(restored.rip, cpu.rip);
+        assert_eq!(restored.rflags, cpu.rflags);
+        assert_eq!(restored.fs_base, cpu.fs_base);
+        assert_eq!(restored.gs_base, cpu.gs_base);
+        assert_eq!(restored.xmm, cpu.xmm);
+        assert_eq!(restored.ymm_hi, cpu.ymm_hi);
+        assert_eq!(restored.mxcsr, cpu.mxcsr);
+        assert_eq!(
+            restored.fpu_st.map(f64::to_bits),
+            cpu.fpu_st.map(f64::to_bits)
+        );
+        assert_eq!(restored.fpu_top, cpu.fpu_top);
+        assert_eq!(restored.fpu_cw, cpu.fpu_cw);
+        assert_eq!(restored.fpu_sw, cpu.fpu_sw);
+        assert_eq!(restored.fpu_tw, cpu.fpu_tw);
+        assert_eq!(restored.tsc, cpu.tsc);
+        assert_eq!(restored.icount, cpu.icount);
+    }
+
+    #[test]
+    fn rejects_an_invalid_snapshotted_cpu_mode_without_partial_commit() {
+        let mut state = JitState::from(&Cpu::new());
+        state.cpu_mode = 2;
+        let mut cpu = Cpu::new();
+        cpu.gpr[0] = 0xfeed_face;
+        cpu.rip = 0x1234;
+
+        assert!(!state.copy_to(&mut cpu));
+        assert_eq!(cpu.gpr[0], 0xfeed_face);
+        assert_eq!(cpu.rip, 0x1234);
+    }
 
     #[test]
     fn emits_supported_mov_and_nop_prefix_then_stops_at_partial_width_mov() {
@@ -1366,6 +1973,34 @@ mod tests {
         let emitted = emit_mov_block(75, 0x1840, &[add_eax_minus_eight, jne], 2).unwrap();
         assert_eq!(emitted.instruction_count(), 2);
         assert!(emitted.wasm.contains(&0x6a), "missing Wasm i32.add");
+    }
+
+    #[test]
+    fn emits_64_bit_loop_arithmetic_and_compare_before_jcc() {
+        let add_rdx_two = decode(&[0x48, 0x83, 0xc2, 0x02], 0x1860).unwrap();
+        let cmp_rdx_4096 = decode(&[0x48, 0x81, 0xfa, 0x00, 0x10, 0x00, 0x00], 0x1864).unwrap();
+        let jne = decode(&[0x75, 0xf5], 0x186b).unwrap();
+        let emitted = emit_mov_block(76, 0x1860, &[add_rdx_two, cmp_rdx_4096, jne], 3).unwrap();
+
+        assert_eq!(emitted.instruction_count(), 3);
+        assert!(emitted.wasm.contains(&0x7c), "missing Wasm i64.add");
+        assert!(emitted.wasm.contains(&0x7d), "missing Wasm i64.sub");
+    }
+
+    #[test]
+    fn emits_register_xor_and_memory_add_as_a_restartable_store_prefix() {
+        let mov_r8_rdx = decode(&[0x49, 0x89, 0xd0], 0x1870).unwrap();
+        let xor_r8_rax = decode(&[0x49, 0x31, 0xc0], 0x1873).unwrap();
+        let add_mem_r8 = decode(&[0x4c, 0x01, 0x04, 0xd1], 0x1876).unwrap();
+        let lea_r8 = decode(&[0x4c, 0x8d, 0x42, 0x01], 0x187a).unwrap();
+        let emitted =
+            emit_mov_block(77, 0x1870, &[mov_r8_rdx, xor_r8_rax, add_mem_r8, lea_r8], 3).unwrap();
+
+        assert_eq!(emitted.instruction_count(), 3);
+        assert!(emitted.ends_with_store);
+        assert!(emitted.wasm.contains(&0x85), "missing Wasm i64.xor");
+        assert!(emitted.wasm.contains(&0x29), "missing guarded i64.load");
+        assert!(emitted.wasm.contains(&0x37), "missing guarded i64.store");
     }
 
     #[test]

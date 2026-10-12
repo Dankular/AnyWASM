@@ -315,6 +315,32 @@ impl Memory {
         Ok(off + (addr & PAGE_MASK) as usize)
     }
 
+    /// Stable test-only snapshot of every mapped guest page: guest page number (u64 LE),
+    /// permissions (u8), then the full page contents. Pages are ordered by guest address.
+    #[cfg(feature = "jit-test-api")]
+    pub fn test_snapshot_mapped_pages(&self) -> Vec<u8> {
+        const RECORD_SIZE: usize = 8 + 1 + PAGE_SIZE as usize;
+        let mut snapshot = Vec::with_capacity(self.pages_mapped as usize * RECORD_SIZE);
+        for (a, mid) in self.top.iter().enumerate() {
+            let Some(mid) = mid else { continue };
+            for (b, leaf) in mid.0.iter().enumerate() {
+                let Some(leaf) = leaf else { continue };
+                for (c, slot) in leaf.0.iter().copied().enumerate() {
+                    if slot & PRESENT == 0 {
+                        continue;
+                    }
+                    let page = ((a as u64) << (2 * L_BITS)) | ((b as u64) << L_BITS) | c as u64;
+                    let frame = (slot >> 32) as usize * PAGE_SIZE as usize;
+                    snapshot.extend_from_slice(&page.to_le_bytes());
+                    snapshot.push(((slot >> 1) & 7) as u8);
+                    snapshot.extend_from_slice(&self.frames[frame..frame + PAGE_SIZE as usize]);
+                }
+            }
+        }
+        debug_assert_eq!(snapshot.len(), self.pages_mapped as usize * RECORD_SIZE);
+        snapshot
+    }
+
     /// Pointers needed by emitted modules. The caller must keep this `Memory` borrowed for the
     /// complete synchronous module execution so the backing vector cannot be reallocated.
     #[cfg(target_arch = "wasm32")]
@@ -579,5 +605,29 @@ mod tests {
     fn out_of_range_rejected() {
         let mut m = Memory::new();
         assert!(!m.map(1u64 << 48, 0x1000, PROT_RW));
+    }
+
+    #[cfg(feature = "jit-test-api")]
+    #[test]
+    fn test_snapshot_lists_mapped_pages_with_permissions_and_full_contents() {
+        let mut m = Memory::new();
+        assert!(m.map(0x3000, PAGE_SIZE, PROT_RW));
+        assert!(m.map(0x1000, PAGE_SIZE, PROT_R));
+        m.write_force(0x1000, &[0xa1, 0xa2]).unwrap();
+        m.write_from(0x3000, &[0xb1, 0xb2]).unwrap();
+
+        let snapshot = m.test_snapshot_mapped_pages();
+        let record_size = 8 + 1 + PAGE_SIZE as usize;
+        assert_eq!(snapshot.len(), 2 * record_size);
+        assert_eq!(u64::from_le_bytes(snapshot[0..8].try_into().unwrap()), 1);
+        assert_eq!(snapshot[8], PROT_R);
+        assert_eq!(&snapshot[9..11], &[0xa1, 0xa2]);
+        let second = record_size;
+        assert_eq!(
+            u64::from_le_bytes(snapshot[second..second + 8].try_into().unwrap()),
+            3
+        );
+        assert_eq!(snapshot[second + 8], PROT_RW);
+        assert_eq!(&snapshot[second + 9..second + 11], &[0xb1, 0xb2]);
     }
 }

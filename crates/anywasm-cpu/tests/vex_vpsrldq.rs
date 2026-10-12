@@ -1,5 +1,5 @@
 use anywasm_cpu::cpu::Cpu;
-use anywasm_cpu::decode::{decode, Op};
+use anywasm_cpu::decode::{decode, Op, Opnd};
 use anywasm_cpu::exec::step;
 use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RWX};
 
@@ -14,6 +14,12 @@ fn vex_byte_shifts_apply_per_128_bit_lane_and_clear_upper_for_xmm() {
         0xc5, 0xfd, 0x73, 0xd8, 0x04, // vpsrldq ymm0, ymm0, 4
         0xc5, 0xfd, 0x73, 0xf8, 0x04, // vpslldq ymm0, ymm0, 4
     ];
+    let distinct_source = [
+        0xc5, 0xe1, 0x73, 0xd8, 0x08, // vpsrldq xmm3, xmm0, 8
+    ];
+    let decoded = decode(&distinct_source, CODE).unwrap();
+    assert_eq!(decoded.ops[0], Opnd::Xmm(3));
+    assert_eq!(decoded.ops[1], Opnd::Xmm(0));
     let decoded = decode(&code, CODE).unwrap();
     assert_eq!((decoded.op, decoded.osz), (Op::Vpsrldq, 16));
 

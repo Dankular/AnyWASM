@@ -59,7 +59,9 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
         if let Some(cwd) = cwd {
             let cwd = anywasm_rt::vfs::absolute(&cwd, "C:\\");
             if !p.vfs.is_dir(&cwd) {
-                return Err(format!("bundle current directory is not present in its VFS: {cwd}"));
+                return Err(format!(
+                    "bundle current directory is not present in its VFS: {cwd}"
+                ));
             }
             p.current_directory = cwd;
         }
@@ -68,11 +70,27 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     });
     match res {
         Ok(p) => {
-            STATE = Some(State { p, message: Vec::new(), exit_code: 0, stdout: Vec::new(), stderr: Vec::new(), gpu: Vec::new(), pending_stop: None });
+            STATE = Some(State {
+                p,
+                message: Vec::new(),
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                gpu: Vec::new(),
+                pending_stop: None,
+            });
             0
         }
         Err(e) => {
-            STATE = Some(State { p: Process::new(anywasm_rt::Vfs::new()), message: e.into_bytes(), exit_code: 0, stdout: vec![], stderr: vec![], gpu: vec![], pending_stop: None });
+            STATE = Some(State {
+                p: Process::new(anywasm_rt::Vfs::new()),
+                message: e.into_bytes(),
+                exit_code: 0,
+                stdout: vec![],
+                stderr: vec![],
+                gpu: vec![],
+                pending_stop: None,
+            });
             1
         }
     }
@@ -87,7 +105,8 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
         s.gpu.extend(std::mem::take(&mut s.p.extra.gpu.buf));
         return match stop {
             Stop::Unimplemented { dll, name } => {
-                s.message = format!("unimplemented import {dll}!{name} from input callback").into_bytes();
+                s.message =
+                    format!("unimplemented import {dll}!{name} from input callback").into_bytes();
                 2
             }
             Stop::Crash(message) => {
@@ -123,7 +142,8 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
         Stop::Frame => 4,
         Stop::Idle => 5,
         Stop::ThreadExit(code) => {
-            s.message = format!("internal thread exit escaped its worker context (code {code})").into_bytes();
+            s.message = format!("internal thread exit escaped its worker context (code {code})")
+                .into_bytes();
             3
         }
         Stop::GuestUnwind(_) => {
@@ -159,11 +179,91 @@ pub extern "C" fn aw_retired_instructions() -> u64 {
     state().map(|s| s.p.retired_instructions).unwrap_or(0)
 }
 
+/// Copy a stable little-endian snapshot of the active CPU for JIT differential tests.
+///
+/// Layout: mode (u32; 0=x86-32, 1=x86-64), GPRs, RIP/RFLAGS/FS/GS bases, XMM and YMM-high
+/// registers, MXCSR, eight f64 x87 stack slots as their raw u64 bits, x87 TOP/CW/SW/TW as u32,
+/// then TSC and icount. Returns 776 bytes, or zero when the output buffer is too small or no
+/// process is loaded. This export exists only in builds using the `jit-test-api` feature.
+///
+/// # Safety
+/// `ptr` must point to `capacity` writable bytes.
+#[cfg(feature = "jit-test-api")]
+#[no_mangle]
+pub unsafe extern "C" fn aw_test_cpu_snapshot(ptr: *mut u8, capacity: usize) -> usize {
+    const SNAPSHOT_SIZE: usize = 776;
+    if ptr.is_null() || capacity < SNAPSHOT_SIZE {
+        return 0;
+    }
+    let Some(s) = state() else { return 0 };
+    let cpu = &s.p.cpu;
+    let out = std::slice::from_raw_parts_mut(ptr, SNAPSHOT_SIZE);
+    let mut cursor = 0;
+    macro_rules! put {
+        ($value:expr) => {{
+            let bytes = $value.to_le_bytes();
+            out[cursor..cursor + bytes.len()].copy_from_slice(&bytes);
+            cursor += bytes.len();
+        }};
+    }
+    put!(cpu.mode as u32);
+    for value in cpu.gpr {
+        put!(value);
+    }
+    for value in [cpu.rip, cpu.rflags, cpu.fs_base, cpu.gs_base] {
+        put!(value);
+    }
+    for value in cpu.xmm {
+        put!(value);
+    }
+    for value in cpu.ymm_hi {
+        put!(value);
+    }
+    put!(cpu.mxcsr);
+    for value in cpu.fpu_st {
+        put!(value.to_bits());
+    }
+    for value in [
+        cpu.fpu_top as u32,
+        cpu.fpu_cw as u32,
+        cpu.fpu_sw as u32,
+        cpu.fpu_tw as u32,
+    ] {
+        put!(value);
+    }
+    for value in [cpu.tsc, cpu.icount] {
+        put!(value);
+    }
+    debug_assert_eq!(cursor, SNAPSHOT_SIZE);
+    SNAPSHOT_SIZE
+}
+
+/// Copy all mapped guest pages in ascending guest-page order. Each record contains the guest page
+/// number (u64 LE), permissions (u8), and all 4096 bytes. With a null or undersized output buffer,
+/// returns the required byte count without writing. This export exists only with `jit-test-api`.
+///
+/// # Safety
+/// When `ptr` is non-null and the buffer is large enough, it must point to `capacity` writable
+/// bytes.
+#[cfg(feature = "jit-test-api")]
+#[no_mangle]
+pub unsafe extern "C" fn aw_test_memory_snapshot(ptr: *mut u8, capacity: usize) -> usize {
+    let Some(s) = state() else { return 0 };
+    let snapshot = s.p.mem.test_snapshot_mapped_pages();
+    if ptr.is_null() || capacity < snapshot.len() {
+        return snapshot.len();
+    }
+    std::ptr::copy_nonoverlapping(snapshot.as_ptr(), ptr, snapshot.len());
+    snapshot.len()
+}
+
 macro_rules! buf_api {
     ($ptr:ident, $len:ident, $clear:ident, $field:ident) => {
         #[no_mangle]
         pub extern "C" fn $ptr() -> *const u8 {
-            state().map(|s| s.$field.as_ptr()).unwrap_or(std::ptr::null())
+            state()
+                .map(|s| s.$field.as_ptr())
+                .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
         pub extern "C" fn $len() -> usize {
@@ -205,6 +305,7 @@ pub extern "C" fn aw_advance_time_100ns(ticks: u64) {
 #[no_mangle]
 pub unsafe extern "C" fn aw_stdin_push(ptr: *const u8, len: usize) {
     if let Some(s) = state() {
-        s.p.stdin.extend(std::slice::from_raw_parts(ptr, len).iter().copied());
+        s.p.stdin
+            .extend(std::slice::from_raw_parts(ptr, len).iter().copied());
     }
 }

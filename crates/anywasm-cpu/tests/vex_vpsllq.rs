@@ -6,7 +6,7 @@ use anywasm_cpu::mem::{Memory, PAGE_SIZE, PROT_RW, PROT_RWX};
 #[test]
 fn vex_vpsllq_shifts_each_ymm_qword_and_preserves_flags() {
     const CODE: u64 = 0x27000;
-    let code = [0xc5, 0xed, 0x73, 0xf3, 0x04]; // vpsllq ymm3, ymm2, 4
+    let code = [0xc5, 0xe5, 0x73, 0xf2, 0x04]; // vpsllq ymm3, ymm2, 4
     let instruction = decode(&code, CODE).unwrap();
     assert_eq!(format!("{:?}", instruction.op), "Vpsllq");
     assert_eq!(instruction.ops[0], Opnd::Xmm(3));

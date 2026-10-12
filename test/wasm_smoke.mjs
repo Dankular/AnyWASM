@@ -1,6 +1,6 @@
 // Runs real Windows executables through the WebAssembly build under Node.
-// Usage: node test/wasm_smoke.mjs   (expects target/wasm32-unknown-unknown/release/anywasm_wasm.asyncified.wasm
-//                                    and target/debug/anywasm for packing)
+// Usage: node test/wasm_smoke.mjs   (expects a `jit-test-api` asyncified WASM build and
+//                                    target/debug/anywasm for packing)
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -80,13 +80,45 @@ function pack(exe, extra = []) {
   return readFileSync(out);
 }
 
-async function runBundle(bundle, runtimeOptions = {}) {
+async function runBundle(bundle, runtimeOptions = {}, captureState = false) {
   const w = await AnyWasm.create(wasm, runtimeOptions);
   w.load(bundle);
   let out = '', err = '';
   const r = w.runToEnd({ onOutput: (s, t) => (s === 'stdout' ? (out += t) : (err += t)) });
-  return { ...r, out, err, instr: w.instructions(), retiredInstr: w.retiredInstructions?.(), jitStats: w.jitStats };
+  let cpuSnapshot = null, memorySnapshot = null;
+  if (captureState) {
+    if (typeof w.x.aw_test_cpu_snapshot !== 'function' || typeof w.x.aw_test_memory_snapshot !== 'function') {
+      throw new Error('WASM smoke build is missing the jit-test-api snapshot exports');
+    }
+    const cpuSize = 776;
+    const cpuPtr = w.x.aw_alloc(cpuSize);
+    try {
+      const written = w.x.aw_test_cpu_snapshot(cpuPtr, cpuSize);
+      if (written !== cpuSize) throw new Error(`CPU snapshot wrote ${written} bytes, expected ${cpuSize}`);
+      cpuSnapshot = new Uint8Array(w.x.memory.buffer, cpuPtr, cpuSize).slice();
+    } finally {
+      w.x.aw_free(cpuPtr, cpuSize);
+    }
+    const memorySize = w.x.aw_test_memory_snapshot(0, 0);
+    const memoryPtr = w.x.aw_alloc(memorySize);
+    try {
+      const written = w.x.aw_test_memory_snapshot(memoryPtr, memorySize);
+      if (written !== memorySize) throw new Error(`Memory snapshot wrote ${written} bytes, expected ${memorySize}`);
+      memorySnapshot = new Uint8Array(w.x.memory.buffer, memoryPtr, memorySize).slice();
+    } finally {
+      w.x.aw_free(memoryPtr, memorySize);
+    }
+  }
+  return { ...r, out, err, instr: w.instructions(), retiredInstr: w.retiredInstructions?.(), jitStats: w.jitStats,
+    cpuSnapshot, memorySnapshot };
 }
+
+const sameCpuSnapshot = (a, b) => a.cpuSnapshot instanceof Uint8Array && b.cpuSnapshot instanceof Uint8Array &&
+  a.cpuSnapshot.byteLength === 776 && b.cpuSnapshot.byteLength === 776 &&
+  a.cpuSnapshot.every((value, index) => value === b.cpuSnapshot[index]);
+const sameMemorySnapshot = (a, b) => a.memorySnapshot instanceof Uint8Array && b.memorySnapshot instanceof Uint8Array &&
+  a.memorySnapshot.byteLength === b.memorySnapshot.byteLength &&
+  a.memorySnapshot.every((value, index) => value === b.memorySnapshot[index]);
 
 async function runExe(exe, extra = [], runtimeOptions = {}) {
   return runBundle(pack(exe, extra), runtimeOptions);
@@ -99,23 +131,30 @@ r = await runExe('fixtures/system_random_test.exe');
 check('SystemFunction036 resolves and fills through the WASM host', r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 
 const computeBundle = pack('fixtures/compute.exe');
-r = await runBundle(computeBundle, { jitMinPrefix: 1 });
+r = await runBundle(computeBundle, { jitMinPrefix: 1 }, true);
 check('compute.exe (heap, SSE2, indirect calls)', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('primes<20000=2262') && r.out.includes('fp=609') && r.out.includes('gpa=ok'), JSON.stringify(r));
 check('compute.exe resumes emitted execution after one cold-page TLB fallback',
   r.jitStats.executions > 0 && r.jitStats.compilations > 0 && r.jitStats.fallbacks === 1, JSON.stringify(r.jitStats));
 check('compute.exe executes generated register-to-register MOVs', r.jitStats.registerRegisterHits > 0, JSON.stringify(r.jitStats));
 
-const cachedOnly = await runBundle(computeBundle);
+const cachedOnly = await runBundle(computeBundle, {}, true);
 check('default emission gate skips short prefixes', cachedOnly.jitStats.executions === 0 && cachedOnly.jitStats.compilations === 0 && cachedOnly.jitStats.fallbacks === 0,
   JSON.stringify(cachedOnly.jitStats));
 check('cached-only execution matches emitted compute output and count',
   r.status === cachedOnly.status && r.exitCode === cachedOnly.exitCode && r.out === cachedOnly.out && r.err === cachedOnly.err && r.instr === cachedOnly.instr,
   JSON.stringify({ emitted: { status: r.status, exitCode: r.exitCode, instr: r.instr }, cached: { status: cachedOnly.status, exitCode: cachedOnly.exitCode, instr: cachedOnly.instr } }));
 
-const interpreted = await runBundle(computeBundle, { jit: false, jitMinPrefix: 1 });
+const interpreted = await runBundle(computeBundle, { jit: false, jitMinPrefix: 1 }, true);
 check('compute.exe matches generated execution with interpreter fallback',
   r.status === interpreted.status && r.exitCode === interpreted.exitCode && r.out === interpreted.out && r.err === interpreted.err && r.instr === interpreted.instr,
   JSON.stringify({ generated: { status: r.status, exitCode: r.exitCode, out: r.out, err: r.err, instr: r.instr }, interpreter: { status: interpreted.status, exitCode: interpreted.exitCode, out: interpreted.out, err: interpreted.err, instr: interpreted.instr } }));
+check('compute CPU snapshot matches cached-only and interpreter execution',
+  sameCpuSnapshot(r, cachedOnly) && sameCpuSnapshot(r, interpreted),
+  JSON.stringify({ emitted: r.cpuSnapshot?.length, cached: cachedOnly.cpuSnapshot?.length, interpreted: interpreted.cpuSnapshot?.length }));
+check('compute mapped guest memory matches cached-only and interpreter execution',
+  sameMemorySnapshot(r, cachedOnly) && sameMemorySnapshot(r, interpreted),
+  JSON.stringify({ emitted: r.memorySnapshot?.length, cached: cachedOnly.memorySnapshot?.length,
+    interpreted: interpreted.memorySnapshot?.length }));
 check('JIT opt-out uses interpreter fallback without compiling modules',
   interpreted.jitStats.executions === 0 && interpreted.jitStats.compilations === 0 && interpreted.jitStats.fallbacks > 0,
   JSON.stringify(interpreted.jitStats));
@@ -161,9 +200,9 @@ check('packed-double benchmark matches cached-only and interpreter retirement co
     interpreted: { status: interpretedSseLoop.status, exitCode: interpretedSseLoop.exitCode, instr: interpretedSseLoop.instr } }));
 
 const jitStateBundle = pack('fixtures/jit_state.exe');
-const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 3 });
-const cachedState = await runBundle(jitStateBundle);
-const interpretedState = await runBundle(jitStateBundle, { jit: false, jitMinPrefix: 1 });
+const emittedState = await runBundle(jitStateBundle, { jitMinPrefix: 3 }, true);
+const cachedState = await runBundle(jitStateBundle, {}, true);
+const interpretedState = await runBundle(jitStateBundle, { jit: false, jitMinPrefix: 1 }, true);
 const sameJitState = (a, b) => a.status === b.status && a.exitCode === b.exitCode &&
   a.out === b.out && a.err === b.err && a.instr === b.instr && a.retiredInstr === b.retiredInstr;
 check('JIT fixture emits warm memory, direct JMP/Jcc exits, and cold-page fallback',
@@ -177,6 +216,14 @@ check('emitted, cached-only, and interpreter paths agree on JIT register and mem
   JSON.stringify({ emitted: { status: emittedState.status, exitCode: emittedState.exitCode, instr: emittedState.instr },
     cached: { status: cachedState.status, exitCode: cachedState.exitCode, instr: cachedState.instr },
     interpreted: { status: interpretedState.status, exitCode: interpretedState.exitCode, instr: interpretedState.instr } }));
+check('JIT fixture complete CPU snapshot matches cached-only and interpreter state',
+  sameCpuSnapshot(emittedState, cachedState) && sameCpuSnapshot(emittedState, interpretedState),
+  JSON.stringify({ emitted: emittedState.cpuSnapshot?.length, cached: cachedState.cpuSnapshot?.length,
+    interpreted: interpretedState.cpuSnapshot?.length }));
+check('JIT fixture mapped guest memory matches cached-only and interpreter state',
+  sameMemorySnapshot(emittedState, cachedState) && sameMemorySnapshot(emittedState, interpretedState),
+  JSON.stringify({ emitted: emittedState.memorySnapshot?.length, cached: cachedState.memorySnapshot?.length,
+    interpreted: interpretedState.memorySnapshot?.length }));
 if (process.platform === 'win32') {
   const nativeState = spawnSync(join(repoRoot, 'fixtures/jit_state.exe'), [], { cwd: tempDir });
   check('native host executes the same JIT state fixture', nativeState.status === 0,

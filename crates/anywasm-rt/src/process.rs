@@ -301,6 +301,7 @@ pub struct Process {
     pub rng: u64,
     pub trace_imports: bool,
     pub trace_modules_only: bool,
+    trace_recent_guest: VecDeque<String>,
     pub nested: u32,
     /// Set by an HLE function that has rewritten RSP/RIP itself (longjmp): skip the normal return.
     pub skip_ret: bool,
@@ -377,6 +378,8 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             | "GetKeyboardLayout"
             | "IsRectEmpty"
             | "GetKeyState"
+            | "IsIconic"
+            | "IsZoomed"
             | "ClipCursor"
             | "DestroyWindow"
             | "CharUpperA"
@@ -552,6 +555,7 @@ impl Process {
             rng: 0x2545_F491_4F6C_DD1D,
             trace_imports: false,
             trace_modules_only: false,
+            trace_recent_guest: VecDeque::with_capacity(128),
             nested: 0,
             skip_ret: false,
             yield_request: None,
@@ -2214,17 +2218,39 @@ impl Process {
                 .as_bytes(),
             );
         }
-        if self.trace_imports && self.cpu.mode == CpuMode::X86_64 {
-            let mut recent = VecDeque::with_capacity(128);
-            let (executed, result) = self.block_cache.execute_counted_with_hook(
+        if self.trace_imports
+            && self.cpu.mode == CpuMode::X86_64
+            && (0x1_4003_0700..0x1_4003_0b00).contains(&rip)
+        {
+            let (block_cache, cpu, mem, recent) = (
+                &mut self.block_cache,
                 &mut self.cpu,
                 &mut self.mem,
+                &mut self.trace_recent_guest,
+            );
+            let (executed, result) = block_cache.execute_counted_with_hook(
+                cpu,
+                mem,
                 max_instructions,
                 |cpu, mem| {
+                    // Limit this diagnostic to Tutorial01's failing object traversal at +0x30987.
+                    if !(0x1_4003_0800..0x1_4003_0a20).contains(&cpu.rip) {
+                        return;
+                    }
                     if recent.len() == 128 {
                         recent.pop_front();
                     }
-                    recent.push_back(trace_guest_instruction(cpu, mem));
+                    let object = cpu.gpr[RDI];
+                    let words = (0..8)
+                        .map(|index| {
+                            format!("{:#x}", mem.read_u64(object.wrapping_add(index * 8)).unwrap_or(0))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    recent.push_back(format!(
+                        "{} rdi_words=[{words}]",
+                        trace_guest_instruction(cpu, mem)
+                    ));
                 },
             );
             self.charge_retired(executed)?;
@@ -2233,7 +2259,12 @@ impl Process {
                 Err(error) => {
                     match self.describe_exit(error) {
                         Stop::Crash(message) => {
-                            let trace = recent.into_iter().collect::<Vec<_>>().join("\n");
+                            let trace = self
+                                .trace_recent_guest
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             Err(Stop::Crash(format!(
                                 "{message}\nrecent x64 instructions:\n{trace}"
                             )))

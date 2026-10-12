@@ -192,6 +192,7 @@ $('demo-hello').addEventListener('click', () => demo('hello'));
 $('demo-crt').addEventListener('click', () => demo('crt_test'));
 $('demo-tri').addEventListener('click', () => demo('d3d11_triangle'));
 $('demo-tex').addEventListener('click', () => demo('d3d11_textured'));
+$('demo-gta').addEventListener('click', () => demo('gta_sa'));
 $('stop').addEventListener('click', () => { worker?.postMessage({ type: 'stop' }); });
 
 const auto = new URLSearchParams(location.search).get('run');

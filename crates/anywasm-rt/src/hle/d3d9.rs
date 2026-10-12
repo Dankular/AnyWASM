@@ -708,15 +708,13 @@ fn texture_get_level_desc(p: &mut Process) -> R {
     let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
     let w = texture_mip_dim(width, level);
     let h = texture_mip_dim(height, level);
-    let size = texture_level_layout(w, h, info.format).4;
-    let mut desc = [0u8; 36];
+    let mut desc = [0u8; 32];
     desc[0..4].copy_from_slice(&format.to_le_bytes());
     desc[4..8].copy_from_slice(&3u32.to_le_bytes()); // D3DRTYPE_TEXTURE
     desc[8..12].copy_from_slice(&info.usage.to_le_bytes());
     desc[12..16].copy_from_slice(&pool.to_le_bytes());
-    desc[16..20].copy_from_slice(&size.to_le_bytes());
-    desc[28..32].copy_from_slice(&w.to_le_bytes());
-    desc[32..36].copy_from_slice(&h.to_le_bytes());
+    desc[24..28].copy_from_slice(&w.to_le_bytes());
+    desc[28..32].copy_from_slice(&h.to_le_bytes());
     p.write_bytes(out, &desc)?;
     Ok(S_OK)
 }
@@ -865,6 +863,7 @@ fn create_device(p: &mut Process) -> R {
     let format = p.rd32(params + 8)?;
     let buffers = p.rd32(params + 12)?.max(1);
     let multisample = p.rd32(params + 16)?;
+    let windowed = p.rd32(params + 32)? != 0;
     let auto_depth = p.rd32(params + 36)? != 0;
     let auto_depth_format = p.rd32(params + 40)?;
     let hwnd = if p.rd32(params + 28)? != 0 { p.rd32(params + 28)? as u64 } else { focus };
@@ -873,7 +872,7 @@ fn create_device(p: &mut Process) -> R {
     };
     let hwnd = if hwnd == 0 { fallback } else { hwnd };
     let (window_width, window_height) = p.extra.win.windows.get(&hwnd)
-        .map(|w| (w.w.max(1) as u32, w.h.max(1) as u32))
+        .map(|w| (w.client_w.max(1) as u32, w.client_h.max(1) as u32))
         .unwrap_or((640, 480));
     let width = if width == 0 { window_width } else { width };
     let height = if height == 0 { window_height } else { height };
@@ -920,6 +919,9 @@ fn create_device(p: &mut Process) -> R {
         }
         p.extra.com.d3d9_depth_surfaces.insert(device, surface);
         bind_depth_surface(p, device, surface)?;
+    }
+    if !windowed {
+        super::user32::set_fullscreen_window(p, hwnd, width, height)?;
     }
     if p.trace_imports {
         p.stderr.extend_from_slice(format!("[d3d9] CreateDevice hwnd={hwnd:#x} size={width}x{height} auto_depth={auto_depth} depth_format={auto_depth_format} swapchain={sc_id} device={device:#x}\n").as_bytes());
@@ -2101,11 +2103,11 @@ fn surface_get_desc(p: &mut Process) -> R {
     let (surface, out) = (p.arg(0), p.arg(1));
     if out == 0 { return Ok(E_POINTER); }
     let Some(com::Kind::Direct3DSurface9 { width,height,format,.. }) = com::kind_of(p, surface) else { return Ok(D3DERR_INVALIDCALL); };
-    let mut data = [0u8; 36];
+    let mut data = [0u8; 32];
     data[0..4].copy_from_slice(&format.to_le_bytes());
     data[4..8].copy_from_slice(&1u32.to_le_bytes());
-    data[28..32].copy_from_slice(&width.to_le_bytes());
-    data[32..36].copy_from_slice(&height.to_le_bytes());
+    data[24..28].copy_from_slice(&width.to_le_bytes());
+    data[28..32].copy_from_slice(&height.to_le_bytes());
     p.write_bytes(out, &data)?;
     Ok(S_OK)
 }

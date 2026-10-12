@@ -29,6 +29,32 @@ fn put(v: &mut u128, l: u8, i: usize, x: u64) {
     let sh = 8 * l as usize * i;
     *v = (*v & !(lane_mask(l) << sh)) | (((x as u128) & lane_mask(l)) << sh);
 }
+
+#[inline]
+fn cmp_ss(a: f32, b: f32, predicate: u8) -> bool {
+    // Predicates 16..31 repeat the truth tables of 0..15; their signaling behavior is outside
+    // the current MXCSR exception model.
+    let unordered = a.is_nan() || b.is_nan();
+    match predicate & 0x0f {
+        0 => !unordered && a == b,
+        1 => !unordered && a < b,
+        2 => !unordered && a <= b,
+        3 => unordered,
+        4 => unordered || a != b,
+        5 => unordered || a >= b,
+        6 => unordered || a > b,
+        7 => !unordered,
+        8 => unordered || a == b,
+        9 => unordered || a < b,
+        10 => unordered || a <= b,
+        11 => false,
+        12 => !unordered && a != b,
+        13 => !unordered && a >= b,
+        14 => !unordered && a > b,
+        _ => true,
+    }
+}
+
 #[inline]
 fn lsx(x: u64, l: u8) -> i64 {
     sext(x, l)
@@ -695,6 +721,38 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             cpu.xmm[dst] = low;
             cpu.ymm_hi[dst] = high;
         }
+        Op::Vunpack(precision, high) => {
+            let dst = dst_n(&i.ops[0])?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], i.osz)?;
+            let lane_bytes = if precision == Prec::Ps { 4 } else { 8 };
+            let unpack_half = |a: u128, b: u128| {
+                let lanes = 16 / lane_bytes as usize;
+                let first = if high { lanes / 2 } else { 0 };
+                let mut result = 0u128;
+                for index in 0..lanes / 2 {
+                    put(
+                        &mut result,
+                        lane_bytes,
+                        index * 2,
+                        get(a, lane_bytes, first + index),
+                    );
+                    put(
+                        &mut result,
+                        lane_bytes,
+                        index * 2 + 1,
+                        get(b, lane_bytes, first + index),
+                    );
+                }
+                result
+            };
+            cpu.xmm[dst] = unpack_half(a_lo, b_lo);
+            cpu.ymm_hi[dst] = if i.osz == 32 {
+                unpack_half(a_hi, b_hi)
+            } else {
+                0
+            };
+        }
         Op::Vmovups | Op::Vmovdqu | Op::Vmovdqa => match (&i.ops[0], &i.ops[1]) {
             (Opnd::Xmm(d), Opnd::Xmm(s)) => {
                 let (d, s) = (*d as usize, *s as usize);
@@ -819,6 +877,17 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             }
             cpu.xmm[dst] = low;
             cpu.ymm_hi[dst] = if i.osz == 32 { high } else { 0 };
+        }
+        Op::Vpi(kind, lane_bytes, signed) => {
+            let dst = dst_n(&i.ops[0])?;
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], i.osz)?;
+            cpu.xmm[dst] = pi_exec(kind, lane_bytes, signed, a_lo, b_lo);
+            cpu.ymm_hi[dst] = if i.osz == 32 {
+                pi_exec(kind, lane_bytes, signed, a_hi, b_hi)
+            } else {
+                0
+            };
         }
         Op::Vpaddd => {
             let dst = dst_n(&i.ops[0])?;
@@ -955,17 +1024,42 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             cpu.xmm[d] = (merge & !lane_mask(4)) | value;
             cpu.ymm_hi[d] = 0;
         }
+        Op::VcvtPd2Ps => {
+            let d = dst_n(&i.ops[0])?;
+            let (source_lo, source_hi) = src_ymm(cpu, mem, &i.ops[1], i.osz)?;
+            let mut result = 0u128;
+            let doubles = i.osz as usize / 8;
+            for lane in 0..doubles {
+                let source = if lane < 2 {
+                    get(source_lo, 8, lane)
+                } else {
+                    get(source_hi, 8, lane - 2)
+                };
+                let value = f64::from_bits(source).to_bits() as u64;
+                put(&mut result, 4, lane, (f64::from_bits(value) as f32).to_bits() as u64);
+            }
+            cpu.xmm[d] = result;
+            cpu.ymm_hi[d] = 0;
+        }
         Op::Vfp(k, pr) => {
             let d = dst_n(&i.ops[0])?;
-            let a = src_x(cpu, mem, &i.ops[1], 16)?;
-            let bytes = match pr {
-                Prec::Ss => 4,
-                Prec::Sd => 8,
-                Prec::Ps | Prec::Pd => 16,
-            };
-            let b = src_x(cpu, mem, &i.ops[2], bytes)?;
-            cpu.xmm[d] = fp_exec(k, pr, a, b);
-            cpu.ymm_hi[d] = 0;
+            let scalar = matches!(pr, Prec::Ss | Prec::Sd);
+            let width = if scalar { 16 } else { i.osz };
+            let (a_lo, a_hi) = src_ymm(cpu, mem, &i.ops[1], width)?;
+            if scalar {
+                let bytes = if pr == Prec::Ss { 4 } else { 8 };
+                let b = src_x(cpu, mem, &i.ops[2], bytes)?;
+                cpu.xmm[d] = fp_exec(k, pr, a_lo, b);
+                cpu.ymm_hi[d] = 0;
+            } else {
+                let (b_lo, b_hi) = src_ymm(cpu, mem, &i.ops[2], width)?;
+                cpu.xmm[d] = fp_exec(k, pr, a_lo, b_lo);
+                cpu.ymm_hi[d] = if width == 32 {
+                    fp_exec(k, pr, a_hi, b_hi)
+                } else {
+                    0
+                };
+            }
         }
         Op::Vblendvps => {
             let d = dst_n(&i.ops[0])?;
@@ -984,12 +1078,21 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Inst, next: u64) -> ExecResult<
             cpu.xmm[d] = result;
             cpu.ymm_hi[d] = 0;
         }
-        Op::Vcmpeqss => {
+        Op::Vcmpeqss | Op::VcmpSs(_) => {
             let d = dst_n(&i.ops[0])?;
             let merge = src_x(cpu, mem, &i.ops[1], 16)?;
             let source = src_x(cpu, mem, &i.ops[2], 4)?;
-            let equal = f32::from_bits(merge as u32) == f32::from_bits(source as u32);
-            let result = if equal { u32::MAX as u128 } else { 0 };
+            let predicate = match i.op {
+                Op::Vcmpeqss => 0,
+                Op::VcmpSs(predicate) => predicate,
+                _ => unreachable!(),
+            };
+            let matches = cmp_ss(
+                f32::from_bits(merge as u32),
+                f32::from_bits(source as u32),
+                predicate,
+            );
+            let result = if matches { u32::MAX as u128 } else { 0 };
             cpu.xmm[d] = (merge & !lane_mask(4)) | result;
             cpu.ymm_hi[d] = 0;
         }

@@ -44,6 +44,7 @@ const TME_CANCEL: u32 = 0x8000_0000;
 const HWND_BASE: u64 = 0x0001_0010;
 const HWND_DESKTOP: u64 = HWND_BASE;
 const WS_CHILD: u32 = 0x4000_0000;
+const WS_POPUP: u32 = 0x8000_0000;
 
 fn set_windows_hook(p: &mut Process) -> R {
     let (hook_type, callback, module, thread_id) = (
@@ -105,10 +106,16 @@ pub struct Window {
     pub title: String,
     pub x: i32,
     pub y: i32,
+    /// Outer window rectangle, as returned by GetWindowRect.
     pub w: i32,
     pub h: i32,
+    /// Client area, as returned by GetClientRect.
+    pub client_w: i32,
+    pub client_h: i32,
     pub visible: bool,
     pub style: u32,
+    pub ex_style: u32,
+    pub has_menu: bool,
     pub user_data: u64,
     pub parent: u64,
     pub control_id: u32,
@@ -326,7 +333,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let (w, ht) = if h == HWND_DESKTOP {
                 (system_metric(0) as i32, system_metric(1) as i32)
             } else {
-                p.extra.win.windows.get(&h).map(|x| (x.w, x.h)).unwrap_or((0, 0))
+                p.extra.win.windows.get(&h).map(|x| (x.client_w, x.client_h)).unwrap_or((0, 0))
             };
             write_rect(p, r, 0, 0, w, ht)?;
             Ok((h == HWND_DESKTOP || p.extra.win.windows.contains_key(&h)) as u64)
@@ -604,12 +611,23 @@ fn set_window_placement(p: &mut Process) -> R {
         p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
         return Ok(0);
     };
+    let outer_w = right.saturating_sub(left);
+    let outer_h = bottom.saturating_sub(top);
+    let (client_w, client_h) = client_size_from_outer(outer_w, outer_h, window.style, window.ex_style, window.has_menu);
+    let changed = (window.client_w, window.client_h) != (client_w, client_h);
     window.x = left;
     window.y = top;
-    window.w = right.saturating_sub(left);
-    window.h = bottom.saturating_sub(top);
+    window.w = outer_w;
+    window.h = outer_h;
+    window.client_w = client_w;
+    window.client_h = client_h;
     window.visible = visible;
     window.needs_paint |= window.visible;
+    let gpu_id = window.gpu_id;
+    if changed {
+        p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(client_w as u32).u32(client_h as u32));
+        send(p, hwnd, WM_SIZE, 0, ((client_h as u64) << 16) | (client_w as u64 & 0xffff))?;
+    }
     Ok(1)
 }
 
@@ -621,6 +639,21 @@ fn adjust_window_rect(p: &mut Process, extended: bool, dpi_aware: bool) -> R {
     }
     let (style, menu, ex_style) = (p.arg(1) as u32, p.arg(2) != 0, if extended { p.arg(3) as u32 } else { 0 });
     let dpi = if dpi_aware { (p.arg(4) as u32).max(1) } else { 96 };
+    let (x, y, bottom_inset) = nonclient_insets(style, ex_style, menu, dpi);
+    let (left, top, right, bottom) = (
+        p.rd32(rect)? as i32,
+        p.rd32(rect + 4)? as i32,
+        p.rd32(rect + 8)? as i32,
+        p.rd32(rect + 12)? as i32,
+    );
+    p.wr32(rect, left.wrapping_sub(x) as u32)?;
+    p.wr32(rect + 4, top.wrapping_sub(y) as u32)?;
+    p.wr32(rect + 8, right.wrapping_add(x) as u32)?;
+    p.wr32(rect + 12, bottom.wrapping_add(bottom_inset) as u32)?;
+    Ok(1)
+}
+
+fn nonclient_insets(style: u32, ex_style: u32, menu: bool, dpi: u32) -> (i32, i32, i32) {
     let scale = |v: u32| ((v as u64 * dpi as u64 + 48) / 96) as i32;
     let thick = style & 0x0004_0000 != 0;
     let border = style & (0x0080_0000 | 0x0040_0000) != 0;
@@ -633,17 +666,16 @@ fn adjust_window_rect(p: &mut Process, extended: bool, dpi_aware: bool) -> R {
     if menu {
         y += scale(system_metric(15) as u32);
     }
-    let (left, top, right, bottom) = (
-        p.rd32(rect)? as i32,
-        p.rd32(rect + 4)? as i32,
-        p.rd32(rect + 8)? as i32,
-        p.rd32(rect + 12)? as i32,
-    );
-    p.wr32(rect, left.wrapping_sub(x) as u32)?;
-    p.wr32(rect + 4, top.wrapping_sub(y) as u32)?;
-    p.wr32(rect + 8, right.wrapping_add(x) as u32)?;
-    p.wr32(rect + 12, bottom.wrapping_add(scale(if thick { 8 } else if border { 1 } else { 0 })) as u32)?;
-    Ok(1)
+    let bottom = scale(if thick { 8 } else if border { 1 } else { 0 });
+    (x, y, bottom)
+}
+
+fn client_size_from_outer(outer_w: i32, outer_h: i32, style: u32, ex_style: u32, has_menu: bool) -> (i32, i32) {
+    let (left_right, top, bottom) = nonclient_insets(style, ex_style, has_menu, 96);
+    (
+        outer_w.saturating_sub(left_right.saturating_mul(2)).max(0),
+        outer_h.saturating_sub(top.saturating_add(bottom)).max(0),
+    )
 }
 
 fn map_virtual_key_w(p: &mut Process) -> R {
@@ -1093,7 +1125,7 @@ fn char_case_a(p: &mut Process, upper: bool, buffered: bool) -> R {
 }
 
 fn create_window(p: &mut Process, wide: bool) -> R {
-    let (ex_style, cls, title, style) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3) as u32);
+    let (ex_style, cls, title, style) = (p.arg(0) as u32, p.arg(1), p.arg(2), p.arg(3) as u32);
     let (x, y, w, h) = (p.arg(4) as i32, p.arg(5) as i32, p.arg(6) as i32, p.arg(7) as i32);
     let (parent, menu, inst, param) = (p.arg(8), p.arg(9), p.arg(10), p.arg(11));
     let cname = if cls < 0x10000 && cls >= 0xc000 { p.extra.win.atoms.get(&(cls as u16)).cloned().unwrap_or_default() } else { lc(&class_name(p, cls, wide)?) };
@@ -1105,16 +1137,18 @@ fn create_window(p: &mut Process, wide: bool) -> R {
     let cw = |v: i32, d: i32| if v == i32::MIN || v == 0x8000_0000u32 as i32 { d } else { v };
     let (w, h) = (cw(w, 1280), cw(h, 720));
     let (x, y) = (cw(x, 0), cw(y, 0));
+    let has_menu = menu != 0;
+    let (client_w, client_h) = client_size_from_outer(w, h, style, ex_style, has_menu);
     p.extra.win.next = p.extra.win.next.max(HWND_BASE) + 0x10;
     let hwnd = p.extra.win.next;
     let gpu_id = p.extra.gpu.new_id();
     let control_id = if parent != 0 && style & WS_CHILD != 0 { menu as u32 } else { 0 };
-    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, visible: false, style, user_data: 0, parent, control_id, unicode: class.unicode, needs_paint: false, gpu_id });
+    p.extra.win.windows.insert(hwnd, Window { class: cname, wndproc: class.wndproc, title: title_s.clone(), x, y, w, h, client_w, client_h, visible: false, style, ex_style, has_menu, user_data: 0, parent, control_id, unicode: class.unicode, needs_paint: false, gpu_id });
     if p.extra.win.main_window == 0 && parent == 0 {
         p.extra.win.main_window = hwnd;
         p.extra.win.focus = hwnd;
     }
-    p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(w as u32).u32(h as u32).bytes(title_s.as_bytes()));
+    p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(client_w as u32).u32(client_h as u32).bytes(title_s.as_bytes()));
     // CREATESTRUCT (x64, 80 bytes): lpCreateParams, hInstance, hMenu, hwndParent, cy, cx, y, x, style, lpszName, lpszClass, dwExStyle
     let cs = kernel32::alloc_block(p, 96, true);
     p.wr64(cs, param)?;
@@ -1139,7 +1173,7 @@ fn create_window(p: &mut Process, wide: bool) -> R {
         p.extra.win.windows.remove(&hwnd);
         return Ok(0);
     }
-    send(p, hwnd, WM_SIZE, 0, ((h as u64) << 16) | (w as u64 & 0xffff))?;
+    send(p, hwnd, WM_SIZE, 0, ((client_h as u64) << 16) | (client_w as u64 & 0xffff))?;
     Ok(hwnd)
 }
 
@@ -1197,6 +1231,29 @@ fn get_prop(p: &mut Process, wide: bool, remove: bool) -> R {
     })
 }
 
+pub fn set_fullscreen_window(p: &mut Process, hwnd: u64, width: u32, height: u32) -> Result<(), Stop> {
+    let width = width.min(i32::MAX as u32) as i32;
+    let height = height.min(i32::MAX as u32) as i32;
+    let Some(window) = p.extra.win.windows.get_mut(&hwnd) else { return Ok(()); };
+    let changed = (window.x, window.y, window.w, window.h, window.client_w, window.client_h, window.style)
+        != (0, 0, width, height, width, height, WS_POPUP);
+    window.x = 0;
+    window.y = 0;
+    window.w = width;
+    window.h = height;
+    window.client_w = width;
+    window.client_h = height;
+    window.style = WS_POPUP;
+    window.ex_style = 0;
+    window.has_menu = false;
+    let gpu_id = window.gpu_id;
+    if changed {
+        p.extra.gpu.emit(op::WINDOW, Pk::new().u32(gpu_id).u32(width as u32).u32(height as u32));
+        send(p, hwnd, WM_SIZE, 0, ((height as u64) << 16) | (width as u64 & 0xffff))?;
+    }
+    Ok(())
+}
+
 fn resize_window(p: &mut Process, h: u64, pos: Option<(i32, i32)>, size: Option<(i32, i32)>) -> Result<(), Stop> {
     let mut changed = None;
     if let Some(w) = p.extra.win.windows.get_mut(&h) {
@@ -1208,7 +1265,8 @@ fn resize_window(p: &mut Process, h: u64, pos: Option<(i32, i32)>, size: Option<
             if (cx, cy) != (w.w, w.h) {
                 w.w = cx;
                 w.h = cy;
-                changed = Some((cx, cy, w.gpu_id));
+                (w.client_w, w.client_h) = client_size_from_outer(cx, cy, w.style, w.ex_style, w.has_menu);
+                changed = Some((w.client_w, w.client_h, w.gpu_id));
             }
         }
     }
@@ -1495,8 +1553,12 @@ mod tests {
             y: 0,
             w: 640,
             h: 480,
+            client_w: 640,
+            client_h: 480,
             visible,
             style: 0,
+            ex_style: 0,
+            has_menu: false,
             user_data: 0,
             parent,
             control_id: 0,
