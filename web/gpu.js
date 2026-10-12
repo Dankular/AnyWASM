@@ -255,15 +255,191 @@ function mirrorOnceHelper(dimension) {
 `;
 }
 
-function mirrorOnceSampleWgsl(wgsl, samplerAddressModes) {
+function samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings) {
+  return JSON.stringify([...samplerAddressModes]
+    .filter(([, modes]) => modes?.some((mode) => mode === 4 || mode === 5))
+    .sort(([a], [b]) => a - b)
+    .map(([register, modes]) => [register, modes,
+      modes.includes(4) ? samplerBorderColors.get(register) || [0, 0, 0, 0] : null,
+      modes.includes(4) ? samplerSettings.get(register) || null : null]));
+}
+
+function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture) {
+  const kind = textureType.kind;
+  const dimension = kind === 'texture_1d' ? 1
+    : ['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(kind) ? 2
+      : kind === 'texture_3d' ? 3 : 0;
+  const depthTexture = kind.startsWith('texture_depth_');
+  const componentType = depthTexture ? 'f32' : textureType.component;
+  if (!dimension || !['f32', 'i32', 'u32'].includes(componentType) || settings?.comparison || settings?.anisotropic) return null;
+  if (arrayTexture !== (kind === 'texture_2d_array' || kind === 'texture_depth_2d_array')) return null;
+
+  const name = `border_sample_${textureName}_${samplerIndex}`;
+  const coordType = dimension === 1 ? 'f32' : `vec${dimension}<f32>`;
+  const resultType = depthTexture ? 'f32' : `vec4<${componentType}>`;
+  const zero = depthTexture ? '0.0' : `vec4<${componentType}>(0.0)`;
+  const lodBias = settings?.mipBias || 0;
+  const minLod = settings?.lodMinClamp || 0;
+  const maxLod = settings?.lodMaxClamp ?? 32;
+  const floatLiteral = (value) => Number.isInteger(value) ? `${value}.0` : String(value);
+  const borderValue = depthTexture
+    ? floatLiteral(borderColor[0])
+    : `vec4<${componentType}>(${borderColor.map((value) => componentType === 'f32' ? floatLiteral(value) : `${componentType}(${floatLiteral(value)})`).join(', ')})`;
+  const axes = ['x', 'y', 'z'].slice(0, dimension);
+  const levelSize = dimension === 1
+    ? `i32(textureDimensions(${textureName}, level))`
+    : `vec${dimension}<i32>(textureDimensions(${textureName}, level))`;
+  const asFloatSize = dimension === 1 ? 'f32(_size)' : `vec${dimension}<f32>(_size)`;
+  const half = dimension === 1 ? '0.5' : `vec${dimension}<f32>(0.5)`;
+  const indexExpr = (name, axis) => dimension === 1 ? name : `${name}.${axes[axis]}`;
+  const coordParams = `coord: ${coordType}${arrayTexture ? ', layer: i32' : ''}`;
+  const sampleArgs = (indices, levelName) => {
+    const address = dimension === 1 ? indices[0] : `vec${dimension}<i32>(${indices.join(', ')})`;
+    return arrayTexture
+      ? `${textureName}, ${address}, layer, ${levelName}`
+      : `${textureName}, ${address}, ${levelName}`;
+  };
+  const levelFunction = `${name}_at_level`;
+  const makeAddress = (tap, axis, index) => {
+    const size = dimension === 1 ? '_size' : `_size.${axes[axis]}`;
+    const addressName = `_addr_${tap}_${axis}`;
+    const lines = [];
+    let expr;
+    switch (addressModes[axis]) {
+      case 1:
+        expr = `((_index_${tap}_${axis} % ${size}) + ${size}) % ${size}`;
+        break;
+      case 2: {
+        const period = `_period_${tap}_${axis}`, wrapped = `_wrapped_${tap}_${axis}`;
+        lines.push(`let ${period} = ${size} * 2;`);
+        lines.push(`let ${wrapped} = ((_index_${tap}_${axis} % ${period}) + ${period}) % ${period};`);
+        expr = `select(${wrapped}, ${period} - 1 - ${wrapped}, ${wrapped} >= ${size})`;
+        break;
+      }
+      case 5: {
+        const mirrored = `_mirrored_${tap}_${axis}`;
+        lines.push(`let ${mirrored} = select(_index_${tap}_${axis}, -_index_${tap}_${axis} - 1, _index_${tap}_${axis} < 0);`);
+        expr = `clamp(${mirrored}, 0, ${size} - 1)`;
+        break;
+      }
+      case 3:
+      case 4:
+      default:
+        expr = `clamp(_index_${tap}_${axis}, 0, ${size} - 1)`;
+        break;
+    }
+    lines.push(`let ${addressName} = ${expr};`);
+    return { lines, addressName, size };
+  };
+  const makeTap = (tap, bits, linear) => {
+    const lines = [];
+    const indices = [];
+    const borderTerms = [];
+    const weights = [];
+    for (let axis = 0; axis < dimension; axis++) {
+      const base = indexExpr('_base', axis);
+      const indexName = `_index_${tap}_${axis}`;
+      lines.push(`let ${indexName} = ${base}${linear && bits[axis] ? ' + 1' : ''};`);
+      indices.push(indexName);
+      const { lines: addressLines, addressName, size } = makeAddress(tap, axis, indexName);
+      lines.push(...addressLines);
+      if (addressModes[axis] === 4) borderTerms.push(`(${indexName} < 0 || ${indexName} >= ${size})`);
+      if (linear) {
+        const fraction = indexExpr('_fraction', axis);
+        weights.push(bits[axis] ? fraction : `(1.0 - ${fraction})`);
+      }
+      indices[axis] = addressName;
+    }
+    if (linear) lines.push(`let _weight_${tap} = ${weights.join(' * ')};`);
+    const loaded = `textureLoad(${sampleArgs(indices, 'level')})`;
+    const value = borderTerms.length ? `select(${loaded}, ${borderValue}, ${borderTerms.join(' || ')})` : loaded;
+    if (linear) lines.push(`_sum = _sum + (${value}) * _weight_${tap};`);
+    else lines.push(`return ${value};`);
+    return lines;
+  };
+  const linearSampling = componentType === 'f32';
+  const atLevelBody = [`let _size = ${levelSize};`];
+  if (linearSampling) {
+    atLevelBody.push(`if (linear) {`);
+    atLevelBody.push(`  let _position = coord * ${asFloatSize} - ${half};`);
+    atLevelBody.push(`  let _base = ${dimension === 1 ? 'i32(floor(_position))' : `vec${dimension}<i32>(floor(_position))`};`);
+    atLevelBody.push(`  let _fraction = fract(_position);`);
+    atLevelBody.push(`  var _sum: ${resultType} = ${zero};`);
+    for (let tap = 0; tap < 1 << dimension; tap++) {
+      const bits = axes.map((_, axis) => (tap >> axis) & 1);
+      atLevelBody.push(...makeTap(tap, bits, true).map((line) => `  ${line}`));
+    }
+    atLevelBody.push('  return _sum;', '}');
+  }
+  atLevelBody.push(`let _base = ${dimension === 1 ? 'i32(floor(coord * f32(_size)))' : `vec${dimension}<i32>(floor(coord * ${asFloatSize}))`};`);
+  atLevelBody.push(...makeTap('point', axes.map(() => 0), false));
+
+  const params = `${coordParams}, level: i32, linear: bool`;
+  const atLevel = `fn ${levelFunction}(${params}) -> ${resultType} {\n${atLevelBody.map((line) => `  ${line}`).join('\n')}\n}`;
+  const mainParams = `${coordParams}, requestedLod: f32`;
+  const mainBody = [
+    `let _maxLevel = f32(textureNumLevels(${textureName}) - 1u);`,
+    `let _lod = clamp(requestedLod + ${floatLiteral(lodBias)}, ${floatLiteral(minLod)}, min(${floatLiteral(maxLod)}, _maxLevel));`,
+    `let _sampleLod = clamp(_lod, 0.0, _maxLevel);`,
+    `let _linear = select(${settings?.minFilter === 'linear'}, ${settings?.magFilter === 'linear'}, _lod <= 0.0);`,
+  ];
+  if (settings?.mipmapFilter === 'linear' && componentType === 'f32') {
+    mainBody.push(`let _mip0 = i32(floor(_sampleLod));`);
+    mainBody.push(`let _mip1 = min(_mip0 + 1, i32(textureNumLevels(${textureName})) - 1);`);
+    mainBody.push(`let _mipWeight = fract(_sampleLod);`);
+    const atArgs = (mip) => `${arrayTexture ? 'coord, layer' : 'coord'}, ${mip}, _linear`;
+    mainBody.push(`return mix(${levelFunction}(${atArgs('_mip0')}), ${levelFunction}(${atArgs('_mip1')}), _mipWeight);`);
+  } else {
+    mainBody.push(`let _mip = i32(floor(_sampleLod + 0.5));`);
+    mainBody.push(`return ${levelFunction}(${arrayTexture ? 'coord, layer' : 'coord'}, _mip, _linear);`);
+  }
+  return { name, source: `${atLevel}\nfn ${name}(${mainParams}) -> ${resultType} {\n${mainBody.map((line) => `  ${line}`).join('\n')}\n}` };
+}
+
+function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode) {
+  const dimension = textureType.kind === 'texture_1d' ? 1
+    : ['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(textureType.kind) ? 2
+      : textureType.kind === 'texture_3d' ? 3 : 0;
+  if (!dimension) return null;
+  const coordType = dimension === 1 ? 'f32' : `vec${dimension}<f32>`;
+  const size = dimension === 1
+    ? `f32(textureDimensions(${textureName}, 0))`
+    : `vec${dimension}<f32>(textureDimensions(${textureName}, 0))`;
+  const coordParams = `coord: ${coordType}${arrayTexture ? ', layer: i32' : ''}`;
+  const callArgs = (lod) => `${arrayTexture ? 'coord, layer' : 'coord'}, ${lod}`;
+  const gradientLength = (gradient) => dimension === 1 ? `abs(${gradient})` : `length(${gradient})`;
+  let params = coordParams;
+  let derivativeX, derivativeY, lodBias = '0.0';
+  if (mode === 'grad') {
+    params += `, derivativeX: ${coordType}, derivativeY: ${coordType}`;
+    derivativeX = 'derivativeX'; derivativeY = 'derivativeY';
+  } else {
+    derivativeX = 'dpdx(coord)'; derivativeY = 'dpdy(coord)';
+    if (mode === 'bias') {
+      params += ', sourceBias: f32';
+      lodBias = 'sourceBias';
+    }
+  }
+  const source = `fn ${name}_${mode}(${params}) -> ${textureType.kind.startsWith('texture_depth_') ? 'f32' : `vec4<${textureType.component}>`} {
+  let _size = ${size};
+  let _dx = (${derivativeX}) * _size;
+  let _dy = (${derivativeY}) * _size;
+  let _lod = log2(max(${gradientLength('_dx')}, ${gradientLength('_dy')})) + ${lodBias};
+  return ${name}(${callArgs('_lod')});
+}`;
+  return { name: `${name}_${mode}`, source };
+}
+
+function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors, samplerSettings) {
   const textureTypes = new Map();
-  const texturePattern = /\bvar\s+(\w+)\s*:\s*(texture_(?:1d|2d|2d_array|3d|cube|cube_array|depth_2d|depth_2d_array|depth_cube|depth_cube_array))(?:\s*<[^;]*>)?\s*;/g;
-  for (const match of wgsl.matchAll(texturePattern)) textureTypes.set(match[1], match[2]);
+  const texturePattern = /\bvar\s+(\w+)\s*:\s*(texture_(?:1d|2d|2d_array|3d|cube|cube_array|depth_2d|depth_2d_array|depth_cube|depth_cube_array))(?:\s*<([^;]*)>)?\s*;/g;
+  for (const match of wgsl.matchAll(texturePattern)) textureTypes.set(match[1], { kind: match[2], component: match[3]?.trim() });
 
   const callPattern = /\b(textureSample(?:BaseClampToEdge|CompareLevel|Compare|Level|Grad|Bias)?|textureGather(?:Compare)?)\s*\(/g;
   let result = '', cursor = 0, changed = false;
   const unsupported = new Set();
   const dimensions = new Set();
+  const borderHelpers = new Map();
   for (const match of wgsl.matchAll(callPattern)) {
     const open = match.index + match[0].lastIndexOf('(');
     let depth = 1, close = open + 1;
@@ -279,33 +455,91 @@ function mirrorOnceSampleWgsl(wgsl, samplerAddressModes) {
     const samplerRegister = /^s(\d+)_$/.exec(samplerName);
     const samplerIndex = samplerRegister ? Number(samplerRegister[1]) : samplerName === 'd3d9Sampler' ? 0 : null;
     const addressModes = samplerIndex === null ? undefined : samplerAddressModes.get(samplerIndex);
-    if (!addressModes?.includes(5)) continue;
+    if (!addressModes?.some((mode) => mode === 4 || mode === 5)) continue;
 
     const textureType = textureTypes.get(textureName);
-    const dimension = textureType === 'texture_1d' ? 1
-      : ['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(textureType) ? 2
-        : textureType === 'texture_3d' ? 3 : 0;
+    const dimension = textureType?.kind === 'texture_1d' ? 1
+      : ['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(textureType?.kind) ? 2
+        : textureType?.kind === 'texture_3d' ? 3 : 0;
     if (!dimension) {
-      unsupported.add(samplerName);
+      unsupported.add(`${samplerName}: no supported sampled-texture dimension`);
       continue;
     }
 
     const spatialAxes = dimension === 1 ? 1 : dimension === 2 ? 2 : 3;
-    const mask = addressModes.slice(0, spatialAxes).map((mode) => mode === 5);
-    if (!mask.some(Boolean)) continue;
-    const maskExpr = dimension === 1 ? String(mask[0]) : `vec${spatialAxes}<bool>(${mask.join(', ')})`;
+    const mirrorMask = addressModes.slice(0, spatialAxes).map((mode) => mode === 5);
+    const borderMask = addressModes.slice(0, spatialAxes).map((mode) => mode === 4);
+    if (!mirrorMask.some(Boolean) && !borderMask.some(Boolean)) continue;
     const coord = args[2];
     const coordStart = open + 1 + coord.start;
     const coordEnd = open + 1 + coord.end;
-    result += wgsl.slice(cursor, coordStart) + `mirror_once_${dimension}(${coord.text.trim()}, ${maskExpr})`;
-    cursor = coordEnd;
+    let call = wgsl.slice(match.index, close + 1);
+
+    if (borderMask.some(Boolean)) {
+      const arrayTexture = textureType.kind === 'texture_2d_array' || textureType.kind === 'texture_depth_2d_array';
+      const settings = samplerSettings.get(samplerIndex);
+      const mode = ({
+        textureSample: 'implicit',
+        textureSampleLevel: 'level',
+        textureSampleGrad: 'grad',
+        textureSampleBias: 'bias',
+      })[match[1]];
+      const expectedArgs = mode === 'level' ? (arrayTexture ? 5 : 4)
+        : mode === 'grad' ? (arrayTexture ? 6 : 5)
+          : mode === 'bias' ? (arrayTexture ? 5 : 4)
+            : mode === 'implicit' ? (arrayTexture ? 4 : 3) : 0;
+      const borderColor = samplerBorderColors.get(samplerIndex) || [0, 0, 0, 0];
+      const helper = mode && args.length === expectedArgs
+        ? borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture)
+        : null;
+      if (helper) {
+        borderHelpers.set(helper.name, helper.source);
+        const sampleArgs = [coord.text.trim()];
+        if (arrayTexture) sampleArgs.push(args[3].text.trim());
+        let helperCall;
+        if (mode === 'level') {
+          sampleArgs.push(args[arrayTexture ? 4 : 3].text.trim());
+          helperCall = `${helper.name}(${sampleArgs.join(', ')})`;
+        } else {
+          const wrapper = borderSampleLodWgsl(helper.name, textureName, textureType, arrayTexture, mode);
+          if (wrapper) {
+            borderHelpers.set(wrapper.name, wrapper.source);
+            const restStart = arrayTexture ? 4 : 3;
+            for (let index = restStart; index < args.length; index++) sampleArgs.push(args[index].text.trim());
+            helperCall = `${wrapper.name}(${sampleArgs.join(', ')})`;
+          }
+        }
+        if (helperCall) {
+          result += wgsl.slice(cursor, match.index) + helperCall;
+          cursor = close + 1;
+          changed = true;
+          continue;
+        }
+      }
+      unsupported.add(`${samplerName}: BORDER ${match[1]} could not be specialized for ${textureType.kind}`);
+    }
+
+    if (mirrorMask.some(Boolean)) {
+      const maskExpr = dimension === 1 ? String(mirrorMask[0]) : `vec${spatialAxes}<bool>(${mirrorMask.join(', ')})`;
+      const localStart = coordStart - match.index, localEnd = coordEnd - match.index;
+      call = call.slice(0, localStart) + `mirror_once_${dimension}(${coord.text.trim()}, ${maskExpr})` + call.slice(localEnd);
+      dimensions.add(dimension);
+    }
+
+    if (borderMask.some(Boolean)) {
+      unsupported.add(`${samplerName}: BORDER is unsupported for ${match[1]} on ${textureType.kind}`);
+    }
+
+    result += wgsl.slice(cursor, match.index) + call;
+    cursor = close + 1;
     changed = true;
-    dimensions.add(dimension);
   }
   if (!changed) return { wgsl, changed: false, unsupported };
   result += wgsl.slice(cursor);
   const helpers = [...dimensions].sort().map(mirrorOnceHelper).join('\n');
-  return { wgsl: `${helpers}\n${result}`, changed: true, unsupported };
+  const specialized = [...borderHelpers.values()].join('\n');
+  const prelude = [helpers, specialized].filter(Boolean).join('\n');
+  return { wgsl: prelude ? `${prelude}\n${result}` : result, changed: true, unsupported };
 }
 
 const defaultPipelineState = () => ({
@@ -708,10 +942,15 @@ export class GpuExecutor {
       addressModeU: ADDRESS[au] || 'repeat', addressModeV: ADDRESS[av] || 'repeat', addressModeW: ADDRESS[aw] || 'repeat',
       lodMinClamp: Math.max(0, minLod), lodMaxClamp: Math.min(32, Math.max(maxLod, minLod)),
     };
+    const borderColor = [0, 1, 2, 3].map((channel) => dv.getFloat32(28 + channel * 4, true));
     if (isAniso) { d.minFilter = d.magFilter = d.mipmapFilter = 'linear'; d.maxAnisotropy = Math.max(1, Math.min(16, aniso)); }
     if (comparison) d.compare = CMP[cmp] || 'always';
-    void bias;
-    return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1, addressModes: [au, av, aw] };
+    const sampling = {
+      minFilter: d.minFilter, magFilter: d.magFilter, mipmapFilter: d.mipmapFilter,
+      mipBias: bias, lodMinClamp: d.lodMinClamp, lodMaxClamp: d.lodMaxClamp,
+      anisotropic: isAniso, comparison,
+    };
+    return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1, addressModes: [au, av, aw], borderColor, sampling };
   }
 
   shaderInfo(dxbc, uavFormat) {
@@ -755,11 +994,9 @@ export class GpuExecutor {
     return { ...shader, ...variant };
   }
 
-  samplerAddressVariant(shader, samplerAddressModes) {
+  samplerAddressVariant(shader, samplerAddressModes, samplerBorderColors, samplerSettings) {
     if (!shader) return shader;
-    const key = JSON.stringify([...samplerAddressModes]
-      .filter(([, modes]) => modes?.includes(5))
-      .sort(([a], [b]) => a - b));
+    const key = samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings);
     if (key === '[]') return shader;
     let variants = this.samplerAddressVariants.get(shader);
     if (!variants) {
@@ -771,9 +1008,9 @@ export class GpuExecutor {
 
     const source = shader.wgsl || shader.fixedFunction?.source;
     if (!source) return shader;
-    const transformed = mirrorOnceSampleWgsl(source, new Map(samplerAddressModes));
-    for (const sampler of transformed.unsupported) {
-      this.log(`MIRROR_ONCE sampler ${sampler} has no supported sampled-texture dimension`);
+    const transformed = samplerAddressSampleWgsl(source, samplerAddressModes, samplerBorderColors, samplerSettings);
+    for (const message of transformed.unsupported) {
+      this.log(`sampler addressing unsupported: ${message}`);
     }
     if (!transformed.changed) return shader;
     variant = {
@@ -1271,19 +1508,23 @@ export class GpuExecutor {
     }
     const samplerComparison = [];
     const samplerAddressModes = new Map();
+    const samplerBorderColors = new Map();
+    const samplerSettings = new Map();
     for (const [reg, { d, vis }] of groups[2]) {
       const sid = this.st.smp[(vis & GPUShaderStage.VERTEX) ? 0 : 1][reg] || this.st.smp[1][reg] || this.st.smp[0][reg] || 0;
       const s = this.samplers.get(sid);
       samplerComparison[reg] = !!s?.comparison;
-      if (s?.addressModes) samplerAddressModes.set(reg, s.addressModes);
+      if (s?.addressModes) {
+        samplerAddressModes.set(reg, s.addressModes);
+        if (s.addressModes.includes(4)) samplerBorderColors.set(reg, s.borderColor || [0, 0, 0, 0]);
+        samplerSettings.set(reg, s.sampling || {});
+      }
       layoutEntries[2].push({ binding: reg, visibility: vis, sampler: { type: s?.comparison ? 'comparison' : 'filtering' } });
       resolved[2].push({ binding: reg, resource: s ? s.gpu : this.defaultSampler });
     }
-    const samplerAddressKey = JSON.stringify([...samplerAddressModes]
-      .filter(([, modes]) => modes.includes(5))
-      .sort(([a], [b]) => a - b));
-    vs = this.samplerAddressVariant(vs, samplerAddressModes);
-    ps = this.samplerAddressVariant(ps, samplerAddressModes);
+    const samplerAddressKey = samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings);
+    vs = this.samplerAddressVariant(vs, samplerAddressModes, samplerBorderColors, samplerSettings);
+    ps = this.samplerAddressVariant(ps, samplerAddressModes, samplerBorderColors, samplerSettings);
     for (const [reg, { d, vis }] of groups[1]) {
       const vid = this.st.srv[(vis & GPUShaderStage.FRAGMENT) ? 1 : 0][reg] || this.st.srv[1][reg] || this.st.srv[0][reg] || 0;
       const view = this.getView(vid);

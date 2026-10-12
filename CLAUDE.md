@@ -243,8 +243,11 @@ register-stack subset):
       reverse-subtract, add, subtract, min, and max blend operations;
       texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture
       `CopySubresourceRegion` and `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
-      fractional-LOD linear filtering; repeat/mirror/clamp sampler address pixels (BORDER and
-      MIRROR_ONCE remain open) and an 8x anisotropic
+      fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
+      BORDER verifies configured color for point and linear taps in 2D RGBA8 Sample, SampleLevel,
+      SampleGrad, and SampleBias paths. Other dimensions/formats and comparison/gather/cube/
+      anisotropic BORDER cases remain open;
+      an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
       for RGBA8, BGRA8, and RGBA16_FLOAT; 4x D24S8 depth testing with an RGBA8 color resolve; and

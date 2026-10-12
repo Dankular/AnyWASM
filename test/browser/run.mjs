@@ -1541,22 +1541,40 @@ try {
         SamplerState clampSampler : register(s1);
         SamplerState mirrorSampler : register(s2);
         SamplerState mirrorOnceSampler : register(s3);
+        SamplerState borderSampler : register(s4);
         float4 main(float4 position : SV_Position) : SV_Target {
-          return position.x < 16.0
+          float4 borderStraddle = image.Sample(borderSampler, float2(0.9, 0.5));
+          return position.x < 10.0
             ? image.SampleLevel(wrapSampler, float2(1.25, 0.5), 0.0)
-            : position.x < 32.0
+            : position.x < 20.0
               ? image.SampleLevel(mirrorSampler, float2(1.75, 0.5), 0.0)
-              : position.x < 48.0
+              : position.x < 30.0
                 ? image.SampleLevel(clampSampler, float2(1.25, 0.5), 0.0)
-                : position.x < 56.0
+                : position.x < 40.0
                   ? image.SampleLevel(mirrorOnceSampler, float2(2.75, 0.5), 0.0)
-                : image.SampleLevel(mirrorOnceSampler, float2(-0.75, 0.5), 0.0);
+                  : position.x < 50.0
+                    ? image.SampleLevel(mirrorOnceSampler, float2(-0.75, 0.5), 0.0)
+                    : position.x < 58.0
+                      ? image.SampleLevel(borderSampler, float2(1.25, 0.5), 0.0)
+                      : borderStraddle;
         }
       `, 'main', 'ps_5_0');
       const linearPixel = tool.compileHlsl(`
         Texture2D<float4> image : register(t0);
         SamplerState linearSampler : register(s0);
         float4 main() : SV_Target { return image.SampleLevel(linearSampler, float2(0.5, 0.5), 0.0); }
+      `, 'main', 'ps_5_0');
+      const borderGradientPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main() : SV_Target {
+          return image.SampleGrad(borderSampler, float2(0.9, 0.5), float2(0.0, 0.0), float2(0.0, 0.0));
+        }
+      `, 'main', 'ps_5_0');
+      const borderBiasPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main() : SV_Target { return image.SampleBias(borderSampler, float2(0.9, 0.5), 0.0); }
       `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
@@ -1582,11 +1600,12 @@ try {
       texels.set([255, 0, 0, 255, 0, 255, 0, 255], 36);
       command(5, texels);
       command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1));
-      const sampler = (id, addressU, filter = 0) => {
+      const sampler = (id, addressU, filter = 0, borderColor = [0, 0, 0, 0]) => {
         const data = new Uint8Array(56), view = new DataView(data.buffer);
         view.setUint32(0, id, true); view.setUint32(4, filter, true);
         view.setUint32(8, addressU, true); view.setUint32(12, 3, true); view.setUint32(16, 3, true);
         view.setUint32(24, 1, true); view.setUint32(28, 1, true);
+        borderColor.forEach((value, index) => view.setFloat32(32 + index * 4, value, true));
         view.setFloat32(48, 0, true); view.setFloat32(52, 0, true);
         return data;
       };
@@ -1595,10 +1614,11 @@ try {
       command(8, sampler(17, 3, 0x15)); // linear min/mag/mip, clamp U
       command(8, sampler(18, 2)); // mirror U
       command(8, sampler(19, 5, 0x15)); // mirror once U with linear filtering
+      command(8, sampler(20, 4, 0x15, [0, 0, 1, 1])); // linear blue border U
       shader(7, 0, vertex); shader(8, 1, pixel); shader(9, 1, linearPixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(21, words(1, 2, 0)); command(16, words(4));
-      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 4, 15, 16, 18, 19));
+      command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 5, 15, 16, 18, 19, 20));
       command(29, words(3, 0));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
@@ -1613,20 +1633,38 @@ try {
       gpu.execute(secondCommands);
       const linearPixels = await gpu.readBackbuffer(1);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
-      const result = { wrap: at(pixels, 8), mirror: at(pixels, 24), clamp: at(pixels, 40), mirrorOncePositive: at(pixels, 52), mirrorOnceNegative: at(pixels, 60), linear: at(linearPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      stream.length = 0;
+      shader(10, 1, borderGradientPixel);
+      command(17, words(1, 10)); command(20, words(1, 0, 1, 20)); command(29, words(3, 0));
+      const gradientSize = stream.reduce((total, part) => total + part.length, 0), gradientCommands = new Uint8Array(gradientSize);
+      let gradientOffset = 0; for (const part of stream) { gradientCommands.set(part, gradientOffset); gradientOffset += part.length; }
+      gpu.execute(gradientCommands);
+      const gradientPixels = await gpu.readBackbuffer(1);
+      stream.length = 0;
+      shader(11, 1, borderBiasPixel);
+      command(17, words(1, 11)); command(29, words(3, 0));
+      const biasSize = stream.reduce((total, part) => total + part.length, 0), biasCommands = new Uint8Array(biasSize);
+      let biasOffset = 0; for (const part of stream) { biasCommands.set(part, biasOffset); biasOffset += part.length; }
+      gpu.execute(biasCommands);
+      const biasPixels = await gpu.readBackbuffer(1);
+      const result = { wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35), mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61), linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 sampler repeat/mirror/clamp/MIRROR_ONCE modes and linear filtering match sampled texels',
-    samplerAddressResult.draws === 2 && samplerAddressResult.errors.length === 0
+  check('D3D11 sampler repeat/mirror/clamp/MIRROR_ONCE/BORDER modes and linear filtering match sampled texels',
+    samplerAddressResult.draws === 4 && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
       && near(samplerAddressResult.mirrorOncePositive || [], [0, 255, 0, 255], 1)
       && near(samplerAddressResult.mirrorOnceNegative || [], [0, 255, 0, 255], 1)
+      && near(samplerAddressResult.borderOut || [], [0, 0, 255, 255], 1)
+      && near(samplerAddressResult.borderStraddle || [], [0, 179, 77, 255], 2)
+      && near(samplerAddressResult.borderGrad || [], [0, 179, 77, 255], 2)
+      && near(samplerAddressResult.borderBias || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 

@@ -67,7 +67,7 @@
 - [x] Pixel-check all eight D3D11 depth comparisons with incoming depth below, equal to, and above the cleared reference value.
 - [x] Verify stencil write mask `0x0f` preserves upper bits and stencil read mask `0x0f` compares only lower bits.
 - [x] Verify D3D11 stencil fail and depth-fail paths for KEEP, ZERO, REPLACE, saturating increment/decrement, invert, wrapping increment/decrement, and masked replace; all boundary pixels pass in the full Chromium suite with no WebGPU validation errors.
-- [x] Pixel-check D3D11 WRAP, MIRROR, CLAMP, and MIRROR_ONCE sampler address modes with out-of-range coordinates and verify linear filtering; D3D9 fixed-function MIRROR_ONCE also mirrors negative UVs before linear filtering. BORDER remains open.
+- [x] Pixel-check D3D11 WRAP, MIRROR, CLAMP, and MIRROR_ONCE modes and D3D9 fixed-function MIRROR_ONCE; D3D11 BORDER verifies the configured color for point taps and linear footprints both outside and straddling a 2D RGBA8 edge through Sample, SampleLevel, SampleGrad, and SampleBias. Other dimensions/formats and comparison/gather/cube/anisotropic BORDER cases remain open.
 - [x] Verify `CopySubresourceRegion` for a 3D box spanning two depth slices and assert source values plus untouched destination voxels.
 
 **Gate:** Every render-state, copy, resolve, packing, and staging item listed open by the checklist has a named passing regression.
