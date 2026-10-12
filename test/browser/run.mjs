@@ -410,6 +410,49 @@ try {
     triText.includes('staging BGRA8_SRGB readback=10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160 row_pitch=8'), triText);
   check('D3D11 staging Texture3D Map(READ) preserves row and depth pitches',
     triText.includes('staging Texture3D R32_FLOAT readback=0.125,0.250,0.375,0.500,0.625,0.750,0.875,1.000 row_pitch=8 depth_pitch=16'), triText);
+  const bcReadbackResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 8; canvas.height = 8;
+    const gpu = new GpuExecutor(canvas, null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      if (!gpu.features.has('texture-compression-bc')) {
+        gpu.device.destroy();
+        return { skipped: 'adapter does not support BC textures' };
+      }
+      const formats = [
+        { name: 'BC1', dxgi: 71, blockBytes: 8 },
+        { name: 'BC3', dxgi: 77, blockBytes: 16 },
+      ];
+      const readbacks = [];
+      for (const [index, format] of formats.entries()) {
+        const rowBytes = 2 * format.blockBytes, rowPitch = rowBytes + 4;
+        const source = new Uint8Array(rowPitch * 2).fill(0xee);
+        for (let i = 0; i < rowBytes; i++) {
+          source[i] = i + 1;
+          source[rowPitch + i] = 0x80 + i;
+        }
+        const id = 7 + index;
+        gpu.createTexture(id, 8, 8, 1, 1, format.dxgi, 0, 0, 0);
+        gpu.textureWrite(id, 0, 0, 0, 0, 8, 8, rowPitch, source.length, source);
+        readbacks.push({ name: format.name, bytes: Array.from(await gpu.readBackResource(id)) });
+      }
+      gpu.device.destroy();
+      return { readbacks };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  const bcExpected = [16, 32].map((rowBytes) => Array.from({ length: rowBytes }, (_, i) => i + 1)
+    .concat(Array.from({ length: rowBytes }, (_, i) => 0x80 + i)));
+  check('D3D11 BC1/BC3 staging Map(READ) preserves block rows and source row pitches',
+    Boolean(bcReadbackResult.skipped)
+      || (!bcReadbackResult.error && bcReadbackResult.readbacks?.length === 2
+        && bcReadbackResult.readbacks.every((item, index) => item.bytes.length === bcExpected[index].length
+          && item.bytes.every((value, i) => value === bcExpected[index][i]))),
+    JSON.stringify(bcReadbackResult));
   const gpuStats = await page.evaluate(() => window.__gpuStats);
   console.log('gpu stats:', JSON.stringify(gpuStats));
   check('WebGPU executor drew and presented', gpuStats && gpuStats.draws >= 3 && gpuStats.presents >= 3, JSON.stringify(gpuStats));
