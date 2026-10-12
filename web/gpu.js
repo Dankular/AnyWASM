@@ -1105,7 +1105,7 @@ export class GpuExecutor {
     return { width: t.width, height: t.height, data: out };
   }
 
-  /** Read an R32_FLOAT texture, or the texture selected by one of its D3D11 views (for diagnostics). */
+  /** Read a common color texture or R32_FLOAT texture, optionally through a D3D11 view. */
   async readBackTexture(id) {
     const view = this.views.get(id);
     const resourceId = view?.resource ?? id;
@@ -1114,7 +1114,11 @@ export class GpuExecutor {
     const mip = view?.mip ?? 0;
     const slice = view && (view.dim === 5 || view.dim === 4 && view.slices > 1) ? view.slice : 0;
     const format = view ? this.viewFormat(view.format, texture) : texture.format;
-    if (format !== 'r32float') throw new Error(`texture readback supports R32_FLOAT only (got ${format})`);
+    const floatData = format === 'r32float';
+    const rgba8 = ['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb'].includes(format);
+    if (!floatData && !rgba8) {
+      throw new Error(`texture readback supports R32_FLOAT and RGBA8/BGRA8 only (got ${format})`);
+    }
     const width = Math.max(1, texture.width >> mip);
     const height = Math.max(1, texture.height >> mip);
     const bytesPerRow = (width * 4 + 255) & ~255;
@@ -1132,9 +1136,29 @@ export class GpuExecutor {
     this.device.queue.submit([encoder.finish()]);
     await buffer.mapAsync(GPUMapMode.READ);
     const bytes = new Uint8Array(buffer.getMappedRange());
-    const data = new Float32Array(width * height);
-    for (let row = 0; row < height; row++) {
-      data.set(new Float32Array(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
+    let data;
+    if (floatData) {
+      data = new Float32Array(width * height);
+      for (let row = 0; row < height; row++) {
+        data.set(new Float32Array(bytes.buffer, bytes.byteOffset + row * bytesPerRow, width), row * width);
+      }
+    } else {
+      data = new Uint8Array(width * height * 4);
+      const bgra = format.startsWith('bgra');
+      for (let y = 0; y < height; y++) {
+        const row = bytes.subarray(y * bytesPerRow, y * bytesPerRow + width * 4);
+        if (!bgra) {
+          data.set(row, y * width * 4);
+        } else {
+          for (let x = 0; x < width; x++) {
+            const src = x * 4, dst = (y * width + x) * 4;
+            data[dst] = row[src + 2];
+            data[dst + 1] = row[src + 1];
+            data[dst + 2] = row[src];
+            data[dst + 3] = row[src + 3];
+          }
+        }
+      }
     }
     buffer.unmap();
     buffer.destroy();

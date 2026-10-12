@@ -989,6 +989,152 @@ try {
       && near(scissorResult.outside, [0, 0, 0, 255], 1),
     JSON.stringify(scissorResult));
 
+  const reverseBlendResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl('float4 main() : SV_Target { return float4(0.25, 0.5, 0.0, 1.0); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      const blend = new Uint8Array(268), blendView = new DataView(blend.buffer);
+      blendView.setUint32(0, 11, true); // state id
+      blendView.setUint32(12, 1, true); // RenderTarget[0].BlendEnable
+      blendView.setUint32(16, 2, true); // SrcBlend = ONE
+      blendView.setUint32(20, 2, true); // DestBlend = ONE
+      blendView.setUint32(24, 3, true); // BlendOp = REV_SUBTRACT
+      blendView.setUint32(28, 2, true); // SrcBlendAlpha = ONE
+      blendView.setUint32(32, 2, true); // DestBlendAlpha = ONE
+      blendView.setUint32(36, 3, true); // BlendOpAlpha = REV_SUBTRACT
+      blendView.setUint32(40, 0xf, true); // RenderTarget[0].WriteMask
+      command(9, blend);
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8)); command(16, words(4));
+      command(21, words(1, 2, 0)); command(24, words(11, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xffffffff));
+      const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
+      clearView.setUint32(0, 2, true); clearView.setFloat32(12, 1, true); clearView.setFloat32(16, 1, true);
+      command(27, clear); command(29, words(3, 0));
+      gpu.execute(append());
+      const pixels = await gpu.readBackbuffer(1);
+      const i = (32 * pixels.width + 32) * 4;
+      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 reverse-subtract blending computes destination minus source',
+    near(reverseBlendResult.pixel, [0, 0, 255, 0], 1) && reverseBlendResult.errors.length === 0,
+    JSON.stringify(reverseBlendResult));
+
+  const mrtResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        struct Output { float4 first : SV_Target0; float4 second : SV_Target1; };
+        Output main() {
+          Output output;
+          output.first = float4(1.0, 0.0, 0.0, 1.0);
+          output.second = float4(0.0, 0.0, 1.0, 1.0);
+          return output;
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const append = () => {
+        const size = stream.reduce((n, part) => n + part.length, 0), data = new Uint8Array(size);
+        let at = 0; for (const part of stream) { data.set(part, at); at += part.length; }
+        return data;
+      };
+      command(4, words(3, 64, 64, 1, 1, 28, 0x20, 0, 1, 0));
+      command(4, words(4, 64, 64, 1, 1, 87, 0x20, 0, 1, 0));
+      command(12, words(5, 0, 3, 28, 4, 0, 1, 0, 1));
+      command(12, words(6, 0, 4, 87, 4, 0, 1, 0, 1));
+      shader(7, 0, vertex); shader(8, 1, pixel);
+      command(17, words(0, 7)); command(17, words(1, 8));
+      command(16, words(4)); command(21, words(2, 5, 6, 0));
+      command(29, words(3, 0));
+      gpu.execute(append());
+      const [first, second] = await Promise.all([gpu.readBackTexture(3), gpu.readBackTexture(4)]);
+      const pixelAt = (image) => {
+        const i = (32 * image.width + 32) * 4;
+        return Array.from(image.data.slice(i, i + 4));
+      };
+      const result = { first: pixelAt(first), second: pixelAt(second), errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 multiple render targets write independent pixel outputs',
+    !mrtResult.error && mrtResult.errors?.length === 0
+      && near(mrtResult.first || [], [255, 0, 0, 255], 1)
+      && near(mrtResult.second || [], [0, 0, 255, 255], 1),
+    JSON.stringify(mrtResult));
+
   const caps = await page.textContent('#caps');
   console.log('capabilities:', caps.replace(/\s+/g, ' ').trim());
   const gpu = await page.evaluate(async () => {
