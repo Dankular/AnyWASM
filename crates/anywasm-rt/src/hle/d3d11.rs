@@ -63,6 +63,7 @@ const DXGI_FORMAT_R32G32_FLOAT: u32 = 16;
 const DXGI_FORMAT_R32G32_UINT: u32 = 17;
 const DXGI_FORMAT_R32G32_SINT: u32 = 18;
 const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
+const DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: u32 = 29;
 const DXGI_FORMAT_R8G8B8A8_SNORM: u32 = 31;
 const DXGI_FORMAT_R8G8B8A8_UINT: u32 = 30;
 const DXGI_FORMAT_R8G8B8A8_SINT: u32 = 32;
@@ -73,6 +74,7 @@ const DXGI_FORMAT_R32G32B32A32_FLOAT: u32 = 2;
 const DXGI_FORMAT_R32G32B32A32_UINT: u32 = 3;
 const DXGI_FORMAT_R32G32B32A32_SINT: u32 = 4;
 const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
+const DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: u32 = 91;
 const D3D11_FORMAT_SUPPORT_BUFFER: u32 = 0x1;
 const D3D11_FORMAT_SUPPORT_CPU_LOCKABLE: u32 = 0x0002_0000;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
@@ -84,7 +86,9 @@ fn supports_4x_multisample_render_target(format: u32) -> bool {
     matches!(
         format,
         DXGI_FORMAT_R8G8B8A8_UNORM
+            | DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
             | DXGI_FORMAT_B8G8R8A8_UNORM
+            | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
             | DXGI_FORMAT_R16G16B16A16_FLOAT
     )
 }
@@ -1721,6 +1725,14 @@ mod tests {
         assert_eq!(query(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
 
+        p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB as u64;
+        assert_eq!(query(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 1);
+
+        p.cpu.gpr[RDX] = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB as u64;
+        assert_eq!(query(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 1);
+
         p.cpu.gpr[RDX] = DXGI_FORMAT_R16G16B16A16_FLOAT as u64;
         assert_eq!(query(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
@@ -1771,6 +1783,22 @@ mod tests {
         p.cpu.gpr[R9] = OUT + 16;
         assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
         assert_ne!(p.rd64(OUT + 16).unwrap(), 0);
+
+        for (index, format) in [
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut srgb_desc = float16_desc.clone();
+            srgb_desc[16..20].copy_from_slice(&format.to_le_bytes());
+            p.write_bytes(DESC, &srgb_desc).unwrap();
+            let out = OUT + 24 + index as u64 * 8;
+            p.cpu.gpr[R9] = out;
+            assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
+            assert_ne!(p.rd64(out).unwrap(), 0);
+        }
 
         let stream = &p.extra.gpu.buf;
         assert_eq!(u32::from_le_bytes(stream[0..4].try_into().unwrap()), op::CREATE_TEXTURE2D);
@@ -1828,6 +1856,40 @@ mod tests {
         let (_, payload) = &commands[1];
         let fields = payload.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
         assert_eq!(fields, vec![dst16_id, 0, src16_id, 0, DXGI_FORMAT_R16G16B16A16_FLOAT]);
+
+        let dst_srgb_id = p.extra.gpu.new_id();
+        let src_srgb_id = p.extra.gpu.new_id();
+        p.extra.com.res.insert(
+            dst_srgb_id,
+            ResInfo {
+                width: 8,
+                height: 8,
+                format: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                samples: 1,
+                ..Default::default()
+            },
+        );
+        p.extra.com.res.insert(
+            src_srgb_id,
+            ResInfo {
+                width: 8,
+                height: 8,
+                format: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                samples: 4,
+                ..Default::default()
+            },
+        );
+        let dst_srgb = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: dst_srgb_id });
+        let src_srgb = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: src_srgb_id });
+        p.cpu.gpr[RDX] = dst_srgb;
+        p.cpu.gpr[R9] = src_srgb;
+        p.wr64(STACK + 48, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB as u64).unwrap();
+        assert_eq!(resolve(&mut p).unwrap(), 0);
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 3);
+        let (_, payload) = &commands[2];
+        let fields = payload.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
+        assert_eq!(fields, vec![dst_srgb_id, 0, src_srgb_id, 0, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB]);
     }
 
     #[test]

@@ -690,6 +690,22 @@ try {
       command(29, words(3, 0));
       command(4, words(22, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample coverage resolve target
       command(47, words(22, 0, 20, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
+      command(4, words(30, 8, 8, 1, 1, 29, 0x20, 0, 4, 0)); // 4x RGBA8 sRGB render target
+      command(12, words(31, 0, 30, 29, 4, 0, 1, 0, 1));
+      command(27, words(31, 0, 0, 0, 0x3f800000));
+      shader(11, 1, pixelShader);
+      command(17, words(1, 11));
+      command(21, words(1, 31, 0));
+      command(29, words(3, 0));
+      command(4, words(32, 8, 8, 1, 1, 29, 0x20, 0, 1, 0)); // single-sample RGBA8 sRGB resolve target
+      command(47, words(32, 0, 30, 0, 29)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM_SRGB)
+      command(4, words(33, 8, 8, 1, 1, 91, 0x20, 0, 4, 0)); // 4x BGRA8 sRGB render target
+      command(12, words(34, 0, 33, 91, 4, 0, 1, 0, 1));
+      command(27, words(34, 0, 0, 0, 0x3f800000));
+      command(21, words(1, 34, 0));
+      command(29, words(3, 0));
+      command(4, words(35, 8, 8, 1, 1, 91, 0x20, 0, 1, 0)); // single-sample BGRA8 sRGB resolve target
+      command(47, words(35, 0, 33, 0, 91)); // ResolveSubresource(dst, 0, src, 0, BGRA8_UNORM_SRGB)
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -697,6 +713,8 @@ try {
       const bgraPixels = await gpu.readBackTexture(6);
       const float16Pixels = await gpu.readBackTexture(9);
       const coveragePixels = await gpu.readBackTexture(22);
+      const rgbaSrgbPixels = await gpu.readBackTexture(32);
+      const bgraSrgbPixels = await gpu.readBackTexture(35);
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
@@ -715,6 +733,12 @@ try {
         float16Format: float16Pixels.format,
         float16PixelsMatch: float16Pixels.data.every((value, i) => Math.abs(value - [0.25, 0.5, 0.75, 1.0][i % 4]) <= 0.001),
         coveragePixelsMatch: coveragePixels.data.every((value, i) => Math.abs(value - [128, 0, 0, 255][i % 4]) <= 1),
+        rgbaSrgbSamples: gpu.res.get(30)?.samples,
+        rgbaSrgbFormat: rgbaSrgbPixels.format,
+        rgbaSrgbPixelsMatch: rgbaSrgbPixels.data.every((value, i) => Math.abs(value - [137, 188, 225, 255][i % 4]) <= 1),
+        bgraSrgbSamples: gpu.res.get(33)?.samples,
+        bgraSrgbFormat: bgraSrgbPixels.format,
+        bgraSrgbPixelsMatch: bgraSrgbPixels.data.every((value, i) => Math.abs(value - [137, 188, 225, 255][i % 4]) <= 1),
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
         logs,
@@ -734,7 +758,10 @@ try {
       && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
       && msaaResolveResult.bgraPixelsMatch && msaaResolveResult.float16Samples === 4
       && msaaResolveResult.float16Format === 'rgba16float' && msaaResolveResult.float16PixelsMatch
-      && msaaResolveResult.coveragePixelsMatch && msaaResolveResult.draws === 4 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.coveragePixelsMatch && msaaResolveResult.rgbaSrgbSamples === 4
+      && msaaResolveResult.rgbaSrgbFormat === 'rgba8unorm-srgb' && msaaResolveResult.rgbaSrgbPixelsMatch
+      && msaaResolveResult.bgraSrgbSamples === 4 && msaaResolveResult.bgraSrgbFormat === 'bgra8unorm-srgb'
+      && msaaResolveResult.bgraSrgbPixelsMatch && msaaResolveResult.draws === 6 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));
