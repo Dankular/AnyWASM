@@ -424,6 +424,10 @@ try {
       const formats = [
         { name: 'BC1', dxgi: 71, blockBytes: 8 },
         { name: 'BC3', dxgi: 77, blockBytes: 16 },
+        { name: 'BC4_SNORM', dxgi: 81, blockBytes: 8 },
+        { name: 'BC5_UNORM', dxgi: 83, blockBytes: 16 },
+        { name: 'BC6H_SF16', dxgi: 96, blockBytes: 16 },
+        { name: 'BC7_SRGB', dxgi: 99, blockBytes: 16 },
       ];
       const readbacks = [];
       for (const [index, format] of formats.entries()) {
@@ -445,11 +449,14 @@ try {
       return { error: String(error) };
     }
   });
-  const bcExpected = [16, 32].map((rowBytes) => Array.from({ length: rowBytes }, (_, i) => i + 1)
-    .concat(Array.from({ length: rowBytes }, (_, i) => 0x80 + i)));
-  check('D3D11 BC1/BC3 staging Map(READ) preserves block rows and source row pitches',
+  const bcExpected = [8, 16, 8, 16, 16, 16].map((blockBytes) => {
+    const rowBytes = 2 * blockBytes;
+    return Array.from({ length: rowBytes }, (_, i) => i + 1)
+      .concat(Array.from({ length: rowBytes }, (_, i) => 0x80 + i));
+  });
+  check('D3D11 BC1/BC3/BC4/BC5/BC6H/BC7 staging Map(READ) preserves compressed block rows',
     Boolean(bcReadbackResult.skipped)
-      || (!bcReadbackResult.error && bcReadbackResult.readbacks?.length === 2
+      || (!bcReadbackResult.error && bcReadbackResult.readbacks?.length === bcExpected.length
         && bcReadbackResult.readbacks.every((item, index) => item.bytes.length === bcExpected[index].length
           && item.bytes.every((value, i) => value === bcExpected[index][i]))),
     JSON.stringify(bcReadbackResult));
