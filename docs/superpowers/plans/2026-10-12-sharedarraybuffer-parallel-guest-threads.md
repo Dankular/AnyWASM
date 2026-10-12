@@ -88,7 +88,7 @@
 
 - [x] Bring x87 instructions needed by the selected fixture into the no-std worker build, or stop unsupported x87 instructions at their original RIP for coordinator-owned interpreter fallback before state is lost.
 - [x] Verify the serialized CPU ABI carries all architectural state used by the worker, including x87, flags, FS/GS bases, instruction count, and stop metadata.
-- [ ] Distinguish quantum, HLE, guest fault, thread exit, yield, and worker failure; never advance RIP for an instruction that did not retire. The worker ABI now distinguishes process/thread return trampolines and retries unsupported atomic operations at their original RIP; explicit yield outcomes and concurrent runtime acceptance remain open.
+- [x] Distinguish quantum, HLE, guest fault, thread exit, and worker failure; never advance RIP for an instruction that did not retire. Win32 scheduling yields are requested by serialized HLE and now remain effective across a saved-context handoff, instead of restoring the previous thread directly. The worker ABI also distinguishes process/thread return trampolines and retries unsupported atomic operations at their original RIP.
 - [x] Hand complete faulting contexts to existing coordinator exception dispatch and resume only from its resulting context.
 - [ ] Keep decoded/JIT state worker-local and enforce generation checks before each translated block if JIT execution is enabled.
 

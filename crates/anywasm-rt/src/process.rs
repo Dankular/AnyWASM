@@ -1505,7 +1505,10 @@ impl Process {
         }
 
         if let Some((previous_id, previous_quantum, resume_directly)) = handoff.previous {
+            // A serviced HLE may request a scheduler yield (for example SwitchToThread).
+            // Honor that request instead of restoring the previous context unconditionally.
             if resume_directly
+                && !self.schedule_requested
                 && self
                     .guest_threads
                     .get(&previous_id)
