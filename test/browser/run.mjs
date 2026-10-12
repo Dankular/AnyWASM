@@ -396,19 +396,29 @@ try {
       command(17, words(1, 11));
       command(21, words(1, 2, 0));
       command(29, words(3, 0));
+      command(4, words(4, 8, 8, 1, 1, 87, 0x20, 0, 4, 0)); // 4x BGRA8 render target
+      command(12, words(5, 0, 4, 87, 4, 0, 1, 0, 1));
+      command(27, words(5, 0, 0, 0, 0x3f800000));
+      command(21, words(1, 5, 0));
+      command(29, words(3, 0));
       command(4, words(3, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      command(4, words(6, 8, 8, 1, 1, 87, 0x20, 0, 1, 0));
       command(47, words(3, 0, 1, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
+      command(47, words(6, 0, 4, 0, 87)); // ResolveSubresource(dst, 0, src, 0, BGRA8_UNORM)
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackTexture(3);
+      const bgraPixels = await gpu.readBackTexture(6);
       const result = {
         samples: gpu.res.get(1)?.samples,
+        bgraSamples: gpu.res.get(4)?.samples,
         width: pixels.width,
         height: pixels.height,
         format: pixels.format,
-        firstPixel: Array.from(pixels.data.slice(0, 4)),
         allPixelsMatch: pixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
+        bgraFormat: bgraPixels.format,
+        bgraPixelsMatch: bgraPixels.data.every((value, i) => Math.abs(value - [64, 128, 191, 255][i % 4]) <= 1),
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
         logs,
@@ -422,7 +432,8 @@ try {
   check('4x multisampled render target draws and resolves into a single-sample texture',
     msaaResolveResult.samples === 4 && msaaResolveResult.width === 8 && msaaResolveResult.height === 8
       && msaaResolveResult.format === 'rgba8unorm' && msaaResolveResult.allPixelsMatch
-      && msaaResolveResult.draws === 1 && msaaResolveResult.errors?.length === 0,
+      && msaaResolveResult.bgraSamples === 4 && msaaResolveResult.bgraFormat === 'bgra8unorm'
+      && msaaResolveResult.bgraPixelsMatch && msaaResolveResult.draws === 2 && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
 
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
