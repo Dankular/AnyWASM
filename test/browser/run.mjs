@@ -1566,11 +1566,11 @@ try {
       clearView.setUint32(0, 2, true);
       clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
       clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
-      const renderOperation = async (colorOp, setup = null, alphaOp = 2) => {
+      const renderOperation = async (colorOp, setup = null, alphaOp = 2, textureFactor = 0xffffffff) => {
         stream.length = 0;
         setup?.();
         command(27, clear);
-        command(45, words(0x144, 64, 64, colorOp, 2, 1, alphaOp, 2, 1));
+        command(45, words(0x144, 64, 64, colorOp, 2, 1, alphaOp, 2, 1, textureFactor));
         command(16, words(4)); command(29, words(3, 0));
         gpu.execute(append());
         const pixels = await gpu.readBackbuffer(1);
@@ -1587,6 +1587,8 @@ try {
       const blendedTextureAlphaPixel = await renderOperation(13);
       const blendedTextureAlphaPmPixel = await renderOperation(15);
       const blendedCurrentAlphaPixel = await renderOperation(16);
+      const blendFactorAlphaPixel = await renderOperation(14, () => command(48, words(60, 0x40ffffff)), 2, 0x40ffffff);
+      const blendFactorAlphaHighPixel = await renderOperation(14, () => command(48, words(60, 0xc0ffffff)), 2, 0xc0ffffff);
       const signedVertices = vertices.slice(), signedView = new DataView(signedVertices.buffer);
       for (let i = 0; i < 3; i++) signedView.setUint32(i * 28 + 16, 0x33333333, true);
       const signedUpload = new Uint8Array(12 + signedVertices.length);
@@ -1619,6 +1621,8 @@ try {
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
         blendedCurrentAlphaPixel,
+        blendFactorAlphaPixel,
+        blendFactorAlphaHighPixel,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -1629,13 +1633,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 15 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 17 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 15 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 17 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1658,6 +1662,10 @@ try {
     near(d3d9TextureResult.alphaAddSignedPixel, [115, 115, 115, 116], 2), JSON.stringify(d3d9TextureResult.alphaAddSignedPixel));
   check('D3D9 stage-0 alpha ADDSIGNED2X doubles the biased sum',
     near(d3d9TextureResult.alphaAddSigned2xPixel, [115, 115, 115, 231], 2), JSON.stringify(d3d9TextureResult.alphaAddSigned2xPixel));
+  check('D3D9 stage-0 BLENDFACTORALPHA uses the texture-factor alpha byte',
+    near(d3d9TextureResult.blendFactorAlphaPixel, [223, 32, 32, 128], 2), JSON.stringify(d3d9TextureResult.blendFactorAlphaPixel));
+  check('D3D9 stage-0 BLENDFACTORALPHA changes when the render-state factor changes',
+    near(d3d9TextureResult.blendFactorAlphaHighPixel, [159, 96, 96, 128], 2), JSON.stringify(d3d9TextureResult.blendFactorAlphaHighPixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

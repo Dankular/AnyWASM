@@ -394,6 +394,7 @@ export class GpuExecutor {
           dv.byteLength >= 28 ? u(6) : 2,
           dv.byteLength >= 32 ? u(7) : 2,
           dv.byteLength >= 36 ? u(8) : 1,
+          dv.byteLength >= 40 ? u(9) : 0xffffffff,
         );
         break;
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
@@ -583,7 +584,7 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
-  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1) {
+  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff) {
     if (fvf === 0) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
@@ -597,7 +598,7 @@ export class GpuExecutor {
       this.log(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
-    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg1}/${alphaArg2}`;
+    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
       const transformed = fvf === 0x44 || fvf === 0x144;
@@ -647,6 +648,7 @@ export class GpuExecutor {
       const channelArg = (argument, channel) => argument === 2 ? `texel.${channel}` : `input.color.${channel}`;
       const colorA = channelArg(colorArg1, 'rgb'), colorB = channelArg(colorArg2, 'rgb');
       const alphaA = channelArg(alphaArg1, 'a'), alphaB = channelArg(alphaArg2, 'a');
+      const textureFactorAlpha = (((textureFactor >>> 24) & 0xff) / 255).toFixed(8);
       const colorExpr = colorOp === 1 ? 'input.color.rgb'
         : colorOp === 2 ? colorA
         : colorOp === 3 ? colorB
@@ -660,6 +662,7 @@ export class GpuExecutor {
         : colorOp === 11 ? `(${colorA} + ${colorB} - (${colorA} * ${colorB}))`
         : colorOp === 12 || colorOp === 16 ? `((${colorA} * input.color.a) + (${colorB} * (1.0 - input.color.a)))`
         : colorOp === 13 ? `((${colorA} * texel.a) + (${colorB} * (1.0 - texel.a)))`
+        : colorOp === 14 ? `((${colorA} * ${textureFactorAlpha}) + (${colorB} * (1.0 - ${textureFactorAlpha})))`
         : colorOp === 15 ? `(${colorA} + (${colorB} * (1.0 - texel.a)))`
         : 'input.color.rgb';
       const alphaExpr = alphaOp === 2 ? alphaA
