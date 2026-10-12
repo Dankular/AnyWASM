@@ -979,10 +979,25 @@ try {
       `, 'main', 'vs_5_0');
       const pixel = tool.compileHlsl(`
         Texture2D<float> depthImage : register(t0);
-        SamplerComparisonState comparisonSampler : register(s0);
+        SamplerComparisonState neverSampler : register(s0);
+        SamplerComparisonState lessSampler : register(s1);
+        SamplerComparisonState equalSampler : register(s2);
+        SamplerComparisonState lessEqualSampler : register(s3);
+        SamplerComparisonState greaterSampler : register(s4);
+        SamplerComparisonState notEqualSampler : register(s5);
+        SamplerComparisonState greaterEqualSampler : register(s6);
+        SamplerComparisonState alwaysSampler : register(s7);
         float4 main(float4 position : SV_Position) : SV_Target {
-          float reference = position.x < 32.0 ? 0.4 : 0.6;
-          float result = depthImage.SampleCmpLevelZero(comparisonSampler, float2(0.5, 0.5), reference);
+          float reference = position.y < 32.0 ? 0.4 : 0.6;
+          float result;
+          if (position.x < 8.0) result = depthImage.SampleCmpLevelZero(neverSampler, float2(0.5, 0.5), reference);
+          else if (position.x < 16.0) result = depthImage.SampleCmpLevelZero(lessSampler, float2(0.5, 0.5), reference);
+          else if (position.x < 24.0) result = depthImage.SampleCmpLevelZero(equalSampler, float2(0.5, 0.5), reference);
+          else if (position.x < 32.0) result = depthImage.SampleCmpLevelZero(lessEqualSampler, float2(0.5, 0.5), reference);
+          else if (position.x < 40.0) result = depthImage.SampleCmpLevelZero(greaterSampler, float2(0.5, 0.5), reference);
+          else if (position.x < 48.0) result = depthImage.SampleCmpLevelZero(notEqualSampler, float2(0.5, 0.5), reference);
+          else if (position.x < 56.0) result = depthImage.SampleCmpLevelZero(greaterEqualSampler, float2(0.5, 0.5), reference);
+          else result = depthImage.SampleCmpLevelZero(alwaysSampler, float2(0.5, 0.5), reference);
           return float4(result, result, result, 1.0);
         }
       `, 'main', 'ps_5_0');
@@ -1008,33 +1023,40 @@ try {
       command(12, words(21, 1, 20, 40, 3, 0, 1, 0, 1)); // depth-stencil view
       command(12, words(22, 2, 20, 40, 4, 0, 1, 0, 1)); // shader-resource view
       command(28, words(21, 1, 0x3f000000, 0)); // clear stored depth to 0.5
-      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
-      samplerView.setUint32(0, 23, true); samplerView.setUint32(4, 0x80, true); // comparison, point filter
-      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
-      samplerView.setUint32(24, 1, true); samplerView.setUint32(28, 2, true); // LESS comparison
-      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
-      command(8, sampler);
+      const samplerIds = [];
+      for (let comparison = 1; comparison <= 8; comparison++) {
+        const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+        const samplerId = 30 + comparison;
+        samplerIds.push(samplerId);
+        samplerView.setUint32(0, samplerId, true); samplerView.setUint32(4, 0x80, true); // comparison, point filter
+        samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+        samplerView.setUint32(24, 1, true); samplerView.setUint32(28, comparison, true);
+        samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
+        command(8, sampler);
+      }
       shader(24, 0, vertex); shader(25, 1, pixel);
       command(17, words(0, 24)); command(17, words(1, 25));
       command(21, words(1, 2, 0)); command(16, words(4));
-      command(19, words(1, 0, 1, 22)); command(20, words(1, 0, 1, 23));
+      command(19, words(1, 0, 1, 22)); command(20, words(1, 0, samplerIds.length, ...samplerIds));
       command(29, words(3, 0));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { passing: at(10), failing: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors, logs };
+      const at = (x, y) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      const left = samplerIds.map((_, i) => at(4 + i * 8, 16)[0]);
+      const right = samplerIds.map((_, i) => at(4 + i * 8, 48)[0]);
+      const result = { left, right, draws: gpu.stats.draws, errors: gpu.stats.errors, logs };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 comparison sampler applies LESS to depth samples',
+  check('D3D11 comparison samplers implement all eight compare functions',
     comparisonSamplerResult.draws === 1 && comparisonSamplerResult.errors.length === 0
-      && near(comparisonSamplerResult.passing, [255, 255, 255, 255], 1)
-      && near(comparisonSamplerResult.failing, [0, 0, 0, 255], 1),
+      && comparisonSamplerResult.left?.every((v, i) => v === [0, 255, 0, 255, 0, 255, 0, 255][i])
+      && comparisonSamplerResult.right?.every((v, i) => v === [0, 0, 0, 0, 255, 255, 255, 255][i]),
     JSON.stringify(comparisonSamplerResult));
 
   const d3d9FixedResult = await page.evaluate(async () => {
