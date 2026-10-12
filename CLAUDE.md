@@ -255,13 +255,19 @@ register-stack subset):
       defaults are also pixel-checked. An 8x anisotropic Texture2D SampleLevel outside sample and an
       in-range SampleGrad footprint crossing the right edge are pixel-checked.
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
-      edge-crossing BORDER pixels. A TextureCube SRV also selects the expected color for all six
-      signed-axis faces. vkd3d rejects the documented float2 DDX/DDY arguments for
+      edge-crossing BORDER pixels. A TextureCube SRV selects the expected color for all six
+      signed-axis directions and linearly blends taps across +X/+Y, +X/+Z, and +X/-Y boundaries to
+      `[127, 0, 127, 255]`, `[255, 0, 127, 255]`, and `[255, 127, 0, 255]` respectively. vkd3d
+      rejects the documented float2 DDX/DDY arguments for
       Texture2DArray.SampleGrad with E5002 ([Microsoft HLSL signature](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplegrad));
       anisotropic Texture2D comparison SampleCmpLevelZero also returns `[110, 0, 0, 255]` for the
-      same edge-crossing LESS footprint. Anisotropic array SampleGrad, cube-array/cross-face filtering,
-      other sampled dimensions/
-      formats, remaining Shader Model 6.8 comparison methods, and other anisotropic cases remain open;
+      same edge-crossing LESS footprint. Anisotropic array SampleGrad and cube-array filtering remain open.
+      `TextureCubeArray.SampleLevel` generates SPIR-V with `Dim=Cube, Arrayed=1`, which the vendored Naga
+      frontend rejects as an invalid image type (`Type [3] '' is invalid`, surfaced in the browser as
+      `op 6: undefined`). The checked-in Naga frontend is generated JS/WASM; rebuilding a source bridge
+      could not fetch Cargo dependencies because crates.io TLS failed. The bundled vkd3d compiler also
+      rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad` untestable.
+      Additional sampled dimensions/formats and other anisotropic cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube-array, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves

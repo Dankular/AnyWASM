@@ -5229,7 +5229,10 @@ try {
             : position.x < 30.0 ? float3(0.0, 1.0, 0.0)
             : position.x < 40.0 ? float3(0.0, -1.0, 0.0)
             : position.x < 50.0 ? float3(0.0, 0.0, 1.0)
-            : float3(0.0, 0.0, -1.0);
+            : position.x < 52.0 ? float3(0.0, 0.0, -1.0)
+            : position.x < 56.0 ? float3(1.0, 1.0, 0.0)
+            : position.x < 60.0 ? float3(1.0, 0.0, 1.0)
+            : float3(1.0, -1.0, 0.0);
           return source.SampleLevel(sourceSampler, direction, 0.0);
         }
       `, 'main', 'ps_5_0');
@@ -5280,7 +5283,12 @@ try {
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { faces: [4, 14, 24, 34, 44, 54].map(at), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const result = {
+        faces: [4, 14, 24, 34, 44, 50].map(at),
+        edges: [54, 58, 62].map(at),
+        draws: gpu.stats.draws,
+        errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -5294,6 +5302,12 @@ try {
         [255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255],
         [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255],
       ][index], 1)),
+    JSON.stringify(cubeTextureResult));
+  check('D3D11 TextureCube filtering blends taps across adjacent signed-axis faces',
+    cubeTextureResult.edges?.length === 3
+      && cubeTextureResult.edges.every((pixel, index) => near(pixel, [
+        [128, 0, 128, 255], [255, 0, 128, 255], [255, 128, 0, 255],
+      ][index], 2)),
     JSON.stringify(cubeTextureResult));
 
   const constantRangeResult = await page.evaluate(async () => {
