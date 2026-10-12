@@ -77,7 +77,7 @@
 
 - [x] Enumerate D3D11 typed UAV formats advertised by the HLE and pixel-test all 16 through texture dispatch/readback.
 - [x] Read back D32_FLOAT_S8X24 depth and stencil aspects separately and pack the DXGI 8-byte texel layout; Chromium verifies all four depth/stencil texels.
-- [ ] Add readback for D24_UNORM_S8 and legacy packed 16-bit formats. WebGPU's `depth24plus-stencil8` depth representation is implementation-defined, and DXGI B5G6R5/B5G5R5A1/B4G4R4A4 still lack raw packed-texture support.
+- [x] Read back D24_UNORM_S8 by sampling its depth-only aspect, quantizing to 24 bits, and copying stencil separately; Chromium checks the packed bytes for all four 2x2 texels. Read back B5G6R5_UNORM, B5G5R5A1_UNORM, and B4G4R4A4_UNORM through RGBA16Float backing; browser assertions verify normalized channel values and exact packed words across odd-width padded 3x2 rows.
 - [x] Verify event-query `End`/`GetData` ordering and explicit rejection of unsupported valid query types; invalid query types return `E_INVALIDARG`.
 - [x] Verify `SV_DispatchThreadID`, group system values, dispatch-to-draw/readback visibility, and buffer copies feeding later dispatches.
 - [x] Report the unsupported D3D11.2 `OPTIONS1` capabilities, including tiled-resource tier 0, with a 16-byte HLE regression.

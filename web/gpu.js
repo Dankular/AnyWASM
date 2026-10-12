@@ -35,9 +35,18 @@ const TEX = {
   73: 'bc2-rgba-unorm', 74: 'bc2-rgba-unorm', 75: 'bc2-rgba-unorm-srgb',
   76: 'bc3-rgba-unorm', 77: 'bc3-rgba-unorm', 78: 'bc3-rgba-unorm-srgb',
   79: 'bc4-r-unorm', 80: 'bc4-r-unorm', 81: 'bc4-r-snorm', 82: 'bc5-rg-unorm', 83: 'bc5-rg-unorm', 84: 'bc5-rg-snorm',
+  85: 'rgba16float', 86: 'rgba16float', 115: 'rgba16float',
   87: 'bgra8unorm', 88: 'bgra8unorm', 90: 'bgra8unorm', 91: 'bgra8unorm-srgb', 92: 'bgra8unorm', 93: 'bgra8unorm-srgb',
   94: 'bc6h-rgb-ufloat', 95: 'bc6h-rgb-ufloat', 96: 'bc6h-rgb-float',
   97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
+};
+// DXGI packed BGR formats use the first named component in the least-significant bits.
+// RGBA16_FLOAT is the portable rendering/sampling backing; conversion back to the packed DXGI
+// texel happens only at the guest-visible staging boundary.
+const LEGACY_PACKED_16 = {
+  85: { r: [5, 11], g: [6, 5], b: [5, 0], a: null },
+  86: { r: [5, 10], g: [5, 5], b: [5, 0], a: [1, 15] },
+  115: { r: [4, 8], g: [4, 4], b: [4, 0], a: [4, 12] },
 };
 const TYPED_UAV_DATA_TYPES = { 2: 5, 3: 4, 4: 3, 10: 5, 12: 4, 14: 3, 16: 5, 17: 4, 18: 3, 28: 5, 30: 4, 31: 5, 32: 3, 41: 5, 42: 4, 43: 3 };
 const UAV_CLEAR_FORMATS = {
@@ -53,6 +62,41 @@ const roundToEven = (value) => {
   const floor = Math.floor(value), fraction = value - floor;
   return fraction < 0.5 ? floor : fraction > 0.5 ? floor + 1 : floor % 2 === 0 ? floor : floor + 1;
 };
+
+function halfBitsToFloat(half) {
+  const sign = half & 0x8000 ? -1 : 1;
+  const exponent = (half >>> 10) & 0x1f;
+  const fraction = half & 0x03ff;
+  return exponent === 0
+    ? sign * Math.pow(2, -14) * (fraction / 1024)
+    : exponent === 0x1f
+      ? (fraction ? NaN : sign * Infinity)
+      : sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
+}
+
+function unpackLegacyPacked16(value, dxgi) {
+  const channels = LEGACY_PACKED_16[dxgi];
+  return ['r', 'g', 'b', 'a'].map((channel) => {
+    const spec = channels[channel];
+    if (!spec) return 1;
+    const [bits, shift] = spec;
+    return ((value >>> shift) & ((1 << bits) - 1)) / ((1 << bits) - 1);
+  });
+}
+
+function packLegacyPacked16(channels, dxgi) {
+  const layout = LEGACY_PACKED_16[dxgi];
+  let value = 0;
+  for (const [index, channel] of ['r', 'g', 'b', 'a'].entries()) {
+    const spec = layout[channel];
+    if (!spec) continue;
+    const [bits, shift] = spec;
+    const max = (1 << bits) - 1;
+    const normalized = Number.isNaN(channels[index]) ? 0 : Math.min(1, Math.max(0, channels[index]));
+    value |= roundToEven(normalized * max) << shift;
+  }
+  return value;
+}
 
 function floatToHalfBits(value) {
   const bits = new Uint32Array(new Float32Array([value]).buffer)[0];
@@ -226,6 +270,7 @@ export class GpuExecutor {
     this.pipelines = new Map();
     this.dualSourceShaderVariants = new WeakMap();
     this.computePipelines = new Map();
+    this.depth24ReadbackPipeline = null;
     this.bglCache = new Map();
     this.emptyBindGroupCache = new WeakMap();
     this.dummyBuffers = new Map();
@@ -536,12 +581,27 @@ export class GpuExecutor {
   textureWrite(id, mip, slice, x, y, w, h, rowPitch, len, data) {
     const r = this.res.get(id);
     if (!r) return;
+    let uploadData = data, uploadRowPitch = rowPitch;
+    if (LEGACY_PACKED_16[r.dxgi]) {
+      uploadData = new Uint8Array(w * h * 8);
+      uploadRowPitch = w * 8;
+      const source = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const destination = new DataView(uploadData.buffer);
+      for (let row = 0; row < h; row++) {
+        for (let column = 0; column < w; column++) {
+          const channels = unpackLegacyPacked16(source.getUint16(row * rowPitch + column * 2, true), r.dxgi);
+          for (let channel = 0; channel < 4; channel++) {
+            destination.setUint16((row * w + column) * 8 + channel * 2, floatToHalfBits(channels[channel]), true);
+          }
+        }
+      }
+    }
     const blk = BLOCK(r.format) || [1, 1, BYTES(r.format)];
     const rows = Math.ceil(h / blk[1]);
     const rowBytes = Math.ceil(w / blk[0]) * blk[2];
     const bpr = (rowBytes + 255) & ~255;
     const packed = new Uint8Array(bpr * rows);
-    for (let row = 0; row < rows; row++) packed.set(data.subarray(row * rowPitch, row * rowPitch + rowBytes), row * bpr);
+    for (let row = 0; row < rows; row++) packed.set(uploadData.subarray(row * uploadRowPitch, row * uploadRowPitch + rowBytes), row * bpr);
     this.endPass();
     const s = this.stage(packed);
     const cw = Math.ceil(w / blk[0]) * blk[0], ch = Math.ceil(h / blk[1]) * blk[1];
@@ -1890,6 +1950,10 @@ export class GpuExecutor {
     const width = Math.max(1, resource.width >> mip);
     const height = Math.max(1, resource.height >> mip);
     const depth = resource.dimension === '3d' ? Math.max(1, resource.depth >> mip) : 1;
+    if (resource.dxgi === 45 && resource.format === 'depth24plus-stencil8') {
+      if (resource.dimension !== '2d' || depth !== 1) throw new Error(`D24_UNORM_S8 readback does not support ${resource.dimension} textures`);
+      return this.readBackDepth24Stencil(resource, mip, slice, width, height);
+    }
     if (resource.format === 'depth32float-stencil8') {
       const depthBytesPerRow = (width * 4 + 255) & ~255;
       const stencilBytesPerRow = (width + 255) & ~255;
@@ -1965,10 +2029,98 @@ export class GpuExecutor {
           );
         }
       }
+      if (LEGACY_PACKED_16[resource.dxgi]) {
+        const packed = new Uint8Array(width * height * depth * 2);
+        const source = new DataView(output.buffer, output.byteOffset, output.byteLength);
+        const destination = new DataView(packed.buffer);
+        for (let z = 0; z < depth; z++) {
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const pixel = ((z * height + y) * width + x);
+              const channels = Array.from({ length: 4 }, (_, channel) => halfBitsToFloat(source.getUint16(pixel * 8 + channel * 2, true)));
+              destination.setUint16(pixel * 2, packLegacyPacked16(channels, resource.dxgi), true);
+            }
+          }
+        }
+        return packed;
+      }
       return output;
     } finally {
       if (readback.mapState === 'mapped') readback.unmap();
       readback.destroy();
+    }
+  }
+
+  async readBackDepth24Stencil(resource, mip, slice, width, height) {
+    if (!this.depth24ReadbackPipeline) {
+      const module = this.device.createShaderModule({ code: `
+        @group(0) @binding(0) var depthTexture: texture_depth_2d;
+        @group(0) @binding(1) var<storage, read_write> depthValues: array<f32>;
+        @compute @workgroup_size(8, 8, 1)
+        fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+          let size = textureDimensions(depthTexture, 0);
+          if (id.x >= size.x || id.y >= size.y) { return; }
+          let value = textureLoad(depthTexture, vec2<i32>(id.xy), 0);
+          depthValues[id.y * size.x + id.x] = value;
+        }
+      ` });
+      this.depth24ReadbackPipeline = this.device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+    }
+    const depthByteLength = width * height * 4;
+    const stencilBytesPerRow = (width + 255) & ~255;
+    const depthStorage = this.device.createBuffer({ size: depthByteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const depthReadback = this.device.createBuffer({ size: depthByteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const stencilReadback = this.device.createBuffer({ size: stencilBytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      this.flush();
+      const depthView = resource.gpu.createView({
+        dimension: '2d', aspect: 'depth-only', baseMipLevel: mip, mipLevelCount: 1,
+        baseArrayLayer: slice, arrayLayerCount: 1,
+      });
+      const bindGroup = this.device.createBindGroup({
+        layout: this.depth24ReadbackPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: depthView },
+          { binding: 1, resource: { buffer: depthStorage, size: depthByteLength } },
+        ],
+      });
+      const encoder = this.device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.depth24ReadbackPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+      pass.end();
+      encoder.copyBufferToBuffer(depthStorage, 0, depthReadback, 0, depthByteLength);
+      encoder.copyTextureToBuffer(
+        { texture: resource.gpu, mipLevel: mip, origin: { x: 0, y: 0, z: slice }, aspect: 'stencil-only' },
+        { buffer: stencilReadback, bytesPerRow: stencilBytesPerRow, rowsPerImage: height },
+        { width, height, depthOrArrayLayers: 1 },
+      );
+      this.device.queue.submit([encoder.finish()]);
+      await Promise.all([depthReadback.mapAsync(GPUMapMode.READ), stencilReadback.mapAsync(GPUMapMode.READ)]);
+      const depthValues = new Float32Array(depthReadback.getMappedRange());
+      const stencilValues = new Uint8Array(stencilReadback.getMappedRange());
+      const packed = new Uint8Array(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const pixel = y * width + x;
+          const d24 = roundToEven(Math.min(1, Math.max(0, depthValues[pixel])) * 0xffffff);
+          const output = pixel * 4;
+          packed[output] = d24 & 0xff;
+          packed[output + 1] = (d24 >>> 8) & 0xff;
+          packed[output + 2] = (d24 >>> 16) & 0xff;
+          packed[output + 3] = stencilValues[y * stencilBytesPerRow + x];
+        }
+      }
+      return packed;
+    } finally {
+      for (const buffer of [depthStorage, depthReadback, stencilReadback]) {
+        if (buffer.mapState === 'mapped') buffer.unmap();
+        buffer.destroy();
+      }
     }
   }
 

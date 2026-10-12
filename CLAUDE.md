@@ -260,15 +260,15 @@ register-stack subset):
       mip/array subresource selection; depth-only D16_UNORM and D32_FLOAT values; D32_FLOAT_S8X24
       depth/stencil/padding bytes when the optional WebGPU format is available; and Texture3D
       R32_FLOAT row/depth
-      pitches. D24_UNORM_S8 depth and legacy packed 16-bit staging formats remain open; WebGPU's
-      depth24plus representation is implementation-defined ([format rules](https://www.w3.org/TR/webgpu/#depth-stencil-formats)).
+      pitches; D24_UNORM_S8 depth/stencil bytes by sampling and quantizing depth to 24 bits; and
+      B5G6R5, B5G5R5A1, and B4G4R4A4 packed words via RGBA16_FLOAT backing. WebGPU's depth24plus
+      representation may use 24- or 32-bit depth ([format rules](https://www.w3.org/TR/webgpu/#depth-stencil-formats)).
       Comparison samplers pixel-test all eight
       comparison functions against depth values on both sides of the reference; depth-state
       comparisons pixel-test all eight functions at equality. Stencil comparisons cover all eight
       functions with stored values below, equal to, and above the reference. Stencil pass operations
       cover keep, zero, replace, both saturating operations, invert, and both wrapping operations,
-      including 8-bit boundaries. D24_UNORM_S8 and legacy packed 16-bit staging formats, other
-      subresource layouts, other format/resolve
+      including 8-bit boundaries. Other staging formats and subresource layouts, other format/resolve
       combinations, and more render-state combinations remain open.
 - [~] **Compute shader target path**: D3D11 HLE advertises typed UAV support for R32_FLOAT,
       creates texture UAVs, records CS UAV bindings and initial counts, records D3D11.1 constant

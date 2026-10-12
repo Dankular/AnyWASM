@@ -467,6 +467,75 @@ try {
         && depthStencilReadbackResult.bytes.length === expectedDepthStencilBytes.length
         && depthStencilReadbackResult.bytes.every((value, i) => value === expectedDepthStencilBytes[i])),
     JSON.stringify(depthStencilReadbackResult));
+  const depth24ReadbackResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      gpu.createTexture(1, 2, 2, 1, 1, 45, 0x40, 0, 0); // D24_UNORM_S8_UINT
+      const pass = gpu.encoder().beginRenderPass({ colorAttachments: [], depthStencilAttachment: {
+        view: gpu.res.get(1).gpu.createView(), depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 0.375,
+        stencilLoadOp: 'clear', stencilStoreOp: 'store', stencilClearValue: 0x5a,
+      } });
+      pass.end();
+      const bytes = Array.from(await gpu.readBackResource(1));
+      const errors = gpu.stats.errors;
+      gpu.device.destroy();
+      return { bytes, errors };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  const depth24Pixel = [0x00, 0x00, 0x60, 0x5a];
+  const expectedDepth24Bytes = [...depth24Pixel, ...depth24Pixel, ...depth24Pixel, ...depth24Pixel];
+  check('D3D11 D24_UNORM_S8 readback packs depth and stencil into four-byte texels',
+    !depth24ReadbackResult.error && depth24ReadbackResult.errors?.length === 0
+      && depth24ReadbackResult.bytes?.length === expectedDepth24Bytes.length
+      && depth24ReadbackResult.bytes.every((value, i) => value === expectedDepth24Bytes[i]),
+    JSON.stringify(depth24ReadbackResult));
+  const packed16ReadbackResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      const formats = [
+        { name: 'B5G6R5_UNORM', dxgi: 85, values: [0x001f, 0x07e0, 0xf800, 0xffff, 0x0000, 0x8410],
+          pixels: [0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 16 / 31, 32 / 63, 16 / 31, 1] },
+        { name: 'B5G5R5A1_UNORM', dxgi: 86, values: [0x001f, 0x03e0, 0x7c00, 0x8000, 0xffff, 0x4210],
+          pixels: [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 16 / 31, 16 / 31, 16 / 31, 0] },
+        { name: 'B4G4R4A4_UNORM', dxgi: 115, values: [0xf00f, 0x0f00, 0x00f0, 0x000f, 0xffff, 0x8421],
+          pixels: [0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 4 / 15, 2 / 15, 1 / 15, 8 / 15] },
+      ];
+      const readbacks = [];
+      for (const [index, format] of formats.entries()) {
+        const rowPitch = 10, source = new Uint8Array(rowPitch * 2).fill(0xee), view = new DataView(source.buffer);
+        format.values.forEach((value, pixel) => view.setUint16(Math.floor(pixel / 3) * rowPitch + pixel % 3 * 2, value, true));
+        const id = index + 1;
+        gpu.createTexture(id, 3, 2, 1, 1, format.dxgi, 0, 0, 0);
+        gpu.textureWrite(id, 0, 0, 0, 0, 3, 2, rowPitch, source.length, source);
+        const pixels = await gpu.readBackTexture(id);
+        readbacks.push({ name: format.name, expected: Array.from(source).filter((_, byte) => byte % rowPitch < 6),
+          expectedPixels: format.pixels, backingFormat: gpu.res.get(id).format, pixels: Array.from(pixels.data),
+          bytes: Array.from(await gpu.readBackResource(id)) });
+      }
+      const errors = gpu.stats.errors;
+      gpu.device.destroy();
+      return { readbacks, errors };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  check('D3D11 legacy packed 16-bit staging textures preserve odd-width padded rows',
+    !packed16ReadbackResult.error && packed16ReadbackResult.errors?.length === 0
+      && packed16ReadbackResult.readbacks?.length === 3
+      && packed16ReadbackResult.readbacks.every(({ expected, expectedPixels, backingFormat, pixels, bytes }) =>
+        backingFormat === 'rgba16float' && bytes.length === expected.length
+        && bytes.every((value, i) => value === expected[i])
+        && pixels.length === expectedPixels.length
+        && pixels.every((value, i) => Math.abs(value - expectedPixels[i]) <= 0.001)),
+    JSON.stringify(packed16ReadbackResult));
   const bcReadbackResult = await page.evaluate(async () => {
     const { GpuExecutor } = await import('/gpu.js');
     const canvas = document.createElement('canvas');
