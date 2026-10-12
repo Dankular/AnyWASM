@@ -654,6 +654,8 @@ export class GpuExecutor {
         : colorOp === 5 ? `((${colorA} * ${colorB}) * 2.0)`
         : colorOp === 6 ? `((${colorA} * ${colorB}) * 4.0)`
         : colorOp === 7 ? `(${colorA} + ${colorB})`
+        : colorOp === 8 ? `(${colorA} + ${colorB} - 0.5)`
+        : colorOp === 9 ? `((${colorA} + ${colorB} - 0.5) * 2.0)`
         : colorOp === 10 ? `(${colorA} - ${colorB})`
         : colorOp === 11 ? `(${colorA} + ${colorB} - (${colorA} * ${colorB}))`
         : colorOp === 12 || colorOp === 16 ? `((${colorA} * input.color.a) + (${colorB} * (1.0 - input.color.a)))`

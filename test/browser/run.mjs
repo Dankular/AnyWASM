@@ -1566,8 +1566,9 @@ try {
       clearView.setUint32(0, 2, true);
       clearView.setFloat32(4, 0, true); clearView.setFloat32(8, 0, true);
       clearView.setFloat32(12, 0, true); clearView.setFloat32(16, 1, true);
-      const renderOperation = async (colorOp) => {
+      const renderOperation = async (colorOp, setup = null) => {
         stream.length = 0;
+        setup?.();
         command(27, clear);
         command(45, words(0x144, 64, 64, colorOp, 2, 1, 2, 2, 1));
         command(16, words(4)); command(29, words(3, 0));
@@ -1586,6 +1587,16 @@ try {
       const blendedTextureAlphaPixel = await renderOperation(13);
       const blendedTextureAlphaPmPixel = await renderOperation(15);
       const blendedCurrentAlphaPixel = await renderOperation(16);
+      const signedVertices = vertices.slice(), signedView = new DataView(signedVertices.buffer);
+      for (let i = 0; i < 3; i++) signedView.setUint32(i * 28 + 16, 0x33333333, true);
+      const signedUpload = new Uint8Array(12 + signedVertices.length);
+      signedUpload.set(words(11, 0, signedVertices.length)); signedUpload.set(signedVertices, 12);
+      const signedTextureUpload = new Uint8Array(36 + 16);
+      signedTextureUpload.set(words(13, 0, 0, 0, 0, 2, 2, 8, 16));
+      signedTextureUpload.set([115, 115, 115, 128, 115, 115, 115, 128, 115, 115, 115, 128, 115, 115, 115, 128], 36);
+      const setupSignedArgs = () => { command(3, signedUpload); command(5, signedTextureUpload); };
+      const addSignedPixel = await renderOperation(8, setupSignedArgs);
+      const addSigned2xPixel = await renderOperation(9, setupSignedArgs);
       const result = {
         selectedPixel: Array.from(selectedPixels.data.slice(selectedAt, selectedAt + 4)),
         modulatedPixel,
@@ -1594,6 +1605,8 @@ try {
         addedPixel,
         subtractedPixel,
         addSmoothPixel,
+        addSignedPixel,
+        addSigned2xPixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
         blendedTextureAlphaPmPixel,
@@ -1608,13 +1621,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 11 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 13 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 11 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 13 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1629,6 +1642,10 @@ try {
     near(d3d9TextureResult.blendedTextureAlphaPmPixel, [255, 127, 127, 128], 2), JSON.stringify(d3d9TextureResult.blendedTextureAlphaPmPixel));
   check('D3D9 stage-0 ADDSMOOTH adds both arguments and subtracts their product',
     near(d3d9TextureResult.addSmoothPixel, [255, 127, 127, 128], 2), JSON.stringify(d3d9TextureResult.addSmoothPixel));
+  check('D3D9 stage-0 ADDSIGNED applies the half-range bias',
+    near(d3d9TextureResult.addSignedPixel, [39, 39, 39, 128], 2), JSON.stringify(d3d9TextureResult.addSignedPixel));
+  check('D3D9 stage-0 ADDSIGNED2X doubles the biased sum',
+    near(d3d9TextureResult.addSigned2xPixel, [77, 77, 77, 128], 2), JSON.stringify(d3d9TextureResult.addSigned2xPixel));
 
   const discardResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
