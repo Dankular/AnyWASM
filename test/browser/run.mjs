@@ -1407,6 +1407,104 @@ try {
       && depthCompareResult.bands?.every((v, i) => v === [0, 0, 255, 255, 0, 0, 255, 255][i]),
     JSON.stringify(depthCompareResult));
 
+  const depthWriteMaskResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 96; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const makeVertex = (z) => tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, ${z}, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const redVertex = makeVertex('0.25'), blueVertex = makeVertex('0.75');
+      const redPixel = tool.compileHlsl('float4 main() : SV_Target { return float4(1, 0, 0, 1); }', 'main', 'ps_5_0');
+      const bluePixel = tool.compileHlsl('float4 main() : SV_Target { return float4(0, 0, 1, 1); }', 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(4 * i, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      const floatBits = (value) => {
+        const data = new DataView(new ArrayBuffer(4)); data.setFloat32(0, value, true); return data.getUint32(0, true);
+      };
+      command(38, words(1, 0, 9, 96, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(3, 96, 64, 1, 1, 40, 0x40, 0, 1, 0)); // D32_FLOAT depth
+      command(12, words(4, 1, 3, 40, 3, 0, 1, 0, 1)); // DSV
+      command(21, words(1, 2, 4));
+      const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
+      rasterView.setUint32(0, 12, true); rasterView.setUint32(4, 3, true); rasterView.setUint32(8, 1, true);
+      rasterView.setUint32(28, 1, true); // depth clip enabled
+      rasterView.setUint32(32, 1, true); // scissor enabled
+      command(10, raster);
+      command(25, words(12));
+      const depthState = (id, enabled, writeMask) => {
+        const payload = new Uint8Array(56), view = new DataView(payload.buffer);
+        view.setUint32(0, id, true); view.setUint32(4, Number(enabled), true);
+        view.setUint32(8, writeMask, true); view.setUint32(12, 2, true); // LESS
+        command(11, payload);
+      };
+      depthState(10, false, 0); // depth disabled control
+      depthState(11, true, 0); // DepthWriteMask = ZERO
+      depthState(12, true, 1); // DepthWriteMask = ALL
+      shader(7, 0, redVertex); shader(8, 0, blueVertex);
+      shader(9, 1, redPixel); shader(10, 1, bluePixel);
+      command(16, words(4));
+      command(27, words(2, 0, 0, 0, 0x3f800000));
+      command(28, words(4, 1, 0x3f800000, 0)); // clear depth to 1.0
+      command(22, words(1, 0, 0, 0x42c00000, 0x42800000, 0, 0x3f800000)); // 96x64 viewport
+      const draw = (depthId, left, right) => {
+        command(26, words(depthId, 0));
+        command(23, words(1, left, 0, right, 64));
+        command(17, words(0, 7)); command(17, words(1, 9)); command(29, words(3, 0)); // nearer red
+        command(17, words(0, 8)); command(17, words(1, 10)); command(29, words(3, 0)); // farther blue
+      };
+      command(26, words(10, 0));
+      command(23, words(1, 0, 0, 32, 64));
+      command(17, words(0, 8)); command(17, words(1, 10)); command(29, words(3, 0)); // blue-only pipeline control
+      draw(11, 32, 64);
+      draw(12, 64, 96);
+      const size = stream.reduce((n, part) => n + part.length, 0), commands = new Uint8Array(size);
+      let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x, y) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      const result = {
+        depthDisabled: at(16, 32), disabledWrite: at(48, 32), enabledWrite: at(80, 32), draws: gpu.stats.draws,
+        errors: gpu.stats.errors,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 depth write mask controls whether a nearer fragment occludes later draws',
+    depthWriteMaskResult.draws === 5 && depthWriteMaskResult.errors.length === 0
+      && near(depthWriteMaskResult.depthDisabled || [], [0, 0, 255, 255], 1)
+      && near(depthWriteMaskResult.disabledWrite || [], [0, 0, 255, 255], 1)
+      && near(depthWriteMaskResult.enabledWrite || [], [255, 0, 0, 255], 1),
+    JSON.stringify(depthWriteMaskResult));
+
   const d3d9FixedResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
