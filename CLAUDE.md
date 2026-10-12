@@ -255,13 +255,15 @@ register-stack subset):
       defaults are also pixel-checked. An 8x anisotropic Texture2D SampleLevel outside sample and an
       in-range SampleGrad footprint crossing the right edge are pixel-checked.
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
-      edge-crossing BORDER pixels. vkd3d rejects the documented float2 DDX/DDY arguments for
+      edge-crossing BORDER pixels. A TextureCube SRV also selects the expected color for all six
+      signed-axis faces. vkd3d rejects the documented float2 DDX/DDY arguments for
       Texture2DArray.SampleGrad with E5002 ([Microsoft HLSL signature](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplegrad));
       anisotropic Texture2D comparison SampleCmpLevelZero also returns `[110, 0, 0, 255]` for the
-      same edge-crossing LESS footprint. Anisotropic array SampleGrad, cube, other sampled dimensions/
+      same edge-crossing LESS footprint. Anisotropic array SampleGrad, cube-array/cross-face filtering,
+      other sampled dimensions/
       formats, remaining Shader Model 6.8 comparison methods, and other anisotropic cases remain open;
       an 8x anisotropic
-      sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
+      sampler request; instance step rates; render-to-texture; multiple render targets; cube-array, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
       for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, R10G10B10A2_UNORM, and
       R11G11B10_FLOAT; 4x D24S8 depth testing with an RGBA8 color resolve; and

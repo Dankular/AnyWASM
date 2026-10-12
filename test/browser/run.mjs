@@ -5223,7 +5223,15 @@ try {
       const pixel = tool.compileHlsl(`
         TextureCube<float4> source : register(t0);
         SamplerState sourceSampler : register(s0);
-        float4 main() : SV_Target { return source.SampleLevel(sourceSampler, float3(1.0, 0.0, 0.0), 0.0); }
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float3 direction = position.x < 10.0 ? float3(1.0, 0.0, 0.0)
+            : position.x < 20.0 ? float3(-1.0, 0.0, 0.0)
+            : position.x < 30.0 ? float3(0.0, 1.0, 0.0)
+            : position.x < 40.0 ? float3(0.0, -1.0, 0.0)
+            : position.x < 50.0 ? float3(0.0, 0.0, 1.0)
+            : float3(0.0, 0.0, -1.0);
+          return source.SampleLevel(sourceSampler, direction, 0.0);
+        }
       `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
@@ -5271,17 +5279,21 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const i = (32 * pixels.width + 32) * 4;
-      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const result = { faces: [4, 14, 24, 34, 44, 54].map(at), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 TextureCube SRV selects the positive-X face',
+  check('D3D11 TextureCube SRV selects all six signed-axis faces',
     cubeTextureResult.draws === 1 && cubeTextureResult.errors.length === 0
-      && near(cubeTextureResult.pixel, [255, 0, 0, 255], 1),
+      && cubeTextureResult.faces?.length === 6
+      && cubeTextureResult.faces.every((pixel, index) => near(pixel, [
+        [255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255],
+        [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255],
+      ][index], 1)),
     JSON.stringify(cubeTextureResult));
 
   const constantRangeResult = await page.evaluate(async () => {
