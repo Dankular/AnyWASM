@@ -39,6 +39,7 @@ const TEX = {
   94: 'bc6h-rgb-ufloat', 95: 'bc6h-rgb-ufloat', 96: 'bc6h-rgb-float',
   97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
 };
+const TYPED_UAV_DATA_TYPES = { 28: 5, 41: 5, 42: 4, 43: 3 };
 
 // DXGI_FORMAT -> GPUVertexFormat
 const VTX = {
@@ -411,8 +412,9 @@ export class GpuExecutor {
     return { gpu: this.device.createSampler(d), comparison, maxAnisotropy: d.maxAnisotropy || 1 };
   }
 
-  createShader(id, stage, dxbc) {
-    const { wgsl, descriptors } = this.tool.translate(dxbc);
+  shaderInfo(dxbc, uavFormat) {
+    const translated = this.tool.translate(dxbc, uavFormat === undefined ? undefined : { uavFormat });
+    const { wgsl, descriptors } = translated;
     const entry = (/@(vertex|fragment|compute)(?:\s+@\w+(?:\([^)]*\))?)*\s*fn\s+(\w+)/.exec(wgsl) || [])[2] || 'main';
     const usesDrawParameters = /@group\(3\)\s*@binding\(0\)\s*var<uniform>/.test(wgsl);
     const cbSizes = {};
@@ -433,7 +435,22 @@ export class GpuExecutor {
       storageBuffers[+m[1]][+m[2]] = { access: m[3] };
     }
     const module = this.device.createShaderModule({ code: wgsl });
-    this.shaders.set(id, { stage, module, entry, descriptors, cbSizes, storageTextures, storageBuffers, usesDrawParameters, wgsl });
+    return { module, entry, descriptors, cbSizes, storageTextures, storageBuffers, usesDrawParameters, wgsl };
+  }
+
+  createShader(id, stage, dxbc) {
+    this.shaders.set(id, { ...this.shaderInfo(dxbc), stage, dxbc, variants: new Map() });
+  }
+
+  shaderVariant(shader, dxgiFormat) {
+    const defaultFormat = { 3: 43, 4: 42, 5: 41 }[shader.descriptors.find((d) => d.type === 1)?.dataType];
+    if (dxgiFormat === defaultFormat) return shader;
+    let variant = shader.variants.get(dxgiFormat);
+    if (!variant) {
+      variant = this.shaderInfo(shader.dxbc, dxgiFormat);
+      shader.variants.set(dxgiFormat, variant);
+    }
+    return { ...shader, ...variant };
   }
 
   // ── views ────────────────────────────────────────────────────────────────
@@ -1016,10 +1033,23 @@ export class GpuExecutor {
 
   dispatchCompute(x, y, z) {
     const st = this.st;
-    const shader = this.shaders.get(st.shader[2]);
+    let shader = this.shaders.get(st.shader[2]);
     if (!shader || shader.stage !== 2) {
       this.log(`compute dispatch skipped: compute shader ${st.shader[2]} is unavailable`);
       return;
+    }
+
+    const textureUavs = shader.descriptors.filter((d) => d.type === 1 && !shader.storageBuffers?.[3]?.[d.register + 1]);
+    if (textureUavs.length === 1) {
+      const declaration = textureUavs[0];
+      const uav = st.uav[declaration.register];
+      const viewDesc = uav?.id && this.views.get(uav.id);
+      const view = viewDesc && this.getView(uav.id);
+      const texture = viewDesc && this.res.get(viewDesc.resource);
+      const dxgiFormat = viewDesc?.format || texture?.dxgi;
+      if (view?.dim !== 'buffer' && TYPED_UAV_DATA_TYPES[dxgiFormat] === declaration.dataType) {
+        shader = this.shaderVariant(shader, dxgiFormat);
+      }
     }
 
     const GROUP = { 2: 0, 0: 1, 3: 2, 1: 3 };
