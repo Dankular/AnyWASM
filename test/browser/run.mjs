@@ -593,6 +593,32 @@ try {
   check('CopyResource exposes the source red texel in quad D', near(at2(32, 150), RED, 1), JSON.stringify(at2(32, 150)));
   check('buffer CopyResource exposes the red quad at its copied vertex-buffer position', near(at2(604, 150), RED, 1), JSON.stringify(at2(604, 150)));
 
+  await page.goto('http://localhost:8099/index.html?run=d3d11_textured');
+  await page.waitForFunction(() => document.getElementById('stat').dataset.status !== undefined, null, { timeout: 60000 });
+  const visibleTextureStats = await page.evaluate(() => window.__gpuStats);
+  const visibleTextureLayout = await page.locator('#screen').evaluate((canvas) => {
+    const [width, height] = canvas.style.aspectRatio.split('/').map(Number);
+    return { aspectWidth: width, aspectHeight: height };
+  });
+  const visibleTexturePixels = decodePng(await page.locator('#screen').screenshot());
+  const visibleTextureY = (sourceY) => Math.round(1 + (sourceY + 0.5) / 480 * (visibleTexturePixels.h - 2));
+  const atVisibleTexture = (x, y) => {
+    const i = (y * visibleTexturePixels.w + x) * 4;
+    return Array.from(visibleTexturePixels.data.slice(i, i + 4));
+  };
+  check('textured D3D11 canvas presents all frames without WebGPU validation errors',
+    visibleTextureStats?.draws === 18 && visibleTextureStats.presents === 3 && visibleTextureStats.errors.length === 0,
+    JSON.stringify(visibleTextureStats));
+  check('textured canvas blit preserves the blended red quad and sampled texture pixels',
+    visibleTexturePixels.w === 640
+      && Math.abs(visibleTexturePixels.h - visibleTexturePixels.w * visibleTextureLayout.aspectHeight / visibleTextureLayout.aspectWidth) < 1
+      && near(atVisibleTexture(100, visibleTextureY(150)), [128, 0, 26, 255], 2)
+      && near(atVisibleTexture(200, visibleTextureY(340)), RED, 2)
+      && near(atVisibleTexture(440, visibleTextureY(430)), WHITE, 2),
+    JSON.stringify({ size: [visibleTexturePixels.w, visibleTexturePixels.h], layout: visibleTextureLayout,
+      blended: atVisibleTexture(100, visibleTextureY(150)),
+      texture: [atVisibleTexture(200, visibleTextureY(340)), atVisibleTexture(440, visibleTextureY(430))] }));
+
   const indexCopyResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
