@@ -1620,16 +1620,21 @@ try {
       command(2, words(23, initial.byteLength, 0x80, 0, 0x20, 0)); // raw UAV buffer
       const write = new Uint8Array(12 + initial.byteLength);
       write.set(words(23, 0, initial.byteLength)); write.set(new Uint8Array(initial.buffer), 12); command(3, write);
+      const copiedInitial = new Uint32Array(16).fill(0xdeadbeef);
+      command(2, words(26, copiedInitial.byteLength, 0x80, 0, 0x20, 0)); // raw CopyResource destination
+      const copiedWrite = new Uint8Array(12 + copiedInitial.byteLength);
+      copiedWrite.set(words(26, 0, copiedInitial.byteLength)); copiedWrite.set(new Uint8Array(copiedInitial.buffer), 12); command(3, copiedWrite);
       command(12, words(24, 3, 23, 39, 1, 2, 3, 1, 0)); // R32_TYPELESS raw view, elements [2, 5)
       shader(25, compute);
       command(17, words(2, 25));
       command(43, words(0, 1, 24, 0xffffffff));
       command(42, words(3, 1, 1));
+      command(33, words(26, 23)); // copy the GPU-written raw buffer
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
 
-      const resource = gpu.res.get(23);
+      const resource = gpu.res.get(26);
       const readback = gpu.device.createBuffer({ size: initial.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       const encoder = gpu.device.createCommandEncoder();
       encoder.copyBufferToBuffer(resource.gpu, 0, readback, 0, initial.byteLength);
@@ -1644,7 +1649,7 @@ try {
   });
   const sentinelsOutsideRawView = rawBufferUavResult.values?.every((value, i) =>
     (i < 2 || i >= 5) ? value === 0xfeed1234 : value === 123);
-  check('D3D11 raw-buffer UAV Store honors FirstElement and NumElements',
+  check('D3D11 raw-buffer CopyResource preserves UAV writes and FirstElement/NumElements',
     rawBufferUavResult.dispatches === 1 && rawBufferUavResult.errors.length === 0 && sentinelsOutsideRawView,
     JSON.stringify(rawBufferUavResult));
 
@@ -1686,7 +1691,12 @@ try {
       command(2, words(33, input.byteLength, 0x8, 0, 0, 0));
       const inputWrite = new Uint8Array(12 + input.byteLength);
       inputWrite.set(words(33, 0, input.byteLength)); inputWrite.set(new Uint8Array(input.buffer), 12); command(3, inputWrite);
-      command(12, words(34, 2, 33, 42, 1, 1, 3, 0, 0)); // R32_UINT SRV, elements [1, 4)
+      const copied = new Uint32Array(16).fill(0xdeadbeef);
+      command(2, words(38, copied.byteLength, 0x8, 0, 0, 0)); // typed CopyResource destination
+      const copiedWrite = new Uint8Array(12 + copied.byteLength);
+      copiedWrite.set(words(38, 0, copied.byteLength)); copiedWrite.set(new Uint8Array(copied.buffer), 12); command(3, copiedWrite);
+      command(33, words(38, 33)); // typed-buffer CopyResource destination <- source
+      command(12, words(34, 2, 38, 42, 1, 1, 3, 0, 0)); // copied R32_UINT SRV, elements [1, 4)
       command(2, words(35, initial.byteLength, 0x80, 0, 0, 0));
       const outputWrite = new Uint8Array(12 + initial.byteLength);
       outputWrite.set(words(35, 0, initial.byteLength)); outputWrite.set(new Uint8Array(initial.buffer), 12); command(3, outputWrite);
@@ -1715,7 +1725,7 @@ try {
   });
   const typedValuesMatchViews = typedBufferResult.values?.every((value, i) =>
     (i < 2 || i >= 5) ? value === 0xfeed5678 : value === typedBufferResult.expected?.[i - 2]);
-  check('D3D11 typed-buffer SRV/UAV dispatch honors formats and element ranges',
+  check('D3D11 typed-buffer CopyResource feeds an SRV/UAV dispatch with element ranges',
     typedBufferResult.dispatches === 1 && typedBufferResult.errors.length === 0 && typedValuesMatchViews,
     JSON.stringify(typedBufferResult));
 
