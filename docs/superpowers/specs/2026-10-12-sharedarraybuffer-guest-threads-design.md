@@ -1,9 +1,9 @@
 # Shared WebAssembly Memory for Parallel Guest Threads
 
-**Status:** feasibility spike complete; the no-std worker executes integer/control-flow and SSE
-instructions over the shared-frame view. A browser worker-pool helper now allocates its shared memory,
-publishes snapshots and CPU contexts, and dispatches bounded slices. The existing process loop does
-not use the helper yet, and x87 execution remains std-only.
+**Status:** the browser has an opt-in `?sharedCpuWorkers` path that offloads the active guest context
+through a shared-memory CPU worker and returns to the coordinator at HLE and fault boundaries. This
+first runtime hookup is serial; concurrent guest-thread scheduling and x87 execution in the worker
+remain unimplemented.
 
 ## Goal and scope
 
@@ -23,11 +23,12 @@ sample rendering path. Those remain in the parent runtime goal.
 ## Current implementation evidence
 
 - `web/serve.mjs` already returns `Cross-Origin-Opener-Policy: same-origin` and
-  `Cross-Origin-Embedder-Policy: require-corp`. `web/main.js` only displays whether the
-  `SharedArrayBuffer` constructor exists; it does not select a threaded runtime.
-- `web/worker.js` creates one `AnyWasm` instance and calls its `run` loop on one worker. The browser
-  build in `web/build.sh` targets `wasm32-unknown-unknown` without shared-memory or atomic target
-  options.
+  `Cross-Origin-Embedder-Policy: require-corp`. `web/main.js` enables the experimental path when the
+  page URL contains `?sharedCpuWorkers`.
+- `web/worker.js` creates one `AnyWasm` coordinator and can dispatch its active guest context to one
+  nested CPU worker. The worker stops at the HLE range or a CPU fault; the coordinator imports the
+  shared snapshot, handles that boundary, then republishes state. Other execution stays cooperative.
+  `web/build.sh` builds the normal runtime and a separate shared-memory CPU-worker artifact.
 - `crates/anywasm-wasm/src/lib.rs` stores one process in `static mut STATE`; its safety comment
   depends on a single-threaded Wasm instance and no re-entrant host calls.
 - Guest memory is not currently the Wasm linear memory. `crates/anywasm-cpu/src/mem.rs` implements a
@@ -57,10 +58,10 @@ sample rendering path. Those remain in the parent runtime goal.
   and for memory `XCHG`. Locked `CMPXCHG16B` reports an unsupported atomic-width fault because this
   Wasm shared-memory backend has no 128-bit compare-exchange. The view requires an immutable map and
   atomic access by every concurrent participant.
-- The ABI and `anywasm-cpu-worker` crates are not loaded by `web/worker.js`; the current runtime
-  still runs cooperatively and keeps guest frame bytes in `Memory`'s `Vec<u8>`. The generic
-  instruction executor is now in `anywasm-cpu-state`, and both the paged memory and shared-frame
-  view implement its no-allocation memory interface. The worker's no-std build supports
+- The opt-in browser path loads the ABI and `anywasm-cpu-worker`; the default runtime remains
+  cooperative and keeps authoritative guest frames in `Memory`'s `Vec<u8>`. The generic instruction
+  executor is now in `anywasm-cpu-state`, and both the paged memory and shared-frame view implement
+  its no-allocation memory interface. The worker's no-std build supports
   integer/control-flow and SSE instructions; x87 execution remains behind the ordinary std feature.
   No-std SSE rounding is implemented in core, and scalar square root uses an iterative f64
   approximation. The worker control protocol and shared-frame view have not yet been exercised
@@ -116,9 +117,11 @@ process counter, and advances the scheduler quantum when the imported context is
 `AnyWasm` provides host methods that copy page and CPU snapshots through caller-owned buffers.
 `web/shared-cpu-pool.js` and `web/shared-cpu-worker.js` now construct the matching shared ABI,
 reserve disjoint Wasm stacks, and claim/collect worker slots; `web/build.sh` emits the separate worker
-module with its stack pointer export. Neither helper is wired into `web/worker.js` yet. Production
-integration still needs no-std x87 execution, coordinator scheduling around worker slices, HLE return
-handling, and a target replay after the ABI has been exercised between browser workers.
+module with its stack pointer export. The `?sharedCpuWorkers` path currently dispatches only the
+coordinator's active context, preserving the single TEB/TLS view; it replays HLE and faulting
+instructions on the coordinator and falls back to cooperative execution if the shared layout must
+grow. True concurrent guest threads still need per-thread TEB/TLS isolation and scheduler handoff,
+plus a browser worker exercise and target replay.
 
 ## Success criteria
 

@@ -4,6 +4,7 @@ use anywasm_cpu_state::{Cpu, CpuMode};
 
 const CPU_CONTEXT_BYTES: usize = 784;
 const CPU_CONTEXT_ALIGN: usize = 16;
+const SHARED_CPU_QUANTUM: u64 = 10_000;
 const _: [(); CPU_CONTEXT_BYTES] = [(); core::mem::size_of::<Cpu>()];
 const _: [(); CPU_CONTEXT_ALIGN] = [(); core::mem::align_of::<Cpu>()];
 
@@ -37,6 +38,39 @@ pub extern "C" fn aw_shared_context_thread_id(index: u32) -> u32 {
     let mut ids: Vec<u32> = p.guest_threads.keys().copied().collect();
     ids.sort_unstable();
     ids.get(index as usize).copied().unwrap_or(0)
+}
+
+/// Active coordinator context when it is safe to dispatch, or zero when scheduling must run first.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_active_thread_id() -> u32 {
+    use anywasm_rt::process::ThreadState;
+    let Some(s) = super::state() else { return 0 };
+    let p = &s.p;
+    if !p.current_thread_saved
+        && !p.schedule_requested
+        && p.current_thread_state == ThreadState::Running
+        && p.quantum_used < SHARED_CPU_QUANTUM // matches Process::run_with_budget's thread quantum
+    {
+        p.current_thread_id
+    } else {
+        0
+    }
+}
+
+/// Remaining worker budget in the active thread's scheduler quantum, or zero when it must yield.
+#[no_mangle]
+pub extern "C" fn aw_shared_context_quantum_remaining() -> u32 {
+    let Some(s) = super::state() else { return 0 };
+    let p = &s.p;
+    if !p.current_thread_saved
+        && !p.schedule_requested
+        && p.current_thread_state == anywasm_rt::process::ThreadState::Running
+        && p.quantum_used < SHARED_CPU_QUANTUM
+    {
+        (SHARED_CPU_QUANTUM - p.quantum_used) as u32
+    } else {
+        0
+    }
 }
 
 /// Start address of the coordinator-owned HLE thunk range.

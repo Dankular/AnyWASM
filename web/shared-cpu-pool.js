@@ -61,7 +61,7 @@ function layoutFor({ workerCount, contextCount, pageCount, base }) {
  * completed contexts and worker-written frames to the coordinator.
  */
 export class SharedCpuWorkerPool {
-  static async create({ workerWasm, workerCount, contextCount, pageCount, workerUrl } = {}) {
+  static async create({ workerWasm, workerCount, contextCount, pageCount, pageCapacity = pageCount, workerUrl } = {}) {
     if (!globalThis.crossOriginIsolated || typeof SharedArrayBuffer !== 'function') {
       throw new Error('shared CPU workers require cross-origin isolation and SharedArrayBuffer');
     }
@@ -74,6 +74,9 @@ export class SharedCpuWorkerPool {
     }
     if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 0xffff_ffff) {
       throw new RangeError('pageCount must be a positive u32');
+    }
+    if (!Number.isInteger(pageCapacity) || pageCapacity < pageCount || pageCapacity > 0xffff_ffff) {
+      throw new RangeError('pageCapacity must be a u32 no smaller than pageCount');
     }
     if (!(workerWasm instanceof WebAssembly.Module)) {
       if (!(workerWasm instanceof ArrayBuffer) && !ArrayBuffer.isView(workerWasm)) {
@@ -92,6 +95,7 @@ export class SharedCpuWorkerPool {
       workerCount,
       contextCount,
       pageCount,
+      pageCapacity,
       workerUrl: workerUrl || new URL('./shared-cpu-worker.js', import.meta.url),
     });
     try {
@@ -136,7 +140,7 @@ export class SharedCpuWorkerPool {
     this.layout = layoutFor({
       workerCount: this.workerCount,
       contextCount: this.contextCount,
-      pageCount: this.pageCount,
+      pageCount: this.pageCapacity,
       base,
     });
     const requiredPages = Math.ceil((base + this.layout.totalBytes) / WASM_PAGE_BYTES);
@@ -184,15 +188,16 @@ export class SharedCpuWorkerPool {
   /** Publish matching mappings, frames, and per-thread contexts before starting workers. */
   publish({ snapshot, contexts }) {
     this.requireQuiescent();
+    const snapshotPageCount = Number(snapshot?.pageCount);
     if (!snapshot || snapshot.frameBase !== this.layout.frames.offset ||
-        snapshot.pageCount !== BigInt(this.pageCount) ||
+        !Number.isSafeInteger(snapshotPageCount) || snapshotPageCount < 0 || snapshotPageCount > this.pageCapacity ||
         !(snapshot.mappings instanceof Uint8Array) || !(snapshot.frames instanceof Uint8Array) ||
-        snapshot.mappings.byteLength !== this.layout.pageMap.length ||
-        snapshot.frames.byteLength !== this.layout.frames.length) {
+        snapshot.mappings.byteLength !== snapshotPageCount * 16 ||
+        snapshot.frames.byteLength !== snapshotPageCount * PAGE_BYTES) {
       throw new RangeError('guest-memory snapshot does not match the shared worker layout');
     }
-    if (!Array.isArray(contexts) || contexts.length !== this.contextCount) {
-      throw new RangeError('one CPU context is required for every shared context slot');
+    if (!Array.isArray(contexts) || contexts.length > this.contextCount) {
+      throw new RangeError('guest CPU contexts exceed the shared context capacity');
     }
     const threadIds = new Set();
     for (const { threadId, bytes } of contexts) {
@@ -213,12 +218,21 @@ export class SharedCpuWorkerPool {
       this.layout.frames.length,
     );
     const firstPublish = !this.snapshot;
-    const mappingChanged = firstPublish || mappingsView.some((byte, index) => byte !== snapshot.mappings[index]);
+    const mappingChanged = firstPublish || this.snapshot.pageCount !== snapshotPageCount ||
+      snapshot.mappings.some((byte, index) => byte !== this.snapshot.mappings[index]);
+    const previousMapBytes = this.snapshot ? this.snapshot.pageCount * 16 : 0;
+    const previousFrameBytes = this.snapshot ? this.snapshot.pageCount * PAGE_BYTES : 0;
+    const nextMapBytes = snapshotPageCount * 16;
+    const nextFrameBytes = snapshotPageCount * PAGE_BYTES;
+    if (nextMapBytes < previousMapBytes) mappingsView.fill(0, nextMapBytes, previousMapBytes);
+    if (nextFrameBytes < previousFrameBytes) framesView.fill(0, nextFrameBytes, previousFrameBytes);
     mappingsView.set(snapshot.mappings);
     framesView.set(snapshot.frames);
     const header = new Int32Array(this.memory.buffer, this.layout.base, HEADER_BYTES / 4);
     if (!firstPublish && mappingChanged) Atomics.add(header, 15, 1);
     if (!firstPublish) Atomics.add(header, 16, 1);
+    Atomics.store(header, 14, snapshotPageCount);
+    new Uint8Array(this.memory.buffer, this.layout.base + this.layout.contexts.offset, this.layout.contexts.length).fill(0);
     this.contextIndex.clear();
     for (let index = 0; index < contexts.length; index++) {
       const { threadId, bytes } = contexts[index];
@@ -228,7 +242,7 @@ export class SharedCpuWorkerPool {
     }
     this.snapshot = {
       frameBase: snapshot.frameBase,
-      pageCount: snapshot.pageCount,
+      pageCount: snapshotPageCount,
       mappings: snapshot.mappings.slice(),
     };
   }
@@ -236,13 +250,12 @@ export class SharedCpuWorkerPool {
   /** Export the current quiescent AnyWasm process into this pool's fixed layout. */
   publishFrom(anyWasm) {
     this.requireQuiescent();
-    if (anyWasm.sharedSnapshotPageCount() !== BigInt(this.pageCount)) {
-      throw new Error('guest mapping size changed; recreate the shared CPU pool before publishing');
-    }
+    const pageCount = Number(anyWasm.sharedSnapshotPageCount());
+    if (pageCount > this.pageCapacity) throw new Error('guest mapping size exceeded shared CPU page capacity');
     const snapshot = anyWasm.exportSharedSnapshot(this.layout.frames.offset);
     const threadIds = anyWasm.sharedCpuContextThreadIds();
-    if (threadIds.length !== this.contextCount) {
-      throw new Error('guest thread count changed; recreate the shared CPU pool before publishing');
+    if (threadIds.length > this.contextCount) {
+      throw new Error('guest thread count exceeded shared CPU context capacity');
     }
     const contexts = threadIds.map((threadId) => ({
       threadId,
@@ -262,7 +275,7 @@ export class SharedCpuWorkerPool {
       frames: new Uint8Array(
         this.memory.buffer,
         this.layout.base + this.layout.frames.offset,
-        this.layout.frames.length,
+        this.snapshot.pageCount * PAGE_BYTES,
       ).slice(),
     };
   }
@@ -272,6 +285,12 @@ export class SharedCpuWorkerPool {
     this.requireQuiescent();
     const snapshot = this.readGuestSnapshot();
     anyWasm.importSharedSnapshot(snapshot);
+    this.importSharedCpuContexts(anyWasm);
+  }
+
+  /** Import returned CPU registers and counters without copying the guest frame store. */
+  importSharedCpuContexts(anyWasm) {
+    this.requireQuiescent();
     for (const [threadId, index] of this.contextIndex) {
       const context = new Uint8Array(this.memory.buffer, this.contextOffset(index), CPU_BYTES).slice();
       anyWasm.importSharedCpuContext(threadId, context);

@@ -66,7 +66,11 @@ async function run(bundleBytes, label, assetUrl = null) {
     return;
   }
   if (!reuseWorker) {
-    worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    const workerUrl = new URL('./worker.js', import.meta.url);
+    if (new URLSearchParams(location.search).has('sharedCpuWorkers')) {
+      workerUrl.searchParams.set('sharedCpuWorkers', '');
+    }
+    worker = new Worker(workerUrl, { type: 'module' });
     window.__worker = worker; // exposed for automated tests
   }
 

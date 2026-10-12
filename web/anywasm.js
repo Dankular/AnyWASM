@@ -552,6 +552,22 @@ export class AnyWasm {
     return Array.from({ length: count }, (_, index) => this.x.aw_shared_context_thread_id(index) >>> 0);
   }
 
+  /** Active context eligible for dispatch, or zero when the coordinator must schedule first. */
+  sharedCpuActiveThreadId() {
+    if (typeof this.x.aw_shared_context_active_thread_id !== 'function') {
+      throw new Error('WASM runtime is missing active shared CPU context state; rebuild the runtime');
+    }
+    return this.x.aw_shared_context_active_thread_id() >>> 0;
+  }
+
+  /** Remaining instructions before the coordinator's current thread quantum must yield. */
+  sharedCpuQuantumRemaining() {
+    if (typeof this.x.aw_shared_context_quantum_remaining !== 'function') {
+      throw new Error('WASM runtime is missing the shared CPU quantum ABI; rebuild the runtime');
+    }
+    return this.x.aw_shared_context_quantum_remaining() >>> 0;
+  }
+
   /** HLE thunk range at which shared CPU workers must return to the coordinator. */
   sharedCpuTrapRange() {
     if (typeof this.x.aw_shared_hle_range_start !== 'function' ||
