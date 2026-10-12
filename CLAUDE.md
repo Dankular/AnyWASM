@@ -195,8 +195,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       units to the internal 10 ns ticks, matching the configured 10 MHz QPC; process and selected
       target regressions cover this frame-yield path. Accuracy for other scheduling patterns remains
       open.
-- [ ] **32-bit PE (WoW64-style)**: needs a 32-bit decoder/execution mode, 32-bit TEB/PEB and
-      32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
+- [~] **32-bit PE (WoW64-style)**: x86-32 decode/execution, PE32 image mapping, 32-bit TEB/PEB
+      setup, and stdcall stack cleanup are in place. A synthetic PE32 entry plus `SetLastError`
+      thunk test covers only that narrow path; import-heavy DLLs, broad Win32 API coverage, and a
+      real 32-bit program remain unverified. This is still a large target-compatibility task.
 - [~] **DLL loading**: the selected Diligent target maps and executes code from
       `GraphicsEngineD3D11_64r.dll` and `D3Dcompiler_47.dll`; their nonzero entry points ran through
       `DllMain` successfully in the bounded target trace. `Archiver_64r.dll` has an entry point but
