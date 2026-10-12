@@ -202,14 +202,16 @@
   through guest compute `Dispatch`, `Draw`, and repeated `IDXGISwapChain2::Present` calls. Those guest
   calls alone did not verify a host window or renderer. A later Chromium replay captures the
   1040x807 maze with 5 draws, one dispatch, and no WebGPU validation errors. After each `Stop::Frame`,
-  the worker advances the virtual guest clock by the elapsed browser `requestAnimationFrame` wait.
-  A target input regression confirms W moves the green marker 2.5 pixels. GLFW's hidden helper HWND
-  had received browser input; routing now selects the focused visible window or a visible top-level
-  fallback. Tab regenerates 19.7% of the captured pixels. This path exposed Diligent's idle sequence:
-  D3D11 `Flush1` signals its optional guest event, then event-query `GetData` reports completion
-  after `End` in the serialized command-stream model. The interaction replay reached 128 presents
-  and two compute dispatches without WebGPU validation errors. Target UAV values are not independently
-  read back, the frame is not compared with native output, and no gameplay acceptance pass is claimed.
+  the worker converts its measured 100 ns `requestAnimationFrame` wait into internal 10 ns ticks,
+  matching the configured 10 MHz `QueryPerformanceCounter`; a process regression covers the scaling.
+  In the post-fix seed-1 input replay, W/S/A/D and cursor-aimed movement each moved the player about
+  22–24 pixels per 500 ms action, and the flashlight increased bright pixels by 2,035. GLFW's hidden
+  helper HWND had received browser input; routing now selects the focused visible window or a visible
+  top-level fallback. The random-map Tab replay changed 20.3% of captured pixels and issued a second
+  compute dispatch. The seed-1 input replay reached 363 presents and the random-map reset replay
+  reached 74, both without WebGPU validation errors. A target 128x128 R32_FLOAT UAV was independently
+  read back. The frame is not compared with native output, and no general gameplay acceptance pass is
+  claimed.
   Native and WASM fixtures cover secure
   `SystemFunction036`; PE `.pdata` parsing, `RtlLookupFunctionEntry`, and a tested version 1
   `RtlVirtualUnwind` subset are in place. General SEH remains open. A browser fixture now executes

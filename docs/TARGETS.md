@@ -509,9 +509,11 @@ The readback had 651,249 nontransparent, nonblack pixels; the center sample was 
 ![Diligent GLFW Demo WebGPU frame](images/glfwdemo-first-frame.png)
 
 The browser worker measures the time spent waiting for `requestAnimationFrame` after each guest
-`Present` and adds that elapsed duration to the virtual guest clock in 100 ns units. This lets the
-target's `QueryPerformanceCounter`-based frame delta advance while preserving the instruction-based
-clock during guest execution.
+`Present` in 100 ns units. `Process::advance_time_100ns` converts each unit to ten internal 10 ns
+ticks; this matches the runtime's 10 MHz `QueryPerformanceFrequency` and `QueryPerformanceCounter`
+conversion. The process regression verifies the conversion, and the target's input replay confirms
+that its QPC-based simulation advances at the measured frame-time scale while guest execution still
+uses retired instructions.
 
 The same target replay checks input through the rendered output. GLFW creates a hidden helper window
 before the visible game window, so routing browser input to the first top-level HWND silently dropped
@@ -519,20 +521,21 @@ keys. The runtime now selects the focused visible window, or falls back to a vis
 Mouse coordinates are scaled from the canvas content area (excluding its border) to the guest window;
 the fixture verifies that the center of a 320x240 CSS canvas maps to `(520,404)` in a 1040x807 guest
 window. The guest also requests `TrackMouseEvent(TME_LEAVE)` and receives `WM_MOUSELEAVE` when the
-pointer exits the canvas. With this fix, holding W for 500 ms moves the green player marker 2.5 pixels
-upward. The seed-1 replay additionally checks W/S/A/D and cursor-aimed Space movement in all four
-directions; the marker moves 2.2–2.5 pixels in the expected direction for each action. Holding the
-left button for one second increases pixels above luminance 16 from 3,955 to 5,751 (1,796 more);
+pointer exits the canvas. After correcting the host-time unit conversion, holding W for 500 ms moves
+the green player marker 22.2 pixels upward. The seed-1 replay checks W/S/A/D and cursor-aimed Space
+movement in all four directions; each moves 22.2–23.7 pixels in the expected direction. Holding the
+left button for one second increases pixels above luminance 16 from 3,909 to 5,944 (2,035 more);
 this verifies a visible flashlight response for this seed and aim direction. Measurements are saved
 in [`target-data/glfwdemo-seed1-input-directions.json`](target-data/glfwdemo-seed1-input-directions.json),
 [`target-data/glfwdemo-seed1-mouse-aim.json`](target-data/glfwdemo-seed1-mouse-aim.json), and
 [`target-data/glfwdemo-seed1-flashlight.json`](target-data/glfwdemo-seed1-flashlight.json). Pressing Tab
-regenerates the map; 165,601 of 839,280 pixels changed (19.7%), and the target issued a second compute
-dispatch. This reset path exposed Diligent's `ID3D11DeviceContext3::Flush1` followed by an idle-event
+regenerates the random map; in the post-fix replay, 170,386 of 839,280 pixels changed (20.3%), and the
+target issued a second compute dispatch. The seed-1 input replay reached 363 presents and one compute
+dispatch; the random-map reset replay reached 74 presents and two dispatches. Both had no WebGPU
+validation errors. This reset path exposed Diligent's `ID3D11DeviceContext3::Flush1` followed by an idle-event
 wait and an event-query polling loop. `Flush1` now signals its optional guest event, and D3D11 event
 queries report completion after `End` in the ordered browser command-stream model. Rust regressions
-cover hidden-helper input selection, idle-event signaling, and event-query completion. The browser
-run reached 128 presents and 2 dispatches with no WebGPU validation errors. The W and Tab captures
+cover hidden-helper input selection, idle-event signaling, and event-query completion. The W and Tab captures
 are saved at [after W](images/glfwdemo-first-frame.after-w.png) and
 [after Tab](images/glfwdemo-first-frame.after-tab.png).
 
@@ -578,20 +581,23 @@ checks the output independently of the rendered backbuffer. The same seed-1 repl
 and 12,608 positive, with a minimum of -2.236068 and maximum of 4.0. The target shader uses
 `RADIUS=8` and `DIST_SCALE=0.5`, so the observed range is within its signed ±4 distance bound.
 Sampled values at the top-left, center, and bottom-right were -1.414214, 2.0, and -1.414214. The
-report is saved in [`target-data/glfwdemo-sdf-seed1.json`](target-data/glfwdemo-sdf-seed1.json).
+post-fix replay reproduced these values; the report is saved in
+[`target-data/glfwdemo-sdf-seed1.json`](target-data/glfwdemo-sdf-seed1.json).
 The standalone 4x4 R32_FLOAT fixture also reads all 16 written values as 0.25. This verifies the
 selected target's SDF output for one deterministic state; it does not establish other UAV
 formats/readback paths, all gameplay states, or game acceptance.
 
 This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
 directions, a flashlight response for one seed/aim direction, and map regeneration in the selected
-target. A controlled replay of the deterministic seed-1 bundle also traversed the maze to its
-teleport, regenerated the map (compute dispatches 1 → 2), and returned the player marker to the
-center with no WebGPU errors. It covered 45.01 map units in 1,834 key pulses over 34 measured route
-segments; the complete measurements and bundle hash are in
+target. A controlled replay of the deterministic seed-1 bundle, recorded before the 2026-10-12
+frame-time unit correction, also traversed the maze to its teleport, regenerated the map (compute
+dispatches 1 → 2), and returned the player marker to the center with no WebGPU errors. It covered
+45.01 map units in 1,834 key pulses over 34 measured route segments; the complete measurements and
+bundle hash are in
 [`target-data/glfwdemo-seed1-playthrough.json`](target-data/glfwdemo-seed1-playthrough.json). This
-establishes one complete seeded maze traversal, not general gameplay acceptance: the random Release
-map, other gameplay states, graphics states, and other readback paths remain unverified. The default
+route record needs a rerun before its timing is treated as current. It does not establish general
+gameplay acceptance: the random Release map, other gameplay states, graphics states, and other
+readback paths remain unverified. The default
 250,000-instruction worker slice still cannot resume the synchronous guest callback; the larger slice
 is diagnostic test routing only.
 

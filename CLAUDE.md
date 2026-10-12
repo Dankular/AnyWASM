@@ -186,12 +186,14 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       empty subkey, and reports missing subkeys while no registry data store exists. Target probes
       `HKCU` and `HKLM` at `Software\Microsoft\Direct3D\Direct3D12`; query/create/write APIs and
       populated registry data remain open. Other outstanding areas include COM beyond D3D/DXGI,
-      shell/known-folders, networking (winsock → WebSocket/fetch relay), timers/QueryPerformanceCounter
-      accuracy, file dialogs, persistent VFS
+      shell/known-folders, networking (winsock → WebSocket/fetch relay), timer delivery and
+      QueryPerformanceCounter accuracy under other scheduling patterns, file dialogs, persistent VFS
       (IndexedDB/OPFS) — verify what is already implemented before starting each. `SetTimer` and
       `KillTimer` currently only store/remove registrations; no `WM_TIMER` messages or `TimerProc`
       callbacks are scheduled. QPC uses virtual ticks derived from retired guest instructions plus
-      host time injected after browser frame yields; accuracy for other scheduling patterns remains
+      host time injected after browser frame yields. Browser elapsed values are converted from 100 ns
+      units to the internal 10 ns ticks, matching the configured 10 MHz QPC; process and selected
+      target regressions cover this frame-yield path. Accuracy for other scheduling patterns remains
       open.
 - [ ] **32-bit PE (WoW64-style)**: needs a 32-bit decoder/execution mode, 32-bit TEB/PEB and
       32-bit HLE ABI. Large; decide after the JIT (many old games are 32-bit).
@@ -261,9 +263,10 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       resize/vsync semantics, OpenGL (WGL), Vulkan. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)
       is documented in `docs/EVALUATION.md` — review licence/architecture before borrowing.
 - [~] **Frame pacing**: after each `Stop::Frame`, the worker advances the virtual guest clock by the
-      measured time spent waiting for browser `requestAnimationFrame`; the selected target's W
-      movement regression covers `QueryPerformanceCounter`-based simulation time. `Present` interval
-      semantics, scheduling under JIT, offscreen canvas resize, and HiDPI remain open.
+      measured time spent waiting for browser `requestAnimationFrame`, converting elapsed 100 ns
+      units to internal 10 ns ticks. A process regression and the selected target's movement replay
+      verify this scale against its 10 MHz `QueryPerformanceCounter`. `Present` interval semantics,
+      scheduling under JIT, offscreen canvas resize, and HiDPI remain open.
 
 ## 4. CPU correctness
 - [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
@@ -346,13 +349,16 @@ Design (partial implementation; the verified dynamic-emission scope is a leading
       `docs/target-data/glfwdemo-seed1-flashlight.json`. A deterministic seed-1 native D3D11 capture
       is visually compared with the browser frame in `docs/TARGETS.md`;
       `--check-uav` reads the target's 128x128 R32_FLOAT SDF and records finite-value, sign, and range
-      checks there. These do not establish pixel equivalence or end-to-end rendering correctness. The
-      general Release bundle uses `std::random_device` for map generation; its flashlight threshold
+      checks there. These do not establish pixel equivalence or end-to-end rendering correctness. A
+      stored seed-1 maze traversal predates the 100 ns-to-10 ns frame-time correction and needs a
+      rerun before its route timing is treated as current. The general Release bundle uses
+      `std::random_device` for map generation; its flashlight threshold
       varies between launches and failed once in an unseeded replay. Keep the stored flashlight claim
       scoped to its seeded build and aim direction; see `docs/TARGETS.md`. The
-      normal worker slice still stops in a synchronous callback that cannot resume. One controlled
-      seed-1 maze traversal reaches the teleport, but broad gameplay and end-to-end game acceptance
-      remain open; see `docs/TARGETS.md` for exact evidence and limits.
+      normal worker slice still stops in a synchronous callback that cannot resume. One pre-correction
+      controlled seed-1 maze traversal reached the teleport; rerun it with the corrected frame clock.
+      Broad gameplay and end-to-end game acceptance remain open; see `docs/TARGETS.md` for exact
+      evidence and limits.
 - [~] Packaging flow: the browser now shows the first reached unimplemented import in an accessible
       alert with the exact runtime message and `anywasm analyze` guidance; verified with the
       `unimpl.exe` fixture. It also shows phase-based load progress; browser coverage holds the
