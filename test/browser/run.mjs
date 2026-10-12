@@ -1401,7 +1401,12 @@ try {
       command(2, words(11, input.byteLength, 0x8, 0, 0x40, 4)); // structured SRV buffer
       const inputWrite = new Uint8Array(12 + input.byteLength);
       inputWrite.set(words(11, 0, input.byteLength)); inputWrite.set(new Uint8Array(input.buffer), 12); command(3, inputWrite);
-      command(12, words(12, 2, 11, 0, 1, 1, 3, 0, 0)); // buffer SRV, elements [1, 4)
+      const copied = new Uint32Array(16).fill(0xdeadbeef);
+      command(2, words(17, copied.byteLength, 0x8, 0, 0x40, 4)); // structured CopyResource destination
+      const copiedWrite = new Uint8Array(12 + copied.byteLength);
+      copiedWrite.set(words(17, 0, copied.byteLength)); copiedWrite.set(new Uint8Array(copied.buffer), 12); command(3, copiedWrite);
+      command(33, words(17, 11)); // structured-buffer CopyResource destination <- source
+      command(12, words(12, 2, 17, 0, 1, 1, 3, 0, 0)); // copied buffer SRV, elements [1, 4)
       command(2, words(13, initial.byteLength, 0x80, 0, 0x40, 4)); // structured UAV buffer
       const outputWrite = new Uint8Array(12 + initial.byteLength);
       outputWrite.set(words(13, 0, initial.byteLength)); outputWrite.set(new Uint8Array(initial.buffer), 12); command(3, outputWrite);
@@ -1430,7 +1435,7 @@ try {
   });
   const structuredValuesMatchViews = structuredBufferUavResult.values?.every((value, i) =>
     (i < 2 || i >= 5) ? value === 0xfeed1234 : value === structuredBufferUavResult.expected?.[i - 2]);
-  check('D3D11 structured-buffer SRV/UAV dispatch honors FirstElement and NumElements',
+  check('D3D11 structured-buffer CopyResource feeds an SRV/UAV dispatch with FirstElement and NumElements',
     structuredBufferUavResult.dispatches === 1 && structuredBufferUavResult.errors.length === 0
       && structuredValuesMatchViews,
     JSON.stringify(structuredBufferUavResult));
@@ -2684,6 +2689,9 @@ try {
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
       buffer(11, 16, [0.25, 0.5, 0.75, 1]);
       buffer(12, 256, [1, 1, 0, 1]);
+      buffer(14, 0, [0, 0, 0, 1]);
+      buffer(15, 0, [0.25, 0.75, 0.5, 1]);
+      command(33, words(14, 15)); // constant-buffer CopyResource destination <- source
       const raster = new Uint8Array(44), rasterView = new DataView(raster.buffer);
       rasterView.setUint32(0, 13, true); rasterView.setUint32(4, 3, true);
       rasterView.setUint32(8, 1, true); rasterView.setUint32(28, 1, true); rasterView.setUint32(32, 1, true);
@@ -2698,23 +2706,26 @@ try {
       command(23, words(1, 0, 0, 32, 64)); command(29, words(3, 0));
       command(44, words(1, 0, 1, 12, 16, 4)); // firstConstant=16, directly bound at offset 256
       command(23, words(1, 32, 0, 64, 64)); command(29, words(3, 0));
+      command(44, words(1, 0, 1, 14, 0, 4));
+      command(23, words(1, 0, 32, 32, 64)); command(29, words(3, 0));
       gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x) => {
-        const i = (32 * pixels.width + x) * 4;
+      const at = (x, y = 32) => {
+        const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
       };
-      const result = { packed: at(16), aligned: at(48), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const result = { packed: at(16, 16), aligned: at(48), copied: at(16, 48), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11.1 constant-buffer ranges pack misaligned offsets and bind 256-byte offsets directly',
-    constantRangeResult.draws === 2 && constantRangeResult.errors.length === 0
+  check('D3D11 constant-buffer CopyResource and D3D11.1 ranges preserve bound pixel data',
+    constantRangeResult.draws === 3 && constantRangeResult.errors.length === 0
       && near(constantRangeResult.packed, [64, 128, 191, 255], 1)
-      && near(constantRangeResult.aligned, [255, 255, 0, 255], 1),
+      && near(constantRangeResult.aligned, [255, 255, 0, 255], 1)
+      && near(constantRangeResult.copied, [64, 191, 128, 255], 1),
     JSON.stringify(constantRangeResult));
 
   const texture3dResult = await page.evaluate(async () => {
