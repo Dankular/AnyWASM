@@ -1941,8 +1941,9 @@ try {
         SamplerState borderSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
           float4 edge = image.GatherRed(borderSampler, float2(0.1, 0.5));
+          float4 offset = image.GatherRed(borderSampler, float2(0.1, 0.5), int2(1, 0));
           float4 outside = image.GatherRed(borderSampler, float2(2.0, 0.5));
-          return position.x < 32.0 ? edge : outside;
+          return position.x < 21.0 ? edge : position.x < 43.0 ? offset : outside;
         }
       `, 'main', 'ps_5_0');
       const comparisonPixel = tool.compileHlsl(`
@@ -2013,7 +2014,7 @@ try {
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
       const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const edge = at(16), outside = at(48);
+      const edge = at(16), offsetPixels = at(32), outside = at(53);
       stream.length = 0;
       command(4, words(13, 2, 2, 1, 1, 40, 0x48, 0, 1, 0)); // D32_FLOAT depth + SRV
       command(12, words(14, 1, 13, 40, 3, 0, 1, 0, 1)); // depth-stencil view
@@ -2069,7 +2070,7 @@ try {
       const alphaPixels = await gpu.readBackbuffer(1);
       const alphaAt = (x) => Array.from(alphaPixels.data.slice((32 * alphaPixels.width + x) * 4, (32 * alphaPixels.width + x) * 4 + 4));
       const result = {
-        edge, outside, comparisonEdge, comparisonOutside, arrayEdge: arrayAt(16), arrayOutside: arrayAt(48),
+        edge, offsetPixels, outside, comparisonEdge, comparisonOutside, arrayEdge: arrayAt(16), arrayOutside: arrayAt(48),
         r8AlphaEdge: alphaAt(16), r8AlphaOutside: alphaAt(48),
         draws: gpu.stats.draws, errors: gpu.stats.errors, logs,
       };
@@ -2079,9 +2080,10 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 Gather applies BORDER per tap at an edge and for a fully outside footprint',
+      check('D3D11 Gather applies BORDER per tap at edge/outside footprints and honors explicit offsets',
     gatherBorderResult.draws === 4 && gatherBorderResult.errors.length === 0
       && near([...gatherBorderResult.edge].sort((a, b) => a - b), [32, 32, 64, 191], 1)
+      && near([...gatherBorderResult.offsetPixels].sort((a, b) => a - b), [64, 128, 192, 255], 1)
       && near(gatherBorderResult.outside || [], [32, 32, 32, 32], 1)
       && near([...gatherBorderResult.comparisonEdge].sort((a, b) => a - b), [0, 0, 255, 255], 1)
       && near(gatherBorderResult.comparisonOutside || [], [255, 255, 255, 255], 1)

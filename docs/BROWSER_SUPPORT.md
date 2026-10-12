@@ -91,6 +91,9 @@ shader output. Other cases resolve half-alpha red
 over a blue clear to verify alpha-to-coverage, and verify that sample mask `0x5` preserves two of
 four samples. A two-target pixel check also verifies independent blend
 descriptors by adding red to target 0 while target 1 overwrites its clear colour.
+The D3D11 BORDER gather regression covers 2D and 2D-array RGBA8 taps at an edge and outside the
+image, an explicit nonzero gather offset, D32_FLOAT comparison gathers, and R8_UNORM alpha-channel
+defaults.
 The suite also checks 4x D24S8 depth/stencil attachments: a near green draw occludes a later far red
 draw, and the 4x RGBA8 color target resolves to the expected green pixel. Rust HLE tests verify
 4x quality-level reports for D32_FLOAT, D24S8, and D16, reject 8x, and accept typeless D24S8
