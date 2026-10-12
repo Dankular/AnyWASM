@@ -64,8 +64,9 @@ sample rendering path. Those remain in the parent runtime goal.
   its no-allocation memory interface. The worker's no-std build supports
   integer/control-flow and SSE instructions; x87 execution remains behind the ordinary std feature.
   No-std SSE rounding is implemented in core, and scalar square root uses an iterative f64
-  approximation. The worker control protocol and shared-frame view have not yet been exercised
-  between browser workers.
+  approximation. A cross-origin-isolated Chrome smoke now starts the nested CPU worker through
+  `?sharedCpuWorkers` and runs `hello.exe` to exit 0. This exercises worker initialization and a
+  serial active-context handoff, but does not prove concurrent guest-thread execution.
 
 ## Feasibility spike result (2026-10-12)
 
@@ -81,9 +82,10 @@ sample rendering path. Those remain in the parent runtime goal.
   establish the behavior of `std`'s allocator.
 - Building `anywasm-wasm` with shared-memory linker flags failed because the installed prebuilt
   `std` objects lack `atomics`/`bulk-memory` feature metadata. The standalone no-std worker module
-  now links with `+atomics,+bulk-memory,+mutable-globals` and LLD's `--no-check-features`; this
-  bypasses the metadata check and still emits Rust's unstable-target-feature warning. The module
-  compiles, but its shared-memory execution has not yet been exercised in a browser.
+  links with `+atomics,+bulk-memory,+mutable-globals` and LLD's `--no-check-features`; this bypasses
+  the metadata check and still emits Rust's unstable-target-feature warning. The browser smoke
+  confirms module instantiation and a clean guest exit, but not multi-thread scheduling or target
+  rendering.
 - Result: the full-runtime-per-worker layout remains blocked. The separate CPU-worker boundary now
   executes bounded integer/control-flow and SSE slices over validated shared guest frames, but does
   not yet share the process's live page backing or coordinator scheduling state; x87 execution

@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 
 use core::mem::size_of;
 use core::slice;
@@ -183,6 +183,7 @@ fn encode_exit(exit: Exit, rip: u64) -> (u32, u64, u64) {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     loop {

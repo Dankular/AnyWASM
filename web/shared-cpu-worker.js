@@ -9,7 +9,7 @@ onmessage = async (event) => {
       memory = message.memory;
       workerIndex = message.workerIndex;
       const result = await WebAssembly.instantiate(message.module, { env: { memory } });
-      instance = result.instance;
+      instance = result instanceof WebAssembly.Instance ? result : result.instance;
       const stack = instance.exports.__stack_pointer;
       const heapBase = instance.exports.__heap_base;
       if (!(stack instanceof WebAssembly.Global) || !(heapBase instanceof WebAssembly.Global)) {
