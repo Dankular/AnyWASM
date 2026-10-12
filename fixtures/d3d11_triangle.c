@@ -64,7 +64,7 @@ static void check_staging_r32g32_float(ID3D11Device *dev, ID3D11DeviceContext *c
     ID3D11Texture2D_Release(source);
 }
 
-static void check_staging_r32_integer(ID3D11Device *dev, ID3D11DeviceContext *ctx,
+static void check_staging_u32_words(ID3D11Device *dev, ID3D11DeviceContext *ctx,
     UINT format, const char *name, const UINT *expected, UINT components) {
     const UINT row_words = 2 * components;
     D3D11_TEXTURE2D_DESC desc = {0};
@@ -103,15 +103,22 @@ static void check_staging_r32g32_integers(ID3D11Device *dev, ID3D11DeviceContext
         0x80000000, 0xffffffff, 0x00000000, 0x00000001,
         0x7fffffff, 0x87654321, 0xfffffffe, 0x0000002a
     };
-    check_staging_r32_integer(dev, ctx, DXGI_FORMAT_R32G32_UINT, "R32G32_UINT", unsigned_values, 2);
-    check_staging_r32_integer(dev, ctx, DXGI_FORMAT_R32G32_SINT, "R32G32_SINT", signed_bits, 2);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R32G32_UINT, "R32G32_UINT", unsigned_values, 2);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R32G32_SINT, "R32G32_SINT", signed_bits, 2);
 }
 
 static void check_staging_r32_integers(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     static const UINT unsigned_values[4] = { 0x12345678, 0xffffffff, 0x00000000, 0x80000000 };
     static const UINT signed_bits[4] = { 0x80000000, 0xffffffff, 0x00000000, 0x7fffffff };
-    check_staging_r32_integer(dev, ctx, DXGI_FORMAT_R32_UINT, "R32_UINT", unsigned_values, 1);
-    check_staging_r32_integer(dev, ctx, DXGI_FORMAT_R32_SINT, "R32_SINT", signed_bits, 1);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R32_UINT, "R32_UINT", unsigned_values, 1);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R32_SINT, "R32_SINT", signed_bits, 1);
+}
+
+static void check_staging_packed32_formats(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    static const UINT r10g10b10a2_values[4] = { 0x12345678, 0x9abcdef0, 0x55aa33cc, 0xffffffff };
+    static const UINT r11g11b10_values[4] = { 0x3c003c00, 0x7bf0fe00, 0x00000000, 0x7f7fffff };
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R10G10B10A2_UINT, "R10G10B10A2_UINT", r10g10b10a2_values, 1);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R11G11B10_FLOAT, "R11G11B10_FLOAT", r11g11b10_values, 1);
 }
 
 static void check_staging_r16_words(ID3D11Device *dev, ID3D11DeviceContext *ctx,
@@ -296,8 +303,8 @@ static void check_staging_rgba32_integers(ID3D11Device *dev, ID3D11DeviceContext
         0xffffffff, 0x80000001, 0xfffffffd, 0x00000003,
         0x12345678, 0xedcba987, 0x40000000, 0xc0000000
     };
-    check_staging_r32_integer(dev, ctx, DXGI_FORMAT_R32G32B32A32_UINT, "R32G32B32A32_UINT", unsigned_values, 4);
-    check_staging_r32_integer(dev, ctx, DXGI_FORMAT_R32G32B32A32_SINT, "R32G32B32A32_SINT", signed_bits, 4);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R32G32B32A32_UINT, "R32G32B32A32_UINT", unsigned_values, 4);
+    check_staging_u32_words(dev, ctx, DXGI_FORMAT_R32G32B32A32_SINT, "R32G32B32A32_SINT", signed_bits, 4);
 }
 
 static void check_staging_rgba16_float(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
@@ -739,6 +746,7 @@ int main(void) {
             check_staging_8bit_formats(dev, ctx);
             check_staging_r32g32_float(dev, ctx);
             check_staging_r32g32_integers(dev, ctx);
+            check_staging_packed32_formats(dev, ctx);
             check_staging_rgba32_float(dev, ctx);
             check_staging_rgba32_integers(dev, ctx);
             check_staging_rgba16_float(dev, ctx);
