@@ -2684,24 +2684,34 @@ try {
       rasterView.setUint32(0, 12, true); rasterView.setUint32(4, 3, true);
       rasterView.setUint32(8, 1, true); rasterView.setUint32(28, 1, true); rasterView.setUint32(32, 1, true);
       command(10, raster);
-      const blend = (id, op) => {
+      const blend = (id, src, dst, op, writeMask = 0xf) => {
         const payload = new Uint8Array(268), view = new DataView(payload.buffer);
         view.setUint32(0, id, true); view.setUint32(12, 1, true);
-        view.setUint32(16, 2, true); view.setUint32(20, 2, true); view.setUint32(24, op, true);
-        view.setUint32(28, 2, true); view.setUint32(32, 2, true); view.setUint32(36, op, true);
-        view.setUint32(40, 0xf, true); command(9, payload);
+        view.setUint32(16, src, true); view.setUint32(20, dst, true); view.setUint32(24, op, true);
+        view.setUint32(28, src, true); view.setUint32(32, dst, true); view.setUint32(36, op, true);
+        view.setUint32(40, writeMask, true); command(9, payload);
       };
-      blend(13, 1); blend(14, 2); blend(15, 4); blend(16, 5);
+      blend(13, 2, 2, 1); blend(14, 2, 2, 2); blend(15, 2, 2, 4); blend(16, 2, 2, 5);
+      blend(17, 5, 6, 1, 0x7); // src-alpha / inverse-src-alpha
+      blend(18, 7, 8, 1, 0x7); // destination-alpha / inverse-destination-alpha
+      blend(19, 11, 2, 1, 0x7); // saturate / one
+      blend(20, 14, 15, 1, 0x7); // blend-constant / inverse-blend-constant
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
       command(21, words(1, 2, 0)); command(25, words(12));
       const clear = new Uint8Array(20), clearView = new DataView(clear.buffer);
       clearView.setUint32(0, 2, true); [0.5, 0.1, 0.4, 0.3].forEach((v, i) => clearView.setFloat32(4 + i * 4, v, true)); command(27, clear);
-      const rects = [[0, 0, 32, 32], [32, 0, 64, 32], [0, 32, 32, 64], [32, 32, 64, 64]];
-      for (let i = 0; i < rects.length; i++) {
-        const id = 13 + i, [left, top, right, bottom] = rects[i];
-        command(24, words(id, 0, 0, 0, 0, 0xf));
+      const rects = [
+        [0, 0, 16, 32], [16, 0, 32, 32], [32, 0, 48, 32], [48, 0, 64, 32],
+        [0, 32, 16, 64], [16, 32, 32, 64], [32, 32, 48, 64], [48, 32, 64, 64],
+      ];
+      const tests = rects.map((rect, i) => ({ id: 13 + i, rect, factor: i === 7 ? [0.25, 0.5, 0.75, 0.5] : [0, 0, 0, 0] }));
+      const floatBits = (value) => {
+        const data = new DataView(new ArrayBuffer(4)); data.setFloat32(0, value, true); return data.getUint32(0, true);
+      };
+      for (const { id, rect: [left, top, right, bottom], factor } of tests) {
+        command(24, words(id, ...factor.map(floatBits), 0xf));
         command(23, words(1, left, top, right, bottom));
         command(29, words(3, 0));
       }
@@ -2712,7 +2722,8 @@ try {
         return Array.from(pixels.data.slice(i, i + 4));
       };
       const result = {
-        add: at(16, 16), subtract: at(48, 16), min: at(16, 48), max: at(48, 48),
+        add: at(8, 16), subtract: at(24, 16), min: at(40, 16), max: at(56, 16),
+        srcAlpha: at(8, 48), dstAlpha: at(24, 48), srcAlphaSaturate: at(40, 48), blendConstant: at(56, 48),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -2722,11 +2733,18 @@ try {
     }
   });
   check('D3D11 ADD, SUBTRACT, MIN, and MAX blend operations match channel-wise pixels',
-    blendModesResult.draws === 4 && blendModesResult.errors.length === 0
+    blendModesResult.draws === 8 && blendModesResult.errors.length === 0
       && near(blendModesResult.add, [191, 153, 128, 255], 1)
       && near(blendModesResult.subtract, [0, 102, 0, 128], 1)
       && near(blendModesResult.min, [64, 26, 26, 77], 1)
       && near(blendModesResult.max, [128, 128, 102, 204], 1),
+    JSON.stringify(blendModesResult));
+  check('D3D11 blend factors cover src-alpha, dst-alpha, saturate, and blend-constant paths',
+    blendModesResult.errors.length === 0
+      && near(blendModesResult.srcAlpha, [77, 107, 41, 77], 1)
+      && near(blendModesResult.dstAlpha, [108, 56, 79, 77], 1)
+      && near(blendModesResult.srcAlphaSaturate, [172, 115, 120, 77], 1)
+      && near(blendModesResult.blendConstant, [112, 77, 45, 77], 1),
     JSON.stringify(blendModesResult));
 
   const mrtResult = await page.evaluate(async () => {

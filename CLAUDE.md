@@ -236,8 +236,9 @@ register-stack subset):
       explicitly does not guarantee runtime success. The JSON serializer escapes control characters.
 
 ## 3. Graphics
-- [~] **D3D11 verification gaps**: browser pixel/readback checks cover constant-factor and
-      source-alpha blending plus reverse-subtract, add, subtract, min, and max blend operations;
+- [~] **D3D11 verification gaps**: browser pixel/readback checks cover constant-factor,
+      source-alpha, destination-alpha, and source-alpha-saturate blending with inverse factors, plus
+      reverse-subtract, add, subtract, min, and max blend operations;
       texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture
       `CopySubresourceRegion` and `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
       fractional-LOD linear filtering; repeat/clamp sampler address pixels and an 8x anisotropic
