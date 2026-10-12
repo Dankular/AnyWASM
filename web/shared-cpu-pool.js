@@ -450,10 +450,21 @@ export class SharedCpuWorkerPool {
     if (firstTrap < 0n || endTrap <= firstTrap || endTrap > 0xffff_ffff_ffff_ffffn) {
       throw new RangeError('trap range must be a nonempty u64 interval');
     }
+    const processExit = BigInt(options.processExit ?? this.trapRange?.processExit ?? 0);
+    const threadExit = BigInt(options.threadExit ?? this.trapRange?.threadExit ?? 0);
+    for (const [name, address] of [['processExit', processExit], ['threadExit', threadExit]]) {
+      if (address < 0n || address > 0xffff_ffff_ffff_ffffn ||
+          (address !== 0n && (address < firstTrap || address >= endTrap))) {
+        throw new RangeError(`${name} must be zero or an address inside the trap range`);
+      }
+    }
+    if (processExit !== 0n && processExit === threadExit) {
+      throw new RangeError('processExit and threadExit must be different addresses');
+    }
     const contextIndex = this.contextIndex.get(threadId);
     if (contextIndex === undefined) throw new RangeError(`unknown shared CPU context for thread ${threadId}`);
     if (this.activeThreads.has(threadId)) throw new Error(`thread ${threadId} already has an active CPU slice`);
-    return { threadId, budget, firstTrap, endTrap, contextIndex };
+    return { threadId, budget, firstTrap, endTrap, processExit, threadExit, contextIndex };
   }
 
   claimWorkerSlot(workerIndex) {
@@ -470,7 +481,7 @@ export class SharedCpuWorkerPool {
   }
 
   dispatchClaimed(workerIndex, dispatch) {
-    const { threadId, budget, firstTrap, endTrap, contextIndex } = dispatch;
+    const { threadId, budget, firstTrap, endTrap, processExit, threadExit, contextIndex } = dispatch;
     const slotOffset = this.layout.slots.offset + workerIndex * SLOT_BYTES;
     const slot = new Int32Array(this.memory.buffer, this.layout.base + slotOffset, SLOT_BYTES / 4);
     const sequence = (Atomics.add(slot, 1, 1) + 1) >>> 0;
@@ -497,6 +508,8 @@ export class SharedCpuWorkerPool {
       sequence,
       trapStart: firstTrap,
       trapEnd: endTrap,
+      processExit,
+      threadExit,
     });
     return result.then((message) => ({
       ...this.takeCompletion(workerIndex, threadId, sequence, message),

@@ -39,6 +39,8 @@ onmessage = async (event) => {
         message.slotIndex >>> 0,
         BigInt(message.trapStart),
         BigInt(message.trapEnd),
+        BigInt(message.processExit || 0),
+        BigInt(message.threadExit || 0),
       );
       const slotOffset = (message.sharedBase + message.slotOffset) >>> 0;
       const slot = new Int32Array(memory.buffer, slotOffset, 16);

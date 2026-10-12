@@ -147,6 +147,18 @@ pub extern "C" fn aw_shared_hle_range_end() -> u64 {
     anywasm_rt::process::THUNK_BASE + anywasm_rt::process::THUNK_BYTES
 }
 
+/// Process-entry return address intercepted by the shared CPU worker.
+#[no_mangle]
+pub extern "C" fn aw_shared_process_exit_magic() -> u64 {
+    anywasm_rt::process::EXIT_MAGIC
+}
+
+/// Guest-thread return address intercepted by the shared CPU worker.
+#[no_mangle]
+pub extern "C" fn aw_shared_thread_return_magic() -> u64 {
+    anywasm_rt::process::THREAD_RETURN_MAGIC
+}
+
 /// Copy one guest thread's architectural context to a buffer for a shared CPU worker.
 ///
 /// The buffer uses the `Cpu` ABI from `anywasm-cpu-state`, including its 16-byte alignment.

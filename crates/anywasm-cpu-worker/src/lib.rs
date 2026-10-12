@@ -17,6 +17,8 @@ pub const STOP_BREAKPOINT: u32 = 4;
 pub const STOP_ILLEGAL_INSTRUCTION: u32 = 5;
 pub const STOP_PRIVILEGED_INSTRUCTION: u32 = 6;
 pub const STOP_SYSCALL: u32 = 7;
+pub const STOP_PROCESS_EXIT: u32 = 8;
+pub const STOP_THREAD_EXIT: u32 = 9;
 pub const STOP_SOFTWARE_INTERRUPT_BASE: u32 = 0x100;
 /// Retry this instruction on the coordinator's full interpreter.
 pub const STOP_UNSUPPORTED: u32 = 0x200;
@@ -34,7 +36,8 @@ const WORKER_FAILURE: u32 = 4;
 /// `shared_base` points to the ABI header, not necessarily to byte zero of the imported
 /// WebAssembly memory. The coordinator reserves that aligned region after all worker modules'
 /// initialized data and stacks. `trap_start..trap_end` is the coordinator's HLE thunk range.
-/// The worker stops before executing any address in that range.
+/// The worker stops before executing any address in that range. `process_exit` and `thread_exit`
+/// identify terminal addresses in this range; zero disables recognition for standalone users.
 ///
 /// # Safety
 ///
@@ -49,8 +52,15 @@ pub unsafe extern "C" fn aw_cpu_worker_slice(
     slot_index: u32,
     trap_start: u64,
     trap_end: u64,
+    process_exit: u64,
+    thread_exit: u64,
 ) -> u32 {
-    if shared_base == 0 || trap_start >= trap_end {
+    if shared_base == 0
+        || trap_start >= trap_end
+        || (process_exit != 0 && !(trap_start..trap_end).contains(&process_exit))
+        || (thread_exit != 0 && !(trap_start..trap_end).contains(&thread_exit))
+        || (process_exit != 0 && process_exit == thread_exit)
+    {
         return ABI_FAILURE;
     }
     let base = shared_base as usize as *mut u8;
@@ -119,6 +129,19 @@ pub unsafe extern "C" fn aw_cpu_worker_slice(
     let mut payload_value = 0;
     let mut retired = 0u64;
     while retired < dispatch.instruction_budget {
+        if process_exit != 0 && context.rip == process_exit {
+            completion_state = CompletionState::Exited;
+            stop_reason = STOP_PROCESS_EXIT;
+            payload_address = context.rip;
+            payload_value = context.gpr[anywasm_cpu_state::RAX] as u32 as u64;
+            break;
+        }
+        if thread_exit != 0 && context.rip == thread_exit {
+            completion_state = CompletionState::Exited;
+            stop_reason = STOP_THREAD_EXIT;
+            payload_address = context.rip;
+            break;
+        }
         if (trap_start..trap_end).contains(&context.rip) {
             completion_state = CompletionState::Hle;
             stop_reason = STOP_HLE;

@@ -763,12 +763,16 @@ export class AnyWasm {
   /** HLE thunk range at which shared CPU workers must return to the coordinator. */
   sharedCpuTrapRange() {
     if (typeof this.x.aw_shared_hle_range_start !== 'function' ||
-        typeof this.x.aw_shared_hle_range_end !== 'function') {
-      throw new Error('WASM runtime is missing the shared HLE range ABI; rebuild the runtime');
+        typeof this.x.aw_shared_hle_range_end !== 'function' ||
+        typeof this.x.aw_shared_process_exit_magic !== 'function' ||
+        typeof this.x.aw_shared_thread_return_magic !== 'function') {
+      throw new Error('WASM runtime is missing the shared CPU trap ABI; rebuild the runtime');
     }
     return {
       trapStart: this.x.aw_shared_hle_range_start(),
       trapEnd: this.x.aw_shared_hle_range_end(),
+      processExit: this.x.aw_shared_process_exit_magic(),
+      threadExit: this.x.aw_shared_thread_return_magic(),
     };
   }
 
