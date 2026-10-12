@@ -8,6 +8,14 @@
 
 pub mod shared;
 
+// Keep the decoder's existing import path while it is shared with the std interpreter crate.
+pub mod cpu {
+    pub use crate::CpuMode;
+}
+
+#[path = "../../anywasm-cpu/src/decode.rs"]
+pub mod decode;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CpuMode {

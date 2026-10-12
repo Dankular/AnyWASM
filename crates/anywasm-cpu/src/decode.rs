@@ -4,8 +4,8 @@
 //! destination (and first source for two-operand forms), `ops[1]` the source. SSE store forms
 //! (e.g. `0F 11`) are swapped by the decoder so `ops[0]` is always the destination.
 
-use std::fmt;
 use crate::cpu::CpuMode;
+use core::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prec {
@@ -358,7 +358,7 @@ impl fmt::Display for DecodeError {
         }
     }
 }
-impl std::error::Error for DecodeError {}
+impl core::error::Error for DecodeError {}
 
 type R<T> = Result<T, DecodeError>;
 

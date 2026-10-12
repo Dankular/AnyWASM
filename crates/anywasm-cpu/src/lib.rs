@@ -1,6 +1,6 @@
 //! x86-64 user-mode CPU core for AnyWASM: paged memory, decoder, interpreter.
 pub mod cpu;
-pub mod decode;
+pub use anywasm_cpu_state::decode;
 pub mod exec;
 pub mod jit;
 pub mod sse;
