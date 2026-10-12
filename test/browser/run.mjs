@@ -1603,8 +1603,13 @@ try {
       signedAlphaTextureUpload.set(words(13, 0, 0, 0, 0, 2, 2, 8, 16));
       signedAlphaTextureUpload.set([115, 115, 115, 192, 115, 115, 115, 192, 115, 115, 115, 192, 115, 115, 115, 192], 36);
       const setupSignedAlphaArgs = () => command(5, signedAlphaTextureUpload);
+      const alphaModulated2xPixel = await renderOperation(2, setupSignedAlphaArgs, 5);
+      const alphaModulated4xPixel = await renderOperation(2, setupSignedAlphaArgs, 6);
+      const alphaAddedPixel = await renderOperation(2, setupSignedAlphaArgs, 7);
       const alphaAddSignedPixel = await renderOperation(2, setupSignedAlphaArgs, 8);
       const alphaAddSigned2xPixel = await renderOperation(2, setupSignedAlphaArgs, 9);
+      const alphaSubtractedPixel = await renderOperation(2, setupSignedAlphaArgs, 10);
+      const alphaAddSmoothPixel = await renderOperation(2, setupSignedAlphaArgs, 11);
       const modulateAlphaAddColorPixel = await renderOperation(18);
       const modulateColorAddAlphaPixel = await renderOperation(19);
       const modulateInvAlphaAddColorPixel = await renderOperation(20);
@@ -1620,8 +1625,13 @@ try {
         addSmoothPixel,
         addSignedPixel,
         addSigned2xPixel,
+        alphaModulated2xPixel,
+        alphaModulated4xPixel,
+        alphaAddedPixel,
         alphaAddSignedPixel,
         alphaAddSigned2xPixel,
+        alphaSubtractedPixel,
+        alphaAddSmoothPixel,
         modulateAlphaAddColorPixel,
         modulateColorAddAlphaPixel,
         modulateInvAlphaAddColorPixel,
@@ -1643,13 +1653,13 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 22 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 27 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 22 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 27 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
@@ -1668,10 +1678,20 @@ try {
     near(d3d9TextureResult.addSignedPixel, [39, 39, 39, 128], 2), JSON.stringify(d3d9TextureResult.addSignedPixel));
   check('D3D9 stage-0 ADDSIGNED2X doubles the biased sum',
     near(d3d9TextureResult.addSigned2xPixel, [77, 77, 77, 128], 2), JSON.stringify(d3d9TextureResult.addSigned2xPixel));
+  check('D3D9 stage-0 alpha MODULATE2X doubles the product',
+    near(d3d9TextureResult.alphaModulated2xPixel, [115, 115, 115, 77], 2), JSON.stringify(d3d9TextureResult.alphaModulated2xPixel));
+  check('D3D9 stage-0 alpha MODULATE4X quadruples the product and clamps',
+    near(d3d9TextureResult.alphaModulated4xPixel, [115, 115, 115, 153], 2), JSON.stringify(d3d9TextureResult.alphaModulated4xPixel));
+  check('D3D9 stage-0 alpha ADD sums both arguments',
+    near(d3d9TextureResult.alphaAddedPixel, [115, 115, 115, 243], 2), JSON.stringify(d3d9TextureResult.alphaAddedPixel));
   check('D3D9 stage-0 alpha ADDSIGNED applies the half-range bias',
     near(d3d9TextureResult.alphaAddSignedPixel, [115, 115, 115, 116], 2), JSON.stringify(d3d9TextureResult.alphaAddSignedPixel));
   check('D3D9 stage-0 alpha ADDSIGNED2X doubles the biased sum',
     near(d3d9TextureResult.alphaAddSigned2xPixel, [115, 115, 115, 231], 2), JSON.stringify(d3d9TextureResult.alphaAddSigned2xPixel));
+  check('D3D9 stage-0 alpha SUBTRACT subtracts the second argument',
+    near(d3d9TextureResult.alphaSubtractedPixel, [115, 115, 115, 141], 2), JSON.stringify(d3d9TextureResult.alphaSubtractedPixel));
+  check('D3D9 stage-0 alpha ADDSMOOTH subtracts the product from the sum',
+    near(d3d9TextureResult.alphaAddSmoothPixel, [115, 115, 115, 205], 2), JSON.stringify(d3d9TextureResult.alphaAddSmoothPixel));
   check('D3D9 stage-0 BLENDFACTORALPHA uses the texture-factor alpha byte',
     near(d3d9TextureResult.blendFactorAlphaPixel, [223, 32, 32, 128], 2), JSON.stringify(d3d9TextureResult.blendFactorAlphaPixel));
   check('D3D9 stage-0 BLENDFACTORALPHA changes when the render-state factor changes',

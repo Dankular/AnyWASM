@@ -1824,7 +1824,7 @@ fn set_texture_stage_state(p: &mut Process) -> R {
     let valid = match state {
         1 => matches!(value, 1..=16 | 18..=21 | 24), // selected add, subtract, blend, modulate-add, and dot-product ops
         2 | 3 | 5 | 6 => value <= 2, // diffuse/current or texture
-        4 => matches!(value, 2..=4 | 8..=9), // selected and signed-add alpha operations
+        4 => matches!(value, 2..=11), // selected, multiply, add, subtract, and smooth/signed-add alpha ops
         _ => false,
     };
     if !valid {
@@ -2357,7 +2357,7 @@ mod tests {
             let words = state.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect::<Vec<_>>();
             assert_eq!(words, [0x144, 64, 64, color_op, 2, 1, 2, 2, 1, u32::MAX]);
         }
-        for alpha_op in [8, 9] {
+        for alpha_op in [5, 6, 7, 8, 9, 10, 11] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 4), (16, alpha_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }

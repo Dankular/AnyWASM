@@ -674,8 +674,13 @@ export class GpuExecutor {
       const alphaExpr = alphaOp === 2 ? alphaA
         : alphaOp === 3 ? alphaB
         : alphaOp === 4 ? `(${alphaA} * ${alphaB})`
+        : alphaOp === 5 ? `((${alphaA} * ${alphaB}) * 2.0)`
+        : alphaOp === 6 ? `((${alphaA} * ${alphaB}) * 4.0)`
+        : alphaOp === 7 ? `(${alphaA} + ${alphaB})`
         : alphaOp === 8 ? `(${alphaA} + ${alphaB} - 0.5)`
         : alphaOp === 9 ? `((${alphaA} + ${alphaB} - 0.5) * 2.0)`
+        : alphaOp === 10 ? `(${alphaA} - ${alphaB})`
+        : alphaOp === 11 ? `(${alphaA} + ${alphaB} - (${alphaA} * ${alphaB}))`
         : 'input.color.a';
       const texturedCode = textured ? `${code}
         @group(1) @binding(0) var d3d9Texture: texture_2d<f32>;
