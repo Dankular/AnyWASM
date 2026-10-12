@@ -248,6 +248,7 @@ register-stack subset):
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
       for RGBA8, BGRA8, and RGBA16_FLOAT; and D3D11.1 constant-buffer ranges. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
+      R32_UINT/SINT words,
       R32G32_FLOAT two-channel texels with row pitches, R32G32_UINT/SINT packed channel words,
       RGBA32_FLOAT four-channel rows and RGBA32_UINT/SINT packed channel words with 32-byte rows,
       packed RGBA16_FLOAT and R16_FLOAT values,

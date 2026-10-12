@@ -100,6 +100,10 @@ try {
         assert.equal(backBuffer.error, undefined, `${item.name} back-buffer readback error: ${backBuffer.error}`);
         assert.match(graphics.output, /staging R32_FLOAT readback=0\.25,0\.50,0\.75,1\.00 row_pitch=8/,
           `${item.name} staging R32_FLOAT Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R32_UINT readback=12345678,ffffffff,00000000,80000000 row_pitch=8/,
+          `${item.name} staging R32_UINT Map(READ) output: ${graphics.output}`);
+        assert.match(graphics.output, /staging R32_SINT readback=80000000,ffffffff,00000000,7fffffff row_pitch=8/,
+          `${item.name} staging R32_SINT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging RGBA16_FLOAT readback=3400,3800,3c00,4000 row_pitch=16/,
           `${item.name} staging RGBA16_FLOAT Map(READ) output: ${graphics.output}`);
         assert.match(graphics.output, /staging R32G32_FLOAT readback=0\.125,-0\.250,0\.500,1\.250,-0\.500,2\.000,-1\.000,0\.750 row_pitch=16/,
