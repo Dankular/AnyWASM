@@ -40,6 +40,26 @@ const TEX = {
   94: 'bc6h-rgb-ufloat', 95: 'bc6h-rgb-ufloat', 96: 'bc6h-rgb-float',
   97: 'bc7-rgba-unorm', 98: 'bc7-rgba-unorm', 99: 'bc7-rgba-unorm-srgb',
 };
+// DXGI formats expose the named channels to shaders; channels omitted by the
+// view receive D3D's format defaults when a sampler supplies a border texel.
+const TEX_CHANNELS = {
+  1: 'rgba', 2: 'rgba', 3: 'rgba', 4: 'rgba',
+  9: 'rgba', 10: 'rgba', 11: 'rgba', 12: 'rgba', 13: 'rgba', 14: 'rgba',
+  15: 'rg', 16: 'rg', 17: 'rg', 18: 'rg',
+  19: 'rg', 20: 'rg', 21: 'r', 22: 'g',
+  23: 'rgba', 24: 'rgba', 25: 'rgba', 26: 'rgb',
+  27: 'rgba', 28: 'rgba', 29: 'rgba', 30: 'rgba', 31: 'rgba', 32: 'rgba',
+  33: 'rg', 34: 'rg', 35: 'rg', 36: 'rg', 37: 'rg', 38: 'rg',
+  39: 'r', 40: 'r', 41: 'r', 42: 'r', 43: 'r',
+  44: 'rg', 45: 'r', 46: 'r', 47: 'g',
+  48: 'rg', 49: 'rg', 50: 'rg', 51: 'rg', 52: 'rg',
+  53: 'r', 54: 'r', 55: 'r', 56: 'r', 57: 'r', 58: 'r', 59: 'r',
+  60: 'r', 61: 'r', 62: 'r', 63: 'r', 64: 'r', 65: 'a',
+  70: 'rgba', 71: 'rgba', 72: 'rgba', 73: 'rgba', 74: 'rgba', 75: 'rgba', 76: 'rgba', 77: 'rgba', 78: 'rgba',
+  79: 'r', 80: 'r', 81: 'r', 82: 'rg', 83: 'rg', 84: 'rg',
+  85: 'rgb', 86: 'rgba', 87: 'rgba', 88: 'rgb', 90: 'rgba', 91: 'rgba', 92: 'rgb', 93: 'rgb',
+  94: 'rgb', 95: 'rgb', 96: 'rgb', 97: 'rgba', 98: 'rgba', 99: 'rgba', 115: 'rgba',
+};
 // DXGI packed BGR formats use the first named component in the least-significant bits.
 // RGBA16_FLOAT is the portable rendering/sampling backing; conversion back to the packed DXGI
 // texel happens only at the guest-visible staging boundary.
@@ -255,16 +275,18 @@ function mirrorOnceHelper(dimension) {
 `;
 }
 
-function samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings) {
-  return JSON.stringify([...samplerAddressModes]
+function samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats = new Map()) {
+  const samplers = [...samplerAddressModes]
     .filter(([, modes]) => modes?.some((mode) => mode === 4 || mode === 5))
     .sort(([a], [b]) => a - b)
     .map(([register, modes]) => [register, modes,
       modes.includes(4) ? samplerBorderColors.get(register) || [0, 0, 0, 0] : null,
-      modes.includes(4) ? samplerSettings.get(register) || null : null]));
+      modes.includes(4) ? samplerSettings.get(register) || null : null]);
+  if (!samplers.length) return '[]';
+  return JSON.stringify([samplers, [...textureFormats].sort(([a], [b]) => a - b)]);
 }
 
-function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture) {
+function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat) {
   const kind = textureType.kind;
   const dimension = kind === 'texture_1d' ? 1
     : ['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(kind) ? 2
@@ -283,9 +305,13 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
   const minLod = settings?.lodMinClamp || 0;
   const maxLod = settings?.lodMaxClamp ?? 32;
   const floatLiteral = (value) => Number.isInteger(value) ? `${value}.0` : String(value);
+  const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+  const formattedBorderColor = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
+    ? borderColor[index]
+    : index === 3 ? 1 : 0);
   const borderValue = depthTexture
     ? floatLiteral(borderColor[0])
-    : `vec4<${componentType}>(${borderColor.map((value) => componentType === 'f32' ? floatLiteral(value) : `${componentType}(${floatLiteral(value)})`).join(', ')})`;
+    : `vec4<${componentType}>(${formattedBorderColor.map((value) => componentType === 'f32' ? floatLiteral(value) : `${componentType}(${floatLiteral(value)})`).join(', ')})`;
   const compareOperator = {
     never: null,
     less: '<',
@@ -454,7 +480,7 @@ function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode)
   return { name: `${name}_${mode}`, source };
 }
 
-function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors, samplerSettings) {
+function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats = new Map()) {
   const textureTypes = new Map();
   const texturePattern = /\bvar\s+(\w+)\s*:\s*(texture_(?:1d|2d|2d_array|3d|cube|cube_array|depth_2d|depth_2d_array|depth_cube|depth_cube_array))(?:\s*<([^;]*)>)?\s*;/g;
   for (const match of wgsl.matchAll(texturePattern)) textureTypes.set(match[1], { kind: match[2], component: match[3]?.trim() });
@@ -515,8 +541,10 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
           : mode === 'bias' ? (arrayTexture ? 5 : 4)
             : mode === 'implicit' ? (arrayTexture ? 4 : 3) : 0;
       const borderColor = samplerBorderColors.get(samplerIndex) || [0, 0, 0, 0];
+      const textureRegister = /^t(\d+)_$/.exec(textureName);
+      const textureFormat = textureRegister ? textureFormats.get(Number(textureRegister[1])) : undefined;
       const helper = mode && args.length === expectedArgs
-        ? borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture)
+        ? borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat)
         : null;
       if (helper) {
         borderHelpers.set(helper.name, helper.source);
@@ -1030,9 +1058,9 @@ export class GpuExecutor {
     return { ...shader, ...variant };
   }
 
-  samplerAddressVariant(shader, samplerAddressModes, samplerBorderColors, samplerSettings) {
+  samplerAddressVariant(shader, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats) {
     if (!shader) return shader;
-    const key = samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings);
+    const key = samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats);
     if (key === '[]') return shader;
     let variants = this.samplerAddressVariants.get(shader);
     if (!variants) {
@@ -1044,7 +1072,7 @@ export class GpuExecutor {
 
     const source = shader.wgsl || shader.fixedFunction?.source;
     if (!source) return shader;
-    const transformed = samplerAddressSampleWgsl(source, samplerAddressModes, samplerBorderColors, samplerSettings);
+    const transformed = samplerAddressSampleWgsl(source, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats);
     for (const message of transformed.unsupported) {
       this.log(`sampler addressing unsupported: ${message}`);
     }
@@ -1288,7 +1316,7 @@ export class GpuExecutor {
       else if (v.dim === 5) { d.dimension = '2d-array'; d.baseArrayLayer = v.slice; d.arrayLayerCount = Math.min(v.slices, tex.array - v.slice); }
       else { d.dimension = '2d'; d.baseArrayLayer = 0; d.arrayLayerCount = 1; }
     }
-    v.cache = { view: tex.gpu.createView(d), format, tex, dim: d.dimension };
+    v.cache = { view: tex.gpu.createView(d), format, dxgi: v.format || tex.dxgi, tex, dim: d.dimension };
     return v.cache;
   }
 
@@ -1546,6 +1574,7 @@ export class GpuExecutor {
     const samplerAddressModes = new Map();
     const samplerBorderColors = new Map();
     const samplerSettings = new Map();
+    const textureFormats = new Map();
     for (const [reg, { d, vis }] of groups[2]) {
       const sid = this.st.smp[(vis & GPUShaderStage.VERTEX) ? 0 : 1][reg] || this.st.smp[1][reg] || this.st.smp[0][reg] || 0;
       const s = this.samplers.get(sid);
@@ -1558,9 +1587,14 @@ export class GpuExecutor {
       layoutEntries[2].push({ binding: reg, visibility: vis, sampler: { type: s?.comparison ? 'comparison' : 'filtering' } });
       resolved[2].push({ binding: reg, resource: s ? s.gpu : this.defaultSampler });
     }
-    const samplerAddressKey = samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings);
-    vs = this.samplerAddressVariant(vs, samplerAddressModes, samplerBorderColors, samplerSettings);
-    ps = this.samplerAddressVariant(ps, samplerAddressModes, samplerBorderColors, samplerSettings);
+    for (const [reg, { vis }] of groups[1]) {
+      const vid = this.st.srv[(vis & GPUShaderStage.FRAGMENT) ? 1 : 0][reg] || this.st.srv[1][reg] || this.st.srv[0][reg] || 0;
+      const view = this.getView(vid);
+      if (view?.dim !== 'buffer' && view) textureFormats.set(reg, view.dxgi ?? view.tex?.dxgi);
+    }
+    const samplerAddressKey = samplerAddressVariantKey(samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats);
+    vs = this.samplerAddressVariant(vs, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats);
+    ps = this.samplerAddressVariant(ps, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats);
     for (const [reg, { d, vis }] of groups[1]) {
       const vid = this.st.srv[(vis & GPUShaderStage.FRAGMENT) ? 1 : 0][reg] || this.st.srv[1][reg] || this.st.srv[0][reg] || 0;
       const view = this.getView(vid);

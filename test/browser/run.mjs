@@ -1609,6 +1609,15 @@ try {
         SamplerState borderSampler : register(s0);
         float4 main() : SV_Target { return image.SampleBias(borderSampler, float2(0.9, 0.5), 0.0); }
       `, 'main', 'ps_5_0');
+      const r8BorderPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float4 edge = image.SampleLevel(borderSampler, float2(0.0, 0.5), 0.0);
+          float4 outside = image.SampleLevel(borderSampler, float2(2.0, 0.5), 0.0);
+          return position.x < 32.0 ? edge : outside;
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -1680,7 +1689,28 @@ try {
       let biasOffset = 0; for (const part of stream) { biasCommands.set(part, biasOffset); biasOffset += part.length; }
       gpu.execute(biasCommands);
       const biasPixels = await gpu.readBackbuffer(1);
-      const result = { wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35), mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61), linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+
+      stream.length = 0;
+      command(4, words(21, 1, 1, 1, 1, 61, 8, 0, 1, 0)); // single-channel R8_UNORM texture
+      const r8Upload = new Uint8Array(40);
+      r8Upload.set(words(21, 0, 0, 0, 0, 1, 1, 4, 4));
+      r8Upload[36] = 128;
+      command(5, r8Upload);
+      command(12, words(22, 2, 21, 61, 4, 0, 1, 0, 1));
+      command(8, sampler(21, 4, 0x15, [1, 0.25, 0.5, 0.25])); // linear border with deliberately non-default missing channels
+      shader(12, 1, r8BorderPixel);
+      command(17, words(1, 12)); command(19, words(1, 0, 1, 22)); command(20, words(1, 0, 1, 21));
+      command(29, words(3, 0));
+      const r8Size = stream.reduce((total, part) => total + part.length, 0), r8Commands = new Uint8Array(r8Size);
+      let r8Offset = 0; for (const part of stream) { r8Commands.set(part, r8Offset); r8Offset += part.length; }
+      gpu.execute(r8Commands);
+      const r8Pixels = await gpu.readBackbuffer(1);
+      const result = {
+        wrap: at(pixels, 5), mirror: at(pixels, 15), clamp: at(pixels, 25), mirrorOncePositive: at(pixels, 35),
+        mirrorOnceNegative: at(pixels, 45), borderOut: at(pixels, 53), borderStraddle: at(pixels, 61),
+        linear: at(linearPixels, 32), borderGrad: at(gradientPixels, 32), borderBias: at(biasPixels, 32),
+        r8BorderEdge: at(r8Pixels, 16), r8BorderOutside: at(r8Pixels, 48), draws: gpu.stats.draws, errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -1688,7 +1718,7 @@ try {
     }
   });
   check('D3D11 sampler repeat/mirror/clamp/MIRROR_ONCE/BORDER modes and linear filtering match sampled texels',
-    samplerAddressResult.draws === 4 && samplerAddressResult.errors.length === 0
+    samplerAddressResult.draws === 5 && samplerAddressResult.errors.length === 0
       && near(samplerAddressResult.wrap, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.mirror, [255, 0, 0, 255], 1)
       && near(samplerAddressResult.clamp, [0, 255, 0, 255], 1)
@@ -1698,6 +1728,8 @@ try {
       && near(samplerAddressResult.borderStraddle || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.borderGrad || [], [0, 179, 77, 255], 2)
       && near(samplerAddressResult.borderBias || [], [0, 179, 77, 255], 2)
+      && near(samplerAddressResult.r8BorderEdge || [], [192, 0, 0, 255], 2)
+      && near(samplerAddressResult.r8BorderOutside || [], [255, 0, 0, 255], 1)
       && near(samplerAddressResult.linear, [128, 128, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
