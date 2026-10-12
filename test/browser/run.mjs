@@ -947,9 +947,10 @@ try {
       const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
       await gpu.init();
       const compute = tool.compileHlsl(`
+        StructuredBuffer<uint> inputData : register(t0);
         RWStructuredBuffer<uint> output : register(u0);
         [numthreads(1, 1, 1)]
-        void main(uint3 id : SV_DispatchThreadID) { output[id.x] = 123; }
+        void main(uint3 id : SV_DispatchThreadID) { output[id.x] = inputData[id.x] + 1; }
       `, 'main', 'cs_5_0');
       const stream = [];
       const words = (...values) => {
@@ -967,12 +968,18 @@ try {
         const head = words(id, 2, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
         payload.set(head); payload.set(dxbc, head.length); command(6, payload);
       };
+      const input = Uint32Array.from({ length: 16 }, (_, i) => 100 + i);
       const initial = new Uint32Array(16).fill(0xfeed1234);
-      command(2, words(13, initial.byteLength, 0x80, 0, 0x40, 4)); // structured UAV buffer, 4-byte elements
-      const write = new Uint8Array(12 + initial.byteLength);
-      write.set(words(13, 0, initial.byteLength)); write.set(new Uint8Array(initial.buffer), 12); command(3, write);
+      command(2, words(11, input.byteLength, 0x8, 0, 0x40, 4)); // structured SRV buffer
+      const inputWrite = new Uint8Array(12 + input.byteLength);
+      inputWrite.set(words(11, 0, input.byteLength)); inputWrite.set(new Uint8Array(input.buffer), 12); command(3, inputWrite);
+      command(12, words(12, 2, 11, 0, 1, 1, 3, 0, 0)); // buffer SRV, elements [1, 4)
+      command(2, words(13, initial.byteLength, 0x80, 0, 0x40, 4)); // structured UAV buffer
+      const outputWrite = new Uint8Array(12 + initial.byteLength);
+      outputWrite.set(words(13, 0, initial.byteLength)); outputWrite.set(new Uint8Array(initial.buffer), 12); command(3, outputWrite);
       command(12, words(14, 3, 13, 0, 1, 2, 3, 0, 0)); // buffer UAV, elements [2, 5)
       shader(15, compute);
+      command(19, words(2, 0, 1, 12));
       command(17, words(2, 15));
       command(43, words(0, 1, 14, 0xffffffff));
       command(42, words(3, 1, 1));
@@ -988,16 +995,16 @@ try {
       await readback.mapAsync(GPUMapMode.READ);
       const values = Array.from(new Uint32Array(readback.getMappedRange().slice(0)));
       readback.unmap(); readback.destroy(); gpu.device.destroy();
-      return { values, dispatches: gpu.stats.dispatches, errors: gpu.stats.errors, logs };
+      return { values, expected: [input[1] + 1, input[2] + 1, input[3] + 1], dispatches: gpu.stats.dispatches, errors: gpu.stats.errors, logs };
     } catch (error) {
       return { error: String(error), logs };
     }
   });
-  const sentinelsOutsideStructuredView = structuredBufferUavResult.values?.every((value, i) =>
-    (i < 2 || i >= 5) ? value === 0xfeed1234 : value === 123);
-  check('D3D11 structured-buffer UAV dispatch honors FirstElement and NumElements',
+  const structuredValuesMatchViews = structuredBufferUavResult.values?.every((value, i) =>
+    (i < 2 || i >= 5) ? value === 0xfeed1234 : value === structuredBufferUavResult.expected?.[i - 2]);
+  check('D3D11 structured-buffer SRV/UAV dispatch honors FirstElement and NumElements',
     structuredBufferUavResult.dispatches === 1 && structuredBufferUavResult.errors.length === 0
-      && sentinelsOutsideStructuredView,
+      && structuredValuesMatchViews,
     JSON.stringify(structuredBufferUavResult));
 
   const rawBufferUavResult = await page.evaluate(async () => {
