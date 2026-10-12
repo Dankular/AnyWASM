@@ -47,6 +47,9 @@ pub enum Kind {
     Buffer {
         id: u32,
     },
+    Texture1D {
+        id: u32,
+    },
     Texture2D {
         id: u32,
     },
@@ -144,6 +147,7 @@ impl Kind {
             | Kind::Direct3DVertexBuffer9 { id, .. }
             | Kind::Direct3DIndexBuffer9 { id, .. }
             | Kind::Direct3DTexture9 { id, .. }
+            | Kind::Texture1D { id }
             | Kind::Texture2D { id }
             | Kind::Texture3D { id }
             | Kind::View { id, .. }
@@ -169,6 +173,7 @@ pub struct ResInfo {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
+    pub is_1d: bool,
     pub is_3d: bool,
     pub mips: u32,
     pub array: u32,
@@ -362,6 +367,13 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Adapter => &["IDXGIAdapter", "IDXGIObject"],
         Kind::Output => &["IDXGIOutput", "IDXGIObject"],
         Kind::Buffer { .. } => &["ID3D11Buffer", "ID3D11Resource", "ID3D11DeviceChild"],
+        Kind::Texture1D { .. } => &[
+            "ID3D11Texture1D",
+            "ID3D11Resource",
+            "ID3D11DeviceChild",
+            "IDXGIObject",
+            "IDXGIResource",
+        ],
         Kind::Texture2D { .. } => &[
             "ID3D11Texture2D",
             "ID3D11Resource",

@@ -260,7 +260,9 @@ register-stack subset):
 - [~] **D3D11 verification gaps**: browser pixel/readback checks cover source/destination alpha
       and color, source-alpha-saturate, and blend-constant factors with inverse forms; they also cover
       reverse-subtract, add, subtract, min, and max blend operations;
-      texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; texture and
+      texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; Texture1D
+      and Texture1DArray sampling lower to 2D backing textures, with a 3-mip/2-slice array pixel-tested
+      at layer 0/mip 1 and layer 1/mip 2; texture and
       buffer `CopySubresourceRegion` plus `UpdateSubresource`; DXBC clip/discard; 2D and 3D `GenerateMips`;
       fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
       BORDER verifies configured color for point and linear taps in 2D RGBA8 Sample, SampleLevel,
@@ -291,7 +293,9 @@ register-stack subset):
       `op 6: undefined`). The checked-in Naga frontend is generated JS/WASM; rebuilding a source bridge
       could not fetch Cargo dependencies because crates.io TLS failed. The bundled vkd3d compiler also
       rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad` untestable.
-      Additional sampled dimensions/formats and other anisotropic cases remain open;
+      Texture1DArray `GetDimensions` still fails Naga SPIR-V validation (`Function [0] 'main' is
+      invalid`), matching an equivalent Texture2DArray query. Additional sampled dimensions/formats and
+      other anisotropic cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube-array, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves

@@ -260,6 +260,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
                             && matches!(
                                 o.kind,
                                 Kind::Buffer { .. }
+                                    | Kind::Texture1D { .. }
                                     | Kind::Texture2D { .. }
                                     | Kind::Texture3D { .. }
                             )
@@ -283,6 +284,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             }
             let dimension = match kind {
                 Some(Kind::Buffer { .. }) => 1,
+                Some(Kind::Texture1D { .. }) => 2,
                 Some(Kind::Texture2D { .. }) => 3,
                 Some(Kind::Texture3D { .. }) => 4,
                 _ => 0,
@@ -296,6 +298,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CreateDeferredContext1" => |p| create_deferred_context(p, "ID3D11DeviceContext1"),
         "CreateDeferredContext2" => |p| create_deferred_context(p, "ID3D11DeviceContext2"),
         "CreateDeferredContext3" => |p| create_deferred_context(p, "ID3D11DeviceContext3"),
+        "CreateTexture1D" => create_texture1d,
         "CreateTexture2D" => create_texture2d,
         "CreateTexture3D" | "CreateTexture3D1" => create_texture3d,
         "CreateRenderTargetView" => |p| create_view(p, ViewKind::Rtv),
@@ -984,6 +987,118 @@ fn mip_count_3d(w: u32, h: u32, d: u32) -> u32 {
     32 - w.max(h).max(d).max(1).leading_zeros()
 }
 
+fn create_texture1d(p: &mut Process) -> R {
+    // (this, const D3D11_TEXTURE1D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture1D**)
+    let (desc, init, out) = (p.arg(1), p.arg(2), p.arg(3));
+    if desc == 0 || out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    let (w, mut mips, array, format) = (
+        p.rd32(desc)?,
+        p.rd32(desc + 4)?,
+        p.rd32(desc + 8)?,
+        p.rd32(desc + 12)?,
+    );
+    let (usage, bind, cpu, misc) = (
+        p.rd32(desc + 16)?,
+        p.rd32(desc + 20)?,
+        p.rd32(desc + 24)?,
+        p.rd32(desc + 28)?,
+    );
+    if w == 0 || array == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    if mips == 0 {
+        mips = mip_count(w, 1);
+    }
+    if mips > mip_count(w, 1) {
+        return Ok(E_INVALIDARG);
+    }
+    // The WebGPU 2D backing requires block-aligned height. D3D11 1D compressed textures are
+    // rejected here until their one-row block layout has a verified representation.
+    if format_info(format).1 != 1 {
+        return Ok(E_NOTIMPL);
+    }
+    let keep_shadow = cpu != 0;
+    let size = row_bytes(format, w);
+    let id = new_res(
+        p,
+        ResInfo {
+            width: w,
+            height: 1,
+            is_1d: true,
+            mips,
+            array,
+            format,
+            usage,
+            bind,
+            cpu,
+            misc,
+            size,
+            shadow: if keep_shadow {
+                vec![0u8; size as usize]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_TEXTURE1D,
+        Pk::new()
+            .u32(id)
+            .u32(w)
+            .u32(mips)
+            .u32(array)
+            .u32(format)
+            .u32(bind)
+            .u32(usage)
+            .u32(misc),
+    );
+    if init != 0 {
+        for slice in 0..array {
+            for mip in 0..mips {
+                let sub = slice * mips + mip;
+                let sd = init + 16 * sub as u64;
+                let (data, pitch) = (p.rd64(sd)?, p.rd32(sd + 8)?);
+                if data == 0 {
+                    continue;
+                }
+                let mw = mip_dim(w, mip);
+                let pitch = if pitch == 0 {
+                    row_bytes(format, mw)
+                } else {
+                    pitch
+                };
+                let bytes = p.read_bytes(data, pitch as usize)?;
+                p.extra.gpu.emit(
+                    op::TEXTURE_WRITE,
+                    Pk::new()
+                        .u32(id)
+                        .u32(mip)
+                        .u32(slice)
+                        .u32(0)
+                        .u32(0)
+                        .u32(mw)
+                        .u32(1)
+                        .u32(pitch)
+                        .u32(bytes.len() as u32)
+                        .bytes(&bytes),
+                );
+                if keep_shadow && sub == 0 {
+                    if let Some(r) = p.extra.com.res.get_mut(&id) {
+                        let n = r.shadow.len().min(bytes.len());
+                        r.shadow[..n].copy_from_slice(&bytes[..n]);
+                    }
+                }
+            }
+        }
+    }
+    let o = create(p, "ID3D11Texture1D", Kind::Texture1D { id });
+    p.wr64(out, o)?;
+    Ok(S_OK)
+}
+
 fn create_texture2d(p: &mut Process) -> R {
     // (this, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**)
     let (desc, init, out) = (p.arg(1), p.arg(2), p.arg(3));
@@ -1240,6 +1355,13 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
         1
     } else if info.is_3d {
         8
+    } else if info.is_1d {
+        match (vk, info.array > 1) {
+            (ViewKind::Dsv, false) => 1,
+            (ViewKind::Dsv, true) => 2,
+            (_, false) => 2,
+            (_, true) => 3,
+        }
     } else if vk == ViewKind::Uav && info.array > 1 {
         5
     } else {
@@ -1280,9 +1402,15 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
         dim = p.rd32(desc + 4)?;
         // Union layout starts at +8: the first fields differ per view kind and dimension.
         match (vk, dim) {
-            (ViewKind::Srv, 4) => {
+            (ViewKind::Srv, 2) | (ViewKind::Srv, 4) => {
                 a = p.rd32(desc + 8)?; // MostDetailedMip
                 b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
+            }
+            (ViewKind::Srv, 3) => {
+                a = p.rd32(desc + 8)?; // MostDetailedMip
+                b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
+                c = p.rd32(desc + 16)?; // FirstArraySlice
+                d = p.rd32(desc + 20)?; // ArraySize
             }
             (ViewKind::Srv, 1) => {
                 a = p.rd32(desc + 8)?; // FirstElement
@@ -1303,11 +1431,11 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 a = p.rd32(desc + 8)?; // MostDetailedMip
                 b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
             }
-            (ViewKind::Rtv, 4) | (ViewKind::Dsv, 3) => {
+            (ViewKind::Rtv, 2) | (ViewKind::Rtv, 4) | (ViewKind::Dsv, 1) | (ViewKind::Dsv, 3) => {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
             }
-            (ViewKind::Uav, 4) => {
+            (ViewKind::Uav, 2) | (ViewKind::Uav, 4) => {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
             }
@@ -1317,13 +1445,13 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 c = p.rd32(desc + 16)?; // Flags
                 d = 0;
             }
-            (ViewKind::Rtv, 5) | (ViewKind::Dsv, 4) => {
+            (ViewKind::Rtv, 3) | (ViewKind::Rtv, 5) | (ViewKind::Dsv, 2) | (ViewKind::Dsv, 4) => {
                 a = p.rd32(desc + 8)?;
                 b = 1;
                 c = p.rd32(desc + 12)?;
                 d = p.rd32(desc + 16)?;
             }
-            (ViewKind::Uav, 5) => {
+            (ViewKind::Uav, 3) | (ViewKind::Uav, 5) => {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
                 c = p.rd32(desc + 12)?; // FirstArraySlice
@@ -1649,7 +1777,7 @@ fn update_subresource(p: &mut Process) -> R {
                 Pk::new().u32(id).u32(left).u32(n as u32).bytes(&bytes),
             );
         }
-        Kind::Texture2D { id } => {
+        Kind::Texture1D { id } | Kind::Texture2D { id } => {
             let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
             let (mip, slice) = (sub % info.mips.max(1), sub / info.mips.max(1));
             let (mw, mh) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
@@ -1962,6 +2090,13 @@ fn get_desc(p: &mut Process) -> R {
                 .iter()
                 .enumerate()
             {
+                p.wr32(out + 4 * i as u64, *v)?;
+            }
+        }
+        Kind::Texture1D { id } => {
+            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let vals = [r.width, r.mips, r.array, r.format, r.usage, r.bind, r.cpu, r.misc];
+            for (i, v) in vals.iter().enumerate() {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
         }
@@ -2302,23 +2437,33 @@ mod tests {
         const INIT: u64 = 0x11000;
         const DATA: u64 = 0x12000;
         const OUT: u64 = 0x13000;
+        const VIEW_DESC: u64 = 0x14000;
         let mut p = Process::new(Vfs::new());
-        for addr in [DESC, INIT, DATA, OUT] {
+        for addr in [DESC, INIT, DATA, OUT, VIEW_DESC] {
             assert!(p.mem.map(addr, PAGE_SIZE, PROT_RW));
         }
-        let desc = [4u32, 1, 1, 28, 0, 8, 0, 0]
+        let desc = [4u32, 3, 2, 28, 0, 8, 0, 0]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
         p.write_bytes(DESC, &desc).unwrap();
-        let mut initial = DATA.to_le_bytes().to_vec();
-        initial.extend(16u32.to_le_bytes()); // SysMemPitch
-        initial.extend(16u32.to_le_bytes()); // SysMemSlicePitch
-        p.write_bytes(INIT, &initial).unwrap();
-        let texels = [
-            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-        ];
-        p.write_bytes(DATA, &texels).unwrap();
+        let mut expected_texels = Vec::new();
+        for subresource in 0..6u64 {
+            let mip = (subresource % 3) as u32;
+            let width = mip_dim(4, mip);
+            let data = DATA + subresource * 64;
+            let pitch = width * 4;
+            let address = data.to_le_bytes();
+            let mut initial = address.to_vec();
+            initial.extend(pitch.to_le_bytes()); // SysMemPitch
+            initial.extend(pitch.to_le_bytes()); // SysMemSlicePitch
+            p.write_bytes(INIT + subresource * 16, &initial).unwrap();
+            let texels = (0..width)
+                .flat_map(|_| [subresource as u8 + 1, 32, 64, 255])
+                .collect::<Vec<_>>();
+            p.write_bytes(data, &texels).unwrap();
+            expected_texels.push((mip, (subresource / 3) as u32, width, pitch, texels));
+        }
         p.cpu.gpr[RCX] = 0;
         p.cpu.gpr[RDX] = DESC;
         p.cpu.gpr[R8] = INIT;
@@ -2334,22 +2479,74 @@ mod tests {
             .and_then(|kind| kind.host_id())
             .expect("CreateTexture1D should return a GPU texture resource");
         let commands = gpu::decode(&p.extra.gpu.buf);
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 7);
         assert_eq!(commands[0].0, 53); // CREATE_TEXTURE1D
         let fields = commands[0]
             .1
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
-        assert_eq!(fields, vec![texture_id, 4, 1, 1, 28, 8, 0, 0]);
-        let (opcode, payload) = &commands[1];
-        assert_eq!(*opcode, op::TEXTURE_WRITE);
-        let fields = payload[..36]
+        assert_eq!(fields, vec![texture_id, 4, 3, 2, 28, 8, 0, 0]);
+        for (index, (mip, slice, width, pitch, texels)) in expected_texels.iter().enumerate() {
+            let (opcode, payload) = &commands[index + 1];
+            assert_eq!(*opcode, op::TEXTURE_WRITE);
+            let fields = payload[..36]
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(fields, vec![texture_id, *mip, *slice, 0, 0, *width, 1, *pitch, *pitch]);
+            assert_eq!(&payload[36..], texels);
+        }
+
+        p.cpu.gpr[RCX] = texture;
+        p.cpu.gpr[RDX] = OUT;
+        assert_eq!(method("ID3D11Resource", "GetType").unwrap()(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 2); // D3D11_RESOURCE_DIMENSION_TEXTURE1D
+        p.cpu.gpr[RCX] = texture;
+        p.cpu.gpr[RDX] = DESC;
+        assert_eq!(method("ID3D11Texture1D", "GetDesc").unwrap()(&mut p).unwrap(), S_OK);
+        let actual_desc = (0..8)
+            .map(|index| p.rd32(DESC + index * 4).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual_desc, vec![4, 3, 2, 28, 0, 8, 0, 0]);
+
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0; // default Texture1DArray SRV
+        p.cpu.gpr[R9] = OUT;
+        assert_eq!(method("ID3D11Device", "CreateShaderResourceView").unwrap()(&mut p).unwrap(), S_OK);
+        let srv = p.rd64(OUT).unwrap();
+        let view_id = kind_of(&p, srv).and_then(|kind| kind.host_id()).unwrap();
+        let (opcode, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
+        assert_eq!(opcode, op::CREATE_VIEW);
+        let view_fields = payload
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
-        assert_eq!(fields, vec![texture_id, 0, 0, 0, 0, 4, 1, 16, 16]);
-        assert_eq!(&payload[36..], &texels);
+        assert_eq!(view_fields, vec![view_id, 2, texture_id, 28, 3, 0, 3, 0, 2]);
+
+        let explicit_view = [28u32, 3, 1, 1, 1, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        p.write_bytes(VIEW_DESC, &explicit_view).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = VIEW_DESC;
+        p.cpu.gpr[R9] = OUT;
+        assert_eq!(
+            method("ID3D11Device", "CreateShaderResourceView").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let explicit_view_id = kind_of(&p, p.rd64(OUT).unwrap())
+            .and_then(|kind| kind.host_id())
+            .unwrap();
+        let (_, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
+        let fields = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(fields, vec![explicit_view_id, 2, texture_id, 28, 3, 1, 1, 1, 1]);
     }
 
     #[test]

@@ -56,6 +56,7 @@ pub mod op {
     pub const CLEAR_UAV: u32 = 50; // view, float-values flag, 4 raw value words
     pub const PUSH_STATE: u32 = 51; // save immediate-context pipeline state
     pub const POP_STATE: u32 = 52; // restore the most recently saved pipeline state
+    pub const CREATE_TEXTURE1D: u32 = 53; // id,w,mips,array,format,bind,usage,misc
 }
 
 #[derive(Default)]

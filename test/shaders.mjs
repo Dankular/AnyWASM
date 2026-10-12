@@ -64,6 +64,48 @@ check('D3D UAV u0 translates to group-3 binding 1 while retaining logical regist
   uavCs.descriptors.some((d) => d.type === 1 && d.register === 0)
     && /@group\(3\)\s*@binding\(1\)\s*var\s+\w+\s*:\s*texture_storage_2d/.test(uavCs.wgsl),
   JSON.stringify(uavCs.descriptors) + '\n' + uavCs.wgsl);
+const texture1dPs = t.translate(t.compileHlsl(`
+  Texture1D<float4> image : register(t0);
+  SamplerState smp : register(s0);
+  float4 main(float4 position : SV_Position) : SV_Target {
+    return image.SampleLevel(smp, position.x / 64.0, 1.0);
+  }
+`, 'main', 'ps_5_0'));
+check('Texture1D samples lower to a 2D backing texture with a centered row coordinate',
+  /var\s+t0_:\s*texture_2d<f32>/.test(texture1dPs.wgsl)
+    && /textureSampleLevel\(t0_,\s*s0_,\s*vec2<f32>\(/.test(texture1dPs.wgsl)
+    && !/texture_1d(?:<|_array)/.test(texture1dPs.wgsl),
+  texture1dPs.wgsl);
+const texture1dDimensionsPs = t.translate(t.compileHlsl(`
+  Texture1D<float4> image : register(t0);
+  float4 main() : SV_Target {
+    uint width, levels;
+    image.GetDimensions(0, width, levels);
+    return float4(width, levels, 0.0, 1.0);
+  }
+`, 'main', 'ps_5_0'));
+check('Texture1D GetDimensions reports the backing width and mip count',
+  /var\s+t0_:\s*texture_2d<f32>/.test(texture1dDimensionsPs.wgsl)
+    && /textureDimensions\(t0_,\s*0i\)/.test(texture1dDimensionsPs.wgsl)
+    && /textureNumLevels\(t0_\)/.test(texture1dDimensionsPs.wgsl)
+    && !/texture_1d(?:<|_array)/.test(texture1dDimensionsPs.wgsl),
+  texture1dDimensionsPs.wgsl);
+let texture1dArrayPs, texture1dArrayError = '';
+try {
+  texture1dArrayPs = t.translate(t.compileHlsl(`
+    Texture1DArray<float4> image : register(t0);
+    SamplerState smp : register(s0);
+    float4 main(float4 position : SV_Position) : SV_Target {
+      return image.SampleLevel(smp, float2(position.x / 64.0, 1.0), 1.0);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { texture1dArrayError = String(error); }
+check('Texture1DArray samples lower to a 2D array backing texture with centered row coordinates',
+  /var\s+t0_:\s*texture_2d_array<f32>/.test(texture1dArrayPs?.wgsl || '')
+    && /vec3<f32>\([^,]+,\s*0\.5f?,/.test(texture1dArrayPs?.wgsl || '')
+    && /textureSampleLevel\(t0_,\s*s0_,\s*vec2<f32>\([^)]*\),\s*i32\(/.test(texture1dArrayPs?.wgsl || '')
+    && !/texture_1d(?:<|_array)/.test(texture1dArrayPs?.wgsl || ''),
+  texture1dArrayError || texture1dArrayPs?.wgsl || 'translation returned no WGSL');
 let threw = false; try { t.compileHlsl('float4 x( {', 'x', 'ps_5_0'); } catch (e) { threw = /HLSL/.test(e.message); }
 check('syntax errors reported', threw);
 let sdfWgsl = '', sdfError = '';

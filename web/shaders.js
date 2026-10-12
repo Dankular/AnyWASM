@@ -223,6 +223,220 @@ function lowerArraySampleMaskOutput(spirv) {
   return out;
 }
 
+// WebGPU has 1D WGSL sampled-texture types, but its native 1D texture resource is single-mip and
+// cannot be an array. The GPU executor backs D3D11 1D resources with 2D textures (height 1), so
+// lower SPIR-V 1D image types and coordinates to the matching 2D shape before Naga sees them.
+function lowerOneDimensionalImagesToTwoDimensional(spirv) {
+  const bytes = new Uint8Array(spirv);
+  if (bytes.byteLength < 20 || bytes.byteLength % 4 !== 0) return spirv;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== 0x07230203) return spirv;
+
+  const instructions = [];
+  const imageTypes = new Map(), sampledImageTypes = new Map(), valueTypes = new Map();
+  const scalarTypes = new Map(), vectorTypes = new Map(), constants = new Map();
+  const typeResultOps = new Set([
+    1, 12, 41, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 55, 57, 59, 61,
+    65, 66, 67, 68, 69, 70, 79, 80, 81, 82, 83, 84, 86,
+  ]);
+  let hasOneDimensionalImage = false;
+  for (let at = 20; at < bytes.byteLength;) {
+    const first = view.getUint32(at, true), wordCount = first >>> 16, opcode = first & 0xffff;
+    if (!wordCount || at + wordCount * 4 > bytes.byteLength) return spirv;
+    const inst = Array.from({ length: wordCount }, (_, index) => view.getUint32(at + index * 4, true));
+    instructions.push(inst);
+    if (opcode === 21 && wordCount === 4) scalarTypes.set(inst[1], { kind: 'int', width: inst[2], signed: inst[3] });
+    if (opcode === 22 && wordCount === 3) scalarTypes.set(inst[1], { kind: 'float', width: inst[2] });
+    if (opcode === 23 && wordCount === 4) vectorTypes.set(inst[1], { componentType: inst[2], count: inst[3] });
+    if (opcode === 25 && wordCount >= 9) {
+      imageTypes.set(inst[1], { sampledType: inst[2], dimension: inst[3], arrayed: inst[5] !== 0 });
+      if (inst[3] === 0) { inst[3] = 1; hasOneDimensionalImage = true; }
+    }
+    if (opcode === 27 && wordCount === 3) sampledImageTypes.set(inst[1], inst[2]);
+    if (opcode === 43 && wordCount === 4) constants.set(`${inst[1]}:${inst[3] >>> 0}`, inst[2]);
+    if ((typeResultOps.has(opcode) || opcode >= 109 && opcode <= 200 || opcode === 245) && inst.length >= 3) {
+      valueTypes.set(inst[2], inst[1]);
+    }
+    at += wordCount * 4;
+  }
+  if (!hasOneDimensionalImage) return spirv;
+
+  let nextId = view.getUint32(12, true);
+  const newTypes = [], newConstants = [];
+  const vectorTypeIds = new Map();
+  for (const [typeId, vector] of vectorTypes) vectorTypeIds.set(`${vector.componentType}:${vector.count}`, typeId);
+  const ensureVectorType = (componentType, count) => {
+    const key = `${componentType}:${count}`;
+    let id = vectorTypeIds.get(key);
+    if (!id) {
+      id = nextId++;
+      vectorTypeIds.set(key, id);
+      newTypes.push([(4 << 16) | 23, id, componentType, count]); // OpTypeVector
+    }
+    return id;
+  };
+  const ensureConstant = (typeId, value) => {
+    const key = `${typeId}:${value >>> 0}`;
+    let id = constants.get(key);
+    if (!id) {
+      id = nextId++;
+      constants.set(key, id);
+      newConstants.push([(4 << 16) | 43, typeId, id, value >>> 0]); // OpConstant
+    }
+    return id;
+  };
+
+  let changed = false, unsupported = false;
+  const component = (id, typeId, index, before) => {
+    const actualType = valueTypes.get(id);
+    if (!actualType) return null;
+    const vector = vectorTypes.get(actualType);
+    if (!vector) return actualType === typeId && index === 0 ? id : null;
+    if (vector.count <= index || vector.componentType !== typeId) return null;
+    const result = nextId++;
+    before.push([(5 << 16) | 81, typeId, result, id, index]); // OpCompositeExtract
+    return result;
+  };
+  const construct = (typeId, components, before) => {
+    const resultType = ensureVectorType(typeId, components.length), result = nextId++;
+    before.push([((components.length + 3) << 16) | 80, resultType, result, ...components]); // OpCompositeConstruct
+    valueTypes.set(result, resultType);
+    return result;
+  };
+  const lowerCoordinate = (id, typeId, arrayed, projected, before) => {
+    const x = component(id, typeId, 0, before);
+    if (x === null) return null;
+    const scalar = scalarTypes.get(typeId);
+    const rowCenter = scalar?.kind === 'float' && scalar.width === 32 ? 0x3f000000 : 0;
+    const components = [x, ensureConstant(typeId, rowCenter)];
+    if (arrayed) {
+      const layer = component(id, typeId, 1, before);
+      if (layer === null) return null;
+      components.push(layer);
+    }
+    if (projected) {
+      const q = component(id, typeId, arrayed ? 2 : 1, before);
+      if (q === null) return null;
+      components.push(q);
+    }
+    return construct(typeId, components, before);
+  };
+  const lowerSpatialOperand = (id, typeId, before) => {
+    const x = component(id, typeId, 0, before);
+    if (x === null) return null;
+    return construct(typeId, [x, ensureConstant(typeId, 0)], before);
+  };
+  const imageOperandCounts = new Map([
+    [1, 1], [2, 1], [4, 2], [8, 1], [16, 1], [32, 1], [64, 1], [128, 1],
+    [256, 1], [512, 1], [32768, 1],
+  ]);
+  const lowerImageOperands = (inst, maskIndex, typeId, before) => {
+    if (maskIndex >= inst.length) return;
+    const mask = inst[maskIndex];
+    let operandIndex = maskIndex + 1;
+    const offsetType = [...scalarTypes].find(([, type]) => type.kind === 'int' && type.width === 32 && type.signed === 1)?.[0]
+      || [...scalarTypes].find(([, type]) => type.kind === 'int' && type.width === 32)?.[0];
+    for (const [bit, count] of imageOperandCounts) {
+      if (!(mask & bit)) continue;
+      if (bit === 4) {
+        for (let index = 0; index < count; index++) {
+          const lowered = lowerSpatialOperand(inst[operandIndex + index], typeId, before);
+          if (lowered === null) { unsupported = true; return; }
+          inst[operandIndex + index] = lowered;
+        }
+      } else if (bit === 8 || bit === 16) {
+        const lowered = offsetType === undefined ? null : lowerSpatialOperand(inst[operandIndex], offsetType, before);
+        if (lowered === null) { unsupported = true; return; }
+        inst[operandIndex] = lowered;
+      } else if (bit === 32) {
+        unsupported = true; // ConstOffsets is an array of dimension-specific vectors.
+        return;
+      }
+      operandIndex += count;
+    }
+  };
+
+  const output = [Array.from({ length: 5 }, (_, index) => view.getUint32(index * 4, true))];
+  for (const original of instructions) {
+    const inst = original.slice(), opcode = inst[0] & 0xffff;
+    if (opcode === 103 || opcode === 104) { // OpImageQuerySizeLod / OpImageQuerySize
+      const imageValue = inst[3];
+      const image = imageTypes.get(valueTypes.get(imageValue));
+      if (image?.dimension === 0) {
+        const resultType = inst[1], resultId = inst[2];
+        const resultVector = vectorTypes.get(resultType);
+        const scalarType = resultVector?.componentType || resultType;
+        const targetType = ensureVectorType(scalarType, image.arrayed ? 3 : 2);
+        const targetId = nextId++;
+        inst[1] = targetType;
+        inst[2] = targetId;
+        valueTypes.set(targetId, targetType);
+        const tail = [];
+        const widthId = nextId++;
+        tail.push([(5 << 16) | 81, scalarType, widthId, targetId, 0]); // OpCompositeExtract width
+        if (image.arrayed) {
+          if (!resultVector || resultVector.count !== 2) { unsupported = true; break; }
+          const layerId = nextId++;
+          tail.push([(5 << 16) | 81, scalarType, layerId, targetId, 2]); // OpCompositeExtract array layers
+          tail.push([(5 << 16) | 80, resultType, resultId, widthId, layerId]); // Repack 1DArray as (width, layers).
+        } else {
+          if (resultVector) { unsupported = true; break; }
+          tail.push([(5 << 16) | 81, resultType, resultId, targetId, 0]);
+        }
+        valueTypes.set(resultId, resultType);
+        output.push(inst, ...tail);
+        changed = true;
+        continue;
+      }
+    }
+    let imageValue, coordinateIndex, maskIndex, projected = false;
+    if (opcode >= 87 && opcode <= 98 || opcode === 105) {
+      imageValue = inst[3]; coordinateIndex = 4; maskIndex = 5;
+      projected = opcode >= 91 && opcode <= 94;
+    } else if (opcode === 99) {
+      imageValue = inst[1]; coordinateIndex = 2; maskIndex = 4;
+    } else if (opcode === 143) { // OpImageTexelPointer
+      imageValue = inst[3]; coordinateIndex = 4;
+    }
+    if (coordinateIndex !== undefined) {
+      const valueType = valueTypes.get(imageValue);
+      const imageType = sampledImageTypes.get(valueType) || valueType;
+      const image = imageTypes.get(imageType);
+      if (image?.dimension === 0) {
+        const coordinate = inst[coordinateIndex];
+        const coordinateType = valueTypes.get(coordinate);
+        const coordinateVector = vectorTypes.get(coordinateType);
+        const coordinateScalarType = coordinateVector?.componentType || coordinateType;
+        if (!scalarTypes.has(coordinateScalarType)) { unsupported = true; break; }
+        const before = [];
+        const lowered = lowerCoordinate(coordinate, coordinateScalarType, image.arrayed, projected, before);
+        if (lowered === null) { unsupported = true; break; }
+        inst[coordinateIndex] = lowered;
+        if (maskIndex !== undefined) lowerImageOperands(inst, maskIndex, coordinateScalarType, before);
+        if (unsupported) break;
+        output.push(...before, inst);
+        changed = true;
+        continue;
+      }
+    }
+    output.push(inst);
+  }
+  if (unsupported || !changed) return unsupported ? spirv : bytes;
+
+  let firstConstant = output.findIndex((inst, index) => index > 0 && [41, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52].includes(inst[0] & 0xffff));
+  if (firstConstant < 0) firstConstant = output.findIndex((inst, index) => index > 0 && [54, 59].includes(inst[0] & 0xffff));
+  if (firstConstant < 0) return spirv;
+  output.splice(firstConstant, 0, ...newTypes);
+  let firstGlobal = output.findIndex((inst, index) => index > 0 && [54, 59].includes(inst[0] & 0xffff));
+  if (firstGlobal < 0) firstGlobal = output.length;
+  output.splice(firstGlobal, 0, ...newConstants);
+  output[0][3] = nextId;
+  const result = new Uint8Array(output.reduce((size, inst) => size + inst.length, 0) * 4), resultView = new DataView(result.buffer);
+  let wordIndex = 0;
+  for (const inst of output) for (const word of inst) resultView.setUint32(wordIndex++ * 4, word, true);
+  return result;
+}
+
 // D3D11 typed UAV declarations do not carry their DXGI format in the scanned binding. The
 // supported formats are inferred from the resource return type or supplied by the bound view, then
 // specialized before Naga validates the formatless SPIR-V storage image for WebGPU.
@@ -656,7 +870,8 @@ export class ShaderTool {
       } finally { if (tbl) this.vk._free(tbl); this.vk._wb_clear(); }
     });
     const normalizedSpirv = lowerArraySampleMaskOutput(deferNonFiniteF32StoreConstants(spirv));
-    const bufferImageSpirv = lowerBufferImagesToStorageBuffers(normalizedSpirv);
+    const twoDimensionalSpirv = lowerOneDimensionalImagesToTwoDimensional(normalizedSpirv);
+    const bufferImageSpirv = lowerBufferImagesToStorageBuffers(twoDimensionalSpirv);
     const wgsl = this.naga.spirv_to_wgsl(specializeSingleTypedUavImage(bufferImageSpirv, descriptors, uavFormat));
     return { spirv, wgsl, descriptors };
   }
