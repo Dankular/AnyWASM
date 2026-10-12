@@ -4439,7 +4439,11 @@ try {
       const pixel = tool.compileHlsl(`
         Texture2DArray<float4> source : register(t0);
         SamplerState sourceSampler : register(s0);
-        float4 main() : SV_Target { return source.SampleLevel(sourceSampler, float3(0.5, 0.5, 1.0), 0.0); }
+        float4 main(float4 position : SV_Position) : SV_Target {
+          return position.x < 20.0
+            ? source.SampleLevel(sourceSampler, float3(1.25, 0.5, 1.0), 0.0)
+            : source.SampleLevel(sourceSampler, float3(0.9, 0.5, 1.0), 0.0);
+        }
       `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
@@ -4476,7 +4480,8 @@ try {
       uploadSlice(0, [255, 0, 0, 255]); uploadSlice(1, [0, 255, 0, 255]);
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
-      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setUint32(8, 4, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      [0, 0, 1, 1].forEach((value, index) => samplerView.setFloat32(32 + index * 4, value, true));
       samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 2, true); command(8, sampler);
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
@@ -4484,17 +4489,18 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const i = (32 * pixels.width + 32) * 4;
-      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const result = { outside: at(10), straddle: at(32), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 Texture2DArray SRV samples the selected second layer',
+  check('D3D11 BORDER sampling returns its color for Texture2DArray taps and blends edge footprints',
     textureArrayResult.draws === 1 && textureArrayResult.errors.length === 0
-      && near(textureArrayResult.pixel, [0, 255, 0, 255], 1),
+      && near(textureArrayResult.outside || [], [0, 0, 255, 255], 1)
+      && near(textureArrayResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(textureArrayResult));
 
   const cubeTextureResult = await page.evaluate(async () => {
@@ -4690,7 +4696,11 @@ try {
       const pixel = tool.compileHlsl(`
         Texture3D<float4> volume : register(t0);
         SamplerState volumeSampler : register(s0);
-        float4 main() : SV_Target { return volume.SampleLevel(volumeSampler, float3(0.5, 0.5, 0.99), 0.0); }
+        float4 main(float4 position : SV_Position) : SV_Target {
+          return position.x < 20.0
+            ? volume.SampleLevel(volumeSampler, float3(1.25, 0.5, 0.99), 0.0)
+            : volume.SampleLevel(volumeSampler, float3(0.9, 0.5, 0.99), 0.0);
+        }
       `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
@@ -4729,7 +4739,8 @@ try {
       command(33, words(13, 3)); // CopyResource preserves the volume slices
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
-      samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setUint32(8, 4, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      [0, 0, 1, 1].forEach((value, index) => samplerView.setFloat32(32 + index * 4, value, true));
       samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 2, true); command(8, sampler);
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
@@ -4737,17 +4748,18 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const i = (32 * pixels.width + 32) * 4;
-      const result = { pixel: Array.from(pixels.data.slice(i, i + 4)), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const result = { outside: at(10), straddle: at(32), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
       return { error: error.message };
     }
   });
-  check('D3D11 Texture3D CopyResource preserves slices for SRV sampling',
+  check('D3D11 Texture3D CopyResource and BORDER sampling preserve slices and edge footprints',
     texture3dResult.draws === 1 && texture3dResult.errors.length === 0
-      && near(texture3dResult.pixel, [0, 255, 0, 255], 1),
+      && near(texture3dResult.outside || [], [0, 0, 255, 255], 1)
+      && near(texture3dResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(texture3dResult));
 
   const texture3dMipsResult = await page.evaluate(async () => {
