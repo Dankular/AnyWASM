@@ -2553,7 +2553,47 @@ impl Process {
         } else {
             None
         };
-        let ret = f(self)?;
+        let deferred_context = if group == "com" {
+            name.split_once("::")
+                .filter(|(iface, method)| {
+                    iface.starts_with("ID3D11DeviceContext")
+                        && !method.starts_with("Get")
+                        && !matches!(
+                            *method,
+                            "AddRef"
+                                | "Release"
+                                | "QueryInterface"
+                                | "Begin"
+                                | "End"
+                                | "ExecuteCommandList"
+                                | "FinishCommandList"
+                        )
+                })
+                .map(|_| self.arg(0))
+                .filter(|context| self.extra.com.deferred_contexts.contains_key(context))
+        } else {
+            None
+        };
+        let ret = if let Some(context) = deferred_context {
+            let deferred_commands = self
+                .extra
+                .com
+                .deferred_contexts
+                .get_mut(&context)
+                .map(|state| std::mem::take(&mut state.commands))
+                .unwrap_or_default();
+            let immediate_commands = std::mem::replace(&mut self.extra.gpu.buf, deferred_commands);
+            let initial_len = self.extra.gpu.buf.len();
+            let result = f(self);
+            let recorded_commands = std::mem::replace(&mut self.extra.gpu.buf, immediate_commands);
+            if let Some(state) = self.extra.com.deferred_contexts.get_mut(&context) {
+                retain_deferred_state_commands(state, &recorded_commands[initial_len..]);
+                state.commands = recorded_commands;
+            }
+            result?
+        } else {
+            f(self)?
+        };
         if self.trace_modules_only
             && group == "com"
             && (name.starts_with("IDirect3D9::")
@@ -2711,8 +2751,154 @@ impl Process {
     }
 }
 
+fn retain_deferred_state_commands(state: &mut hle::com::DeferredContextState, commands: &[u8]) {
+    let mut offset = 0usize;
+    while offset + 8 <= commands.len() {
+        let opcode = u32::from_le_bytes(commands[offset..offset + 4].try_into().unwrap());
+        let payload_len =
+            u32::from_le_bytes(commands[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let end = offset.saturating_add(8).saturating_add(payload_len);
+        if end > commands.len() {
+            break;
+        }
+        let retain = matches!(
+            opcode,
+            hle::gpu::op::SET_VERTEX_BUFFERS
+                | hle::gpu::op::SET_INDEX_BUFFER
+                | hle::gpu::op::SET_INPUT_LAYOUT
+                | hle::gpu::op::SET_TOPOLOGY
+                | hle::gpu::op::SET_SHADER
+                | hle::gpu::op::SET_CBUFFERS
+                | hle::gpu::op::SET_SRVS
+                | hle::gpu::op::SET_SAMPLERS
+                | hle::gpu::op::SET_RENDER_TARGETS
+                | hle::gpu::op::SET_VIEWPORTS
+                | hle::gpu::op::SET_SCISSORS
+                | hle::gpu::op::SET_BLEND
+                | hle::gpu::op::SET_RASTER
+                | hle::gpu::op::SET_DEPTH
+                | hle::gpu::op::SET_UAVS
+                | hle::gpu::op::SET_CBUFFERS1
+                | hle::gpu::op::SET_FIXED_FUNCTION
+        );
+        if opcode == hle::gpu::op::CLEAR_STATE {
+            state.state_commands.clear();
+            state
+                .state_commands
+                .extend_from_slice(&commands[offset..end]);
+        } else if retain {
+            state
+                .state_commands
+                .extend_from_slice(&commands[offset..end]);
+        }
+        offset = end;
+    }
+}
+
 pub fn base_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+#[cfg(test)]
+mod deferred_context_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_routes_and_finishes_deferred_context_commands() {
+        let mut process = Process::new(Vfs::new());
+        let deferred =
+            hle::com::create(&mut process, "ID3D11DeviceContext", hle::com::Kind::Context);
+        process
+            .extra
+            .com
+            .deferred_contexts
+            .insert(deferred, hle::com::DeferredContextState::default());
+        let immediate =
+            hle::com::create(&mut process, "ID3D11DeviceContext", hle::com::Kind::Context);
+        let topology_thunk = process
+            .thunk_for("com", "ID3D11DeviceContext::IASetPrimitiveTopology", true)
+            .unwrap();
+        let finish_thunk = process
+            .thunk_for("com", "ID3D11DeviceContext::FinishCommandList", true)
+            .unwrap();
+        let draw_thunk = process
+            .thunk_for("com", "ID3D11DeviceContext::Draw", true)
+            .unwrap();
+        let stack = 0x10_000;
+        let first_list_out = stack + 0x40;
+        let second_list_out = stack + 0x48;
+        assert!(process.mem.map(stack, 0x1000, PROT_RW));
+
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.wr64(stack + 0x800, 0x1234).unwrap();
+        process.cpu.gpr[RCX] = deferred;
+        process.cpu.gpr[RDX] = 4;
+        process.dispatch_thunk(topology_thunk).unwrap();
+        assert!(process.extra.gpu.buf.is_empty());
+
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.wr64(stack + 0x800, 0x1234).unwrap();
+        process.cpu.gpr[RCX] = deferred;
+        process.cpu.gpr[RDX] = 1; // Preserve deferred state.
+        process.cpu.gpr[R8] = first_list_out;
+        process.dispatch_thunk(finish_thunk).unwrap();
+        let first_list = process.rd64(first_list_out).unwrap();
+        assert!(matches!(
+            hle::com::kind_of(&process, first_list),
+            Some(hle::com::Kind::CommandList { .. })
+        ));
+        assert_eq!(
+            hle::gpu::decode(&process.extra.com.deferred_contexts[&deferred].commands)
+                .into_iter()
+                .map(|(opcode, _)| opcode)
+                .collect::<Vec<_>>(),
+            vec![hle::gpu::op::SET_TOPOLOGY]
+        );
+
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.wr64(stack + 0x800, 0x1234).unwrap();
+        process.cpu.gpr[RCX] = deferred;
+        process.cpu.gpr[RDX] = 3;
+        process.cpu.gpr[R8] = 0;
+        process.dispatch_thunk(draw_thunk).unwrap();
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.wr64(stack + 0x800, 0x1234).unwrap();
+        process.cpu.gpr[RCX] = deferred;
+        process.cpu.gpr[RDX] = 0; // Reset deferred state.
+        process.cpu.gpr[R8] = second_list_out;
+        process.dispatch_thunk(finish_thunk).unwrap();
+        let second_list = process.rd64(second_list_out).unwrap();
+        let second_commands = match hle::com::kind_of(&process, second_list).unwrap() {
+            hle::com::Kind::CommandList { commands, .. } => hle::gpu::decode(&commands),
+            _ => panic!("FinishCommandList must return a command list"),
+        };
+        assert_eq!(
+            second_commands
+                .into_iter()
+                .map(|(opcode, _)| opcode)
+                .collect::<Vec<_>>(),
+            vec![hle::gpu::op::SET_TOPOLOGY, hle::gpu::op::DRAW]
+        );
+        assert!(process.extra.com.deferred_contexts[&deferred]
+            .state_commands
+            .is_empty());
+
+        process.cpu.gpr[RSP] = stack + 0x800;
+        process.wr64(stack + 0x800, 0x1234).unwrap();
+        process.cpu.gpr[RCX] = immediate;
+        process.cpu.gpr[RDX] = 5;
+        process.dispatch_thunk(topology_thunk).unwrap();
+        assert_eq!(
+            hle::gpu::decode(&process.extra.gpu.buf)
+                .into_iter()
+                .map(|(opcode, _)| opcode)
+                .collect::<Vec<_>>(),
+            vec![hle::gpu::op::SET_TOPOLOGY]
+        );
+        assert!(process.extra.com.deferred_contexts[&deferred]
+            .commands
+            .is_empty());
+    }
 }
 
 #[cfg(test)]

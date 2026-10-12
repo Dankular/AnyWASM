@@ -36,6 +36,10 @@ pub enum Kind {
     Output,
     Device,
     Context,
+    CommandList {
+        commands: Vec<u8>,
+        flags: u32,
+    },
     SwapChain {
         id: u32,
         backbuffer: u64,
@@ -189,6 +193,8 @@ pub struct ComState {
     pub device: u64,
     pub dxgi_device: u64,
     pub context: u64,
+    /// Recorded state and commands owned by each deferred D3D11 context.
+    pub deferred_contexts: HashMap<u64, DeferredContextState>,
     pub factory: u64,
     pub adapter: u64,
     pub output: u64,
@@ -220,6 +226,16 @@ pub struct ComState {
     pub d3d9_texture_stage_states: HashMap<(u64, u32, u32), u32>,
     /// Direct3D 9 render-state values set by the guest, keyed by `(device, state)`.
     pub d3d9_render_states: HashMap<(u64, u32), u32>,
+}
+
+#[derive(Default)]
+pub struct DeferredContextState {
+    pub flags: u32,
+    pub commands: Vec<u8>,
+    /// State-setting commands retained across FinishCommandList(TRUE).
+    pub state_commands: Vec<u8>,
+    pub bound_rtv: Vec<u64>,
+    pub bound_dsv: u64,
 }
 
 /// Canonical interface family used to share method implementations across versions
@@ -339,6 +355,7 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Direct3DShader9 { vertex: false, .. } => &["IDirect3DPixelShader9"],
         Kind::Device => &["ID3D11Device", "IDXGIDevice", "IDXGIObject"],
         Kind::Context => &["ID3D11DeviceContext", "ID3D11DeviceChild"],
+        Kind::CommandList { .. } => &["ID3D11CommandList", "ID3D11DeviceChild"],
         Kind::SwapChain { .. } => &["IDXGISwapChain", "IDXGIObject", "IDXGIDeviceSubObject"],
         Kind::Factory => &["IDXGIFactory", "IDXGIObject"],
         Kind::Adapter => &["IDXGIAdapter", "IDXGIObject"],
@@ -442,6 +459,7 @@ const ALL_NAMES: &[&str] = &[
     "ID3D11DeviceContext1",
     "ID3D11DeviceContext2",
     "ID3D11DeviceContext3",
+    "ID3D11CommandList",
     "IDirectInput8A",
     "IDirectInput8W",
     "IDirectInputDevice8A",
@@ -604,6 +622,7 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
     let refs = o.refs;
     if refs == 0 {
         let o = p.extra.com.objs.remove(&this).unwrap();
+        p.extra.com.deferred_contexts.remove(&this);
         if matches!(&o.kind, Kind::Direct3DDevice9 { .. }) {
             let bound = p.extra.com.d3d9_bound_textures
                 .iter()

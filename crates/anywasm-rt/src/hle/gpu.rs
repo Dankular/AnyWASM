@@ -54,6 +54,8 @@ pub mod op {
     pub const D3D9_RENDER_STATE: u32 = 48; // D3DRS state,value
     pub const CLEAR_STATE: u32 = 49; // reset D3D11 immediate-context pipeline bindings
     pub const CLEAR_UAV: u32 = 50; // view, float-values flag, 4 raw value words
+    pub const PUSH_STATE: u32 = 51; // save immediate-context pipeline state
+    pub const POP_STATE: u32 = 52; // restore the most recently saved pipeline state
 }
 
 #[derive(Default)]

@@ -75,7 +75,7 @@
 - [x] Verify event-query `End`/`GetData` ordering and explicit rejection of unsupported valid query types; invalid query types return `E_INVALIDARG`.
 - [x] Verify `SV_DispatchThreadID`, group system values, dispatch-to-draw/readback visibility, and buffer copies feeding later dispatches.
 - [x] Report the unsupported D3D11.2 `OPTIONS1` capabilities, including tiled-resource tier 0, with a 16-byte HLE regression.
-- [ ] Implement deferred contexts and command lists; the current immediate-context path is not a substitute.
+- [x] Implement deferred contexts and command lists; Rust tests verify deferred-context creation/type/flags, command recording, finish/reset behavior, and execute ordering/state restoration. The browser suite separately verifies that saved WebGPU pipeline state, including nested arrays and maps, restores after clear.
 
 **Gate:** Each supported query/UAV/staging feature has typed value assertions and command-order checks; unsupported feature reporting matches implemented behavior.
 

@@ -14,7 +14,7 @@ const OP = {
   SET_BLEND: 24, SET_RASTER: 25, SET_DEPTH: 26, CLEAR_RTV: 27, CLEAR_DSV: 28, DRAW: 29, DRAW_INDEXED: 30,
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
-  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49, CLEAR_UAV: 50,
+  SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49, CLEAR_UAV: 50, PUSH_STATE: 51, POP_STATE: 52,
 };
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
@@ -239,6 +239,7 @@ export class GpuExecutor {
     this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, lastComputeUavs: [], errors: [] };
     this.lastPresentSyncInterval = 1;
     this.st = defaultPipelineState();
+    this.stateStack = [];
   }
 
   clearState() {
@@ -403,6 +404,8 @@ export class GpuExecutor {
       case OP.SET_TOPOLOGY: st.topology = u(0); break;
       case OP.D3D9_RENDER_STATE: st.d3d9RenderStates.set(u(0), u(1)); break;
       case OP.CLEAR_STATE: this.clearState(); break;
+      case OP.PUSH_STATE: this.endPass(); this.stateStack.push(structuredClone(this.st)); break;
+      case OP.POP_STATE: this.endPass(); this.st = this.stateStack.pop() || defaultPipelineState(); break;
       case OP.SET_FIXED_FUNCTION:
         this.setFixedFunction(
           u(0), u(1), u(2),

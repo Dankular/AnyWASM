@@ -228,7 +228,12 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         "GetType" => |p| {
             let o = p.arg(1);
-            let dimension = match kind_of(p, p.arg(0)) {
+            let this = p.arg(0);
+            let kind = kind_of(p, this);
+            if matches!(kind, Some(Kind::Context)) {
+                return Ok(u64::from(p.extra.com.deferred_contexts.contains_key(&this)));
+            }
+            let dimension = match kind {
                 Some(Kind::Buffer { .. }) => 1,
                 Some(Kind::Texture2D { .. }) => 3,
                 Some(Kind::Texture3D { .. }) => 4,
@@ -239,6 +244,10 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         // ── ID3D11Device ──
         "CreateBuffer" => create_buffer,
+        "CreateDeferredContext" => |p| create_deferred_context(p, "ID3D11DeviceContext"),
+        "CreateDeferredContext1" => |p| create_deferred_context(p, "ID3D11DeviceContext1"),
+        "CreateDeferredContext2" => |p| create_deferred_context(p, "ID3D11DeviceContext2"),
+        "CreateDeferredContext3" => |p| create_deferred_context(p, "ID3D11DeviceContext3"),
         "CreateTexture2D" => create_texture2d,
         "CreateTexture3D" | "CreateTexture3D1" => create_texture3d,
         "CreateRenderTargetView" => |p| create_view(p, ViewKind::Rtv),
@@ -275,12 +284,27 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CheckFeatureSupport" => check_feature_support,
         "GetFeatureLevel" => |_| Ok(D3D_FEATURE_LEVEL_11_0 as u64),
         "GetCreationFlags" => |_| Ok(0),
+        "GetContextFlags" => |p| match kind_of(p, p.arg(0)) {
+            Some(Kind::CommandList { flags, .. }) => Ok(flags as u64),
+            Some(Kind::Context) => Ok(p
+                .extra
+                .com
+                .deferred_contexts
+                .get(&p.arg(0))
+                .map_or(0, |context| context.flags) as u64),
+            _ => Ok(0),
+        },
         "GetDeviceRemovedReason" => |_| Ok(S_OK),
         "SetExceptionMode" => |_| Ok(S_OK),
         "GetExceptionMode" => |_| Ok(0),
         "ClearState" => |p| {
-            p.extra.com.bound_rtv.clear();
-            p.extra.com.bound_dsv = 0;
+            if let Some(state) = p.extra.com.deferred_contexts.get_mut(&p.arg(0)) {
+                state.bound_rtv.clear();
+                state.bound_dsv = 0;
+            } else {
+                p.extra.com.bound_rtv.clear();
+                p.extra.com.bound_dsv = 0;
+            }
             p.extra.gpu.emit(op::CLEAR_STATE, Pk::new());
             Ok(0)
         },
@@ -427,22 +451,96 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "End" => set_query_complete,
         "GetData" => get_query_data,
         "ResolveSubresource" => resolve_subresource,
-        "Flush" | "SetPredication" | "FinishCommandList" | "ExecuteCommandList" | "DiscardResource" | "DiscardView" => |_| Ok(0),
+        "FinishCommandList" => finish_command_list,
+        "ExecuteCommandList" => execute_command_list,
+        "Flush" | "SetPredication" | "DiscardResource" | "DiscardView" => |_| Ok(0),
         "OMGetRenderTargets" => |p| {
             let (n, rtvs, dsv) = (p.arg(1) as usize, p.arg(2), p.arg(3));
-            let bound = p.extra.com.bound_rtv.clone();
+            let (bound, bound_dsv) = p
+                .extra
+                .com
+                .deferred_contexts
+                .get(&p.arg(0))
+                .map(|state| (state.bound_rtv.clone(), state.bound_dsv))
+                .unwrap_or_else(|| {
+                    (p.extra.com.bound_rtv.clone(), p.extra.com.bound_dsv)
+                });
             for i in 0..n {
                 if rtvs != 0 {
                     p.wr64(rtvs + 8 * i as u64, bound.get(i).copied().unwrap_or(0))?;
                 }
             }
             if dsv != 0 {
-                p.wr64(dsv, p.extra.com.bound_dsv)?;
+                p.wr64(dsv, bound_dsv)?;
             }
             Ok(0)
         },
         _ => return None,
     })
+}
+
+fn create_deferred_context(p: &mut Process, iface: &'static str) -> R {
+    let (flags, out) = (p.arg(1) as u32, p.arg(2));
+    if flags != 0 {
+        out_ptr(p, out, 0)?;
+        return Ok(E_INVALIDARG);
+    }
+    if out != 0 {
+        let context = create(p, iface, Kind::Context);
+        p.extra.com.deferred_contexts.insert(
+            context,
+            DeferredContextState {
+                flags,
+                ..DeferredContextState::default()
+            },
+        );
+        out_ptr(p, out, context)?;
+    }
+    Ok(S_OK)
+}
+
+fn finish_command_list(p: &mut Process) -> R {
+    let (context, restore, out) = (p.arg(0), p.arg(1) != 0, p.arg(2));
+    out_ptr(p, out, 0)?;
+    let Some(state) = p.extra.com.deferred_contexts.get_mut(&context) else {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    };
+    let commands = std::mem::take(&mut state.commands);
+    let flags = state.flags;
+    state.commands = if restore {
+        state.state_commands.clone()
+    } else {
+        state.state_commands.clear();
+        state.bound_rtv.clear();
+        state.bound_dsv = 0;
+        Vec::new()
+    };
+    if out != 0 {
+        let command_list = create(p, "ID3D11CommandList", Kind::CommandList { commands, flags });
+        out_ptr(p, out, command_list)?;
+    }
+    Ok(S_OK)
+}
+
+fn execute_command_list(p: &mut Process) -> R {
+    let (context, list, restore) = (p.arg(0), p.arg(1), p.arg(2) != 0);
+    if p.extra.com.deferred_contexts.contains_key(&context) {
+        return Ok(0);
+    }
+    let Some(Kind::CommandList { commands, .. }) = kind_of(p, list) else {
+        return Ok(0);
+    };
+    if restore {
+        p.extra.gpu.emit(op::PUSH_STATE, Pk::new());
+    }
+    p.extra.gpu.emit(op::CLEAR_STATE, Pk::new());
+    p.extra.gpu.buf.extend(commands);
+    if restore {
+        p.extra.gpu.emit(op::POP_STATE, Pk::new());
+    } else {
+        p.extra.gpu.emit(op::CLEAR_STATE, Pk::new());
+    }
+    Ok(0)
 }
 
 fn create_query(p: &mut Process, predicate: bool) -> R {
@@ -685,8 +783,13 @@ fn om_set_render_targets(p: &mut Process) -> R {
         bound.push(ptr);
         pk = pk.u32(obj_id(p, ptr));
     }
-    p.extra.com.bound_rtv = bound;
-    p.extra.com.bound_dsv = dsv;
+    if let Some(state) = p.extra.com.deferred_contexts.get_mut(&p.arg(0)) {
+        state.bound_rtv = bound;
+        state.bound_dsv = dsv;
+    } else {
+        p.extra.com.bound_rtv = bound;
+        p.extra.com.bound_dsv = dsv;
+    }
     p.extra.gpu.emit(op::SET_RENDER_TARGETS, pk.u32(obj_id(p, dsv)));
     Ok(0)
 }
@@ -1852,6 +1955,135 @@ mod tests {
 
         p.cpu.gpr[R9] = 12;
         assert_eq!(check(&mut p).unwrap(), E_INVALIDARG);
+    }
+
+    #[test]
+    fn create_deferred_context_returns_a_deferred_context_with_its_flags() {
+        use anywasm_cpu::cpu::{RCX, RDX, R8};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0; // ContextFlags is reserved and must be zero.
+        p.cpu.gpr[R8] = OUT;
+
+        let create_context = method("ID3D11Device", "CreateDeferredContext")
+            .expect("CreateDeferredContext should be implemented");
+        assert_eq!(create_context(&mut p).unwrap(), S_OK);
+        let context = p.rd64(OUT).unwrap();
+        assert_ne!(context, 0);
+
+        p.cpu.gpr[RCX] = context;
+        let get_type = method("ID3D11DeviceContext", "GetType").unwrap();
+        assert_eq!(get_type(&mut p).unwrap(), 1); // D3D11_DEVICE_CONTEXT_DEFERRED
+
+        let get_flags = method("ID3D11DeviceContext", "GetContextFlags").unwrap();
+        assert_eq!(get_flags(&mut p).unwrap(), 0);
+    }
+
+    #[test]
+    fn create_deferred_context_rejects_nonzero_reserved_flags() {
+        use anywasm_cpu::cpu::{RCX, RDX, R8};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        p.wr64(OUT, 0xfeed).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 1;
+        p.cpu.gpr[R8] = OUT;
+
+        let create_context = method("ID3D11Device", "CreateDeferredContext").unwrap();
+        assert_eq!(create_context(&mut p).unwrap(), E_INVALIDARG);
+        assert_eq!(p.rd64(OUT).unwrap(), 0);
+        assert!(p.extra.com.deferred_contexts.is_empty());
+    }
+
+    #[test]
+    fn command_list_execution_brackets_recorded_commands_and_restores_state() {
+        use anywasm_cpu::cpu::{RCX, RDX, R8};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+        use crate::vfs::Vfs;
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let immediate = create(&mut p, "ID3D11DeviceContext", Kind::Context);
+        p.wr64(OUT, 0xfeed).unwrap();
+        p.cpu.gpr[RCX] = immediate;
+        p.cpu.gpr[RDX] = 0;
+        p.cpu.gpr[R8] = OUT;
+        assert_eq!(
+            method("ID3D11DeviceContext", "FinishCommandList").unwrap()(&mut p).unwrap(),
+            DXGI_ERROR_INVALID_CALL
+        );
+        assert_eq!(p.rd64(OUT).unwrap(), 0);
+
+        let deferred = create(&mut p, "ID3D11DeviceContext", Kind::Context);
+        p.extra
+            .com
+            .deferred_contexts
+            .insert(deferred, DeferredContextState::default());
+        let mut recorded = gpu::GpuStream::default();
+        recorded.emit(op::SET_TOPOLOGY, Pk::new().u32(4));
+        p.extra.com.deferred_contexts.get_mut(&deferred).unwrap().commands = recorded.buf;
+
+        p.cpu.gpr[RCX] = deferred;
+        p.cpu.gpr[RDX] = 1; // RestoreDeferredContextState
+        p.cpu.gpr[R8] = OUT;
+        assert_eq!(
+            method("ID3D11DeviceContext", "FinishCommandList").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let command_list = p.rd64(OUT).unwrap();
+        assert!(matches!(
+            kind_of(&p, command_list),
+            Some(Kind::CommandList { .. })
+        ));
+        p.cpu.gpr[RCX] = command_list;
+        assert_eq!(
+            method("ID3D11CommandList", "GetContextFlags").unwrap()(&mut p).unwrap(),
+            0
+        );
+
+        p.extra.gpu.buf.clear();
+        p.cpu.gpr[RCX] = immediate;
+        p.cpu.gpr[RDX] = command_list;
+        p.cpu.gpr[R8] = 1; // Restore immediate-context state.
+        assert_eq!(
+            method("ID3D11DeviceContext", "ExecuteCommandList").unwrap()(&mut p).unwrap(),
+            0
+        );
+        let opcodes = gpu::decode(&p.extra.gpu.buf)
+            .into_iter()
+            .map(|(opcode, _)| opcode)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            opcodes,
+            vec![op::PUSH_STATE, op::CLEAR_STATE, op::SET_TOPOLOGY, op::POP_STATE]
+        );
+
+        p.extra.gpu.buf.clear();
+        p.cpu.gpr[RCX] = immediate;
+        p.cpu.gpr[RDX] = command_list;
+        p.cpu.gpr[R8] = 0; // Leave the immediate context cleared.
+        assert_eq!(
+            method("ID3D11DeviceContext", "ExecuteCommandList").unwrap()(&mut p).unwrap(),
+            0
+        );
+        let opcodes = gpu::decode(&p.extra.gpu.buf)
+            .into_iter()
+            .map(|(opcode, _)| opcode)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            opcodes,
+            vec![op::CLEAR_STATE, op::SET_TOPOLOGY, op::CLEAR_STATE]
+        );
     }
 
     #[test]

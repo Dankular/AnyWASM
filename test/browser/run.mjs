@@ -2,6 +2,7 @@
 import { chromium } from 'playwright-core';
 import { decodePng } from './png.mjs';
 import { waitForPresentInterval } from '../../web/frame-pacing.js';
+import { GpuExecutor } from '../../web/gpu.js';
 
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -34,6 +35,19 @@ check('DXGI present interval zero yields without waiting for vblank', intervalZe
 const intervalThreeWaited = await waitForPresentInterval(3, async () => pacedFrames.push('frame'), async () => { unsynchronizedYields++; });
 check('DXGI present interval three waits for three vblanks', intervalThreeWaited === 3 && pacedFrames.length === 3 && unsynchronizedYields === 1,
   JSON.stringify({ intervalThreeWaited, unsynchronizedYields, pacedFrames }));
+
+const stateProbe = new GpuExecutor({}, null);
+const emptyPayload = new DataView(new ArrayBuffer(0));
+const emptyBytes = new Uint8Array(0);
+stateProbe.st.layout = 17;
+stateProbe.st.cb[0][2] = 31;
+stateProbe.st.d3d9RenderStates.set(4, 9);
+stateProbe.dispatch(51, emptyPayload, emptyBytes); // PUSH_STATE
+stateProbe.dispatch(49, emptyPayload, emptyBytes); // CLEAR_STATE
+stateProbe.dispatch(52, emptyPayload, emptyBytes); // POP_STATE
+check('GPU command-list state restore preserves nested pipeline bindings',
+  stateProbe.st.layout === 17 && stateProbe.st.cb[0][2] === 31 && stateProbe.st.d3d9RenderStates.get(4) === 9,
+  JSON.stringify({ layout: stateProbe.st.layout, constantBuffer: stateProbe.st.cb[0][2], renderState: stateProbe.st.d3d9RenderStates.get(4) }));
 
 const dir = '/opt/pw-browsers';
 const versioned = process.env.CHROMIUM ? undefined : readdirSync(dir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
@@ -276,6 +290,7 @@ try {
       canvas.style.width = '258px';
       canvas.style.height = '194px';
     });
+    await page.locator('#screen').scrollIntoViewIfNeeded();
     await page.locator('#screen').focus();
     await page.keyboard.press('a');
     const inputCenter = await page.locator('#screen').evaluate((canvas) => {
