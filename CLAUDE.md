@@ -255,8 +255,9 @@ register-stack subset):
       defaults are also pixel-checked. An 8x anisotropic Texture2D SampleLevel outside sample and an
       in-range SampleGrad footprint crossing the right edge are pixel-checked.
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
-      edge-crossing BORDER pixels. Texture2DArray SampleGrad also returns `[0, 151, 104, 255]` for an
-      explicit 8x footprint crossing the right edge on layer 1. A TextureCube SRV selects the expected
+      edge-crossing BORDER pixels. Texture2DArray SampleGrad and zero-bias SampleBias each return
+      `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. A
+      TextureCube SRV selects the expected
       color for all six
       signed-axis directions and linearly blends taps across +X/+Y, +X/+Z, and +X/-Y boundaries to
       `[127, 0, 127, 255]`, `[255, 0, 127, 255]`, and `[255, 127, 0, 255]` respectively. vkd3d

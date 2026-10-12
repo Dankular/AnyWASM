@@ -5137,6 +5137,14 @@ try {
           return source.SampleGrad(anisotropicSampler, float3(coordinate, 1.0), float3(0.2, 0.0, 0.0), float3(0.0, 0.0, 0.0));
         }
       `, 'main', 'ps_5_0');
+      const anisotropicBiasPixel = tool.compileHlsl(`
+        Texture2DArray<float4> source : register(t0);
+        SamplerState anisotropicSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = float2(0.95 + (position.x - 32.5) * 0.2, 0.5);
+          return source.SampleBias(anisotropicSampler, float3(coordinate, 1.0), 0.0);
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -5199,10 +5207,16 @@ try {
       command(17, words(1, 11)); command(20, words(1, 0, 1, 10)); command(29, words(3, 0));
       gpu.execute(append());
       const anisotropicGradPixels = await gpu.readBackbuffer(1);
+      stream.length = 0;
+      shader(12, 1, anisotropicBiasPixel);
+      command(17, words(1, 12)); command(29, words(3, 0));
+      gpu.execute(append());
+      const anisotropicBiasPixels = await gpu.readBackbuffer(1);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
       const result = {
         outside: at(pixels, 10), straddle: at(pixels, 32), anisotropicLayerEdge: at(anisotropicPixels, 32),
         anisotropicLayerGradEdge: at(anisotropicGradPixels, 32),
+        anisotropicLayerBiasEdge: at(anisotropicBiasPixels, 32),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -5212,7 +5226,7 @@ try {
     }
   });
   check('D3D11 BORDER sampling returns its color for Texture2DArray taps and blends edge footprints',
-    textureArrayResult.draws === 3 && textureArrayResult.errors.length === 0
+    textureArrayResult.draws === 4 && textureArrayResult.errors.length === 0
       && near(textureArrayResult.outside || [], [0, 0, 255, 255], 1)
       && near(textureArrayResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(textureArrayResult));
@@ -5222,6 +5236,9 @@ try {
   check('D3D11 anisotropic BORDER SampleGrad filters the selected Texture2DArray layer across the edge',
     near(textureArrayResult.anisotropicLayerGradEdge || [], [0, 151, 104, 255], 3),
     JSON.stringify(textureArrayResult.anisotropicLayerGradEdge));
+  check('D3D11 anisotropic BORDER SampleBias filters the selected Texture2DArray layer across the edge',
+    near(textureArrayResult.anisotropicLayerBiasEdge || [], [0, 151, 104, 255], 3),
+    JSON.stringify(textureArrayResult.anisotropicLayerBiasEdge));
 
   const cubeTextureResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
