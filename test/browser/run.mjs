@@ -895,6 +895,24 @@ try {
         const center = (20 * comparisonPixels.width + 45) * 4;
         alphaFunctionPixels[alphaFunc] = Array.from(comparisonPixels.data.slice(center, center + 4));
       }
+      stream.length = 0;
+      const translucentVertices = vertexData.slice();
+      const translucentView = new DataView(translucentVertices.buffer);
+      for (let i = 0; i < 4; i++) translucentView.setUint32(i * 20 + 16, 0x80ff0000, true);
+      const translucentWrite = new Uint8Array(12 + translucentVertices.length);
+      translucentWrite.set(words(11, 0, translucentVertices.length));
+      translucentWrite.set(translucentVertices, 12); command(3, translucentWrite);
+      const blueClear = new Uint8Array(20), blueClearView = new DataView(blueClear.buffer);
+      blueClearView.setUint32(0, 2, true);
+      blueClearView.setFloat32(12, 1, true); blueClearView.setFloat32(16, 1, true);
+      command(27, blueClear);
+      command(48, words(15, 0)); // disable alpha test for blending
+      command(48, words(27, 1)); // D3DRS_ALPHABLENDENABLE
+      command(48, words(19, 5)); // D3DBLEND_SRCALPHA
+      command(48, words(20, 6)); // D3DBLEND_INVSRCALPHA
+      command(29, words(4, 0));
+      gpu.execute(append());
+      const blendedPixels = await gpu.readBackbuffer(1);
       const at = (x, y) => {
         const i = (y * pixels.width + x) * 4;
         return Array.from(pixels.data.slice(i, i + 4));
@@ -907,6 +925,7 @@ try {
         rejected: [rejectedAt(45, 20), rejectedAt(20, 45)],
         upperRight: at(45, 20), lowerLeft: at(20, 45), background: at(1, 1), stats: gpu.stats,
         alphaFunctionPixels,
+        blendedPixel: Array.from(blendedPixels.data.slice((20 * blendedPixels.width + 45) * 4, (20 * blendedPixels.width + 45) * 4 + 4)),
       };
       gpu.device.destroy();
       return result;
@@ -915,7 +934,7 @@ try {
     }
   });
   check('D3D9 FVF fixed-function triangle fan draws with no WebGPU validation errors',
-    d3d9FixedResult.stats?.draws === 9 && d3d9FixedResult.stats.errors.length === 0,
+    d3d9FixedResult.stats?.draws === 10 && d3d9FixedResult.stats.errors.length === 0,
     JSON.stringify(d3d9FixedResult));
   check('D3D9 alpha test discards fragments whose alpha equals the GREATER reference',
     d3d9FixedResult.rejected?.every((pixel) => near(pixel, [0, 0, 0, 255], 1)),
@@ -930,6 +949,8 @@ try {
     Object.entries(alphaFunctionPasses).every(([alphaFunc, passes]) =>
       near(d3d9FixedResult.alphaFunctionPixels?.[alphaFunc], passes ? [255, 0, 0, 255] : [0, 0, 0, 255], 1)),
     JSON.stringify(d3d9FixedResult.alphaFunctionPixels));
+  check('D3D9 SRCALPHA/INVSRCALPHA blends half-alpha red over blue',
+    near(d3d9FixedResult.blendedPixel, [128, 0, 127, 191], 1), JSON.stringify(d3d9FixedResult.blendedPixel));
 
   const d3d9TextureResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
