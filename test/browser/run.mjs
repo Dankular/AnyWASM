@@ -1878,6 +1878,179 @@ try {
       && near(samplerAddressResult.bc4BorderOutside || [], [255, 0, 0, 255], 1),
     JSON.stringify(samplerAddressResult));
 
+  const gatherBorderResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const logs = [];
+      const gpu = new GpuExecutor(canvas, tool, (message) => logs.push(message), { noPresent: true });
+      await gpu.init();
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float4 edge = image.GatherRed(borderSampler, float2(0.1, 0.5));
+          float4 outside = image.GatherRed(borderSampler, float2(2.0, 0.5));
+          return position.x < 32.0 ? edge : outside;
+        }
+      `, 'main', 'ps_5_0');
+      const comparisonPixel = tool.compileHlsl(`
+        Texture2D<float> depthImage : register(t0);
+        SamplerComparisonState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float4 edge = depthImage.GatherCmp(borderSampler, float2(0.1, 0.5), 0.6);
+          float4 outside = depthImage.GatherCmp(borderSampler, float2(2.0, 0.5), 0.6);
+          return position.x < 32.0 ? edge : outside;
+        }
+      `, 'main', 'ps_5_0');
+      const arrayPixel = tool.compileHlsl(`
+        Texture2DArray<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float4 edge = image.GatherRed(borderSampler, float3(0.1, 0.5, 1.0));
+          float4 outside = image.GatherRed(borderSampler, float3(2.0, 0.5, 1.0));
+          return position.x < 32.0 ? edge : outside;
+        }
+      `, 'main', 'ps_5_0');
+      const alphaGatherPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float4 edge = image.GatherAlpha(borderSampler, float2(0.1, 0.5));
+          float4 outside = image.GatherAlpha(borderSampler, float2(2.0, 0.5));
+          return position.x < 32.0 ? edge : outside;
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const head = words(id, stage, dxbc.length), payload = new Uint8Array(head.length + dxbc.length);
+        payload.set(head); payload.set(dxbc, head.length); command(6, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(10, 2, 2, 1, 1, 28, 8, 0, 1, 0));
+      const upload = new Uint8Array(52);
+      upload.set(words(10, 0, 0, 0, 0, 2, 2, 8, 16));
+      upload.set([64, 0, 0, 255, 128, 0, 0, 255, 192, 0, 0, 255, 255, 0, 0, 255], 36);
+      command(5, upload);
+      command(12, words(11, 2, 10, 28, 4, 0, 1, 0, 1));
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 12, true); samplerView.setUint32(4, 0x15, true);
+      samplerView.setUint32(8, 4, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setUint32(24, 1, true); samplerView.setUint32(28, 1, true);
+      samplerView.setFloat32(32, 0.125, true); samplerView.setFloat32(36, 0.25, true);
+      samplerView.setFloat32(40, 0.5, true); samplerView.setFloat32(44, 0.75, true);
+      command(8, sampler);
+      shader(20, 0, vertex); shader(21, 1, pixel);
+      command(17, words(0, 20)); command(17, words(1, 21));
+      command(21, words(1, 2, 0)); command(16, words(4));
+      command(19, words(1, 0, 1, 11)); command(20, words(1, 0, 1, 12));
+      command(29, words(3, 0));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const edge = at(16), outside = at(48);
+      stream.length = 0;
+      command(4, words(13, 2, 2, 1, 1, 40, 0x48, 0, 1, 0)); // D32_FLOAT depth + SRV
+      command(12, words(14, 1, 13, 40, 3, 0, 1, 0, 1)); // depth-stencil view
+      command(12, words(15, 2, 13, 40, 4, 0, 1, 0, 1)); // shader-resource view
+      command(28, words(14, 1, 0x3f000000, 0)); // depth 0.5
+      const comparisonSampler = new Uint8Array(56), comparisonView = new DataView(comparisonSampler.buffer);
+      comparisonView.setUint32(0, 32, true); comparisonView.setUint32(4, 0x80, true);
+      comparisonView.setUint32(8, 4, true); comparisonView.setUint32(12, 3, true); comparisonView.setUint32(16, 3, true);
+      comparisonView.setUint32(24, 1, true); comparisonView.setUint32(28, 2, true); // comparison LESS
+      comparisonView.setFloat32(32, 0.9, true);
+      command(8, comparisonSampler);
+      shader(22, 1, comparisonPixel);
+      command(17, words(1, 22)); command(19, words(1, 0, 1, 15)); command(20, words(1, 0, 1, 32));
+      command(29, words(3, 0));
+      const comparisonSize = stream.reduce((total, part) => total + part.length, 0), comparisonCommands = new Uint8Array(comparisonSize);
+      let comparisonOffset = 0; for (const part of stream) { comparisonCommands.set(part, comparisonOffset); comparisonOffset += part.length; }
+      gpu.execute(comparisonCommands);
+      const comparisonPixels = await gpu.readBackbuffer(1);
+      const compareAt = (x) => Array.from(comparisonPixels.data.slice((32 * comparisonPixels.width + x) * 4, (32 * comparisonPixels.width + x) * 4 + 4));
+      const comparisonEdge = compareAt(16), comparisonOutside = compareAt(48);
+      stream.length = 0;
+      command(4, words(16, 2, 2, 1, 2, 28, 8, 0, 1, 0)); // two-slice RGBA8 array texture
+      command(12, words(17, 2, 16, 28, 5, 0, 1, 0, 2)); // both array slices
+      const uploadSlice = (slice, texels) => {
+        const payload = new Uint8Array(52);
+        payload.set(words(16, 0, slice, 0, 0, 2, 2, 8, 16));
+        payload.set(texels, 36);
+        command(5, payload);
+      };
+      uploadSlice(0, [0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]);
+      uploadSlice(1, [64, 0, 0, 255, 128, 0, 0, 255, 192, 0, 0, 255, 255, 0, 0, 255]);
+      shader(23, 1, arrayPixel);
+      command(17, words(1, 23)); command(19, words(1, 0, 1, 17)); command(20, words(1, 0, 1, 12));
+      command(29, words(3, 0));
+      const arraySize = stream.reduce((total, part) => total + part.length, 0), arrayCommands = new Uint8Array(arraySize);
+      let arrayOffset = 0; for (const part of stream) { arrayCommands.set(part, arrayOffset); arrayOffset += part.length; }
+      gpu.execute(arrayCommands);
+      const arrayPixels = await gpu.readBackbuffer(1);
+      const arrayAt = (x) => Array.from(arrayPixels.data.slice((32 * arrayPixels.width + x) * 4, (32 * arrayPixels.width + x) * 4 + 4));
+      stream.length = 0;
+      command(4, words(24, 2, 2, 1, 1, 61, 8, 0, 1, 0)); // R8_UNORM texture
+      const r8Upload = new Uint8Array(40);
+      r8Upload.set(words(24, 0, 0, 0, 0, 2, 2, 2, 4));
+      r8Upload.set([32, 64, 96, 128], 36);
+      command(5, r8Upload);
+      command(12, words(25, 2, 24, 61, 4, 0, 1, 0, 1));
+      shader(26, 1, alphaGatherPixel);
+      command(17, words(1, 26)); command(19, words(1, 0, 1, 25)); command(20, words(1, 0, 1, 12));
+      command(29, words(3, 0));
+      const alphaSize = stream.reduce((total, part) => total + part.length, 0), alphaCommands = new Uint8Array(alphaSize);
+      let alphaOffset = 0; for (const part of stream) { alphaCommands.set(part, alphaOffset); alphaOffset += part.length; }
+      gpu.execute(alphaCommands);
+      const alphaPixels = await gpu.readBackbuffer(1);
+      const alphaAt = (x) => Array.from(alphaPixels.data.slice((32 * alphaPixels.width + x) * 4, (32 * alphaPixels.width + x) * 4 + 4));
+      const result = {
+        edge, outside, comparisonEdge, comparisonOutside, arrayEdge: arrayAt(16), arrayOutside: arrayAt(48),
+        r8AlphaEdge: alphaAt(16), r8AlphaOutside: alphaAt(48),
+        draws: gpu.stats.draws, errors: gpu.stats.errors, logs,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 Gather applies BORDER per tap at an edge and for a fully outside footprint',
+    gatherBorderResult.draws === 4 && gatherBorderResult.errors.length === 0
+      && near([...gatherBorderResult.edge].sort((a, b) => a - b), [32, 32, 64, 191], 1)
+      && near(gatherBorderResult.outside || [], [32, 32, 32, 32], 1)
+      && near([...gatherBorderResult.comparisonEdge].sort((a, b) => a - b), [0, 0, 255, 255], 1)
+      && near(gatherBorderResult.comparisonOutside || [], [255, 255, 255, 255], 1)
+      && near([...gatherBorderResult.arrayEdge].sort((a, b) => a - b), [32, 32, 64, 191], 1)
+      && near(gatherBorderResult.arrayOutside || [], [32, 32, 32, 32], 1)
+      && near(gatherBorderResult.r8AlphaEdge || [], [255, 255, 255, 255], 1)
+      && near(gatherBorderResult.r8AlphaOutside || [], [255, 255, 255, 255], 1),
+    JSON.stringify(gatherBorderResult));
+
   const comparisonSamplerResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');

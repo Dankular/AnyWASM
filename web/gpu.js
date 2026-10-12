@@ -480,6 +480,105 @@ function borderSampleLodWgsl(name, textureName, textureType, arrayTexture, mode)
   return { name: `${name}_${mode}`, source };
 }
 
+function borderGatherWgsl(textureName, textureType, samplerIndex, addressModes, borderColor, settings, arrayTexture, textureFormat, component, comparison) {
+  const kind = textureType.kind;
+  const depthTexture = kind.startsWith('texture_depth_');
+  if (!['texture_2d', 'texture_2d_array', 'texture_depth_2d', 'texture_depth_2d_array'].includes(kind)
+      || arrayTexture !== (kind === 'texture_2d_array' || kind === 'texture_depth_2d_array')
+      || settings?.anisotropic || (comparison !== !!settings?.comparison)
+      || (comparison && !depthTexture) || (!comparison && depthTexture)
+      || (!comparison && textureType.component !== 'f32')) return null;
+
+  const name = `border_gather_${textureName}_${samplerIndex}`;
+  const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+  const formattedBorderColor = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
+    ? borderColor[index]
+    : index === 3 ? 1 : 0);
+  const floatLiteral = (value) => Number.isInteger(value) ? `${value}.0` : String(value);
+  const borderValue = depthTexture ? floatLiteral(borderColor[0])
+    : `vec4<f32>(${formattedBorderColor.map(floatLiteral).join(', ')})[${component}]`;
+  const compareOperator = {
+    never: null,
+    less: '<',
+    equal: '==',
+    'less-equal': '<=',
+    greater: '>',
+    'not-equal': '!=',
+    'greater-equal': '>=',
+    always: null,
+  }[settings?.compare];
+  const compareAlways = settings?.compare === 'always';
+  const compareExpression = (depth) => compareAlways ? 'true'
+    : compareOperator ? `reference ${compareOperator} ${depth}` : 'false';
+  const axes = ['x', 'y'];
+  const makeAddress = (tap, axis) => {
+    const size = `_size.${axes[axis]}`;
+    const index = `_index_${tap}_${axes[axis]}`;
+    const address = `_addr_${tap}_${axes[axis]}`;
+    let expression;
+    const lines = [];
+    switch (addressModes[axis]) {
+      case 1:
+        expression = `((${index} % ${size}) + ${size}) % ${size}`;
+        break;
+      case 2: {
+        const period = `_period_${tap}_${axes[axis]}`;
+        const wrapped = `_wrapped_${tap}_${axes[axis]}`;
+        lines.push(`let ${period} = ${size} * 2;`);
+        lines.push(`let ${wrapped} = ((${index} % ${period}) + ${period}) % ${period};`);
+        expression = `select(${wrapped}, ${period} - 1 - ${wrapped}, ${wrapped} >= ${size})`;
+        break;
+      }
+      case 5: {
+        const mirrored = `_mirrored_${tap}_${axes[axis]}`;
+        lines.push(`let ${mirrored} = select(${index}, -${index} - 1, ${index} < 0);`);
+        expression = `clamp(${mirrored}, 0, ${size} - 1)`;
+        break;
+      }
+      case 3:
+      case 4:
+      default:
+        expression = `clamp(${index}, 0, ${size} - 1)`;
+        break;
+    }
+    lines.push(`let ${address} = ${expression};`);
+    return { lines, address, borderTerm: addressModes[axis] === 4 ? `(${index} < 0 || ${index} >= ${size})` : null };
+  };
+  const makeTap = (tap, xOffset, yOffset) => {
+    const lines = [
+      `let _index_${tap}_x = _base.x + ${xOffset};`,
+      `let _index_${tap}_y = _base.y + ${yOffset};`,
+    ];
+    const x = makeAddress(tap, 0), y = makeAddress(tap, 1);
+    lines.push(...x.lines, ...y.lines);
+    const address = `vec2<i32>(${x.address}, ${y.address})`;
+    const loaded = comparison
+      ? `textureLoad(${textureName}, ${address}${arrayTexture ? ', layer' : ''}, 0)`
+      : `textureLoad(${textureName}, ${address}${arrayTexture ? ', layer' : ''}, 0)[${component}]`;
+    const borderTerms = [x.borderTerm, y.borderTerm].filter(Boolean);
+    const value = borderTerms.length ? `select(${loaded}, ${borderValue}, ${borderTerms.join(' || ')})` : loaded;
+    if (comparison) {
+      lines.push(`let _depth_${tap} = ${value};`);
+      lines.push(`let _value_${tap} = select(0.0, 1.0, ${compareExpression(`_depth_${tap}`)});`);
+    } else {
+      lines.push(`let _value_${tap} = ${value};`);
+    }
+    return lines;
+  };
+  const params = `coord: vec2<f32>${arrayTexture ? ', layer: i32' : ''}, offset: vec2<i32>${comparison ? ', reference: f32' : ''}`;
+  const body = [
+    `let _size = vec2<i32>(textureDimensions(${textureName}));`,
+    'let _position = coord * vec2<f32>(_size) - vec2<f32>(0.5);',
+    'let _base = vec2<i32>(floor(_position)) + offset;',
+    ...makeTap('00', 0, 0),
+    ...makeTap('10', 1, 0),
+    ...makeTap('01', 0, 1),
+    ...makeTap('11', 1, 1),
+    'return vec4<f32>(_value_01, _value_11, _value_10, _value_00);',
+  ];
+  return { name, source: `fn ${name}(${params}) -> vec4<f32> {\n${body.map((line) => `  ${line}`).join('\n')}\n}` };
+}
+
 function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats = new Map()) {
   const textureTypes = new Map();
   const texturePattern = /\bvar\s+(\w+)\s*:\s*(texture_(?:1d|2d|2d_array|3d|cube|cube_array|depth_2d|depth_2d_array|depth_cube|depth_cube_array))(?:\s*<([^;]*)>)?\s*;/g;
@@ -501,7 +600,12 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
     close--;
     const args = splitWgslArguments(wgsl.slice(open + 1, close));
     if (args.length < 3) continue;
-    const textureName = args[0].text.trim(), samplerName = args[1].text.trim();
+    const gatherCompare = match[1] === 'textureGatherCompare';
+    const gather = gatherCompare || match[1] === 'textureGather';
+    const textureArgIndex = gather ? (gatherCompare ? 0 : 1) : 0;
+    const samplerArgIndex = gather ? (gatherCompare ? 1 : 2) : 1;
+    const coordArgIndex = gather ? (gatherCompare ? 2 : 3) : 2;
+    const textureName = args[textureArgIndex].text.trim(), samplerName = args[samplerArgIndex].text.trim();
     const samplerRegister = /^s(\d+)_$/.exec(samplerName);
     const samplerIndex = samplerRegister ? Number(samplerRegister[1]) : samplerName === 'd3d9Sampler' ? 0 : null;
     const addressModes = samplerIndex === null ? undefined : samplerAddressModes.get(samplerIndex);
@@ -520,7 +624,7 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
     const mirrorMask = addressModes.slice(0, spatialAxes).map((mode) => mode === 5);
     const borderMask = addressModes.slice(0, spatialAxes).map((mode) => mode === 4);
     if (!mirrorMask.some(Boolean) && !borderMask.some(Boolean)) continue;
-    const coord = args[2];
+    const coord = args[coordArgIndex];
     const coordStart = open + 1 + coord.start;
     const coordEnd = open + 1 + coord.end;
     let call = wgsl.slice(match.index, close + 1);
@@ -528,6 +632,31 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
     if (borderMask.some(Boolean)) {
       const arrayTexture = textureType.kind === 'texture_2d_array' || textureType.kind === 'texture_depth_2d_array';
       const settings = samplerSettings.get(samplerIndex);
+      if (gather) {
+        const expectedArgs = arrayTexture ? 5 : 4;
+        const textureRegister = /^t(\d+)_$/.exec(textureName);
+        const textureFormat = textureRegister ? textureFormats.get(Number(textureRegister[1])) : undefined;
+        const helper = args.length >= expectedArgs && args.length <= expectedArgs + 1
+          ? borderGatherWgsl(textureName, textureType, samplerIndex, addressModes,
+            samplerBorderColors.get(samplerIndex) || [0, 0, 0, 0], settings, arrayTexture, textureFormat,
+            gatherCompare ? '0' : args[0].text.trim(), gatherCompare)
+          : null;
+        if (helper) {
+          borderHelpers.set(helper.name, helper.source);
+          const helperArgs = [coord.text.trim()];
+          if (arrayTexture) helperArgs.push(args[gatherCompare ? 3 : 4].text.trim());
+          helperArgs.push(args.length > expectedArgs ? args[expectedArgs].text.trim() : 'vec2<i32>(0, 0)');
+          if (gatherCompare) helperArgs.push(args[arrayTexture ? 4 : 3].text.trim());
+          const orderedArgs = gatherCompare
+            ? [helperArgs[0], helperArgs[1], helperArgs[2], ...(arrayTexture ? [helperArgs[3]] : [])]
+            : [helperArgs[0], helperArgs[1], ...(arrayTexture ? [helperArgs[2]] : [])];
+          const helperCall = `${helper.name}(${orderedArgs.join(', ')})`;
+          result += wgsl.slice(cursor, match.index) + helperCall;
+          cursor = close + 1;
+          changed = true;
+          continue;
+        }
+      }
       const mode = ({
         textureSample: 'implicit',
         textureSampleLevel: 'level',
