@@ -76,6 +76,10 @@ try {
         assert.equal(graphics.status, '1', `${item.name} graphics run did not exit: ${graphics.stat}`);
         assert.equal(graphics.exitCode, '0', `${item.name} graphics run exited nonzero: ${graphics.stat}`);
         const near = (actual, expected, tolerance) => actual.every((value, index) => Math.abs(value - expected[index]) <= tolerance);
+        const canvasAspect = await page.locator('#screen').evaluate((canvas) => {
+          const [width, height] = canvas.style.aspectRatio.split('/').map(Number);
+          return { width, height };
+        });
         await page.evaluate(() => { window.__pixels = null; window.__worker.postMessage({ type: 'capture' }); });
         await page.waitForFunction(() => window.__pixels !== null, null, { timeout: 20000 });
         const backBuffer = await page.evaluate(() => {
@@ -84,19 +88,23 @@ try {
             const index = (y * pixels.width + x) * 4;
             return Array.from(pixels.data.slice(index, index + 4));
           };
-          return { width: pixels.width, height: pixels.height, error: pixels.error, clear: at(10, 10), center: at(320, 288) };
+          const centerY = Math.round((pixels.height - 1) * 0.6);
+          return { width: pixels.width, height: pixels.height, centerY, error: pixels.error, clear: at(10, 10), center: at(320, centerY) };
         });
         assert.equal(backBuffer.error, undefined, `${item.name} back-buffer readback error: ${backBuffer.error}`);
-        assert.deepEqual([backBuffer.width, backBuffer.height], [640, 480], `${item.name} triangle back-buffer dimensions`);
         const screenshot = decodePng(await page.locator('#screen').screenshot());
         const pixel = (x, y) => {
           const index = (y * screenshot.w + x) * 4;
           return Array.from(screenshot.data.subarray(index, index + 4));
         };
-        const clear = pixel(10, 10), center = pixel(320, 288);
+        const screenshotCenterY = Math.round((screenshot.h - 1) * 0.6);
+        const clear = pixel(10, 10), center = pixel(320, screenshotCenterY);
         const gpuStats = await page.evaluate(() => window.__gpuStats);
         assert.ok(gpuStats, `${item.name} missing WebGPU statistics`);
-        assert.deepEqual([screenshot.w, screenshot.h], [640, 480], `${item.name} triangle canvas dimensions`);
+        assert.deepEqual([backBuffer.width, backBuffer.height], [640, 480], `${item.name} triangle back-buffer dimensions`);
+        assert.equal(screenshot.w, 640, `${item.name} triangle canvas width`);
+        assert.ok(Math.abs(screenshot.h - screenshot.w * canvasAspect.height / canvasAspect.width) < 1,
+          `${item.name} canvas dimensions ${screenshot.w}x${screenshot.h} do not match the ${canvasAspect.width}/${canvasAspect.height} guest client ratio`);
         assert.deepEqual(gpuStats.errors, [], `${item.name} emitted WebGPU validation errors: ${JSON.stringify(gpuStats.errors)}`);
         assert.ok(near(backBuffer.clear, [0, 0, 51, 255], 2), `${item.name} back-buffer clear pixel: ${backBuffer.clear}`);
         assert.ok(near(backBuffer.center, [85, 85, 85, 255], 6), `${item.name} back-buffer center pixel: ${backBuffer.center}`);

@@ -144,16 +144,14 @@ register-stack subset):
       and compare output and retired counts with cached-only execution. The page check grows WASM
       memory by one page after emission starts; the cached module resumes without another fallback.
       This JIT check passes in test/browser/run.mjs.
-- [~] **Cross-browser and graphics check**: the cache-pressure probe compiles 300 unique modules,
-      revisits entries, and confirms eviction/recompile and retained-module hits in Node, Chromium,
-      Firefox, and WebKit. Firefox 141.0 runs hello and D3D11 triangle fixtures, but validation
-      errors leave the triangle black; Playwright WebKit 18.2 runs hello and reports graphics
-      unavailable when OffscreenCanvas transfer is missing. Chromium, Firefox, and WebKit also pass
-      the emitted path under a same-origin CSP that permits wasm-unsafe-eval. Full graphics
-      validation on other engines remains open. The latest Chromium full-suite run passes the JIT,
-      memory-growth, and graphics checks without page or WebGPU validation errors, but has seven
-      separate input/canvas assertions failing: mouse-coordinate scaling, mouse-leave delivery/input
-      fixture exit, and visible-canvas screenshot extent/interpolated-pixel expectations.
+- [~] **Cross-browser and graphics check**: Chromium 154 and Firefox 141 run hello and the D3D11
+      triangle, passing back-buffer and visible-canvas pixel checks plus the same-origin CSP JIT
+      probe. The 640x480 back buffer is displayed at 640x453 when the guest client area is 624x441;
+      the screenshot check follows that aspect ratio. Playwright WebKit 18.2 runs hello and the CSP
+      probe but reports graphics unavailable because OffscreenCanvas transfer is missing. Full
+      graphics coverage on other engines remains open. The Chromium full browser suite passes its
+      graphics and input checks but currently has three unrelated JIT assertions failing for emitted
+      register-register MOV and warmed memory/JMP/Jcc paths.
 
 ## 2. Windows runtime coverage
 - [~] **Threads**: a deterministic FIFO cooperative scheduler now saves full CPU state, private
