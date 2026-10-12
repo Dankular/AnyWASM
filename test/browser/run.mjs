@@ -5034,6 +5034,14 @@ try {
             : source.SampleLevel(sourceSampler, float3(0.9, 0.5, 1.0), 0.0);
         }
       `, 'main', 'ps_5_0');
+      const anisotropicPixel = tool.compileHlsl(`
+        Texture2DArray<float4> source : register(t0);
+        SamplerState anisotropicSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = float2(0.95 + (position.x - 32.5) * 0.2, 0.5);
+          return source.Sample(anisotropicSampler, float3(coordinate, 1.0));
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -5078,8 +5086,22 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { outside: at(10), straddle: at(32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      stream.length = 0;
+      const anisotropicSamplerData = new Uint8Array(56), anisotropicSamplerView = new DataView(anisotropicSamplerData.buffer);
+      anisotropicSamplerView.setUint32(0, 9, true); anisotropicSamplerView.setUint32(4, 0x55, true);
+      anisotropicSamplerView.setUint32(8, 4, true); anisotropicSamplerView.setUint32(12, 3, true); anisotropicSamplerView.setUint32(16, 3, true);
+      anisotropicSamplerView.setUint32(24, 8, true);
+      [0, 0, 1, 1].forEach((value, index) => anisotropicSamplerView.setFloat32(32 + index * 4, value, true));
+      anisotropicSamplerView.setFloat32(48, 0, true); anisotropicSamplerView.setFloat32(52, 2, true);
+      command(8, anisotropicSamplerData); shader(10, 1, anisotropicPixel);
+      command(17, words(1, 10)); command(20, words(1, 0, 1, 9)); command(29, words(3, 0));
+      gpu.execute(append());
+      const anisotropicPixels = await gpu.readBackbuffer(1);
+      const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
+      const result = {
+        outside: at(pixels, 10), straddle: at(pixels, 32), anisotropicLayerEdge: at(anisotropicPixels, 32),
+        draws: gpu.stats.draws, errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -5087,10 +5109,13 @@ try {
     }
   });
   check('D3D11 BORDER sampling returns its color for Texture2DArray taps and blends edge footprints',
-    textureArrayResult.draws === 1 && textureArrayResult.errors.length === 0
+    textureArrayResult.draws === 2 && textureArrayResult.errors.length === 0
       && near(textureArrayResult.outside || [], [0, 0, 255, 255], 1)
       && near(textureArrayResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(textureArrayResult));
+  check('D3D11 anisotropic BORDER Sample filters the selected Texture2DArray layer across the edge',
+    near(textureArrayResult.anisotropicLayerEdge || [], [0, 151, 104, 255], 3),
+    JSON.stringify(textureArrayResult.anisotropicLayerEdge));
 
   const cubeTextureResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

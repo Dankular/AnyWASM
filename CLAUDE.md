@@ -252,9 +252,12 @@ register-stack subset):
       channel defaults. 2D and 2D-array RGBA8 Gather verify edge-straddling and fully outside taps,
       including an explicit nonzero offset; D32_FLOAT GatherCmp and R8_UNORM missing-alpha Gather
       defaults are also pixel-checked. An 8x anisotropic Texture2D SampleLevel outside sample and an
-      in-range SampleGrad footprint crossing the right edge are pixel-checked. Other sampled
-      dimensions/formats, Shader Model 6.8 bias/gradient comparison methods, cube, anisotropic
-      comparison samplers, and anisotropic cases outside these paths remain open;
+      in-range SampleGrad footprint crossing the right edge are pixel-checked.
+      An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
+      edge-crossing BORDER pixels. vkd3d rejects the documented float2 DDX/DDY arguments for
+      Texture2DArray.SampleGrad with E5002 ([Microsoft HLSL signature](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplegrad));
+      anisotropic array SampleGrad, comparison SampleCmpLevelZero, cube, other sampled dimensions/
+      formats, remaining Shader Model 6.8 comparison methods, and other anisotropic cases remain open;
       an 8x anisotropic
       sampler request; instance step rates; render-to-texture; multiple render targets; cube, array,
       and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
