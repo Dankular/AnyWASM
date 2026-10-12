@@ -24,6 +24,16 @@ test('builds a timed key plan from the recorded seed-1 route', () => {
   assert.equal(plan.teleported, true);
 });
 
+test('scales recorded marker coordinates to the current guest back-buffer size', () => {
+  const sizedRecord = { ...record, captureSize: { width: 1040, height: 807 } };
+  const plan = buildPlaythroughPlan(sizedRecord, { pulseMs: 10, targetWidth: 1024, targetHeight: 768 });
+
+  assert.ok(Math.abs(plan.steps[0].expectedBefore.x - 511.5) < 0.02);
+  assert.ok(Math.abs(plan.steps[0].expectedBefore.y - 383.5) < 0.1);
+  assert.ok(Math.abs(plan.steps[0].expectedAfter.x - 519.1) < 0.1);
+  assert.equal(plan.steps[0].durationMs, 250);
+});
+
 test('rejects a route step without a positive pulse count', () => {
   assert.throws(() => buildPlaythroughPlan({ result: { runProgress: [{ keys: ['w'], pulses: 0 }] } }), /positive integer/);
 });

@@ -26,10 +26,10 @@ const normalWorkerSlices = options.includes('--normal-slices');
 const playthroughArgument = options.find((argument) => argument.startsWith('--playthrough='));
 const pulseMsArgument = options.find((argument) => argument.startsWith('--pulse-ms='));
 const pulseMs = pulseMsArgument ? Number(pulseMsArgument.slice('--pulse-ms='.length)) : 10;
-const playthroughPlan = playthroughArgument
-  ? buildPlaythroughPlan(JSON.parse(readFileSync(playthroughArgument.slice('--playthrough='.length), 'utf8')), { pulseMs })
+const playthroughRecord = playthroughArgument
+  ? JSON.parse(readFileSync(playthroughArgument.slice('--playthrough='.length), 'utf8'))
   : null;
-if (playthroughPlan && (checkMovement || checkDirections || checkAim || checkFlashlight || checkMapReset)) {
+if (playthroughRecord && (checkMovement || checkDirections || checkAim || checkFlashlight || checkMapReset)) {
   throw new Error('--playthrough cannot be combined with the independent input probes');
 }
 if (!process.argv[2] || !existsSync(bundlePath)) {
@@ -199,6 +199,9 @@ try {
   let mapReset;
   let playthroughReplay;
   let inputDiagnostics;
+  const playthroughPlan = playthroughRecord
+    ? buildPlaythroughPlan(playthroughRecord, { pulseMs, targetWidth: result.width, targetHeight: result.height })
+    : null;
   if (playthroughPlan) {
     await page.locator('#screen').focus();
     const progress = [];
@@ -261,6 +264,8 @@ try {
       steps: progress.length,
       totalInputMs: playthroughPlan.steps.reduce((sum, step) => sum + step.durationMs, 0),
       expectedTeleport: playthroughPlan.teleported,
+      recordedCaptureSize: playthroughRecord.captureSize,
+      replayCaptureSize: { width: result.width, height: result.height },
       callbackSuspensions: inputDiagnostics.gpuStats?.asyncify,
       initialMarker: result.greenMarker,
       finalMarker: before,

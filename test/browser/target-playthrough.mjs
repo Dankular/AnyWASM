@@ -1,8 +1,20 @@
 const PLAYABLE_KEYS = new Set(['w', 'a', 's', 'd']);
 
-export function buildPlaythroughPlan(record, { pulseMs = 10 } = {}) {
+export function buildPlaythroughPlan(record, { pulseMs = 10, targetWidth, targetHeight } = {}) {
   if (!Number.isFinite(pulseMs) || pulseMs <= 0) {
     throw new Error('pulseMs must be a positive number');
+  }
+
+  let scaleX = 1, scaleY = 1;
+  if (targetWidth !== undefined || targetHeight !== undefined) {
+    const captureSize = record?.captureSize;
+    if (!Number.isFinite(targetWidth) || !Number.isFinite(targetHeight) ||
+        !Number.isFinite(captureSize?.width) || !Number.isFinite(captureSize?.height) ||
+        captureSize.width <= 0 || captureSize.height <= 0) {
+      throw new Error('playthrough scaling requires positive captureSize and target dimensions');
+    }
+    scaleX = targetWidth / captureSize.width;
+    scaleY = targetHeight / captureSize.height;
   }
 
   const route = record?.result;
@@ -30,8 +42,8 @@ export function buildPlaythroughPlan(record, { pulseMs = 10 } = {}) {
       durationMs: Math.max(1, Math.round(step.pulses * pulseMs)),
       pulseCount: step.pulses,
       expectedDistance: step.expectedDistance,
-      expectedBefore: { x: step.before.x, y: step.before.y },
-      expectedAfter: { x: step.after.x, y: step.after.y },
+      expectedBefore: { x: step.before.x * scaleX, y: step.before.y * scaleY },
+      expectedAfter: { x: step.after.x * scaleX, y: step.after.y * scaleY },
     };
   });
 

@@ -4,6 +4,10 @@
   "build": "seed-1 D3D11-only /MT target bundle",
   "browser": "Playwright Chromium revision 1234",
   "bundleSha256": "34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36",
+  "captureSize": {
+    "width": 1040,
+    "height": 807
+  },
   "result": {
     "teleportScreen": {
       "x": 885.1428571428571,
