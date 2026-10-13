@@ -445,12 +445,14 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   including locale and condition-variable paths, then reached the configured cap inside D3DCompiler
   without an unresolved-import stop. This guest-only trace made no `Present`; browser render evidence is
   recorded separately. See `docs/target-data/tutorial03-hle-cli-30m-2026-10-13.json`. The current-source
-  analyzer report lists 213 implemented / 38 missing static imports for
-  Tutorial03, including 21 of 65 MSVCP140 imports; all 18 VCRUNTIME140 imports in that report are
-  handled. The HLE copies and destroys MSVC `std::exception` message data using guest allocations
-  and PE32/PE32+ pointer layouts. `_purecall` now invokes the process-wide handler installed by
-  `_set_purecall_handler` and terminates the guest if the handler returns. These helpers have
-  compile and static-analysis evidence, but no runtime fixture yet. The full report is in
+  analyzer report lists 223 implemented / 28 missing static imports for
+  Tutorial03, including 54 of 65 MSVCP140 imports; all 18 VCRUNTIME140 imports in that report are
+  handled. Narrow and wide `basic_streambuf` base defaults now cover `showmanyc`, `setbuf`,
+  `sync`, and `imbue`; wide `_Lock` and `_Unlock` are no-ops. `uflow` and `xsgetn` remain
+  unsupported. The HLE copies and destroys MSVC `std::exception` message data using guest
+  allocations and PE32/PE32+ pointer layouts. `_purecall` now invokes the process-wide handler
+  installed by `_set_purecall_handler` and terminates the guest if the handler returns. These
+  additions have compile and static-analysis evidence, but no runtime fixture yet. The full report is in
   `docs/target-imports/tutorial03-current-source.json`; its preflight is static
   review only. These local DLLs are not a product package. The first
   browser report with that package stopped at unsupported `VPERMILPS xmm0,xmm5,0x55` with zero GPU
@@ -469,7 +471,7 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   uninitialized auxiliary ostream during insertion of the ANSI string `\x1b[39m`; that capture
   predates the current stream handlers. An earlier analyzer snapshot reported 165 implemented /
   86 missing imports, including 61 of 65 MSVCP140 imports missing. The current-source report now
-  records 213 implemented / 38 missing, including 21 of 65 MSVCP140 imports missing. The local
+  records 223 implemented / 28 missing, including 11 of 65 MSVCP140 imports missing. The local
   runtime DLLs are not a product dependency or redistribution decision.
   A separate HLE-only browser bundle of Tutorial01_HelloTriangle, also without local MSVC/UCRT DLLs,
   now renders the colored triangle at the normal 250,000-instruction worker slice: 659 draws, 330

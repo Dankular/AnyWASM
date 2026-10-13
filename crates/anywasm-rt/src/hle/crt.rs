@@ -521,6 +521,18 @@ fn msvc_basic_streambuf_char_sync(_p: &mut Process) -> R {
     Ok(0)
 }
 
+fn msvc_basic_streambuf_showmanyc(_p: &mut Process) -> R {
+    Ok(0)
+}
+
+fn msvc_basic_streambuf_setbuf(p: &mut Process) -> R {
+    Ok(p.arg(0))
+}
+
+fn msvc_basic_streambuf_imbue(_p: &mut Process) -> R {
+    Ok(0)
+}
+
 fn msvc_standard_streambuf_kind(p: &Process, streambuf: u64) -> Result<bool, Stop> {
     if p.extra.data_cells.get(MSVC_STD_COUT_BUFFER).copied() == Some(streambuf) {
         Ok(false)
@@ -592,8 +604,20 @@ fn msvc_standard_streambuf_init(p: &mut Process, streambuf: u64) -> Result<(), S
         (8, "__anywasm_basic_streambuf_char_lock_noop"),
         (16, "__anywasm_basic_streambuf_char_lock_noop"),
         (3 * 8, "__anywasm_standard_streambuf_char_overflow"),
+        (
+            5 * 8,
+            "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ",
+        ),
         (9 * 8, "__anywasm_standard_streambuf_xsputn"),
+        (
+            12 * 8,
+            "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z",
+        ),
         (13 * 8, "__anywasm_standard_streambuf_sync"),
+        (
+            14 * 8,
+            "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z",
+        ),
     ] {
         let target = p
             .thunk_for("msvcp", name, true)
@@ -1524,6 +1548,29 @@ fn msvc_basic_streambuf_default(p: &mut Process, char_type: &str, xsputn_name: &
         .expect("creating the MSVCP basic_streambuf lock no-op thunk");
     p.wr64(vtable + 8, lock_noop)?;
     p.wr64(vtable + 16, lock_noop)?;
+    let (showmanyc_name, setbuf_name, imbue_name) = if char_type == "wchar" {
+        (
+            "?showmanyc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JXZ",
+            "?setbuf@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAPEAV12@PEA_W_J@Z",
+            "?imbue@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAXAEBVlocale@2@@Z",
+        )
+    } else {
+        (
+            "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ",
+            "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z",
+            "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z",
+        )
+    };
+    for (offset, name) in [
+        (5 * 8, showmanyc_name),
+        (12 * 8, setbuf_name),
+        (14 * 8, imbue_name),
+    ] {
+        let target = p
+            .thunk_for("msvcp", name, true)
+            .expect("creating an MSVCP basic_streambuf default-virtual thunk");
+        p.wr64(vtable + offset, target)?;
+    }
 
     let locale = msvc_locale_value(p, &format!("msvcp:basic_streambuf:{char_type}:locale"))?;
     p.wr64(this, vtable)?;
@@ -1554,8 +1601,26 @@ pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
         "__anywasm_basic_streambuf_char_lock_noop"
         | "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
-        | "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ" => {
+        | "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
+        | "?_Lock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ"
+        | "?_Unlock@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAAXXZ" => {
             msvc_basic_streambuf_char_lock_noop
+        }
+        "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ"
+        | "?showmanyc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JXZ" => {
+            msvc_basic_streambuf_showmanyc
+        }
+        "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z"
+        | "?setbuf@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAPEAV12@PEA_W_J@Z" => {
+            msvc_basic_streambuf_setbuf
+        }
+        "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
+        | "?sync@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAHXZ" => {
+            msvc_basic_streambuf_char_sync
+        }
+        "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z"
+        | "?imbue@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAXAEBVlocale@2@@Z" => {
+            msvc_basic_streambuf_imbue
         }
         "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z" => {
             msvc_basic_streambuf_char_sputn
