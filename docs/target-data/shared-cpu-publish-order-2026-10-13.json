@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-13",
+  "issue": "publishFrom captured guest mapping count before exporting runnable CPU contexts; x64 TEB synchronization during export can allocate another guest page.",
+  "fix": [
+    "SharedCpuWorkerPool exports runnable contexts before capturing page count, mapping generation, and capacity.",
+    "InPlaceSharedCpuPool exports runnable contexts before capturing mappings and frame-store information."
+  ],
+  "harness": "test/browser/parallel.mjs",
+  "fixture": "fixtures/parallel_test.exe",
+  "fixtureSha256": "B055D937008CA3C54534F735C24E16A43C546931C7672F0AD312AD59BB7B7151",
+  "testHarnessSha256": "D2BE0BF76E085054F16C95B6FD531AC4B3B5BD78B2D18A019C60ECE4C86746D6",
+  "browser": "Google Chrome 151.0.7922.34",
+  "crossOriginIsolated": true,
+  "runs": [
+    {
+      "mode": "shared-cpu-workers",
+      "workerCount": 2,
+      "processStatus": "exited",
+      "exitCode": 0,
+      "maxConcurrentWorkerSlices": 2,
+      "parallelBatches": 1,
+      "workerRetiredInstructions": 898155,
+      "runtimeWasmSha256": "FC841F7FF8E17CA1A20415A5BD6C5F5669A0C370BD7B4B098D7830A377C2048B",
+      "workerWasmSha256": "0E2BD16811D28AE35A3243AE8481AC2E76F20A62BF8B3301A4BD305FF24379CD"
+    },
+    {
+      "mode": "shared-cpu-workers-in-place",
+      "workerCount": 2,
+      "processStatus": "exited",
+      "exitCode": 0,
+      "maxConcurrentWorkerSlices": 2,
+      "parallelBatches": 1,
+      "workerRetiredInstructions": 898155,
+      "runtimeWasmSha256": "D42CB61F9E576D95E3E6B50EF9C8249817EC766A409F9E555C6DB4EA91D97081",
+      "workerWasmSha256": "E327C8D676F2AA861DFDBDB246518850AE70BB4DCACCB21C21C390318DC412F5"
+    }
+  ],
+  "guestOutput": "t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444 mainTls=0x5555 mainLast=0x6666 rendezvous=2 stack=2",
+  "scope": "The browser fixture verifies the two worker-pool modes, concurrent slices, shared atomic state, TLS/TEB values, and separate stack sentinels. It does not establish target performance or Diligent/GTA acceptance."
+}

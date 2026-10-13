@@ -108,6 +108,7 @@ export class InPlaceSharedCpuPool extends SharedCpuWorkerPool {
     this.layout = {
       base: HEADER_BASE,
       totalBytes: 0,
+      activity: { offset: 84, length: 8 },
       slots: { offset: HEADER_BYTES, length: this.workerCount * SLOT_BYTES },
       contexts: { offset: this.contextBlock.address - HEADER_BASE, length: this.contextCount * CPU_BYTES },
       pageMap: { offset: 0, length: 0 },
@@ -185,13 +186,19 @@ export class InPlaceSharedCpuPool extends SharedCpuWorkerPool {
   /** Publish the quiescent runtime's mappings (by reference) and runnable CPU contexts. */
   publishFrom(anyWasm) {
     this.requireQuiescent();
-    const frames = anyWasm.sharedFramesInfo();
-    const pageCount = Number(anyWasm.sharedSnapshotPageCount());
-    const mappingGeneration = anyWasm.sharedSnapshotMappingGeneration();
     const threadIds = anyWasm.sharedCpuRunnableThreadIds();
     if (threadIds.length > this.contextCount) {
       throw new Error('guest thread count exceeded shared CPU context capacity');
     }
+    const contexts = threadIds.map((threadId) => ({
+      threadId,
+      bytes: anyWasm.exportSharedCpuContext(threadId),
+    }));
+    // Context export can allocate the active x64 thread's backing TEB page and move the frame
+    // store. Query both mappings and frame storage after exporting all runnable contexts.
+    const frames = anyWasm.sharedFramesInfo();
+    const pageCount = Number(anyWasm.sharedSnapshotPageCount());
+    const mappingGeneration = anyWasm.sharedSnapshotMappingGeneration();
     this.trapRange = anyWasm.sharedCpuTrapRange();
 
     const regionChanged = frames.address !== this.framesRegion.address || frames.capacity !== this.framesRegion.capacity;
@@ -211,8 +218,7 @@ export class InPlaceSharedCpuPool extends SharedCpuWorkerPool {
     Atomics.add(this.header, 16, 1); // code generation: the coordinator may have written code
     new Uint8Array(this.memory.buffer, this.contextBlock.address, this.contextBlock.bytes).fill(0);
     this.contextIndex.clear();
-    threadIds.forEach((threadId, index) => {
-      const bytes = anyWasm.exportSharedCpuContext(threadId);
+    contexts.forEach(({ threadId, bytes }, index) => {
       new Uint8Array(this.memory.buffer, this.contextBlock.address + index * CPU_BYTES, CPU_BYTES).set(bytes);
       this.contextIndex.set(threadId, index);
     });

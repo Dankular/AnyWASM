@@ -250,8 +250,15 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   allocator. The default `web/anywasm_wasm.wasm` remains a private-memory coordinator. A separate
   `?inPlaceCpu` build uses imported shared memory and LLD's `--no-check-features` to bypass missing
   atomics/bulk-memory metadata in the installed prebuilt `std`; on 2026-10-13, both the shared
-  coordinator and in-place CPU-worker release artifacts linked with those flags. This confirms the
-  build, not a browser replay of the in-place path. A coordinator/CPU-worker split is documented in
+  coordinator and in-place CPU-worker release artifacts linked with those flags. Browser replays
+  passed the two-thread fixture in Chrome 151.0.7922.34 in both copied-frame and
+  in-place modes: two workers overlapped, and both runs exited 0 with the shared counter, per-thread
+  TLS/TEB values, rendezvous, and stack sentinels intact. The pool now exports contexts before
+  capturing mappings because x64 TEB synchronization can allocate a backing page. This is synthetic
+  concurrency evidence, not target performance. See the
+  [`in-place replay`](target-data/shared-cpu-inplace-overlap-2026-10-13.json) and
+  [`publish-order fix`](target-data/shared-cpu-publish-order-2026-10-13.json) evidence.
+  A coordinator/CPU-worker split is documented in
   [`sharedarraybuffer-guest-threads-design.md`](superpowers/specs/2026-10-12-sharedarraybuffer-guest-threads-design.md);
   `anywasm-cpu-state` contains the `no_std` fixed-layout CPU context, decoder, generic instruction
   executor, versioned shared-memory header, atomic worker-slot handoff, and permission-checked

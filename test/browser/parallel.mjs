@@ -71,12 +71,10 @@ try {
   } else if (!faultMode) {
     assert.ok(BigInt(mode.workerRetired) > 500_000n, `the fixture needs ~1.1M guest instructions; workers retired only ${mode.workerRetired} guest instructions`);
     assert.ok(mode.parallelBatches > 0, 'no batch dispatched two guest threads to separate workers together');
-    if (!inPlace) {
-      assert.ok(mode.maxConcurrentWorkerSlices >= 2,
-        `guest worker slices never overlapped: ${JSON.stringify(mode)}`);
-      assert.match(output, /rendezvous=2 stack=2/,
-        `guest threads did not rendezvous through shared memory with distinct stack state: ${output}`);
-    }
+    assert.ok(mode.maxConcurrentWorkerSlices >= 2,
+      `guest worker slices never overlapped: ${JSON.stringify(mode)}`);
+    assert.match(output, /rendezvous=2 stack=2/,
+      `guest threads did not rendezvous through shared memory with distinct stack state: ${output}`);
   }
   if (faultMode) {
     assert.ok(BigInt(mode.workerRetired) > 0n, 'the CPU worker did not retire guest instructions before the exception');

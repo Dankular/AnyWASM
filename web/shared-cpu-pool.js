@@ -201,7 +201,16 @@ export class SharedCpuWorkerPool {
         !(snapshot.mappings instanceof Uint8Array) || !(snapshot.frames instanceof Uint8Array) ||
         snapshot.mappings.byteLength !== snapshotPageCount * 16 ||
         snapshot.frames.byteLength !== snapshotPageCount * PAGE_BYTES) {
-      throw new RangeError('guest-memory snapshot does not match the shared worker layout');
+      throw new RangeError(`guest-memory snapshot does not match the shared worker layout: ${JSON.stringify({
+        frameBase: snapshot?.frameBase,
+        expectedFrameBase: this.layout.frames.offset,
+        pageCount: snapshot?.pageCount,
+        pageCapacity: this.pageCapacity,
+        mappingBytes: snapshot?.mappings?.byteLength,
+        expectedMappingBytes: snapshotPageCount * 16,
+        frameBytes: snapshot?.frames?.byteLength,
+        expectedFrameBytes: snapshotPageCount * PAGE_BYTES,
+      }, (_, value) => typeof value === 'bigint' ? value.toString() : value)}`);
     }
     if (!Array.isArray(contexts) || contexts.length > this.contextCount) {
       throw new RangeError('guest CPU contexts exceed the shared context capacity');
@@ -261,9 +270,6 @@ export class SharedCpuWorkerPool {
   /** Export the current quiescent AnyWasm process into this pool's current layout. */
   publishFrom(anyWasm) {
     this.requireQuiescent();
-    const pageCount = Number(anyWasm.sharedSnapshotPageCount());
-    const mappingGeneration = anyWasm.sharedSnapshotMappingGeneration();
-    this.ensurePageCapacity(pageCount);
     const threadIds = anyWasm.sharedCpuRunnableThreadIds();
     if (threadIds.length > this.contextCount) {
       throw new Error('guest thread count exceeded shared CPU context capacity');
@@ -272,6 +278,11 @@ export class SharedCpuWorkerPool {
       threadId,
       bytes: anyWasm.exportSharedCpuContext(threadId),
     }));
+    // Exporting the active x64 context may allocate its backing TEB page. Capture guest mappings
+    // only afterward so the capacity and snapshot include that page.
+    const pageCount = Number(anyWasm.sharedSnapshotPageCount());
+    const mappingGeneration = anyWasm.sharedSnapshotMappingGeneration();
+    this.ensurePageCapacity(pageCount);
     this.trapRange = anyWasm.sharedCpuTrapRange();
     const mappingChanged = !this.snapshot || this.snapshot.pageCount !== pageCount ||
       mappingGeneration !== this.snapshot.mappingGeneration;

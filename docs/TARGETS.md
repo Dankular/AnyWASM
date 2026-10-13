@@ -64,8 +64,19 @@ HLE boundaries, rendezvouses through an atomic guest-memory counter, checks a pr
 per thread, waits for both threads, and updates a shared total with a locked instruction. The
 harness checks `t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444
 mainTls=0x5555 mainLast=0x6666 rendezvous=2 stack=2`, exit code 0, and an observed maximum of two
-active worker slices. The Chrome 155.0.8059.40 run retired 908,335 worker instructions across 11
-two-context batches. It also caught an x64 guest-thread entry stack bug: the runtime omitted the
+active worker slices. Both copied-frame and in-place modes now require overlap, the atomic rendezvous,
+and both stack sentinels. The Chrome 155.0.8059.40 copied-frame run retired 908,335 worker
+instructions across 11 two-context batches. A 2026-10-13 Chrome 151.0.7922.34 in-place run used the
+runtime's imported shared `WebAssembly.Memory`, retired 927,479 worker instructions in one
+two-context batch, observed two active slices, and exited 0 with the same guest results. A fresh
+copied-frame and in-place replay also passed after fixing a publish-order race: exporting the active
+x64 context can allocate its backing TEB page, so each pool now captures mapping metadata after
+context export. Both fresh runs observed two active slices and passed the rendezvous, stack, and
+TLS/TEB checks. Artifact hashes and exact results are in the
+[`in-place replay`](target-data/shared-cpu-inplace-overlap-2026-10-13.json) and
+[`publish-order fix`](target-data/shared-cpu-publish-order-2026-10-13.json) evidence. This verifies
+the synthetic in-place worker path, not target speedup. The copied-frame run also caught
+an x64 guest-thread entry stack bug: the runtime omitted the
 32-byte home area, so a compiled stack local landed beyond its allocated stack. Thread entry now
 starts at `stack_base - 0x28`, placing the return address and home area according to the Win64
 function-entry convention. See

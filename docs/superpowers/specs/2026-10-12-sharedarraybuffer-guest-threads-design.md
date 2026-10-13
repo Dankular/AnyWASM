@@ -92,8 +92,17 @@ sample rendering path. Those remain in the parent runtime goal.
   confirms module instantiation and a clean guest exit, but not multi-thread scheduling or target
   rendering.
 - Follow-up on 2026-10-13: the dedicated shared-runtime build applied `--no-check-features` to the
-  coordinator as well, and both the coordinator and in-place worker linked for wasm32 release. This
-  is build evidence only; an in-place browser replay is not recorded.
+  coordinator as well, and both the coordinator and in-place worker linked for wasm32 release. A
+  cross-origin-isolated Chrome replay then ran `parallel_test.exe` to exit 0 through the in-place
+  pool, with two overlapping slices, one two-context batch, 927,479 worker-retired instructions, and
+  the fixture's shared counter, per-thread TLS/TEB values, rendezvous, and stack sentinels intact. See
+  `docs/target-data/shared-cpu-inplace-overlap-2026-10-13.json`.
+- Follow-up: the copied-frame control initially failed because the pool sized its mapping snapshot
+  before exporting runnable contexts. Exporting an active x64 context synchronizes its TEB and can
+  allocate another guest page. Both pool implementations now export contexts first, then capture
+  mapping metadata and size their storage. Fresh copied-frame and in-place browser replays both
+  passed with two overlapping workers and intact TLS/TEB, rendezvous, and stack results; see
+  `docs/target-data/shared-cpu-publish-order-2026-10-13.json`.
 - Result: the full-runtime-per-worker layout remains blocked because it would share process statics
   and allocator state. The separate CPU-worker boundary executes bounded integer/control-flow and
   SSE slices over validated shared guest frames and now schedules multiple guest contexts. The
