@@ -711,12 +711,12 @@ unwind history tables, other PE32 frame layouts, and broader compiler metadata r
 [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
 for the fixture matrix and exit-code meanings.
 
-The next imports are `advapi32!RegOpenKeyExA` probes for
+An earlier trace checkpoint observed `advapi32!RegOpenKeyExA` probes for
 `Software\Microsoft\Direct3D\Direct3D12` under predefined roots `HKCU` and `HKLM`, with options
-`0` and access `0x20019`. The HLE currently has no registry data store, so both non-empty paths
-return `ERROR_FILE_NOT_FOUND` (`2`). A replay capped at 100,000,000 instructions then remains in a
+`0` and access `0x20019`. At that time the HLE had no registry data store, so both non-empty paths
+returned `ERROR_FILE_NOT_FOUND` (`2`). A replay capped at 100,000,000 instructions then remained in a
 repeating stream of `kernel32!HeapAlloc` and `kernel32!TlsGetValue` imports until the step cap. This
-does not establish why the target has not reached shader creation.
+did not establish why the target had not reached shader creation.
 
 At this earlier checkpoint the trace did not reach shader creation or `Present`. Although the HLE
 created virtual window, device, and swap-chain objects, no host window, host graphics device,
@@ -1168,9 +1168,11 @@ protection. Mod overlays remain unverified.
 - The corrected seed-1 route now reaches its teleport and a controlled terminal stop. Flashlight
   behavior at more aim positions, other gameplay states, other UAV formats, and general staging
   readback remain untested.
-- Extend the virtual registry only from observed target paths and required values. The current
-  `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
-  registry query, create, write, or persisted-value behavior.
+- The virtual registry now keeps process-local volatile keys and values. The `RegOpenKeyExA`,
+  `RegCreateKeyExA`, `RegSetValueExA`, `RegQueryValueExA`, and `RegCloseKey` slice supports
+  case-insensitive key/value lookup, nested create/open, two-pass value sizing, and `ERROR_MORE_DATA`.
+  It has no seeded target configuration, persistence, enumeration, or wide-character API support;
+  add values only when target evidence identifies the path and required contents.
 - HLE-only Tutorial01 and Tutorial03 now have visible cooperative-mode first-frame captures without
   local MSVC/UCRT DLLs; neither hit an unresolved runtime MSVCP import before rendering. Their pages
   remained in `Starting`, so later imports and orderly shutdown are still unverified. A controlled

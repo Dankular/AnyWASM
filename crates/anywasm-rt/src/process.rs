@@ -348,6 +348,12 @@ pub struct Process {
     pending_input_events: VecDeque<(u32, i64, i64, i64)>,
     pub handles: HashMap<u64, Handle>,
     pub next_handle: u64,
+    /// Process-local virtual registry key paths, indexed by guest handles.
+    pub registry_key_paths: HashMap<u64, String>,
+    /// Keys created by guest calls during this process lifetime.
+    pub registry_paths: HashSet<String>,
+    /// Volatile registry values indexed by normalized key path and value name.
+    pub registry_values: HashMap<(String, String), (u32, Vec<u8>)>,
     pub heap: crate::hle::heap::Heap,
     pub vmem: BTreeMap<u64, (u64, u8)>,
     pub vmem_next: u64,
@@ -1006,6 +1012,9 @@ impl Process {
             pending_input_events: VecDeque::new(),
             handles: HashMap::new(),
             next_handle: 0x100,
+            registry_key_paths: HashMap::new(),
+            registry_paths: HashSet::new(),
+            registry_values: HashMap::new(),
             heap: crate::hle::heap::Heap::new(),
             vmem: BTreeMap::new(),
             vmem_next: 0x2_0000_0000,
