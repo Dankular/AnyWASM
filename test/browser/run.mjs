@@ -1289,12 +1289,20 @@ try {
       command(4, words(16, 16, 16, 1, 1, 55, 0x40, 0, 4, 0)); // 4x D16_UNORM depth resource
       command(12, words(17, 1, 16, 55, 3, 0, 1, 0, 1)); // D16_UNORM DSV
       command(4, words(18, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // D16 color resolve target
+      command(4, words(19, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // depth + alpha-to-coverage resolve target
       const depthState = new Uint8Array(56), depthView = new DataView(depthState.buffer);
       depthView.setUint32(0, 8, true); depthView.setUint32(4, 1, true);
       depthView.setUint32(8, 1, true); depthView.setUint32(12, 2, true); // depth enabled, write ALL, LESS
       command(11, depthState);
       shader(9, 0, nearVertex); shader(10, 0, farVertex);
       shader(11, 1, greenPixel); shader(12, 1, redPixel);
+      const alphaPixel = tool.compileHlsl('float4 main() : SV_Target { return float4(1, 0, 0, 0.5); }', 'main', 'ps_5_0');
+      const farGreenPixel = tool.compileHlsl('float4 main() : SV_Target { return float4(0, 1, 0, 1); }', 'main', 'ps_5_0');
+      const alphaCoverageBlend = new Uint8Array(268), alphaCoverageBlendView = new DataView(alphaCoverageBlend.buffer);
+      alphaCoverageBlendView.setUint32(0, 20, true); // blend state id
+      alphaCoverageBlendView.setUint32(4, 1, true); // AlphaToCoverageEnable
+      alphaCoverageBlendView.setUint32(40, 0xf, true); // RenderTarget[0].RenderTargetWriteMask
+      command(9, alphaCoverageBlend);
       command(21, words(1, 4, 6));
       command(26, words(8, 0));
       command(27, words(4, 0, 0, 0, 0x3f800000));
@@ -1314,14 +1322,25 @@ try {
       command(17, words(0, 9)); command(17, words(1, 11)); command(29, words(3, 0));
       command(17, words(0, 10)); command(17, words(1, 12)); command(29, words(3, 0));
       command(47, words(18, 0, 3, 0, 28));
+      command(21, words(1, 4, 6));
+      command(24, words(20, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xffffffff));
+      command(26, words(8, 0));
+      command(27, words(4, 0, 0, 0x3f800000, 0x3f800000)); // clear blue
+      command(28, words(6, 3, 0x3f800000, 0)); // clear D24 depth/stencil
+      shader(13, 1, alphaPixel); shader(14, 1, farGreenPixel);
+      command(17, words(0, 9)); command(17, words(1, 13)); command(29, words(3, 0)); // near half-alpha red
+      command(17, words(0, 10)); command(17, words(1, 14)); command(29, words(3, 0)); // far green fills uncovered samples
+      command(47, words(19, 0, 3, 0, 28));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackTexture(7);
       const d32Pixels = await gpu.readBackTexture(15);
       const d16Pixels = await gpu.readBackTexture(18);
+      const coverageDepthPixels = await gpu.readBackTexture(19);
       const centerOf = (data) => Array.from(data.data.slice((8 * data.width + 8) * 4, (8 * data.width + 8) * 4 + 4));
       const result = { d24Center: centerOf(pixels), d32Center: centerOf(d32Pixels), d16Center: centerOf(d16Pixels),
+        coverageDepthCenter: centerOf(coverageDepthPixels),
         draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
@@ -1330,7 +1349,7 @@ try {
     }
   });
   check('D3D11 4x D24S8 depth testing keeps the nearer draw through color resolve',
-    multisampledDepthResult.draws === 6 && multisampledDepthResult.errors?.length === 0
+    multisampledDepthResult.draws === 8 && multisampledDepthResult.errors?.length === 0
       && near(multisampledDepthResult.d24Center || [], [0, 255, 0, 255], 1),
     JSON.stringify(multisampledDepthResult));
   check('D3D11 4x D32_FLOAT depth testing keeps the nearer draw through color resolve',
@@ -1340,6 +1359,12 @@ try {
   check('D3D11 4x D16_UNORM depth testing keeps the nearer draw through color resolve',
     multisampledDepthResult.errors?.length === 0
       && near(multisampledDepthResult.d16Center || [], [0, 255, 0, 255], 1),
+    JSON.stringify(multisampledDepthResult));
+  check('D3D11 4x D24S8 depth testing composes with alpha-to-coverage across samples',
+    multisampledDepthResult.errors?.length === 0
+      && (multisampledDepthResult.coverageDepthCenter?.[0] ?? 0) > 0
+      && (multisampledDepthResult.coverageDepthCenter?.[1] ?? 0) > 0
+      && multisampledDepthResult.coverageDepthCenter?.[2] === 0,
     JSON.stringify(multisampledDepthResult));
 
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');

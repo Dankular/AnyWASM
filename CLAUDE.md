@@ -322,7 +322,8 @@ register-stack subset):
       advertised color/depth formats at 2x, 4x, and 8x and checks representative unsupported formats.
       Chromium verifies the resolve pixels. Chromium also tests near/far depth
       with 4x D32_FLOAT, D24S8, and D16_UNORM attachments and resolves the retained green draw to RGBA8.
-      `Map(READ)` executes older
+      A combined 4x D24S8/alpha-to-coverage draw resolves near red and farther green samples without
+      the clear blue channel. `Map(READ)` executes older
       commands already transferred to the host-visible GPU queue before its current HLE batch,
       preserving order across shared CPU slices; the default shared-worker triangle fixture verifies
       the staging values. Other format/resolve combinations and render-state combinations remain open.
