@@ -352,6 +352,13 @@ and orderly shutdown remain unverified. The source analyzer still lists missing 
 MSVCP140 names, but these captures show those names are not a blocker on the exercised path. The browser
 mode regression and explicit two-worker overlap results are in the linked capture record.
 
+A current-source HLE-only Tutorial03 replay ran for 30 seconds after its first frame, then sent Escape
+and continued for another 15 seconds. It reached 1,890 presents before Escape and 2,820 afterward, with
+two pipelines and no WebGPU validation errors. No unresolved-import stop appeared; the page remained in
+`Starting` with no terminal status, so later imports and orderly shutdown remain open. The browser logged
+one 404 without recording its URL. The runtime and bundle hashes, counters, and screenshot are in the
+[lifecycle capture record](target-data/tutorial03-hle-lifecycle-2026-10-13.json).
+
 Reproduction from the repository root, using an HLE-only directory prepared from the named files
 above:
 

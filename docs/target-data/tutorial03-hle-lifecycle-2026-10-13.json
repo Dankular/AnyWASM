@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-10-13",
+  "target": "DiligentSamples Tutorial03_Texturing",
+  "browser": "Playwright Chromium revision 1234",
+  "runtime": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "fc841f7ff8e17ca1a20415a5bd6c5f5669a0c370bd7b4b098d7830a377c2048b",
+    "sourceRevision": "02e2976"
+  },
+  "bundle": {
+    "path": "target/Tutorial03_Texturing-hle-only.awb",
+    "sha256": "fc6d43dbdae75e0457d78dfe2c6ea58a6aed7342ba682e4912f500a3d7590c25",
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11"
+  },
+  "firstFrame": {
+    "draws": 59,
+    "presents": 30,
+    "passes": 119,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": []
+  },
+  "after30Seconds": {
+    "draws": 3779,
+    "presents": 1890,
+    "passes": 7559,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": []
+  },
+  "afterEscapeAnd15Seconds": {
+    "draws": 5639,
+    "presents": 2820,
+    "passes": 11279,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": [],
+    "pageStatus": "Starting",
+    "terminalStatus": null,
+    "exitCode": null
+  },
+  "browserConsoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found); URL not captured"
+  ],
+  "interpretation": "The HLE-only target continued rendering for 30 seconds and for 15 seconds after Escape without an unresolved-import stop. The page remained active; later imports, guest input handling, and orderly shutdown are not established.",
+  "screenshot": "docs/images/tutorial03-hle-only-after-escape-2026-10-13.png"
+}

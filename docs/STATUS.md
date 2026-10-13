@@ -452,6 +452,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   per sample. No unresolved runtime MSVCP import appeared before either frame; the current source
   analyzer's static MSVCP misses remain outside these exercised paths. See
   `docs/target-data/diligent-hle-only-browser-2026-10-13.json`.
+  A current-source Tutorial03 HLE-only replay continued for 30 seconds after the first frame and for
+  15 seconds after Escape, reaching 2,820 presents with no WebGPU validation errors or unresolved-import
+  stop. It remained in `Starting` with no terminal status; later imports and orderly shutdown remain
+  unverified. See `docs/target-data/tutorial03-hle-lifecycle-2026-10-13.json`.
   Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in
