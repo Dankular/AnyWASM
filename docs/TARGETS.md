@@ -667,8 +667,11 @@ HLE-only runs now also verify a nested exception escaping a filter to an outer h
 exception raised during `__finally`. A synthetic handler test covers disposition 2 setting
 `EXCEPTION_NESTED_CALL` before search continues. A second-pass x64 test covers disposition 3 by
 redirecting to another searched frame, checking the resumed handler's unwind, target, and collided
-flags, and preserving restored register state. First-pass collided dispatch, nested `RtlUnwindEx`
-during phase two, and PE32 collided dispositions remain unsupported. The rebuilt release WASM and
+flags, and preserving restored register state. X64 first-pass search also has a synthetic retry test:
+the handler changes the dispatcher control PC within the loaded function; the resumed call sees the
+per-frame CONTEXT pointer and collided flag.
+Second-pass redirects outside the pre-searched frames, nested `RtlUnwindEx` during phase two, non-null
+unwind history tables, and PE32 collided dispositions remain unsupported. The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
 EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and

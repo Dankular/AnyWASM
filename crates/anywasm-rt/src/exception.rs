@@ -237,9 +237,11 @@ fn dispatch_context_exception_inner(
 
     let exception_record = crate::hle::kernel32::alloc_block(p, EXCEPTION_RECORD_SIZE, true);
     let context_record = crate::hle::kernel32::alloc_block(p, CONTEXT_SIZE, true);
+    let dispatcher_frame_context = crate::hle::kernel32::alloc_block(p, CONTEXT_SIZE, true);
     let dispatcher_context = crate::hle::kernel32::alloc_block(p, DISPATCHER_CONTEXT_SIZE, true);
     write_exception_record(p, exception_record, code, flags, exception_address, args)?;
     p.wr32(context_record + 0x30, 0x0010_000b)?; // CONTEXT_AMD64 | CONTROL | INTEGER | FLOATING_POINT
+    p.wr32(dispatcher_frame_context + 0x30, 0x0010_000b)?;
 
     let exception_context = context.clone();
     write_context(p, context_record, &context)?;
@@ -280,12 +282,12 @@ fn dispatch_context_exception_inner(
         };
         let frame_context = context.clone();
         let mut caller_context = frame_context.clone();
-        let establisher = if function_entry == 0 {
+        let mut establisher = if function_entry == 0 {
             frame_context.gpr[RSP]
         } else {
             read_frame_register(p, module_base, control_pc, function_entry, &frame_context)?
         };
-        let result = if function_entry == 0 {
+        let mut result = if function_entry == 0 {
             unwind_leaf(p, &mut caller_context)?
         } else {
             unwind_function(
@@ -299,72 +301,108 @@ fn dispatch_context_exception_inner(
                 false,
             )?
         };
-        frames.push(ExceptionFrame {
+        let mut frame = ExceptionFrame {
             control_pc,
             image_base: module_base,
             function_entry,
             establisher,
             context: frame_context.clone(),
-        });
+        };
+        frames.push(frame.clone());
 
         if result.handler != 0 {
             // Windows passes the original exception context to every first-pass handler.
             // The per-frame context is carried separately by the dispatcher walk.
-            p.wr32(exception_record + 4, search_flags)?;
-            write_context(p, context_record, &exception_context)?;
-            write_dispatcher_context(
-                p,
-                dispatcher_context,
-                control_pc,
-                module_base,
-                function_entry,
-                establisher,
-                context_record,
-                0,
-                0,
-                result.handler,
-                result.handler_data,
-            )?;
-            if p.trace_imports {
-                p.stderr.extend_from_slice(
-                    format!(
-                        "[seh] invoke frame={frame_number} pc={control_pc:#x} establisher={establisher:#x} handler={:#x} data={:#x}\n",
-                        result.handler, result.handler_data
-                    )
-                    .as_bytes(),
-                );
-            }
-            let disposition = match p.call_guest(
-                result.handler,
-                &[
-                    exception_record,
-                    establisher,
-                    context_record,
+            let mut scope_index = 0;
+            let mut collision_count = 0;
+            let mut collision_redirected = false;
+            let disposition = loop {
+                p.wr32(exception_record + 4, search_flags)?;
+                write_context(p, context_record, &exception_context)?;
+                write_context(p, dispatcher_frame_context, &frame.context)?;
+                write_dispatcher_context(
+                    p,
                     dispatcher_context,
-                ],
-            ) {
-                Ok(disposition) => disposition as u32,
-                Err(Stop::GuestUnwind(unwind)) => {
-                    let context_record = unwind.context_record;
-                    complete_guest_unwind(p, &frames, dispatcher_context, unwind)?;
-                    // The continue handlers see the final context after phase-two unwind.
-                    p.wr32(exception_record + 4, search_flags)?;
-                    dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
-                    restore_exception_context(p, context_record, skip_ret_on_resume)?;
-                    return Ok(0);
+                    frame.control_pc,
+                    frame.image_base,
+                    frame.function_entry,
+                    frame.establisher,
+                    dispatcher_frame_context,
+                    0,
+                    scope_index,
+                    result.handler,
+                    result.handler_data,
+                )?;
+                if p.trace_imports {
+                    p.stderr.extend_from_slice(
+                        format!(
+                            "[seh] invoke frame={frame_number} pc={:#x} establisher={:#x} handler={:#x} data={:#x}\n",
+                            frame.control_pc, frame.establisher, result.handler, result.handler_data
+                        )
+                        .as_bytes(),
+                    );
                 }
-                Err(stop) => return Err(stop),
+                let disposition = match p.call_guest(
+                    result.handler,
+                    &[
+                        exception_record,
+                        frame.establisher,
+                        context_record,
+                        dispatcher_context,
+                    ],
+                ) {
+                    Ok(disposition) => disposition as u32,
+                    Err(Stop::GuestUnwind(unwind)) => {
+                        let context_record = unwind.context_record;
+                        complete_guest_unwind(p, &frames, dispatcher_context, unwind)?;
+                        // The continue handlers see the final context after phase-two unwind.
+                        p.wr32(exception_record + 4, search_flags)?;
+                        dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
+                        restore_exception_context(p, context_record, skip_ret_on_resume)?;
+                        return Ok(0);
+                    }
+                    Err(stop) => return Err(stop),
+                };
+                if p.trace_imports {
+                    p.stderr.extend_from_slice(
+                        format!(
+                            "[seh] search frame={frame_number} pc={:#x} establisher={:#x} handler={:#x} disposition={disposition}\n",
+                            frame.control_pc, frame.establisher, result.handler
+                        )
+                        .as_bytes(),
+                    );
+                }
+                search_flags |= p.rd32(exception_record + 4)? & EXCEPTION_NONCONTINUABLE;
+                if disposition != EXCEPTION_COLLIDED_UNWIND_DISPOSITION {
+                    break disposition;
+                }
+                collision_count += 1;
+                if collision_count > MAX_EXCEPTION_FRAMES {
+                    return Err(Stop::Crash(format!(
+                        "exception search exceeded {MAX_EXCEPTION_FRAMES} collided-unwind redirects"
+                    )));
+                }
+                let (redirect_frame, redirect_result, redirect_scope_index) =
+                    resolve_collided_search_frame(p, dispatcher_context)?;
+                if let Some(redirect_index) = frames.iter().rposition(|searched| {
+                    searched.image_base == redirect_frame.image_base
+                        && searched.function_entry == redirect_frame.function_entry
+                        && searched.establisher == redirect_frame.establisher
+                }) {
+                    frames.truncate(redirect_index + 1);
+                    frames[redirect_index] = redirect_frame.clone();
+                } else {
+                    frames.clear();
+                    frames.push(redirect_frame.clone());
+                }
+                frame = redirect_frame;
+                establisher = frame.establisher;
+                result = redirect_result;
+                scope_index = redirect_scope_index;
+                last_rsp = frame.context.gpr[RSP];
+                search_flags |= EXCEPTION_COLLIDED_UNWIND_FLAG;
+                collision_redirected = true;
             };
-            if p.trace_imports {
-                p.stderr.extend_from_slice(
-                    format!(
-                        "[seh] search frame={frame_number} pc={control_pc:#x} establisher={establisher:#x} handler={:#x} disposition={disposition}\n",
-                        result.handler
-                    )
-                    .as_bytes(),
-                );
-            }
-            search_flags |= p.rd32(exception_record + 4)? & EXCEPTION_NONCONTINUABLE;
             if nested_frame == establisher {
                 search_flags &= !EXCEPTION_NESTED_CALL;
                 nested_frame = 0;
@@ -390,6 +428,9 @@ fn dispatch_context_exception_inner(
                     nested_frame = nested_frame
                         .max(p.rd64(dispatcher_context + DISPATCHER_ESTABLISHER_FRAME)?);
                 }
+                3 => unreachable!(
+                    "collided unwind dispositions are consumed by the repeated-handler loop"
+                ),
                 value => {
                     return Err(Stop::Unimplemented {
                         dll: "ntdll".into(),
@@ -398,6 +439,27 @@ fn dispatch_context_exception_inner(
                             result.handler
                         ),
                     })
+                }
+            }
+            if collision_redirected && disposition == EXCEPTION_CONTINUE_SEARCH as u32 {
+                search_flags &= !EXCEPTION_COLLIDED_UNWIND_FLAG;
+                p.wr32(exception_record + 4, search_flags)?;
+            }
+            if collision_redirected {
+                caller_context = frame.context.clone();
+                if frame.function_entry == 0 {
+                    unwind_leaf(p, &mut caller_context)?;
+                } else {
+                    unwind_function(
+                        p,
+                        frame.image_base,
+                        frame.control_pc,
+                        frame.function_entry,
+                        1,
+                        &mut caller_context,
+                        0,
+                        false,
+                    )?;
                 }
             }
         }
@@ -1286,6 +1348,89 @@ fn resolve_collided_unwind_frame(
         )));
     }
     Ok((redirect_index, restored_context, scope_index))
+}
+
+fn resolve_collided_search_frame(
+    p: &mut Process,
+    dispatcher_context: u64,
+) -> Result<(ExceptionFrame, UnwindResult, u32), Stop> {
+    let control_pc = p.rd64(dispatcher_context + DISPATCHER_CONTROL_PC)?;
+    let image_base = p.rd64(dispatcher_context + DISPATCHER_IMAGE_BASE)?;
+    let function_entry = p.rd64(dispatcher_context + DISPATCHER_FUNCTION_ENTRY)?;
+    let establisher = p.rd64(dispatcher_context + DISPATCHER_ESTABLISHER_FRAME)?;
+    let context_record = p.rd64(dispatcher_context + DISPATCHER_CONTEXT_RECORD)?;
+    let language_handler = p.rd64(dispatcher_context + DISPATCHER_LANGUAGE_HANDLER)?;
+    let handler_data = p.rd64(dispatcher_context + DISPATCHER_HANDLER_DATA)?;
+    let history_table = p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?;
+    let scope_index = p.rd32(dispatcher_context + DISPATCHER_SCOPE_INDEX)?;
+    if history_table != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "ntdll".into(),
+            name: "collided exception search with a non-null history table".into(),
+        });
+    }
+    if function_entry == 0 {
+        return Err(Stop::Crash(
+            "collided exception search redirected to a frame without unwind metadata".into(),
+        ));
+    }
+
+    let mut restored_context = read_context(p, context_record)?;
+    restored_context.rip = control_pc;
+    let Some((found_image_base, found_function_entry)) = lookup_frame(p, control_pc)? else {
+        return Err(Stop::Crash(format!(
+            "collided exception control PC {control_pc:#x} is outside loaded guest images"
+        )));
+    };
+    if found_image_base != image_base || found_function_entry != function_entry {
+        return Err(Stop::Crash(format!(
+            "collided exception dispatcher function metadata does not match control PC {control_pc:#x}"
+        )));
+    }
+    let stack_base = p.rd64(TEB_ADDR + 0x08)?;
+    let stack_limit = p.rd64(TEB_ADDR + 0x10)?;
+    if stack_limit >= stack_base
+        || restored_context.gpr[RSP] < stack_limit
+        || restored_context.gpr[RSP] >= stack_base
+        || establisher < stack_limit
+        || establisher >= stack_base
+        || establisher & 7 != 0
+    {
+        return Err(Stop::Crash(format!(
+            "collided exception context ({:#x},{:#x}) is outside TEB stack bounds {stack_limit:#x}..{stack_base:#x}",
+            restored_context.gpr[RSP], establisher
+        )));
+    }
+    let calculated_establisher =
+        read_frame_register(p, image_base, control_pc, function_entry, &restored_context)?;
+    let mut caller_context = restored_context.clone();
+    let result = unwind_function(
+        p,
+        image_base,
+        control_pc,
+        function_entry,
+        1,
+        &mut caller_context,
+        0,
+        false,
+    )?;
+    if calculated_establisher != establisher
+        || result.handler == 0
+        || result.handler != language_handler
+        || result.handler_data != handler_data
+    {
+        return Err(Stop::Crash(format!(
+            "collided exception dispatcher metadata does not match searched frame {establisher:#x}"
+        )));
+    }
+    let redirect_frame = ExceptionFrame {
+        control_pc,
+        image_base,
+        function_entry,
+        establisher,
+        context: restored_context,
+    };
+    Ok((redirect_frame, result, scope_index))
 }
 
 fn context_from_cpu(cpu: &Cpu, rip: u64, rsp: u64) -> Context64 {
@@ -2678,6 +2823,87 @@ mod tests {
         assert_eq!(result, Ok(0));
         assert_eq!(process.rd32(OUTER_FLAGS).unwrap(), EXCEPTION_NESTED_CALL);
         assert_eq!(process.rd32(TOP_FLAGS).unwrap(), 0);
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert!(process.skip_ret);
+    }
+
+    #[test]
+    fn collided_x64_search_retries_the_saved_dispatcher_frame() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const CALLER: u64 = IMAGE_BASE + 0x110;
+        const REDIRECT_PC: u64 = IMAGE_BASE + 0x118;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x170;
+        const HANDLER: u64 = IMAGE_BASE + 0x600;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const FIRST_FLAGS: u64 = INFO + 0x300;
+        const RETRY_FLAGS: u64 = INFO + 0x304;
+        const DISPATCHER_CONTEXT_RECORD: u64 = INFO + 0x308;
+        const HANDLER_CONTEXT_RECORD: u64 = INFO + 0x310;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions[0].end_address = 0x180;
+        process.modules.push(module);
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+        process.wr64(RAISE_RSP + 8, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0x500, 0x100).unwrap();
+        process.wr32(IMAGE_BASE + 0x504, 0x180).unwrap();
+        process.wr32(IMAGE_BASE + 0x508, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 0x09).unwrap(); // version 1, EHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0x304, 0x600).unwrap();
+
+        let mut handler = vec![0x8b, 0x41, 0x04]; // mov eax, [rcx + ExceptionFlags]
+        handler.extend_from_slice(&[0xa9, 0x40, 0, 0, 0]); // test eax, EXCEPTION_COLLIDED_UNWIND
+        handler.extend_from_slice(&[0x75, 0]); // jnz collided (relative byte patched below)
+        handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, FIRST_FLAGS
+        handler.extend_from_slice(&FIRST_FLAGS.to_le_bytes());
+        handler.extend_from_slice(&[0x89, 0x02]); // mov [rdx], eax
+        handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, DISPATCHER_CONTEXT_RECORD
+        handler.extend_from_slice(&DISPATCHER_CONTEXT_RECORD.to_le_bytes());
+        handler.extend_from_slice(&[0x49, 0x8b, 0x41, 0x28]); // mov rax, [r9 + ContextRecord]
+        handler.extend_from_slice(&[0x48, 0x89, 0x02]); // mov [rdx], rax
+        handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, HANDLER_CONTEXT_RECORD
+        handler.extend_from_slice(&HANDLER_CONTEXT_RECORD.to_le_bytes());
+        handler.extend_from_slice(&[0x4c, 0x89, 0x02]); // mov [rdx], r8
+        handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, REDIRECT_PC
+        handler.extend_from_slice(&REDIRECT_PC.to_le_bytes());
+        handler.extend_from_slice(&[0x49, 0x89, 0x11]); // mov [r9 + ControlPc], rdx
+        handler.extend_from_slice(&[0xb8, 3, 0, 0, 0, 0xc3]); // ExceptionCollidedUnwind; ret
+        let collided = handler.len();
+        handler[9] = (collided - 10) as u8;
+        handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, RETRY_FLAGS
+        handler.extend_from_slice(&RETRY_FLAGS.to_le_bytes());
+        handler.extend_from_slice(&[0x89, 0x02]); // mov [rdx], eax
+        handler.extend_from_slice(&[0x49, 0xb9]); // mov r9, LANDING_PAD
+        handler.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        handler.extend_from_slice(&[
+            0x4d, 0x89, 0x88, 0xf8, 0, 0, 0, // mov [r8 + CONTEXT.Rip], r9
+            0x31, 0xc0, // ExceptionContinueExecution
+            0xc3,
+        ]);
+        process.write_bytes(HANDLER, &handler).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(FIRST_FLAGS).unwrap(), 0);
+        assert_eq!(
+            process.rd32(RETRY_FLAGS).unwrap(),
+            EXCEPTION_COLLIDED_UNWIND_FLAG
+        );
+        assert_ne!(
+            process.rd64(DISPATCHER_CONTEXT_RECORD).unwrap(),
+            process.rd64(HANDLER_CONTEXT_RECORD).unwrap()
+        );
         assert_eq!(process.cpu.rip, LANDING_PAD);
         assert!(process.skip_ret);
     }
