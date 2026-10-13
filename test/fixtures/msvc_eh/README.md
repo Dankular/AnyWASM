@@ -36,8 +36,8 @@ The C++ fixtures return 0 only when all paths pass. Their return codes identify 
 | 93 | Catch-all handler selected instead of the typed handler |
 | 94 | Thrown-object destructor did not run exactly once after the catch |
 
-`seh-x86.exe` returns 0 only when filter selection, exception continuation, and both normal and
-unwind-time termination handlers pass:
+`seh-x86.exe` returns 0 only when filter selection, exception continuation, nested exception handling,
+and both normal and unwind-time termination handlers pass:
 
 | Exit code | Case |
 |---:|---|
@@ -47,6 +47,7 @@ unwind-time termination handlers pass:
 | 4 | A `CONTINUE_EXECUTION` filter incorrectly enters its handler |
 | 5 | Execution does not resume after `RaiseException` |
 | 6 | The outer handler fails to catch or the unwind-time `__finally` does not run once |
+| 7 | A filter-raised nested exception or the original exception is not caught |
 
 Build and inspect the imported exception entry points from the repository root:
 
@@ -128,7 +129,11 @@ verified `EXCEPTION_CONTINUE_SEARCH`, `EXCEPTION_CONTINUE_EXECUTION`, exception-
 `__except` block, normal `__finally`, and `__finally` during frame unwind. The runtime decodes the
 EH4 registration record and cookie-encoded scope table, validates local cookies with the image's
 `__security_check_cookie`, and transfers to the selected handler through the PE32 dispatcher. This
-does not yet cover nested/collided unwind dispositions or every compiler-specific EH4 layout.
+also verifies a filter that raises and catches a second exception before selecting the original
+exception. A synthetic runtime regression separately exercises a handler returning
+`EXCEPTION_NESTED_EXCEPTION` and checks that the next registration sees `EXCEPTION_NESTED_CALL`.
+Full nested-frame bookkeeping, a nested exception escaping its filter, collided unwind dispositions,
+and every compiler-specific EH4 layout remain open.
 
 On 2026-10-13, the C++ fixture added exit code 60 for a cross-registration-frame transfer: a noinline
 callee owns a `DestructorProbe` and throws `Derived`, while its caller catches `Base` by reference and

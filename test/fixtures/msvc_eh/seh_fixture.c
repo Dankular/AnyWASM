@@ -5,6 +5,18 @@ static const DWORD kCaughtCode = 0xE0424242;
 static const DWORD kSearchCode = 0xE0424245;
 static const DWORD kContinueCode = 0xE0424244;
 static const DWORD kUnwindCode = 0xE0424343;
+static const DWORD kNestedOuterCode = 0xE0424246;
+static const DWORD kNestedInnerCode = 0xE0424247;
+static volatile LONG g_nested_caught_code;
+
+static int nested_filter(void) {
+    __try {
+        RaiseException(kNestedInnerCode, 0, 0, NULL);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_nested_caught_code = (LONG)GetExceptionCode();
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 
 static void raise_through_finally(void) {
     __try {
@@ -59,5 +71,18 @@ int main(void) {
         caught_code = (LONG)GetExceptionCode();
     }
 
-    return caught_code == (LONG)kUnwindCode && g_finally_runs == 1 ? 0 : 6;
+    if (caught_code != (LONG)kUnwindCode || g_finally_runs != 1) return 6;
+
+    caught_code = 0;
+    g_nested_caught_code = 0;
+    __try {
+        RaiseException(kNestedOuterCode, 0, 0, NULL);
+    } __except (nested_filter()) {
+        caught_code = (LONG)GetExceptionCode();
+    }
+
+    if (caught_code != (LONG)kNestedOuterCode
+        || g_nested_caught_code != (LONG)kNestedInnerCode) return 7;
+
+    return 0;
 }

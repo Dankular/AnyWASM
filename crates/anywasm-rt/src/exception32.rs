@@ -14,6 +14,7 @@ const EXCEPTION_COLLIDED_UNWIND: u32 = 3;
 const EXCEPTION_CONTINUE_EXECUTION_FILTER: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH_FILTER: i32 = 0;
 const EXCEPTION_NONCONTINUABLE: u32 = 1;
+const EXCEPTION_NESTED_CALL: u32 = 0x10;
 const EXCEPTION_UNWINDING: u32 = 0x2;
 const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
@@ -713,7 +714,15 @@ fn dispatch_exception_inner(
                 return resume_exception(p, exception_record, context_record, skip_ret_on_resume);
             }
             EXCEPTION_CONTINUE_SEARCH => registration = next,
-            EXCEPTION_NESTED_EXCEPTION | EXCEPTION_COLLIDED_UNWIND => {
+            EXCEPTION_NESTED_EXCEPTION => {
+                let exception_flags = p.rd32(exception_record + 4)?;
+                p.wr32(
+                    exception_record + 4,
+                    exception_flags | EXCEPTION_NESTED_CALL,
+                )?;
+                registration = next;
+            }
+            EXCEPTION_COLLIDED_UNWIND => {
                 return Err(Stop::Unimplemented {
                     dll: "ntdll".into(),
                     name: format!("PE32 exception disposition {disposition}"),
@@ -1317,6 +1326,50 @@ mod tests {
         assert_eq!(process.cpu.gpr[RSP], RAISE_RSP + 20);
         assert_eq!(process.rd32(MARKER + 4).unwrap(), 0);
         assert!(process.skip_ret);
+    }
+
+    #[test]
+    fn nested_exception_disposition_marks_the_record_and_continues_search() {
+        const OUTER_FRAME: u64 = STACK + 0x180;
+        const OUTER_HANDLER: u64 = CODE + 0x180;
+        const CALLER: u64 = CODE + 0x20;
+        let mut process = process_with_frame_handler();
+        process.wr32(FRAME, OUTER_FRAME as u32).unwrap();
+        process.wr32(FRAME + 4, HANDLER as u32).unwrap();
+        process.wr32(OUTER_FRAME, u32::MAX).unwrap();
+        process
+            .wr32(OUTER_FRAME + 4, OUTER_HANDLER as u32)
+            .unwrap();
+        process
+            .write_bytes(HANDLER, &[0xb8, 2, 0, 0, 0, 0xc2, 0x10, 0x00])
+            .unwrap(); // return ExceptionNestedException
+
+        let mut outer_handler = vec![
+            0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_RECORD
+            0x8b, 0x50, 0x04, // mov edx, [eax + 4] -- ExceptionFlags
+            0xb9, // mov ecx, MARKER
+        ];
+        outer_handler.extend_from_slice(&(MARKER as u32).to_le_bytes());
+        outer_handler.extend_from_slice(&[
+            0x89, 0x11, // mov [ecx], edx
+            0x8b, 0x44, 0x24, 0x0c, // mov eax, [esp + 12] -- CONTEXT
+            0xba, // mov edx, LANDING
+        ]);
+        outer_handler.extend_from_slice(&(LANDING as u32).to_le_bytes());
+        outer_handler.extend_from_slice(&[
+            0x89, 0x90, 0xb8, 0, 0, 0, // mov [eax + CONTEXT.Eip], edx
+            0x31, 0xc0, // xor eax, eax -- ExceptionContinueExecution
+            0xc2, 0x10, 0x00, // ret 16
+        ]);
+        process
+            .write_bytes(OUTER_HANDLER, &outer_handler)
+            .unwrap();
+
+        let result = dispatch_raised_exception(&mut process, 0xe123_4567, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(MARKER).unwrap(), 0x10);
+        assert_eq!(process.cpu.rip, LANDING);
     }
 
     #[test]
