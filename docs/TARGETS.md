@@ -777,10 +777,11 @@ uses retired instructions.
 The same target replay checks input through the rendered output. GLFW creates a hidden helper window
 before the visible game window, so routing browser input to the first top-level HWND silently dropped
 keys. The runtime now selects the focused visible window, or falls back to a visible top-level window.
-Mouse coordinates are scaled from the canvas content area (excluding its border) to the guest window;
-the fixture verifies that the center of a 320x240 CSS canvas maps to `(520,404)` in a 1040x807 guest
-window. The guest also requests `TrackMouseEvent(TME_LEAVE)` and receives `WM_MOUSELEAVE` when the
-pointer exits the canvas. After correcting the host-time unit conversion, holding W for 500 ms moves
+Mouse coordinates are scaled from the canvas content area (excluding its border) to the Win32 client
+area. The browser fixture uses a 256x192 CSS content box inside a 258x194 border box and verifies
+that a point 130x101 CSS pixels from the content origin maps to `(520,404)` in the 1024x768 client
+area of a 1040x807 guest window. The guest also requests `TrackMouseEvent(TME_LEAVE)` and receives
+`WM_MOUSELEAVE` when the pointer exits the canvas. After correcting the host-time unit conversion, holding W for 500 ms moves
 the green player marker 22.2 pixels upward. The seed-1 replay checks W/S/A/D and cursor-aimed Space
 movement in all four directions; each moves 22.2–23.7 pixels in the expected direction. Holding the
 left button for one second increases pixels above luminance 16 from 3,909 to 5,944 (2,035 more);

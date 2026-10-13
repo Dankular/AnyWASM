@@ -352,6 +352,8 @@ try {
       // Keep a 256x192 content box so integer browser pointer coordinates map exactly at 4x scale.
       canvas.style.width = '258px';
       canvas.style.height = '194px';
+      const rect = canvas.getBoundingClientRect();
+      canvas.style.transform = `translate(${Math.round(rect.left) - rect.left}px, ${Math.round(rect.top) - rect.top}px)`;
     });
     await page.locator('#screen').scrollIntoViewIfNeeded();
     await page.locator('#screen').focus();
@@ -366,7 +368,10 @@ try {
     await page.mouse.click(inputCenter.x, inputCenter.y);
     const inputMove = await page.locator('#screen').evaluate((canvas) => {
       const rect = canvas.getBoundingClientRect();
-      return { x: rect.left + canvas.clientLeft + 130, y: rect.top + canvas.clientTop + 101 };
+      return {
+        x: rect.left + canvas.clientLeft + 520 * canvas.clientWidth / 1024,
+        y: rect.top + canvas.clientTop + 404 * canvas.clientHeight / 768,
+      };
     });
     await page.mouse.move(inputMove.x, inputMove.y);
     await page.mouse.move(inputCenter.x + 500, inputCenter.y + 300);

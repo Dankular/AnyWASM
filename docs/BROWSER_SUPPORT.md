@@ -7,6 +7,11 @@ otherwise the script expects a Chromium under `/opt/pw-browsers`. The cross-engi
 `test/browser/cross-engine.mjs`; `CHROMIUM`, `FIREFOX`, and `WEBKIT` can select executables, and
 `BROWSER` can select one engine.
 
+Focused input fixture repeat on 2026-10-13: Chrome `155.0.8059.40` on Windows x64. The 256x192 CSS
+content area maps the test point to guest client coordinate `(520,404)`; the guest reports
+`TrackMouseEvent(TME_LEAVE)` success, receives `WM_MOUSELEAVE`, and exits with code 0. The fixture
+aligns the canvas to integer CSS pixels so browser pointer rounding does not shift the target point.
+
 Focused cube-array regression on 2026-10-13: Playwright Chromium `151.0.7922.34` on Windows x64.
 The synthetic D3D11 fixture selected two cubes starting at face 6, sampled both cube indices,
 checked the linear +X/+Y edge blend, and read the selected view dimensions as 4x4 with two cubes and

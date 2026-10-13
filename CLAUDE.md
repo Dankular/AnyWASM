@@ -204,8 +204,9 @@ register-stack subset):
       drawing, common controls, message boxes, and clipboard remain open as needed by real programs.
 - [ ] **Audio**: winmm waveOut, DirectSound, XAudio2, WASAPI → WebAudio (AudioWorklet).
 - [~] **Input devices**: `test/browser/run.mjs` verifies Playwright `WM_KEYDOWN` and
-      `WM_LBUTTONDOWN`, scales mouse coordinates from the CSS client area to the 1040x807 guest
-      window, and exercises `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`. `test/browser/target.mjs`
+      `WM_LBUTTONDOWN`, maps a 256x192 CSS content area to the 1024x768 Win32 client area inside
+      the 1040x807 guest window, and exercises `TrackMouseEvent(TME_LEAVE)`/`WM_MOUSELEAVE`.
+      `test/browser/target.mjs`
       verifies W/S/A/D movement, cursor-aimed movement in all four directions, a flashlight response,
       and Tab map regeneration in the selected Diligent maze; browser input skips hidden top-level
       helper windows. The positive flashlight measurement is from a seeded build; the random Release
