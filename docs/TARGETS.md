@@ -515,24 +515,23 @@ The regenerated static-runtime analyzer output is in
 [`target-imports/glfwdemo-d3d11-staticcrt.json`](target-imports/glfwdemo-d3d11-staticcrt.json).
 The earlier dynamic-runtime report remains in
 [`target-imports/glfwdemo-d3d11.json`](target-imports/glfwdemo-d3d11.json), generated with an older
-analyzer implementation. The current source-built CLI reports 84 missing imports across the EXE and
+analyzer implementation. The current source-built CLI reports 68 missing imports across the EXE and
 three DLLs when each image is analyzed with the release directory, so imports from bundled sibling
-DLLs count as resolved. An individual-file run without `--dir` reports 88 because four imports from
-the bundled D3Dcompiler DLL are counted as missing. The older 349-miss dynamic-runtime snapshot used
-an older analyzer and is not directly comparable.
+DLLs count as resolved. The older 349-miss dynamic-runtime snapshot used an older analyzer and is not
+directly comparable.
 
 | Image | Implemented | Missing | Largest unresolved groups |
 |---|---:|---:|---|
-| `GLFWDemo.exe` | 164 | 40 | USER32 20; GDI32 10; KERNEL32 7; SHELL32 3 |
-| `GraphicsEngineD3D11_64r.dll` | 112 | 9 | KERNEL32 8; USER32 1 |
-| `Archiver_64r.dll` | 104 | 8 | KERNEL32 8 |
-| `D3Dcompiler_47.dll` | 104 | 27 | KERNEL32 15; ADVAPI32 11; RPCRT4 1 |
-| **Aggregate** | **484** | **84** | |
+| `GLFWDemo.exe` | 167 | 37 | USER32 19; GDI32 10; KERNEL32 5; SHELL32 3 |
+| `GraphicsEngineD3D11_64r.dll` | 115 | 6 | KERNEL32 6 |
+| `Archiver_64r.dll` | 106 | 6 | KERNEL32 6 |
+| `D3Dcompiler_47.dll` | 112 | 19 | KERNEL32 9; ADVAPI32 9; RPCRT4 1 |
+| **Aggregate** | **500** | **68** | |
 
-The static runtime leaves no reported MSVCP140, VCRUNTIME140, or UCRT import misses in the EXE,
-engine, and archiver. The EXE's current misses include 20 USER32, 10 GDI32, 7 KERNEL32, and 3
-SHELL32 symbols; the engine retains 9 imports, the archiver 8, and D3DCompiler 27. The JSON
-records each unresolved name.
+The static runtime leaves no reported MSVCP140, VCRUNTIME140, or UCRT import misses in these images.
+The EXE's current misses include 19 USER32, 10 GDI32, 5 KERNEL32, and 3 SHELL32 symbols; the engine
+and archiver each retain 6 imports, and D3DCompiler retains 19. The JSON records each unresolved
+name.
 
 ### Third-party DLL loading audit
 

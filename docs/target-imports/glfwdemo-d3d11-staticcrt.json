@@ -1,7 +1,7 @@
 {
-  "generated_utc": "2026-10-11T23:45:54Z",
+  "generated_utc": "2026-10-13T17:18:30Z",
   "analyzer": "anywasm analyze --json --dir <release-dir>",
-  "anywasm_commit": "0ca50c84ed9ede02b3924cc67207d094a53d3e9f",
+  "anywasm_commit": "d7bb1a4b416b881c6d4fb23028a96f62bb455e7a",
   "diligentengine_commit": "efe5da2270c6edfc8b0d2e39e946b35acbeaa874",
   "diligentcore_commit": "074060cfd1db73064d7a18cf40df86af6531520c",
   "diligentsamples_commit": "03a10e15e69c5ae1738a52175ae029f3f4275a90",
@@ -14,14 +14,14 @@
     "rendering_backend": "D3D11 only"
   },
   "aggregate": {
-    "implemented_count": 484,
-    "missing_count": 84
+    "implemented_count": 500,
+    "missing_count": 68
   },
   "images": [
     {
       "image": "GLFWDemo.exe",
-      "implemented_count": 164,
-      "missing_count": 40,
+      "implemented_count": 167,
+      "missing_count": 37,
       "unresolved_imports": [
         {
           "dll": "GDI32.dll",
@@ -41,8 +41,6 @@
         {
           "dll": "KERNEL32.dll",
           "missing": [
-            "FindNextFileW",
-            "FindClose",
             "FindFirstFileExW",
             "EnumSystemLocalesW",
             "IsValidLocale",
@@ -79,50 +77,39 @@
             "OpenClipboard",
             "FlashWindow",
             "GetLayeredWindowAttributes",
-            "WaitMessage",
-            "GetMessageTime"
+            "WaitMessage"
           ]
         }
       ]
     },
     {
       "image": "GraphicsEngineD3D11_64r.dll",
-      "implemented_count": 112,
-      "missing_count": 9,
+      "implemented_count": 115,
+      "missing_count": 6,
       "unresolved_imports": [
         {
           "dll": "KERNEL32.dll",
           "missing": [
             "InterlockedFlushSList",
-            "FindClose",
             "FindFirstFileExW",
-            "FindNextFileW",
             "IsValidLocale",
             "EnumSystemLocalesW",
             "FreeLibraryAndExitThread",
             "HeapQueryInformation"
-          ]
-        },
-        {
-          "dll": "USER32.dll",
-          "missing": [
-            "GetDesktopWindow"
           ]
         }
       ]
     },
     {
       "image": "Archiver_64r.dll",
-      "implemented_count": 104,
-      "missing_count": 8,
+      "implemented_count": 106,
+      "missing_count": 6,
       "unresolved_imports": [
         {
           "dll": "KERNEL32.dll",
           "missing": [
             "InterlockedFlushSList",
-            "FindClose",
             "FindFirstFileExW",
-            "FindNextFileW",
             "IsValidLocale",
             "EnumSystemLocalesW",
             "FreeLibraryAndExitThread",
@@ -133,22 +120,20 @@
     },
     {
       "image": "D3Dcompiler_47.dll",
-      "implemented_count": 104,
-      "missing_count": 27,
+      "implemented_count": 112,
+      "missing_count": 19,
       "unresolved_imports": [
         {
           "dll": "ADVAPI32.dll",
           "missing": [
             "CryptDestroyHash",
             "CryptAcquireContextW",
-            "RegQueryValueExA",
             "RegEnumKeyExA",
             "CryptGetHashParam",
             "CryptCreateHash",
             "CryptHashData",
             "RegQueryValueExW",
             "RegOpenKeyExW",
-            "RegCloseKey",
             "CryptReleaseContext"
           ]
         },
@@ -158,17 +143,11 @@
             "IsValidLocale",
             "EnumSystemLocalesW",
             "InterlockedFlushSList",
-            "UnmapViewOfFile",
             "CreateFileMappingW",
-            "MapViewOfFile",
-            "SetFileAttributesW",
             "DeviceIoControl",
             "MapViewOfFileEx",
-            "CreateFileMappingA",
             "ExpandEnvironmentStringsW",
-            "FindClose",
             "FindFirstFileExW",
-            "FindNextFileW",
             "GetDriveTypeW"
           ]
         },
