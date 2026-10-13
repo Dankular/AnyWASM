@@ -282,8 +282,8 @@ register-stack subset):
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
       edge-crossing BORDER pixels. Texture2DArray SampleGrad and zero-bias SampleBias each return
       `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. A
-      separate 8x anisotropic R8_UNORM Texture2DArray Sample returns `[76, 0, 0, 255]` at that edge,
-      verifying format-specific channel defaults.
+      separate 8x anisotropic R8_UNORM Texture2DArray Sample returns `[76, 0, 0, 255]`, while
+      RG8_UNORM returns `[38, 114, 0, 255]` at that edge, verifying format-specific channel defaults.
       Texture3D R8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a
       3D edge footprint, verifying channel defaults and edge weighting.
       Texture1DArray R8_UNORM sampling returns `[128, 0, 0, 255]` from mip 1/layer 0 and
