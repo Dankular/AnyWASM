@@ -895,6 +895,15 @@ fn dispatch_exception_records(
 }
 
 fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> {
+    unwind_to_rtl32_inner(p, unwind, None, 0)
+}
+
+fn unwind_to_rtl32_inner(
+    p: &mut Process,
+    unwind: GuestUnwind32,
+    skip_handler: Option<SearchFrame32>,
+    nested_depth: usize,
+) -> Result<u64, Stop> {
     let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
     let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
     if stack_limit >= stack_base {
@@ -921,6 +930,29 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
     while index < unwind_count {
         let frame = frames[index];
         let target_unwind = target_index == Some(index);
+        if skip_handler.is_some_and(|skipped| skipped.registration == frame.registration) {
+            if skip_handler.is_some_and(|skipped| {
+                skipped.next != frame.next || skipped.handler != frame.handler
+            }) {
+                return Err(Stop::Crash(format!(
+                    "PE32 nested RtlUnwind changed the active callback registration {:#x}",
+                    frame.registration
+                )));
+            }
+            if p.rd32(TEB_ADDR)? != frame.registration {
+                return Err(Stop::Crash(format!(
+                    "PE32 nested RtlUnwind expected callback registration {:#x} at ExceptionList head",
+                    frame.registration
+                )));
+            }
+            if target_unwind {
+                p.wr32(unwind.exception_record + 4, unwind_flags)?;
+                return resume_rtl_unwind32(p, &unwind, context_record);
+            }
+            p.wr32(TEB_ADDR, frame.next)?;
+            index += 1;
+            continue;
+        }
         p.wr32(
             unwind.exception_record + 4,
             unwind_flags
@@ -953,14 +985,17 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
         p.cpu.gpr[RBP] = previous_ebp;
         let disposition = match result {
             Ok(disposition) => disposition as u32,
-            Err(
-                Stop::GuestUnwind32(_)
-                | Stop::GuestUnwind(_)
-                | Stop::GuestCatch32(_)
-                | Stop::GuestSehTransfer32(_),
-            ) => {
+            Err(Stop::GuestUnwind32(nested)) => {
+                if nested_depth >= MAX_SEH_FRAMES {
+                    return Err(Stop::Crash(format!(
+                        "PE32 nested RtlUnwind exceeded {MAX_SEH_FRAMES} callback transfers"
+                    )));
+                }
+                return unwind_to_rtl32_inner(p, nested, Some(frame), nested_depth + 1);
+            }
+            Err(Stop::GuestUnwind(_) | Stop::GuestCatch32(_) | Stop::GuestSehTransfer32(_)) => {
                 return Err(Stop::Crash(
-                    "nested guest unwind transfer escaped a PE32 RtlUnwind handler".into(),
+                    "unsupported non-PE32 RtlUnwind transfer escaped a PE32 handler".into(),
                 ));
             }
             Err(stop) => return Err(stop),
@@ -1191,7 +1226,13 @@ fn unwind_to_catch32(
             ],
         );
         p.cpu.gpr[RBP] = previous_ebp;
-        let disposition = result? as u32;
+        let disposition = match result {
+            Ok(disposition) => disposition as u32,
+            Err(Stop::GuestUnwind32(nested)) => {
+                return unwind_to_rtl32_inner(p, nested, Some(frame), 0);
+            }
+            Err(stop) => return Err(stop),
+        };
         if p.trace_imports {
             p.stderr.extend_from_slice(
                 format!(
@@ -1302,7 +1343,13 @@ fn unwind_to_seh_transfer32(
             ],
         );
         p.cpu.gpr[RBP] = previous_ebp;
-        let disposition = result? as u32;
+        let disposition = match result {
+            Ok(disposition) => disposition as u32,
+            Err(Stop::GuestUnwind32(nested)) => {
+                return unwind_to_rtl32_inner(p, nested, Some(frame), 0);
+            }
+            Err(stop) => return Err(stop),
+        };
         if p.trace_imports {
             p.stderr.extend_from_slice(
                 format!(
