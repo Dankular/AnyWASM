@@ -427,9 +427,14 @@ function lowerOneDimensionalImagesToTwoDimensional(spirv) {
   if (firstConstant < 0) firstConstant = output.findIndex((inst, index) => index > 0 && [54, 59].includes(inst[0] & 0xffff));
   if (firstConstant < 0) return spirv;
   output.splice(firstConstant, 0, ...newTypes);
-  let firstGlobal = output.findIndex((inst, index) => index > 0 && [54, 59].includes(inst[0] & 0xffff));
-  if (firstGlobal < 0) firstGlobal = output.length;
-  output.splice(firstGlobal, 0, ...newConstants);
+  for (const constant of newConstants) {
+    const typeId = constant[1];
+    const typeIndex = output.findIndex((inst, index) => index > 0
+      && [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32].includes(inst[0] & 0xffff)
+      && inst[1] === typeId);
+    if (typeIndex < 0) return spirv;
+    output.splice(typeIndex + 1, 0, constant);
+  }
   output[0][3] = nextId;
   const result = new Uint8Array(output.reduce((size, inst) => size + inst.length, 0) * 4), resultView = new DataView(result.buffer);
   let wordIndex = 0;

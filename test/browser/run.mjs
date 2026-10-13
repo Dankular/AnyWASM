@@ -5178,6 +5178,71 @@ try {
       && near(texture1dArrayResult.mip2Layer1 || [], [0, 255, 0, 255], 1),
     JSON.stringify(texture1dArrayResult));
 
+  const texture1dArrayUavResult = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 8; canvas.height = 8;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      const compute = tool.compileHlsl(`
+        RWTexture1DArray<float4> outputImage : register(u0);
+        [numthreads(1, 1, 1)]
+        void main(uint3 id : SV_DispatchThreadID) {
+          outputImage[id.xy] = float4((float(id.x) + 1.0) / 5.0, float(id.y), 0.4, 1.0);
+        }
+      `, 'main', 'cs_5_0');
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, i) => view.setUint32(i * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const data = new Uint8Array(8 + payload.length), view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, payload.length, true); data.set(payload, 8);
+        return data;
+      };
+      const stream = [];
+      const emit = (op, payload) => { stream.push(command(op, payload)); };
+      emit(53, words(3, 4, 1, 2, 28, 0x80, 0, 0)); // four-wide, two-layer RGBA8_UNORM Texture1D UAV
+      emit(12, words(4, 3, 3, 28, 3, 0, 1, 0, 2)); // Texture1DArray UAV
+      const shaderHead = words(6, 2, compute.length), shaderPayload = new Uint8Array(shaderHead.length + compute.length);
+      shaderPayload.set(shaderHead); shaderPayload.set(compute, shaderHead.length); emit(6, shaderPayload);
+      emit(17, words(2, 6));
+      emit(43, words(0, 1, 4, 0xffffffff));
+      emit(42, words(4, 2, 1));
+      const commands = new Uint8Array(stream.reduce((size, part) => size + part.length, 0));
+      let offset = 0;
+      for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const layer0 = await gpu.readBackResource(3, 0);
+      const layer1 = await gpu.readBackResource(3, 1);
+      const result = {
+        layer0: Array.from(layer0),
+        layer1: Array.from(layer1),
+        dispatches: gpu.stats.dispatches,
+        errors: gpu.stats.errors,
+      };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check('D3D11 Texture1DArray UAV dispatch writes every element in both layers',
+    !texture1dArrayUavResult.error && texture1dArrayUavResult.dispatches === 1
+      && texture1dArrayUavResult.errors?.length === 0
+      && texture1dArrayUavResult.layer0?.length === 16
+      && texture1dArrayUavResult.layer1?.length === 16
+      && texture1dArrayUavResult.layer0.every((value, i) => value === (i % 4 === 0 ? [51, 102, 153, 204][i >> 2]
+        : i % 4 === 1 ? 0 : i % 4 === 2 ? 102 : 255))
+      && texture1dArrayUavResult.layer1.every((value, i) => value === (i % 4 === 0 ? [51, 102, 153, 204][i >> 2]
+        : i % 4 === 1 ? 255 : i % 4 === 2 ? 102 : 255)),
+    JSON.stringify(texture1dArrayUavResult));
+
   const textureArrayResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');

@@ -106,6 +106,22 @@ check('Texture1DArray samples lower to a 2D array backing texture with centered 
     && /textureSampleLevel\(t0_,\s*s0_,\s*vec2<f32>\([^)]*\),\s*i32\(/.test(texture1dArrayPs?.wgsl || '')
     && !/texture_1d(?:<|_array)/.test(texture1dArrayPs?.wgsl || ''),
   texture1dArrayError || texture1dArrayPs?.wgsl || 'translation returned no WGSL');
+let texture1dArrayUavCs, texture1dArrayUavError = '';
+try {
+  texture1dArrayUavCs = t.translate(t.compileHlsl(`
+    RWTexture1DArray<float4> outputImage : register(u0);
+    [numthreads(1, 1, 1)]
+    void main(uint3 id : SV_DispatchThreadID) {
+      outputImage[id.xy] = float4(float(id.x), float(id.y), 0.0, 1.0);
+    }
+  `, 'main', 'cs_5_0'));
+} catch (error) { texture1dArrayUavError = String(error); }
+check('Texture1DArray UAV stores lower to a 2D array storage texture',
+  texture1dArrayUavCs?.descriptors.some((d) => d.type === 1 && d.register === 0)
+    && /texture_storage_2d_array/.test(texture1dArrayUavCs?.wgsl || '')
+    && /textureStore\(/.test(texture1dArrayUavCs?.wgsl || '')
+    && !/texture_storage_1d(?:<|_array)/.test(texture1dArrayUavCs?.wgsl || ''),
+  texture1dArrayUavError || texture1dArrayUavCs?.wgsl || 'translation returned no WGSL');
 let threw = false; try { t.compileHlsl('float4 x( {', 'x', 'ps_5_0'); } catch (e) { threw = /HLSL/.test(e.message); }
 check('syntax errors reported', threw);
 let sdfWgsl = '', sdfError = '';

@@ -80,6 +80,7 @@
 **Files:** D3D11 HLE modules, `web/gpu.js`, `test/browser/run.mjs`, `docs/TARGETS.md`
 
 - [x] Enumerate D3D11 typed UAV formats advertised by the HLE and pixel-test all 16 through texture dispatch/readback.
+- [x] Lower `RWTexture1DArray` storage images through a 2D-array backing texture; Chromium dispatches across two layers and reads back every written element without WebGPU validation errors.
 - [x] Read back D32_FLOAT_S8X24 depth and stencil aspects separately and pack the DXGI 8-byte texel layout; Chromium verifies all four depth/stencil texels.
 - [x] Read back D24_UNORM_S8 by sampling its depth-only aspect, quantizing to 24 bits, and copying stencil separately; Chromium checks the packed bytes for all four 2x2 texels. Read back B5G6R5_UNORM, B5G5R5A1_UNORM, and B4G4R4A4_UNORM through RGBA16Float backing; browser assertions verify normalized channel values and exact packed words across odd-width padded 3x2 rows.
 - [x] Verify event-query `End`/`GetData` ordering and explicit rejection of unsupported valid query types; invalid query types return `E_INVALIDARG`.
