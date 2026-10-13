@@ -333,6 +333,18 @@ export class AnyWasm {
       if (state !== 0 || !exports?.asyncify_get_state || !asyncifyData || !hostIo.gpuExecutor) return 0;
       if (hostIo.pending) return 0;
       try {
+        const pendingLength = exports.aw_gpu_len();
+        if (pendingLength) {
+          const pending = new Uint8Array(memory.buffer, exports.aw_gpu_ptr() >>> 0, pendingLength);
+          try {
+            const pendingCommands = typeof SharedArrayBuffer !== 'undefined' && memory.buffer instanceof SharedArrayBuffer
+              ? pending.slice()
+              : pending;
+            hostIo.gpuExecutor.execute(pendingCommands);
+          } finally {
+            exports.aw_gpu_clear();
+          }
+        }
         const commands = new Uint8Array(memory.buffer, Number(commandsPtr) >>> 0, Number(commandsLength) >>> 0);
         if (commands.length) hostIo.gpuExecutor.execute(commands);
         const readback = hostIo.gpuExecutor.readBackResource(Number(resourceId) >>> 0, Number(subresource) >>> 0);

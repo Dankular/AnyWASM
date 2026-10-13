@@ -91,6 +91,14 @@ pressure, and returned the expected explicit graphics-unavailable status because
 OffscreenCanvas worker transfer are unavailable.
 These results are specific to the installed browser builds and platform.
 
+Fresh Chromium suite on 2026-10-13: Chrome `155.0.8059.40` on Windows x64. A shared-worker
+readback trace showed a `Map(READ)` call with no commands in its current HLE batch while the
+host-visible GPU queue still held the preceding texture create/copy commands. The readback import
+now executes that older queue before its current batch. The full suite passed the D3D11 staging
+matrix, including BGRA8_UNORM, R10G10B10A2_UNORM, and R8G8_UNORM, with no page or WebGPU validation
+errors. Three unrelated browser checks still fail: two JIT counter expectations and the exact
+unsupported-import alert text.
+
 Fresh Chromium suite on 2026-10-12: Chrome `154.0.8037.98`, selected through `CHROMIUM` on Windows
 x64. `node test/browser/run.mjs` passed the worker, emitted-module, input, D3D11 triangle, textured,
 and compute checks. The `?test=1` triangle back-buffer readback matched barycentric samples at 216

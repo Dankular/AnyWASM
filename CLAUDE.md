@@ -315,8 +315,10 @@ register-stack subset):
       `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 and R8_UNORM cases remain open.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
       sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; Rust HLE tests cover the reports and
-      command fields, while Chromium verifies the resolve pixels. Other staging formats and
-      subresource layouts, format/resolve combinations, and render-state combinations remain open.
+      command fields, while Chromium verifies the resolve pixels. `Map(READ)` executes older
+      commands already transferred to the host-visible GPU queue before its current HLE batch,
+      preserving order across shared CPU slices; the default shared-worker triangle fixture verifies
+      the staging values. Other format/resolve combinations and render-state combinations remain open.
       Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
       R32_UINT/SINT words,
