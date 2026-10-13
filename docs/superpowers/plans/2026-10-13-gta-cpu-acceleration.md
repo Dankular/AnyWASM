@@ -55,7 +55,7 @@
 
 - [x] Add a focused emitter regression for `MOVZX EBX, byte ptr [ESI]` followed by `MOVZX EAX, BL`; verify guarded byte-load and zero-extension code generation.
 - [x] Run the focused test red before the implementation and green after it; all 45 `anywasm-cpu` library tests pass.
-- [ ] Add a WASM differential fixture for the decoded instruction pair; assert interpreter, cached, and emitted execution have equal retired count, full CPU state, and mapped memory.
+- [x] Add a WASM differential fixture for the decoded instruction pair; assert interpreter, cached, and emitted execution have equal retired count, full CPU state, and mapped memory. `node test/wasm_jit_x86_movzx.mjs` passes with 10 retired instructions, 2 emitted executions, and matching 776-byte CPU / 2,204,385-byte mapped-memory snapshots.
 - [ ] Run a forced-emission GTA replay with the new pair and confirm nonzero target execution counters without disrupting the normal loading path.
 
 ### Task 3: Accelerate the measured GTA parser path

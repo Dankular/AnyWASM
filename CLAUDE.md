@@ -41,6 +41,7 @@ reimplemented system libraries, recompile shaders, and **fail loudly** on anythi
 cargo test                          # includes the hardware-differential CPU suite (DIFF_FILTER / DIFF_TRIALS env)
 bash web/build.sh                   # wasm build + cli + .awb demos (needs wasm32-unknown-unknown target)
 node test/wasm_smoke.mjs            # real .exe files through the WASM build under Node
+node test/wasm_jit_x86_movzx.mjs    # x86 MOVZX pair: interpreter/cached/emitted state differential
 node test/shaders.mjs               # HLSL -> DXBC -> SPIR-V -> WGSL
 node test/bench.mjs                 # interpreter throughput (instr/s) under WASM
 (cd test/browser && npm i && node run.mjs)   # headless Chromium, pixel checks (uses ?test=1 mode)
