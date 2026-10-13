@@ -425,8 +425,8 @@ register-stack subset):
       color/alpha blend operations. Triangle fans, alpha blending, and every alpha compare function
       at equality are also checked. Two-stage PREMODULATE is pixel-tested: stage 0 passes arg1,
       and stage 1 SELECTARG1 CURRENT is multiplied by its texture per channel. D3D9 HLE rejects
-      stage-1 PREMODULATE and bump-environment color/alpha operations on both stages without changing
-      state or emitting GPU commands. Bump-environment matrix state, broader multi-stage cascades,
+      stage-1 PREMODULATE, bump-environment color/alpha operations, and bump matrix states 7–10 on
+      both stages without changing state or emitting GPU commands. Broader multi-stage cascades,
       programmable shaders, and broad device/state coverage remain open. D3D12,
       DXGI flip-model/fullscreen/resize/vsync
       semantics, OpenGL (WGL), and Vulkan remain open. Prior art (WineBrowser: D3D9/12→WebGPU, MIT)

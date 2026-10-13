@@ -149,7 +149,7 @@
 **Files:** `crates/anywasm-rt/src/hle/d3d9.rs`, `crates/anywasm-rt/src/hle/gpu.rs`, `web/gpu.js`, `test/browser/run.mjs`
 
 - [ ] Cover remaining texture operations and multi-stage behavior, including PREMODULATE and bump-environment operations where their required state exists.
-- [x] Verify two-stage PREMODULATE for color and alpha: stage 0 passes arg1, then stage 1 SELECTARG1 CURRENT multiplies by its texture; Chromium checks `[0, 128, 64, 64]`. HLE tests reject stage-1 PREMODULATE and bump-environment color/alpha operations on both stages without mutating state or emitting GPU commands; the bump texture-stage matrix state is not implemented.
+- [x] Verify two-stage PREMODULATE for color and alpha: stage 0 passes arg1, then stage 1 SELECTARG1 CURRENT multiplies by its texture; Chromium checks `[0, 128, 64, 64]`. HLE tests reject stage-1 PREMODULATE, bump-environment color/alpha operations, and bump matrix states 7–10 on both stages without mutating state or emitting GPU commands.
 - [ ] Extend state, resource, surface, shader, and device methods from observed target calls; add guest-side and pixel regressions per method.
 - [ ] Verify alpha/color argument selectors, stage transitions, and unsupported combinations against the D3D9 operation definitions.
 

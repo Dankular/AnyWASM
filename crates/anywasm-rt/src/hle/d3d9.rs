@@ -3305,7 +3305,7 @@ mod tests {
         }
 
         // PREMODULATE is supported for color and alpha at stage 0. Stage 1
-        // can select CURRENT; stage-1 PREMODULATE and bump operations stay unsupported.
+        // can select CURRENT; stage-1 PREMODULATE and bump operations/states stay unsupported.
         for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, 17)] {
             p.wr32(STACK + offset, value).unwrap();
         }
@@ -3370,6 +3370,14 @@ mod tests {
             (1, 4, 17),
             (1, 4, 22),
             (1, 4, 23),
+            (0, 7, 0x3f80_0000),
+            (0, 8, 0x3f80_0000),
+            (0, 9, 0x3f80_0000),
+            (0, 10, 0x3f80_0000),
+            (1, 7, 0x3f80_0000),
+            (1, 8, 0x3f80_0000),
+            (1, 9, 0x3f80_0000),
+            (1, 10, 0x3f80_0000),
         ] {
             for (offset, word) in [(4, device as u32), (8, stage), (12, state), (16, value)] {
                 p.wr32(STACK + offset, word).unwrap();
