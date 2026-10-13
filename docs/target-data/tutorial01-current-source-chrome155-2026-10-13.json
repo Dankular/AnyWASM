@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-13T21:19:20+01:00",
+  "sourceRevision": "2cb03e4",
+  "target": "Diligent Tutorial01_HelloTriangle",
+  "bundle": {
+    "path": "C:\\Users\\sysadmin\\AppData\\Local\\Temp\\Tutorial01_HelloTriangle-current-hle.awb",
+    "sha256": "c027ddc6dea26ed77c0e7a01d7f9164e7d899ffa4edd4791b792fb03c32c39a6",
+    "files": 5,
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11"
+  },
+  "runtime": {
+    "sourceBuild": "cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release",
+    "sha256": "6481a007b4e489240c5cb021681b04e9f6b8a33cbb552a0da66bc95fc59014cc",
+    "bytes": 3116870,
+    "suppliedViaBrowserContextRoute": true
+  },
+  "browser": {
+    "name": "Chrome",
+    "version": "155.0.8059.40"
+  },
+  "normalModeVisibleCanvas": {
+    "launchMode": "cooperative default; no sharedCpuWorkers parameter",
+    "firstVisibleFrameSecondsAfterAdapterLog": 20,
+    "canvas": {
+      "width": 640,
+      "height": 513,
+      "coloredPixels": 328320,
+      "visualContent": "colored gradient triangle",
+      "screenshot": "docs/images/tutorial01-current-source-chrome155-2026-10-13.png",
+      "screenshotSha256": "f546455f118ac29ef164ae5c865978d3da7576e1335f225d445cf8c6285ff18b"
+    },
+    "statusAtCapture": "Starting",
+    "terminalStatus": null,
+    "pageErrors": [],
+    "failedRequests": [],
+    "httpErrors": [],
+    "console404": "http://localhost:8142/favicon.ico"
+  },
+  "interpretation": "The current-branch HLE-only Tutorial01 path rendered a visible triangle without an unresolved MSVCP import stopping execution. The page remained in Starting, so later imports and orderly shutdown remain unverified."
+}

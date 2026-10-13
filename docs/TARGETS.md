@@ -25,6 +25,13 @@ No unresolved-import stop, page error, failed request, or HTTP error appeared; t
 `/favicon.ico`. The page remained in `Starting`, so later imports and orderly shutdown remain unverified.
 See the [current-branch report](target-data/tutorial03-current-source-chrome155-2026-10-13.json) and
 [visible canvas capture](images/tutorial03-current-source-chrome155-2026-10-13.png).
+The same current-branch runtime also rendered Tutorial01 from a five-file HLE-only bundle containing
+the sample and its Diligent DLLs, without local MSVC/UCRT runtime DLLs. Chrome 155 showed the colored
+triangle 20 seconds after adapter initialization, with no unresolved-import stop, page error, failed
+request, or HTTP error; the only console 404 was `/favicon.ico`. The page remained in `Starting`, so
+later imports and orderly shutdown remain unverified. See the
+[Tutorial01 report](target-data/tutorial01-current-source-chrome155-2026-10-13.json) and
+[visible canvas capture](images/tutorial01-current-source-chrome155-2026-10-13.png).
 On 2026-10-13, HLE-only Tutorial01 and Tutorial03 first-frame captures showed the colored triangle and
 textured cube in cooperative CPU mode, with no local MSVC/UCRT DLLs and no unresolved runtime MSVCP
 import before either frame. Both pages stayed active; the captures do not establish later imports or
