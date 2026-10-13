@@ -96,7 +96,7 @@ remain open.
 - [x] Run shared worker CPU tests and browser overlap test; require exact retired-count accounting and no lost or duplicated context completions.
 - [ ] Run the GTA replay with workers enabled; record actual overlap, active worker count, loader time, and CPU throughput against the cooperative run.
 
-Progress: On 2026-10-13, the shared-worker Chromium fixture observed two active CPU slices while both guest threads completed an atomic rendezvous and preserved separate stack sentinels. This exposed a missing 32-byte Win64 home area in new-thread startup; x64 threads now begin at `stack_base - 0x28`, matching the main-thread ABI. The selected GLFW target still reports zero two-context batches, so GTA target overlap and throughput remain open.
+Progress: On 2026-10-13, the shared-worker Chromium fixture observed two active CPU slices while both guest threads completed an atomic rendezvous and preserved separate stack sentinels. This exposed a missing 32-byte Win64 home area in new-thread startup; x64 threads now begin at `stack_base - 0x28` according to the Win64 function-entry convention. A GTA replay initialized two workers and retired 1,658,235 instructions in shared mode, but recorded zero two-context batches before guest mapping growth exceeded the pool's page capacity and forced cooperative fallback. GTA target overlap and throughput remain open.
 
 ### Task 5: GTA 10x acceptance benchmark
 

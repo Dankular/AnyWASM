@@ -82,6 +82,18 @@ and rejection when cross-origin isolation is absent. The standalone no-std overl
 observed two workers active at once and checked atomic totals, context checksums, and stack guards. These
 synthetic results do not establish target performance or Diligent acceptance.
 
+### GTA shared CPU worker fallback replay
+
+On 2026-10-13, `target-gta-diag/gta-start-game.mjs` started the local `gta_sa.exe` package in
+Chrome 155.0.8059.40 with `GTA_SHARED_CPU=1`. The snapshot pool initialized with two workers and
+retired 1,658,235 guest instructions, but recorded zero two-context batches. As GTA grew its guest
+memory mappings, the pool fell back to cooperative execution with `guest mapping size exceeded
+shared CPU page capacity`; later progress showed startup phase 8, about 273 million guest
+instructions, and no terminal status while the page still reported `Starting`. The observed AGP
+range requests returned HTTP 206 and WebGPU reported no errors. This run did not reach gameplay or
+measure a speedup. The pool capacity transition and replay details are in
+[`target-data/gta-shared-cpu-fallback-2026-10-13.json`](target-data/gta-shared-cpu-fallback-2026-10-13.json).
+
 ## Sources and build
 
 Built from DiligentEngine `efe5da2270c6edfc8b0d2e39e946b35acbeaa874`, with DiligentCore at

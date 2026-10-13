@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-13",
+  "target": "Grand Theft Auto: San Andreas",
+  "entry": "gta_sa.exe",
+  "harness": "target-gta-diag/gta-start-game.mjs",
+  "conditions": {
+    "browser": "Google Chrome 155.0.8059.40",
+    "sharedCpuRequested": true,
+    "requestedWorkerCount": 2,
+    "afterNewGameCaptureSeconds": 30,
+    "bootTimeoutSeconds": 45,
+    "agpSizeBytes": 5013432573,
+    "runtimeWasmSha256": "7198DF47FDAC85DA593632A047675DF45887CDAA7D3BB0404F1C35F23061FA50",
+    "cpuWorkerWasmSha256": "0E2BD16811D28AE35A3243AE8481AC2E76F20A62BF8B3301A4BD305FF24379CD"
+  },
+  "result": {
+    "initialExecutionMode": "shared-cpu-workers",
+    "initialWorkerCount": 2,
+    "workerRetiredInstructionsBeforeFallback": "1658235",
+    "twoContextParallelBatches": 0,
+    "fallbackExecutionMode": "cooperative",
+    "fallbackWorkerCount": 0,
+    "fallbackReason": "guest mapping size exceeded shared CPU page capacity",
+    "postNewGameCapture": {
+      "startupPhase": 8,
+      "guestInstructions": "273160238",
+      "presents": 1008,
+      "terminalStatus": null,
+      "uiStatus": "Starting gta_sa.exe…",
+      "loadingStatus": "Fetching requested game data…",
+      "agpRangeResponses": "HTTP 206",
+      "webGpuErrors": []
+    },
+    "reachedGameplay": false,
+    "performanceComparison": null
+  },
+  "notes": [
+    "The worker pool initialized successfully, then was disposed when guest mappings grew beyond its fixed snapshot page capacity.",
+    "No two-context execution or gameplay load time was measured; this is a fallback diagnostic, not an optimized performance result."
+  ]
+}
