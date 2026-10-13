@@ -501,7 +501,7 @@ mod rtl_pc_to_file_header_tests {
         process.cpu.gpr[R9] = 0x73000;
         process.wr64(STACK, 0x1400_5678).unwrap();
         process.wr64(STACK + 0x28, CONTEXT).unwrap();
-        process.wr64(STACK + 0x30, 0).unwrap();
+        process.wr64(STACK + 0x30, 0x72400).unwrap();
         process.wr64(CONTEXT + 0x98, 0x71000).unwrap();
         process.wr64(CONTEXT + 0xf8, 0x1400_00110).unwrap();
         process.wr32(0x72000 + 4, 1).unwrap();
@@ -517,12 +517,12 @@ mod rtl_pc_to_file_header_tests {
                 exception_record: 0x72000,
                 return_value: 0x73000,
                 context_record: CONTEXT,
-                history_table: 0,
+                history_table: 0x72400,
             }))
         );
         assert!(String::from_utf8(process.take_stderr())
             .unwrap()
-            .contains("[seh] RtlUnwindEx args=[0x71000, 0x140000110, 0x72000, 0x73000, 0x76000, 0x0] caller=0x14005678 context=0x76000 context_rip=0x140000110 context_rsp=0x71000"));
+            .contains("[seh] RtlUnwindEx args=[0x71000, 0x140000110, 0x72000, 0x73000, 0x76000, 0x72400] caller=0x14005678 context=0x76000 context_rip=0x140000110 context_rsp=0x71000"));
     }
 
     #[test]

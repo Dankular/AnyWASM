@@ -712,15 +712,16 @@ regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback` covers this 
 compiled target fixture yet. Nested x64 `RtlUnwindEx` from a phase-two callback, including a selected
 C++ catch funclet, takes over the active unwind when its context and target match the pre-searched
 frames. Synthetic regressions cover a changed outer target and a catch-funclet continuation in the
-selected frame. Nested targets behind the active frame, different context records, non-null unwind
-history tables, and targets outside the pre-searched frames remain unsupported.
+selected frame. Nested targets behind the active frame, different context records, and targets
+outside the pre-searched frames remain unsupported. Optional history table pointers are validated
+and forwarded to language handlers; the runtime leaves their cache entries unchanged.
 The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
 EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and
 one caller/callee catch transfer; the direct-entry and normal-startup x86 variants return 0 in the
-HLE-only runtime. Full nested-frame bookkeeping, redirects outside the searched x64 frames, non-null
-unwind history tables, other PE32 frame layouts, and broader compiler metadata remain unverified. See
+HLE-only runtime. Full nested-frame bookkeeping, redirects outside the searched x64 frames, history
+table cache updates, other PE32 frame layouts, and broader compiler metadata remain unverified. See
 [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
 for the fixture matrix and exit-code meanings.
 

@@ -2,7 +2,7 @@
 
 use crate::process::{GuestUnwind, Process, Stop, TEB_ADDR};
 use anywasm_cpu::cpu::{Cpu, CpuMode, RBP, RBX, RDI, RSI, RSP};
-use anywasm_cpu::mem::{Access, PROT_X};
+use anywasm_cpu::mem::{Access, PROT_R, PROT_W, PROT_X};
 use anywasm_cpu::{DecodeError, Exit};
 
 const CONTEXT_GPR_BASE: u64 = 0x78;
@@ -34,6 +34,8 @@ const DISPATCHER_LANGUAGE_HANDLER: u64 = 0x30;
 const DISPATCHER_HANDLER_DATA: u64 = 0x38;
 const DISPATCHER_HISTORY_TABLE: u64 = 0x40;
 const DISPATCHER_SCOPE_INDEX: u64 = 0x48;
+const UNWIND_HISTORY_TABLE_BYTES: u64 = 0xd8;
+const UNWIND_HISTORY_TABLE_ENTRIES: u32 = 12;
 const EXCEPTION_POINTERS_SIZE: u64 = 16;
 const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
 const STATUS_INTEGER_DIVIDE_BY_ZERO: u32 = 0xc000_0094;
@@ -249,6 +251,7 @@ fn dispatch_context_exception_inner(
     let mut last_rsp = context.gpr[RSP];
     let mut frames = Vec::new();
     let mut search_flags = flags;
+    let mut search_history_table = 0;
     let mut nested_frame = 0;
 
     if dispatch_vectored_exception_handlers(p, exception_record, context_record)? {
@@ -332,6 +335,7 @@ fn dispatch_context_exception_inner(
                     scope_index,
                     result.handler,
                     result.handler_data,
+                    search_history_table,
                 )?;
                 if p.trace_imports {
                     p.stderr.extend_from_slice(
@@ -384,6 +388,7 @@ fn dispatch_context_exception_inner(
                 }
                 let (redirect_frame, redirect_result, redirect_scope_index) =
                     resolve_collided_search_frame(p, dispatcher_context)?;
+                search_history_table = p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?;
                 if let Some(redirect_index) = frames.iter().rposition(|searched| {
                     searched.image_base == redirect_frame.image_base
                         && searched.function_entry == redirect_frame.function_entry
@@ -846,6 +851,46 @@ fn c_scope_image_address(
         })
 }
 
+// UNWIND_HISTORY_TABLE is 0xd8 bytes on x64 (header plus twelve 16-byte entries). The runtime
+// performs its own function-table search, so it validates and forwards this optional cache without
+// reading or updating the cached entries.
+fn validate_unwind_history_table(
+    p: &Process,
+    history_table: u64,
+    operation: &str,
+) -> Result<(), Stop> {
+    if history_table == 0 {
+        return Ok(());
+    }
+    if history_table & 7 != 0 {
+        return Err(Stop::Crash(format!(
+            "{operation} history table {history_table:#x} is not 8-byte aligned"
+        )));
+    }
+    let last_byte = history_table
+        .checked_add(UNWIND_HISTORY_TABLE_BYTES - 1)
+        .ok_or_else(|| Stop::Crash(format!("{operation} history table range overflows")))?;
+    for address in [history_table, last_byte] {
+        let Some(protection) = p.mem.prot_of(address) else {
+            return Err(Stop::Crash(format!(
+                "{operation} history table {history_table:#x} is not fully mapped"
+            )));
+        };
+        if protection & (PROT_R | PROT_W) != (PROT_R | PROT_W) {
+            return Err(Stop::Crash(format!(
+                "{operation} history table {history_table:#x} is not readable and writable"
+            )));
+        }
+    }
+    let count = p.rd32(history_table)?;
+    if count > UNWIND_HISTORY_TABLE_ENTRIES {
+        return Err(Stop::Crash(format!(
+            "{operation} history table has invalid entry count {count}"
+        )));
+    }
+    Ok(())
+}
+
 /// Capture the target's non-returning `RtlUnwindEx` request for the active dispatcher.
 pub(crate) fn rtl_unwind_ex(p: &mut Process) -> Result<u64, Stop> {
     let unwind = GuestUnwind {
@@ -862,12 +907,7 @@ pub(crate) fn rtl_unwind_ex(p: &mut Process) -> Result<u64, Stop> {
             "RtlUnwindEx received a null target frame, target IP, or exception record".into(),
         ));
     }
-    if unwind.history_table != 0 {
-        return unsupported(
-            p,
-            "non-null unwind history tables are not implemented".into(),
-        );
-    }
+    validate_unwind_history_table(p, unwind.history_table, "RtlUnwindEx")?;
     if lookup_frame(p, unwind.target_ip)?.is_none() {
         return Err(Stop::Crash(format!(
             "RtlUnwindEx target IP {:#x} is outside loaded guest images",
@@ -909,11 +949,7 @@ fn complete_guest_unwind(
     dispatcher_context: u64,
     mut unwind: GuestUnwind,
 ) -> Result<(), Stop> {
-    if unwind.history_table != 0 {
-        return Err(Stop::Crash(
-            "RtlUnwindEx unexpectedly supplied a history table during dispatch".into(),
-        ));
-    }
+    validate_unwind_history_table(p, unwind.history_table, "RtlUnwindEx dispatch")?;
     let Some(mut target_index) = frames
         .iter()
         .position(|frame| frame.establisher == unwind.target_frame)
@@ -1058,6 +1094,7 @@ fn complete_guest_unwind(
             scope_index,
             result.handler,
             result.handler_data,
+            unwind.history_table,
         )?;
         if p.trace_imports {
             p.stderr.extend_from_slice(
@@ -1106,12 +1143,7 @@ fn complete_guest_unwind(
                         "RtlUnwindEx exceeded {MAX_EXCEPTION_FRAMES} nested second-pass transfers"
                     )));
                 }
-                if nested.history_table != 0 {
-                    return Err(Stop::Unimplemented {
-                        dll: "ntdll".into(),
-                        name: "nested RtlUnwindEx with a non-null history table".into(),
-                    });
-                }
+                validate_unwind_history_table(p, nested.history_table, "nested RtlUnwindEx")?;
                 if nested.context_record != unwind.context_record {
                     return Err(Stop::Unimplemented {
                         dll: "ntdll".into(),
@@ -1205,6 +1237,7 @@ fn complete_guest_unwind(
                 index,
                 target_index,
             )?;
+            unwind.history_table = p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?;
             active_frames[redirect_index].context = restored_context;
             for next_index in redirect_index + 1..=target_index {
                 let previous_frame = &active_frames[next_index - 1];
@@ -1395,12 +1428,7 @@ fn resolve_collided_unwind_frame(
     let handler_data = p.rd64(dispatcher_context + DISPATCHER_HANDLER_DATA)?;
     let history_table = p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?;
     let scope_index = p.rd32(dispatcher_context + DISPATCHER_SCOPE_INDEX)?;
-    if history_table != 0 {
-        return Err(Stop::Unimplemented {
-            dll: "ntdll".into(),
-            name: "collided RtlUnwindEx with a non-null history table".into(),
-        });
-    }
+    validate_unwind_history_table(p, history_table, "collided RtlUnwindEx")?;
 
     let mut restored_context = read_context(p, context_record)?;
     restored_context.rip = control_pc;
@@ -1457,12 +1485,7 @@ fn resolve_collided_search_frame(
     let handler_data = p.rd64(dispatcher_context + DISPATCHER_HANDLER_DATA)?;
     let history_table = p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?;
     let scope_index = p.rd32(dispatcher_context + DISPATCHER_SCOPE_INDEX)?;
-    if history_table != 0 {
-        return Err(Stop::Unimplemented {
-            dll: "ntdll".into(),
-            name: "collided exception search with a non-null history table".into(),
-        });
-    }
+    validate_unwind_history_table(p, history_table, "collided exception search")?;
     if function_entry == 0 {
         return Err(Stop::Crash(
             "collided exception search redirected to a frame without unwind metadata".into(),
@@ -1570,6 +1593,7 @@ fn write_dispatcher_context(
     scope_index: u32,
     handler: u64,
     handler_data: u64,
+    history_table: u64,
 ) -> Result<(), Stop> {
     for (offset, value) in [
         (0x00, control_pc),
@@ -1580,7 +1604,7 @@ fn write_dispatcher_context(
         (0x28, context_record),
         (0x30, handler),
         (0x38, handler_data),
-        (0x40, 0), // HistoryTable is not used by the selected image.
+        (0x40, history_table),
     ] {
         p.wr64(address + offset, value)?;
     }
@@ -3385,6 +3409,7 @@ mod tests {
             0,
             0x1400_6789,
             INFO + 0x80,
+            0,
         )
         .unwrap();
 
@@ -3398,6 +3423,29 @@ mod tests {
         assert_eq!(process.rd64(INFO + 56).unwrap(), INFO + 0x80);
         assert_eq!(process.rd64(INFO + 64).unwrap(), 0);
         assert_eq!(process.rd32(INFO + 72).unwrap(), 0);
+    }
+
+    #[test]
+    fn validates_non_null_unwind_history_tables() {
+        let mut process = process_with_memory();
+        process.wr32(INFO, UNWIND_HISTORY_TABLE_ENTRIES).unwrap();
+        assert!(validate_unwind_history_table(&process, INFO, "test").is_ok());
+
+        process
+            .wr32(INFO, UNWIND_HISTORY_TABLE_ENTRIES + 1)
+            .unwrap();
+        assert!(matches!(
+            validate_unwind_history_table(&process, INFO, "test"),
+            Err(Stop::Crash(_))
+        ));
+        assert!(matches!(
+            validate_unwind_history_table(&process, INFO + 1, "test"),
+            Err(Stop::Crash(_))
+        ));
+        assert!(matches!(
+            validate_unwind_history_table(&process, INFO + PAGE_SIZE as u64 - 8, "test"),
+            Err(Stop::Crash(_))
+        ));
     }
 
     #[test]
@@ -3580,6 +3628,7 @@ mod tests {
         const CONTEXT_RECORD: u64 = INFO + 0x200;
         const DISPATCHER_CONTEXT: u64 = INFO + 0x100;
         const HANDLER_RSP_OUT: u64 = INFO + 0x180;
+        const HISTORY_TABLE: u64 = INFO + 0x300;
         const HANDLER_RVA: u32 = 0x800;
 
         let mut process = process_with_memory();
@@ -3673,7 +3722,7 @@ mod tests {
             exception_record: EXCEPTION_RECORD,
             return_value: 0x55,
             context_record: CONTEXT_RECORD,
-            history_table: 0,
+            history_table: HISTORY_TABLE,
         };
         process.cpu.gpr[RSP] = ORIGINAL_RSP;
 
@@ -3700,6 +3749,13 @@ mod tests {
                 .unwrap(),
             ORIGINAL_RSP + 8
         );
+        assert_eq!(
+            process
+                .rd64(DISPATCHER_CONTEXT + DISPATCHER_HISTORY_TABLE)
+                .unwrap(),
+            HISTORY_TABLE
+        );
+        assert_eq!(process.rd32(HISTORY_TABLE).unwrap(), 0);
     }
 
     #[test]

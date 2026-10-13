@@ -237,8 +237,9 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   preserving restored register state, and setting the collided flag on the resumed handler. First-pass
   collided search now restores a validated dispatcher frame and retries its handler; a synthetic test
   changes the control PC within a loaded function and checks the separate per-frame CONTEXT pointer and
-  collided flag. Second-pass redirects outside the pre-searched frames, nested `RtlUnwindEx` escaping a
-  second-pass handler, and non-null unwind history tables remain unsupported. Full nested-frame
+  collided flag. Second-pass redirects outside the pre-searched frames remain unsupported. Nested
+  x64 `RtlUnwindEx` takes over within the searched path; optional history table pointers are checked
+  and forwarded, while the runtime leaves their cache entries unchanged. Full nested-frame
   bookkeeping and broader compiler-specific C/C++ runtime behavior remain open. The rebuilt release WASM and Asyncify module
   also passes all five HLE-only PE32/x64 exception packages in Chromium with zero page errors. A
   direct-entry PE32 EH3 fixture now
@@ -604,8 +605,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   remains unsupported. X64 nested `RtlUnwindEx` now takes over the active phase-two walk, including
   redirects from a selected C++ catch funclet. Synthetic regressions cover a changed outer target
   and a catch-funclet continuation in the selected frame. Nested targets behind the active frame,
-  different context records, non-null unwind history tables, and targets outside the pre-searched
-  frames remain unsupported.
+  different context records, and targets outside the pre-searched frames remain unsupported. The
+  runtime validates and forwards optional history table pointers but does not update their caches.
   Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
   compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
   subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
