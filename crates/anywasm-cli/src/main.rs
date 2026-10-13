@@ -71,6 +71,13 @@ fn blocker_of(dll: &str) -> Option<&'static str> {
     })
 }
 
+fn supported_pe_machine(machine: u16, is_64: bool) -> bool {
+    matches!(
+        (machine, is_64),
+        (anywasm_pe::MACHINE_AMD64, true) | (anywasm_pe::MACHINE_I386, false)
+    )
+}
+
 fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let pe = Pe::parse(&data).map_err(|e| e.to_string())?;
@@ -93,10 +100,10 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
         has_tls: pe.tls().map_err(|e| e.to_string())?.is_some(),
         ..Default::default()
     };
-    if pe.machine != anywasm_pe::MACHINE_AMD64 || !pe.is_64 {
+    if !supported_pe_machine(pe.machine, pe.is_64) {
         r.blockers.push(format!(
-            "{} images are not supported: only PE32+ x86-64",
-            r.machine
+            "unsupported PE machine/magic combination: machine {:#x}, PE32+={}",
+            pe.machine, pe.is_64
         ));
     }
     if pe.is_dotnet() {
@@ -185,7 +192,7 @@ fn json_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_quote, preflight_status};
+    use super::{json_quote, preflight_status, supported_pe_machine};
 
     #[test]
     fn json_quote_escapes_quotes_backslashes_and_control_characters() {
@@ -200,6 +207,15 @@ mod tests {
         assert_eq!(preflight_status(1, 2), "blocked");
         assert_eq!(preflight_status(0, 2), "review");
         assert_eq!(preflight_status(0, 0), "no_known_blockers");
+    }
+
+    #[test]
+    fn analyzer_accepts_supported_pe32_and_pe32_plus_machine_pairs() {
+        assert!(supported_pe_machine(anywasm_pe::MACHINE_I386, false));
+        assert!(supported_pe_machine(anywasm_pe::MACHINE_AMD64, true));
+        assert!(!supported_pe_machine(anywasm_pe::MACHINE_I386, true));
+        assert!(!supported_pe_machine(anywasm_pe::MACHINE_AMD64, false));
+        assert!(!supported_pe_machine(anywasm_pe::MACHINE_ARM64, true));
     }
 }
 

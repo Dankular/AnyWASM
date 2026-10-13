@@ -46,6 +46,17 @@ foreach ($variant in $variants) {
     $commands += 'if errorlevel 1 exit /b %errorlevel%'
 }
 
+# PE32 uses the legacy absolute-pointer EH3 format.  Enter main directly so this fixture
+# isolates C++ EH from the separate EH4 wrapper used by the MSVC CRT startup object.
+$setupX86 = 'call "{0}" -no_logo -arch=x86 -host_arch=x64' -f $devCmd
+$commands += $setupX86
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
+$x86Output = Join-Path $outputDirectory 'eh3-x86-direct.exe'
+$commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- ' +
+    '/Fe:"' + $x86Output + '" "' + $source + '" ' +
+    '/link /ENTRY:main /DEFAULTLIB:vcruntime.lib /DEFAULTLIB:ucrt.lib'
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
+
 $batchPath = Join-Path $outputDirectory 'build-fixtures.cmd'
 [System.IO.File]::WriteAllLines($batchPath, $commands, [System.Text.Encoding]::ASCII)
 $startInfo = [System.Diagnostics.ProcessStartInfo]::new()

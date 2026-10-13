@@ -1,12 +1,13 @@
 # MSVC C++ exception fixtures
 
-`build.ps1` uses the latest installed Visual Studio x64 C++ toolchain and writes two `/MD /EHsc`
-executables under the ignored `target/msvc-cpp-eh/` directory. The EH4 compile prints `cl /Bv`,
-including the compiler and linker versions, so a run can be tied to the toolchain that emitted the
-metadata.
+`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes three fixtures under
+the ignored `target/msvc-cpp-eh/` directory. The EH4 compile prints `cl /Bv`, including the
+compiler and linker versions, so a run can be tied to the toolchain that emitted the metadata.
 
 - `eh4-dynamic.exe` uses the toolset's default FH4 metadata.
 - `eh3-dynamic.exe` adds `/d2FH4-` to request legacy FH3 metadata.
+- `eh3-x86-direct.exe` is a PE32 build using legacy FH3. It enters `main` directly to isolate the
+  C++ EH path from the CRT startup's EH4 wrapper.
 - The binaries dynamically import the MSVC/UCRT runtime; the script does not copy runtime DLLs.
 
 The executable returns 0 only when all paths pass. Return codes identify the failed case:
@@ -25,6 +26,8 @@ Build and inspect the imported exception entry points from the repository root:
 .\test\fixtures\msvc_eh\build.ps1
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh4-dynamic.exe
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-dynamic.exe
+.\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-x86-direct.exe
+.\target\debug\anywasm.exe run .\target\msvc-cpp-eh\eh3-x86-direct.exe --max-steps 2000000
 ```
 
 These fixtures cover the minimum compiler-generated records needed to start EH3/EH4 runtime work;
@@ -68,3 +71,10 @@ the EH4 run also executes `vcruntime140_1.dll`. This confirms DLL initialization
 exception path with the installed UCRT present. API-set contracts without a physical DLL in the VFS
 continue to use HLE. These local DLLs are probe inputs, not product dependencies or a redistribution
 decision. The exact trace captures are ignored files under `target-trace/msvc-eh-runtime-vfs-*`.
+
+On 2026-10-13, the direct-entry PE32 fixture built with the installed x86 MSVC toolchain and
+returned 0 under the same HLE-only run cap. It exercised by-value and adjusted-reference catches,
+catch-all, nested try/catch, and destructor execution during unwind. The x86 catch funclets returned
+their post-catch continuation addresses through EAX; the runtime now calls the funclet with its
+parent frame and resumes at that continuation. The PE32 CRT startup path remains a separate open
+compatibility case.

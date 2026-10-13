@@ -67,8 +67,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "IsBadReadPtr" => |p| Ok(is_bad_memory_range(p, p.arg(0), p.arg(1), PROT_R) as u64),
         "IsBadCodePtr" => |p| Ok(is_bad_memory_range(p, p.arg(0), 1, PROT_X) as u64),
         "InitializeSListHead" => |p| {
-            // Win64 SLIST_HEADER is a 16-byte, 16-byte-aligned opaque structure.
-            p.write_bytes(p.arg(0), &[0; 16])?;
+            // SLIST_HEADER is 8 bytes on x86 and 16 bytes on Win64.
+            let size = if p.cpu.mode == CpuMode::X86_32 { 8 } else { 16 };
+            p.write_bytes(p.arg(0), &[0; 16][..size])?;
             Ok(0)
         },
         "GetLastError" => |p| {
@@ -3343,6 +3344,33 @@ mod lc_map_string_tests {
             p.read_bytes(DEST, 6).unwrap(),
             [b'o', b'l', b'd', 0xe9, b'!', 0]
         );
+    }
+
+    #[test]
+    fn initialize_slist_head_clears_the_pe32_or_pe32_plus_header_size() {
+        const BASE: u64 = 0x90000;
+        const HEADER: u64 = BASE + 0x100;
+        const STACK: u64 = BASE + 0x800;
+        let initialize = lookup("InitializeSListHead").unwrap();
+
+        for (mode, size) in [(CpuMode::X86_32, 8usize), (CpuMode::X86_64, 16usize)] {
+            let mut p = Process::new(crate::vfs::Vfs::new());
+            assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+            p.cpu.mode = mode;
+            p.cpu.gpr[RSP] = STACK;
+            p.write_bytes(HEADER, &[0xa5; 24]).unwrap();
+            if mode == CpuMode::X86_32 {
+                p.wr32(STACK, 0).unwrap();
+                p.wr32(STACK + 4, HEADER as u32).unwrap();
+            } else {
+                p.cpu.gpr[RCX] = HEADER;
+            }
+
+            assert_eq!(initialize(&mut p), Ok(0));
+            let bytes = p.read_bytes(HEADER, 24).unwrap();
+            assert!(bytes[..size].iter().all(|byte| *byte == 0));
+            assert!(bytes[size..].iter().all(|byte| *byte == 0xa5));
+        }
     }
 
     #[test]

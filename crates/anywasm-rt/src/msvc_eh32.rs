@@ -494,7 +494,7 @@ pub(crate) fn frame_handler3(p: &mut Process) -> Result<u64, Stop> {
     let flags = p.rd32(exception_record + EXCEPTION_RECORD_FLAGS)?;
     let code = p.rd32(exception_record + EXCEPTION_RECORD_CODE)?;
     let function_info = p.cpu.gpr[RAX] as u32 as u64;
-    let (_, info) = parse_func_info3_32(p, function_info)?;
+    let (image_base, info) = parse_func_info3_32(p, function_info)?;
     let state = p.rd32(registration + 8)? as i32;
     if state < -1 || state > info.max_state {
         return Err(malformed(format!(
@@ -550,17 +550,18 @@ pub(crate) fn frame_handler3(p: &mut Process) -> Result<u64, Stop> {
             build_catch_object32(p, frame_base, &exception, &matched)?;
             p.wr32(registration + 8, transfer.catch_state as u32)?;
 
-            let stack_slot = registration
-                .checked_sub(4)
-                .ok_or_else(|| malformed("x86 registration stack slot underflows"))?;
             let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
             let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
-            if stack_slot < stack_limit || stack_slot + 4 > stack_base || frame_base > stack_base {
+            if frame_base > stack_base {
                 return Err(malformed(
                     "x86 catch registration lies outside TEB stack bounds",
                 ));
             }
-            let stack_pointer = p.rd32(stack_slot)? as u64;
+            // The saved CONTEXT already has the ESP at the original throw site, after
+            // _CxxThrowException's stdcall frame has been removed.  The word immediately
+            // below the registration record is not a saved stack pointer; using it can
+            // resume the catch body with ESP in an uninitialized local slot.
+            let stack_pointer = p.rd32(context_record + CONTEXT32_ESP)? as u64;
             if stack_pointer < stack_limit
                 || stack_pointer >= frame_base
                 || stack_pointer >= stack_base
@@ -569,9 +570,29 @@ pub(crate) fn frame_handler3(p: &mut Process) -> Result<u64, Stop> {
                     "x86 catch stack pointer {stack_pointer:#x} is outside TEB bounds"
                 )));
             }
+            // x86 catch handlers are funclets: the funclet's RET returns its continuation
+            // address in EAX. Run it with the selected frame's EBP and the saved throw-site
+            // ESP so its stack-relative frame matches the compiler's expectations.
+            let saved_cpu = p.cpu.clone();
+            p.cpu.gpr[RSP] = stack_pointer;
+            p.cpu.gpr[RBP] = frame_base;
+            p.cpu.gpr[RAX] = 0;
+            let catch_result = p.call_guest(handler.handler, &[]);
+            p.cpu = saved_cpu;
+            let continuation = catch_result?;
+            let continuation_module =
+                module_for_address(p, continuation, "x86 catch continuation")?;
+            if continuation_module.base != image_base
+                || p.mem
+                    .prot_of(continuation)
+                    .is_none_or(|protection| protection & PROT_X == 0)
+            {
+                return Err(malformed(format!(
+                    "x86 catch continuation {continuation:#x} is not executable in image {image_base:#x}"
+                )));
+            }
             p.wr32(context_record + CONTEXT32_EBP, frame_base as u32)?;
-            p.wr32(context_record + CONTEXT32_ESP, stack_pointer as u32)?;
-            p.wr32(context_record + CONTEXT32_EIP, transfer.target_ip as u32)?;
+            p.wr32(context_record + CONTEXT32_EIP, continuation as u32)?;
             p.wr32(context_record + CONTEXT32_EAX, 0)?;
         } else {
             unwind_state_map(p, &info, registration, state, -1, frame_base)?;

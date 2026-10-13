@@ -200,9 +200,10 @@
   NT_TIB.ExceptionList handlers, resumes edited contexts, and honors RaiseException's four-argument
   stdcall frame. Guest execution covers selected x86 illegal, privileged, divide, and breakpoint
   exceptions, while a scheduler regression checks per-thread ExceptionList state. PE32 nested and
-  collided unwind plus compiler-specific C/C++ runtime behavior remain open; the new C++ EH3 search
-  and two-pass catch-transfer path is compile-checked but not runtime-verified. Other CPU exits, audio,
-  DirectInput/XInput, 32-bit PE, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
+  collided unwind plus broader compiler-specific C/C++ runtime behavior remain open. A direct-entry
+  PE32 EH3 fixture now verifies by-value/reference catches, catch-all, nested catches, and destructor
+  unwind. General Win32/PE32 compatibility remains incomplete. Other CPU exits, audio, DirectInput/
+  XInput, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
   fixed-function subset covers the checked FVF layouts, stage-0 SELECTARG1/SELECTARG2,
   MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH, signed-add and modulate-add operations,
   BLENDTEXTUREALPHA/BLENDFACTORALPHA, DOTPRODUCT3, triangle fans, alpha blending, and alpha
@@ -304,10 +305,16 @@
   The dispatcher sets the x86 unwind flags, runs intervening frame handlers, unlinks frames above
   the target, and resumes through the selected catch funclet. A compile-only MSVC 19.29 x86 assembly
   probe confirmed compiler-generated handler thunks place the absolute FuncInfo pointer in EAX
-  before jumping to `__CxxFrameHandler3`. The handler and dispatcher compile, but no PE32 C++ runtime
-  fixture has exercised this path yet. PE32 EH3 by-value catches now range-check the thrown object
-  and invoke the metadata copy helper when present, matching the x64 path; this addition is also
-  compile-only. X86 EH4 and nested/collided SEH unwind dispositions remain unsupported.
+  before jumping to `__CxxFrameHandler3`. A direct-entry x86 MSVC fixture now runs under the HLE-only
+  runtime and returns 0 for by-value and adjusted-reference catches, catch-all, nested try/catch, and
+  destructor execution during unwind. This exercised the PE32 EH3 search, two-pass unwind, by-value
+  copy, and catch transfer. The catch funclet runs with its parent EBP and saved throw-site ESP, then
+  returns the post-catch continuation in EAX. PE32 CRT initializer arrays now use four-byte entries,
+  and `InitializeSListHead` clears the 8-byte x86 or 16-byte x64 header. A normal `/MD` PE32 startup
+  advances through its initializers but still reaches the unimplemented `_except_handler4_common`
+  import while dispatching an access violation. The analyzer now accepts supported I386/PE32 and
+  AMD64/PE32+ pairs. X86 EH4, general PE32 CRT startup, and nested/collided SEH unwind dispositions
+  remain unsupported.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   Historical `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` runs with `--mode d3d11` reached
   virtual D3D11 device discovery/creation before stopping at the unresolved `MSVCP140.dll`

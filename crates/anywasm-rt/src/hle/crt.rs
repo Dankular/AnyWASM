@@ -2464,15 +2464,16 @@ fn ctype_table(p: &mut Process) -> u64 {
 
 fn initterm(p: &mut Process, check: bool) -> R {
     let (mut cur, end) = (p.arg(0), p.arg(1));
+    let pointer_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
     while cur < end {
-        let f = p.rd64(cur)?;
+        let f = p.rdptr(cur)?;
         if f != 0 {
             let r = p.call_guest(f, &[])?;
             if check && (r as u32) != 0 {
                 return Ok(r & 0xffff_ffff);
             }
         }
-        cur += 8;
+        cur += pointer_size;
     }
     Ok(0)
 }
@@ -3101,4 +3102,51 @@ fn longjmp(p: &mut Process) -> R {
     p.cpu.gpr[RAX] = if val == 0 { 1 } else { val as u64 };
     p.skip_ret = true;
     Ok(0)
+}
+
+#[cfg(test)]
+mod initterm_tests {
+    use super::initterm;
+    use crate::process::Process;
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
+
+    #[test]
+    fn pe32_initterm_walks_four_byte_function_pointer_entries() {
+        const CODE_BASE: u64 = 0x40000;
+        const STACK_BASE: u64 = 0x80000;
+        const STACK: u64 = STACK_BASE + 0x800;
+        const TABLE: u64 = CODE_BASE + 0x100;
+        const FIRST_MARKER: u64 = CODE_BASE + 0x200;
+        const SECOND_MARKER: u64 = CODE_BASE + 0x204;
+        const FIRST_FUNC: u64 = CODE_BASE + 0x300;
+        const SECOND_FUNC: u64 = CODE_BASE + 0x320;
+
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(CODE_BASE, PAGE_SIZE, PROT_RWX));
+        assert!(p.mem.map(STACK_BASE, PAGE_SIZE, PROT_RW));
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+
+        for (function, marker, value) in [
+            (FIRST_FUNC, FIRST_MARKER, 0x1357_2468u32),
+            (SECOND_FUNC, SECOND_MARKER, 0x89ab_cdefu32),
+        ] {
+            let mut code = vec![0xc7, 0x05]; // mov dword ptr [absolute address], immediate
+            code.extend_from_slice(&(marker as u32).to_le_bytes());
+            code.extend_from_slice(&value.to_le_bytes());
+            code.push(0xc3);
+            p.write_bytes(function, &code).unwrap();
+        }
+        p.wr32(TABLE, FIRST_FUNC as u32).unwrap();
+        p.wr32(TABLE + 4, SECOND_FUNC as u32).unwrap();
+        p.wr32(STACK, 0).unwrap();
+        p.wr32(STACK + 4, TABLE as u32).unwrap();
+        p.wr32(STACK + 8, (TABLE + 8) as u32).unwrap();
+
+        assert_eq!(initterm(&mut p, false), Ok(0));
+        assert_eq!(p.rd32(FIRST_MARKER).unwrap(), 0x1357_2468);
+        assert_eq!(p.rd32(SECOND_MARKER).unwrap(), 0x89ab_cdef);
+    }
 }
