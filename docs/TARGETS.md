@@ -264,6 +264,14 @@ captured interval has no MSVCP import call or unresolved-import diagnostic. It a
 This native CLI probe identifies the callback budget as the next observed stop; it does not establish
 whether later guest execution reaches additional MSVCP imports or produces a browser frame.
 
+On 2026-10-13, a current-source HLE-only import trace with a 30,000,000-instruction cap passed the
+stream and locale paths, including `_Cnd_wait`, `_Mtx_lock`, `_Mtx_unlock`, and
+`_Thrd_hardware_concurrency`, then reached `d3dcompiler_47.dll+0x3a25d` at the step limit. The trace
+contains 34 distinct MSVCP imports and no unresolved-import stop. It records no `Present`; the browser
+replay above is the evidence for rendering. The command, artifact hashes, and observed import set are in
+the [30M-step trace record](target-data/tutorial03-hle-cli-30m-2026-10-13.json). Its full trace log is
+an ignored local artifact under `target-trace/`.
+
 ### Tutorial03 browser capture attempt
 
 On 2026-10-12, the one-off Playwright harness ran the packaged Tutorial03 with the local MSVC/UCRT

@@ -420,7 +420,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `tutorial03_texturing.exe+0x44280`. Its trace contains no guest `Present` or unresolved-import stop.
   A current-source HLE-only CLI probe without MSVC/UCRT DLLs reached D3DCompiler `HeapAlloc` calls,
   then stopped at the synchronous callback budget; no unresolved MSVCP call appeared in that short
-  trace. The current-source analyzer report lists 210 implemented / 41 missing static imports for
+  trace. A current-source 30,000,000-step HLE-only CLI trace later passed 34 distinct MSVCP imports,
+  including locale and condition-variable paths, then reached the configured cap inside D3DCompiler
+  without an unresolved-import stop. This guest-only trace made no `Present`; browser render evidence is
+  recorded separately. See `docs/target-data/tutorial03-hle-cli-30m-2026-10-13.json`. The current-source
+  analyzer report lists 210 implemented / 41 missing static imports for
   Tutorial03, including 21 of 65 MSVCP140 imports and 3 of 18 VCRUNTIME140 imports still missing.
   The full report is in `docs/target-imports/tutorial03-current-source.json`; its preflight is static
   review only. These local DLLs are not a product package. The first

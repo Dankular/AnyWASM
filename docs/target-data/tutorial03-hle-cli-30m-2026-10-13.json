@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-10-13",
+  "target": "DiligentSamples Tutorial03_Texturing",
+  "sourceRevision": "5b4d3d1",
+  "command": ".\\target\\debug\\anywasm.exe run .\\target\\msvcp-vfs-probe03-hle-only\\Tutorial03_Texturing.exe --dir .\\target\\msvcp-vfs-probe03-hle-only --trace-imports --max-steps 30000000 -- --mode d3d11",
+  "artifacts": {
+    "guestExe": {
+      "path": "target/msvcp-vfs-probe03-hle-only/Tutorial03_Texturing.exe",
+      "sha256": "5aa3a05ea448feca865f31850c6267e266b6020e7f1a773849a4f2414c46caa6"
+    },
+    "cli": {
+      "path": "target/debug/anywasm.exe",
+      "sha256": "8337968463b1e6f2687b5fc6be7daf7edc14eb3fa568d8305a16cdc519757d65"
+    },
+    "ignoredTraceLog": {
+      "path": "target-trace/tutorial03-hle-only-30m-current-20261013.log",
+      "sha256": "38146919c50fc97b06c0e0e6a7373832942ec30577299e4fa4baf40ee709a975"
+    }
+  },
+  "package": {
+    "containsLocalMsvcOrUcrtDlls": false,
+    "containsDiligentD3d11Dlls": true,
+    "containsD3dCompiler": true,
+    "containsShaderAndLogoAssets": true
+  },
+  "result": {
+    "retiredGuestInstructions": 30000000,
+    "stop": "configured step limit",
+    "module": "d3dcompiler_47.dll",
+    "rva": "0x3a25d",
+    "threadId": 4100,
+    "unresolvedImportStop": false,
+    "presentObserved": false,
+    "observedMsvcpImportCount": 34,
+    "observedMsvcpImports": [
+      "??0?$basic_ios@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+      "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+      "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z",
+      "??0?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@IEAA@XZ",
+      "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ",
+      "??0_Lockit@std@@QEAA@H@Z",
+      "??1?$basic_ios@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+      "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+      "??1?$basic_iostream@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+      "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+      "??1?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@UEAA@XZ",
+      "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ",
+      "??1_Lockit@std@@QEAA@XZ",
+      "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z",
+      "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z",
+      "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+      "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ",
+      "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ",
+      "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ",
+      "?good@ios_base@std@@QEBA_NXZ",
+      "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z",
+      "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z",
+      "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z",
+      "?uncaught_exception@std@@YA_NXZ",
+      "?widen@?$ctype@_W@std@@QEBA_WD@Z",
+      "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z",
+      "__anywasm_basic_streambuf_char_lock_noop",
+      "__anywasm_locale_facet_decref",
+      "__anywasm_locale_facet_incref",
+      "__anywasm_standard_streambuf_xsputn",
+      "_Cnd_wait",
+      "_Mtx_lock",
+      "_Mtx_unlock",
+      "_Thrd_hardware_concurrency"
+    ]
+  },
+  "interpretation": "The traced HLE-only path handled the observed MSVCP imports through the step cap and entered D3DCompiler shader work. This CLI run did not itself record a Present or verify WebGPU rendering; the separate browser capture covers rendering."
+}
