@@ -5350,6 +5350,15 @@ try {
         payload.set(texels, 36); command(5, payload);
       };
       uploadSlice(0, [255, 0, 0, 255]); uploadSlice(1, [0, 255, 0, 255]);
+      command(4, words(13, 4, 4, 1, 2, 61, 0x8, 0, 1, 0)); // two-layer R8_UNORM SRV texture
+      command(12, words(14, 2, 13, 61, 5, 0, 1, 0, 2)); // view both R8 array layers
+      const uploadR8Slice = (slice, value) => {
+        const texels = new Uint8Array(4 * 4).fill(value);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(13, 0, slice, 0, 0, 4, 4, 4, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      };
+      uploadR8Slice(0, 0); uploadR8Slice(1, 128);
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
       samplerView.setUint32(8, 4, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
@@ -5384,11 +5393,16 @@ try {
       command(17, words(1, 12)); command(29, words(3, 0));
       gpu.execute(append());
       const anisotropicBiasPixels = await gpu.readBackbuffer(1);
+      stream.length = 0;
+      command(17, words(1, 10)); command(19, words(1, 0, 1, 14)); command(20, words(1, 0, 1, 10));
+      command(29, words(3, 0)); gpu.execute(append());
+      const anisotropicR8Pixels = await gpu.readBackbuffer(1);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
       const result = {
         outside: at(pixels, 10), straddle: at(pixels, 32), anisotropicLayerEdge: at(anisotropicPixels, 32),
         anisotropicLayerGradEdge: at(anisotropicGradPixels, 32),
         anisotropicLayerBiasEdge: at(anisotropicBiasPixels, 32),
+        anisotropicR8Edge: at(anisotropicR8Pixels, 32),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -5398,7 +5412,7 @@ try {
     }
   });
   check('D3D11 BORDER sampling returns its color for Texture2DArray taps and blends edge footprints',
-    textureArrayResult.draws === 4 && textureArrayResult.errors.length === 0
+    textureArrayResult.draws === 5 && textureArrayResult.errors.length === 0
       && near(textureArrayResult.outside || [], [0, 0, 255, 255], 1)
       && near(textureArrayResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(textureArrayResult));
@@ -5411,6 +5425,9 @@ try {
   check('D3D11 anisotropic BORDER SampleBias filters the selected Texture2DArray layer across the edge',
     near(textureArrayResult.anisotropicLayerBiasEdge || [], [0, 151, 104, 255], 3),
     JSON.stringify(textureArrayResult.anisotropicLayerBiasEdge));
+  check('D3D11 anisotropic BORDER sampling preserves R8_UNORM channel defaults on a Texture2DArray edge',
+    near(textureArrayResult.anisotropicR8Edge || [], [76, 0, 0, 255], 3),
+    JSON.stringify(textureArrayResult.anisotropicR8Edge));
 
   const cubeTextureResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');

@@ -282,6 +282,8 @@ register-stack subset):
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
       edge-crossing BORDER pixels. Texture2DArray SampleGrad and zero-bias SampleBias each return
       `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. A
+      separate 8x anisotropic R8_UNORM Texture2DArray Sample returns `[76, 0, 0, 255]` at that edge,
+      verifying format-specific channel defaults.
       TextureCube SRV selects the expected
       color for all six
       signed-axis directions and linearly blends taps across +X/+Y, +X/+Z, and +X/-Y boundaries to
