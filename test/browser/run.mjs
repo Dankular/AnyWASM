@@ -419,6 +419,75 @@ try {
     triText.includes('staging R16_UNORM readback=0000,4000,8000,ffff row_pitch=4'), triText);
   check('D3D11 staging R16_SNORM Map(READ) preserves signed normalized words',
     triText.includes('staging R16_SNORM readback=8000,c000,0000,7fff row_pitch=4'), triText);
+  const normalized16SampleResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      const formats = [
+        { dxgi: 56, word: 0x1235, expected: 0x1235 / 65535 },
+        { dxgi: 58, word: 0xedcb, expected: -0x1235 / 32767 },
+      ];
+      const module = gpu.device.createShaderModule({ code: `
+        @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+        @group(0) @binding(1) var sourceSampler: sampler;
+        @vertex fn vs(@builtin(vertex_index) vertexId: u32) -> @builtin(position) vec4<f32> {
+          var positions = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+          return vec4<f32>(positions[vertexId], 0.0, 1.0);
+        }
+        @fragment fn fs() -> @location(0) vec4<f32> {
+          let value = textureSampleLevel(sourceTexture, sourceSampler, vec2<f32>(0.5, 0.5), 0.0).r;
+          return vec4<f32>(value, 0.0, 0.0, 1.0);
+        }
+      ` });
+      const pipeline = gpu.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'r32float' }] },
+        primitive: { topology: 'triangle-list' },
+      });
+      const sampler = gpu.device.createSampler({ minFilter: 'nearest', magFilter: 'nearest' });
+      const samples = [];
+      for (const [index, format] of formats.entries()) {
+        const source = new Uint8Array(2);
+        new DataView(source.buffer).setUint16(0, format.word, true);
+        gpu.createTexture(10 + index * 2, 1, 1, 1, 1, format.dxgi, 0x8, 0, 0);
+        gpu.textureWrite(10 + index * 2, 0, 0, 0, 0, 1, 1, 2, 2, source);
+        gpu.createTexture(11 + index * 2, 1, 1, 1, 1, 39, 0x20, 0, 0);
+        const bindGroup = gpu.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: gpu.res.get(10 + index * 2).gpu.createView() },
+            { binding: 1, resource: sampler },
+          ],
+        });
+        gpu.flush();
+        const pass = gpu.encoder().beginRenderPass({ colorAttachments: [{
+          view: gpu.res.get(11 + index * 2).gpu.createView(),
+          loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }] });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(3);
+        pass.end();
+        gpu.flush();
+        await gpu.device.queue.onSubmittedWorkDone();
+        const bytes = await gpu.readBackResource(11 + index * 2);
+        samples.push({ expected: format.expected, actual: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat32(0, true) });
+      }
+      const errors = gpu.stats.errors;
+      gpu.device.destroy();
+      return { samples, errors, float32Filterable: gpu.features.has('float32-filterable') };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  check('D3D11 R16_UNORM/SNORM sampling preserves 16-bit normalized precision',
+    !normalized16SampleResult.error && normalized16SampleResult.errors?.length === 0
+      && normalized16SampleResult.samples?.length === 2
+      && normalized16SampleResult.samples.every(({ expected, actual }) => Math.abs(expected - actual) < 1e-7),
+    JSON.stringify(normalized16SampleResult));
   const normalized16CopyResult = await page.evaluate(async () => {
     const { GpuExecutor } = await import('/gpu.js');
     const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });

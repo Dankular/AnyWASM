@@ -1018,6 +1018,7 @@ export class GpuExecutor {
     if ((dxgi === 39) && (bind & 0x40)) return 'depth32float';
     if ((dxgi === 44) && (bind & 0x40)) return 'depth24plus-stencil8';
     if (dxgi === 53 && (bind & 0x40)) return 'depth16unorm';
+    if ((dxgi === 56 || dxgi === 58) && this.features?.has('float32-filterable')) return 'r32float';
     let f = TEX[dxgi];
     if (!f) { this.log(`unsupported DXGI format ${dxgi}, using rgba8unorm`); f = 'rgba8unorm'; }
     if (f.startsWith('bc') && !this.features.has('texture-compression-bc')) { this.log('BC texture requested but unsupported; substituting rgba8unorm'); return 'rgba8unorm'; }
@@ -1277,8 +1278,10 @@ export class GpuExecutor {
       }
     }
     if (r.dxgi === 56 || r.dxgi === 58) {
-      uploadData = new Uint8Array(w * h * 2);
-      uploadRowPitch = w * 2;
+      const float32Backing = r.format === 'r32float';
+      const bytesPerPixel = float32Backing ? 4 : 2;
+      uploadData = new Uint8Array(w * h * bytesPerPixel);
+      uploadRowPitch = w * bytesPerPixel;
       const source = new DataView(data.buffer, data.byteOffset, data.byteLength);
       const destination = new DataView(uploadData.buffer);
       for (let row = 0; row < h; row++) {
@@ -1287,7 +1290,8 @@ export class GpuExecutor {
           const value = r.dxgi === 56
             ? source.getUint16(offset, true) / 65535
             : Math.max(-1, source.getInt16(offset, true) / 32767);
-          destination.setUint16((row * w + column) * 2, floatToHalfBits(value), true);
+          if (float32Backing) destination.setFloat32((row * w + column) * 4, value, true);
+          else destination.setUint16((row * w + column) * 2, floatToHalfBits(value), true);
         }
       }
     }
@@ -2975,8 +2979,11 @@ export class GpuExecutor {
         const source = new DataView(output.buffer, output.byteOffset, output.byteLength);
         const destination = new DataView(normalized.buffer);
         for (let pixel = 0; pixel < width * height * depth; pixel++) {
+          const sampled = resource.format === 'r32float'
+            ? source.getFloat32(pixel * 4, true)
+            : halfBitsToFloat(source.getUint16(pixel * 2, true));
           const value = Math.max(resource.dxgi === 56 ? 0 : -1,
-            Math.min(1, halfBitsToFloat(source.getUint16(pixel * 2, true))));
+            Math.min(1, sampled));
           if (resource.dxgi === 56) {
             destination.setUint16(pixel * 2, roundToEven(value * 65535), true);
           } else {

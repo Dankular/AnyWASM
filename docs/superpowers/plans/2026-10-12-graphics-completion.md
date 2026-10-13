@@ -88,7 +88,7 @@
 - [x] Verify RG8_UNORM TextureCubeArray selection on the same two-cube face range; Chromium returns `[128,64,0,255]` and `[64,192,0,255]`, including missing-channel defaults, and reports two cubes and one mip.
 - [x] Verify R16_FLOAT TextureCubeArray samples decode half-floats on the same selected face range; Chromium returns `[128,0,0,255]` and `[64,0,0,255]` for 0.5 and 0.25 and reports two cubes and one mip.
 - [x] Verify R16_UNORM and R16_SNORM TextureCubeArray normalization across the same selected face range; Chromium returns `[128,0,0,255]` and `[64,0,0,255]` and reports two cubes and one mip.
-- [x] Preserve arbitrary R16_UNORM/SNORM words through upload, `CopyResource`, and staging `Map(READ)` while the sampled resource uses half-float backing; Chromium distinguishes adjacent `0x1234`/`0x1235` values and returns the exact source words.
+- [x] Preserve arbitrary R16_UNORM/SNORM words through upload, `CopyResource`, and staging `Map(READ)`; use R32_FLOAT sampling backing when `float32-filterable` is available, with half-float fallback otherwise. Chromium distinguishes adjacent `0x1234`/`0x1235` source words and verifies sampled values against full 16-bit UNORM/SNORM precision.
 - [x] Verify `Texture3D.SampleLevel` BORDER sampling with R8_UNORM; Chromium returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a 3D edge footprint.
 - [x] Verify R8_UNORM Texture1DArray samples at mip 1/layer 0 and mip 2/layer 1, plus dimension-query pixels; Chromium returns `[128, 0, 0, 255]` and `[64, 0, 0, 255]` for the samples.
 - [x] Verify `CopySubresourceRegion` for a 3D box spanning two depth slices and assert source values plus untouched destination voxels.
