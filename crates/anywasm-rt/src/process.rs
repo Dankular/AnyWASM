@@ -238,6 +238,14 @@ pub struct DynamicFunctionTable {
     pub table: u64,
     pub entry_count: u32,
     pub base: u64,
+    pub growable: Option<GrowableFunctionTable>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GrowableFunctionTable {
+    pub handle: u64,
+    pub maximum_entry_count: u32,
+    pub range_end: u64,
 }
 
 pub struct Thunk {
@@ -306,6 +314,7 @@ pub struct Process {
     pub(crate) vectored_exception_handlers: Vec<(u64, u64)>,
     pub(crate) vectored_continue_handlers: Vec<(u64, u64)>,
     pub(crate) next_vectored_exception_handle: u64,
+    pub(crate) next_growable_function_table_handle: u64,
     pub(crate) top_level_exception_filter: u64,
     module_dependencies: HashMap<usize, Vec<usize>>,
     initialized_dlls: HashSet<usize>,
@@ -963,6 +972,7 @@ impl Process {
             vectored_exception_handlers: Vec::new(),
             vectored_continue_handlers: Vec::new(),
             next_vectored_exception_handle: 0x7000_0000,
+            next_growable_function_table_handle: 0x0000_7000_0000_0000,
             top_level_exception_filter: 0,
             module_dependencies: HashMap::new(),
             initialized_dlls: HashSet::new(),

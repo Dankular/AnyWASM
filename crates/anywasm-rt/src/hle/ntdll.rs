@@ -11,6 +11,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RtlLookupFunctionEntry" => rtl_lookup_function_entry,
         "RtlAddFunctionTable" => rtl_add_function_table,
         "RtlDeleteFunctionTable" => rtl_delete_function_table,
+        "RtlAddGrowableFunctionTable" => rtl_add_growable_function_table,
+        "RtlGrowFunctionTable" => rtl_grow_function_table,
+        "RtlDeleteGrowableFunctionTable" => rtl_delete_growable_function_table,
         "RtlVerifyVersionInfo" => rtl_verify_version_info,
         "RtlAllocateHeap" => |p| {
             let n = p.arg(2);
@@ -160,6 +163,7 @@ fn rtl_add_function_table(p: &mut Process) -> R {
         table,
         entry_count,
         base,
+        growable: None,
     });
     Ok(1)
 }
@@ -169,12 +173,152 @@ fn rtl_delete_function_table(p: &mut Process) -> R {
     let Some(index) = p
         .dynamic_function_tables
         .iter()
-        .position(|registered| registered.table == table)
+        .position(|registered| registered.table == table && registered.growable.is_none())
     else {
         return Ok(0);
     };
     p.dynamic_function_tables.remove(index);
     Ok(1)
+}
+
+fn rtl_add_growable_function_table(p: &mut Process) -> R {
+    const STATUS_INVALID_PARAMETER: u64 = 0xC000_000D;
+    const STATUS_NO_MEMORY: u64 = 0xC000_0017;
+    const MAX_ENTRIES: u32 = 1 << 20;
+
+    let output = p.arg(0);
+    let table = p.arg(1);
+    let entry_count = p.arg(2) as u32;
+    let maximum_entry_count = p.arg(3) as u32;
+    let range_base = p.arg(4);
+    let range_end = p.arg(5);
+    let table_bytes = maximum_entry_count as u64 * 12;
+    if output == 0
+        || table == 0
+        || table & 3 != 0
+        || entry_count > maximum_entry_count
+        || maximum_entry_count == 0
+        || maximum_entry_count > MAX_ENTRIES
+        || table.checked_add(table_bytes).is_none()
+        || range_end <= range_base
+        || p.dynamic_function_tables
+            .iter()
+            .any(|registered| registered.table == table)
+        || !valid_dynamic_function_entries(p, table, entry_count, range_base, range_end)
+    {
+        return Ok(STATUS_INVALID_PARAMETER);
+    }
+
+    let handle = p.next_growable_function_table_handle;
+    let Some(next_handle) = handle.checked_add(8) else {
+        return Ok(STATUS_NO_MEMORY);
+    };
+    if handle == 0
+        || p.dynamic_function_tables.iter().any(|registered| {
+            registered
+                .growable
+                .is_some_and(|growable| growable.handle == handle)
+        })
+    {
+        return Ok(STATUS_NO_MEMORY);
+    }
+
+    p.wr64(output, handle)?;
+    p.dynamic_function_tables.push(DynamicFunctionTable {
+        table,
+        entry_count,
+        base: range_base,
+        growable: Some(GrowableFunctionTable {
+            handle,
+            maximum_entry_count,
+            range_end,
+        }),
+    });
+    p.next_growable_function_table_handle = next_handle;
+    Ok(0)
+}
+
+fn rtl_grow_function_table(p: &mut Process) -> R {
+    let handle = p.arg(0);
+    let new_entry_count = p.arg(1) as u32;
+    let Some(index) = p.dynamic_function_tables.iter().position(|registered| {
+        registered
+            .growable
+            .is_some_and(|growable| growable.handle == handle)
+    }) else {
+        return Ok(0);
+    };
+    let registered = p.dynamic_function_tables[index];
+    let Some(growable) = registered.growable else {
+        return Ok(0);
+    };
+    if new_entry_count <= registered.entry_count
+        || new_entry_count > growable.maximum_entry_count
+        || !valid_dynamic_function_entries(
+            p,
+            registered.table,
+            new_entry_count,
+            registered.base,
+            growable.range_end,
+        )
+    {
+        return Ok(0);
+    }
+    p.dynamic_function_tables[index].entry_count = new_entry_count;
+    Ok(0)
+}
+
+fn rtl_delete_growable_function_table(p: &mut Process) -> R {
+    let handle = p.arg(0);
+    if let Some(index) = p.dynamic_function_tables.iter().position(|registered| {
+        registered
+            .growable
+            .is_some_and(|growable| growable.handle == handle)
+    }) {
+        p.dynamic_function_tables.remove(index);
+    }
+    Ok(0)
+}
+
+fn valid_dynamic_function_entries(
+    p: &Process,
+    table: u64,
+    entry_count: u32,
+    range_base: u64,
+    range_end: u64,
+) -> bool {
+    let Some(range_size) = range_end.checked_sub(range_base) else {
+        return false;
+    };
+    let Some(table_bytes) = (entry_count as u64).checked_mul(12) else {
+        return false;
+    };
+    if range_size == 0 || table.checked_add(table_bytes).is_none() {
+        return false;
+    }
+
+    let mut previous_end = None;
+    for index in 0..entry_count {
+        let Some(entry) = table.checked_add(index as u64 * 12) else {
+            return false;
+        };
+        let (Ok(begin), Ok(end), Ok(unwind)) =
+            (p.rd32(entry), p.rd32(entry + 4), p.rd32(entry + 8))
+        else {
+            return false;
+        };
+        if begin >= end
+            || end as u64 > range_size
+            || previous_end.is_some_and(|previous| begin < previous)
+            || unwind == 0
+            || unwind & 3 != 0
+            || range_base.checked_add(unwind as u64).is_none()
+        {
+            return false;
+        }
+        previous_end = Some(end);
+    }
+    true
 }
 
 pub(crate) fn rtl_verify_version_info(p: &mut Process) -> R {
@@ -428,6 +572,93 @@ mod rtl_pc_to_file_header_tests {
 
         assert_eq!(lookup(&mut process), Ok(IMAGE_BASE + 0x1000 + 12));
         assert_eq!(process.rd64(OUTPUT), Ok(IMAGE_BASE));
+    }
+
+    #[test]
+    fn growable_function_table_can_start_empty_grow_and_be_deleted() {
+        const STACK: u64 = 0x60000;
+        const TABLE: u64 = 0x80000;
+        const RANGE_BASE: u64 = 0x3000_0000;
+        const RANGE_END: u64 = RANGE_BASE + 0x1000;
+        let mut process = process_with_guest_image();
+        for address in [STACK, TABLE, RANGE_BASE] {
+            assert!(process.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        process.cpu.gpr[RSP] = STACK;
+        process.cpu.gpr[RCX] = OUTPUT;
+        process.cpu.gpr[RDX] = TABLE;
+        process.cpu.gpr[R8] = 0;
+        process.cpu.gpr[R9] = 4;
+        process.wr64(STACK + 0x28, RANGE_BASE).unwrap();
+        process.wr64(STACK + 0x30, RANGE_END).unwrap();
+        let add = crate::hle::lookup("ntdll", "RtlAddGrowableFunctionTable").unwrap();
+        let grow = crate::hle::lookup("ntdll", "RtlGrowFunctionTable").unwrap();
+        let delete = crate::hle::lookup("ntdll", "RtlDeleteGrowableFunctionTable").unwrap();
+        let lookup = crate::hle::lookup("ntdll", "RtlLookupFunctionEntry").unwrap();
+
+        assert_eq!(add(&mut process), Ok(0));
+        let handle = process.rd64(OUTPUT).unwrap();
+        assert_ne!(handle, 0);
+        process.wr32(TABLE, 0x100).unwrap();
+        process.wr32(TABLE + 4, 0x1100).unwrap();
+        process.wr32(TABLE + 8, 0x400).unwrap();
+
+        process.cpu.gpr[RCX] = handle;
+        process.cpu.gpr[RDX] = 0;
+        assert_eq!(grow(&mut process), Ok(0));
+        process.cpu.gpr[RDX] = 5;
+        assert_eq!(grow(&mut process), Ok(0));
+        process.cpu.gpr[RDX] = 1;
+        assert_eq!(grow(&mut process), Ok(0));
+
+        process.cpu.gpr[RCX] = RANGE_BASE + 0x120;
+        process.cpu.gpr[RDX] = OUTPUT;
+        assert_eq!(lookup(&mut process), Ok(0));
+        assert_eq!(process.rd64(OUTPUT), Ok(0));
+
+        process.wr32(TABLE + 4, 0x180).unwrap();
+        process.cpu.gpr[RCX] = handle;
+        process.cpu.gpr[RDX] = 1;
+        assert_eq!(grow(&mut process), Ok(0));
+        process.cpu.gpr[RCX] = RANGE_BASE + 0x120;
+        process.cpu.gpr[RDX] = OUTPUT;
+        assert_eq!(lookup(&mut process), Ok(TABLE));
+        assert_eq!(process.rd64(OUTPUT), Ok(RANGE_BASE));
+
+        process.cpu.gpr[RCX] = handle;
+        assert_eq!(delete(&mut process), Ok(0));
+        process.cpu.gpr[RCX] = RANGE_BASE + 0x120;
+        process.cpu.gpr[RDX] = OUTPUT;
+        assert_eq!(lookup(&mut process), Ok(0));
+        assert_eq!(process.rd64(OUTPUT), Ok(0));
+    }
+
+    #[test]
+    fn growable_function_table_rejects_entries_outside_its_code_range() {
+        const STACK: u64 = 0x60000;
+        const TABLE: u64 = 0x80000;
+        const RANGE_BASE: u64 = 0x3000_0000;
+        const RANGE_END: u64 = RANGE_BASE + 0x1000;
+        let mut process = process_with_guest_image();
+        for address in [STACK, TABLE] {
+            assert!(process.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        process.cpu.gpr[RSP] = STACK;
+        process.cpu.gpr[RCX] = OUTPUT;
+        process.cpu.gpr[RDX] = TABLE;
+        process.cpu.gpr[R8] = 1;
+        process.cpu.gpr[R9] = 2;
+        process.wr64(STACK + 0x28, RANGE_BASE).unwrap();
+        process.wr64(STACK + 0x30, RANGE_END).unwrap();
+        process.wr32(TABLE, 0x100).unwrap();
+        process.wr32(TABLE + 4, 0x1100).unwrap();
+        process.wr32(TABLE + 8, 0x400).unwrap();
+        process.wr64(OUTPUT, 0xfeed).unwrap();
+        let add = crate::hle::lookup("ntdll", "RtlAddGrowableFunctionTable").unwrap();
+
+        assert_eq!(add(&mut process), Ok(0xC000_000D));
+        assert_eq!(process.rd64(OUTPUT), Ok(0xfeed));
+        assert!(process.dynamic_function_tables.is_empty());
     }
 
     #[test]
