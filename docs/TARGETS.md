@@ -40,6 +40,11 @@ WebGPU errors. The backbuffer contained 1,310,720 nonblack and nontransparent pi
 MSVCP import appeared before the frame. The page remained in `Starting`, so later imports and orderly
 shutdown remain open. Runtime and bundle hashes are in the
 [current-HEAD replay record](target-data/tutorial03-hle-only-head-replay-2026-10-13.json).
+The same current-source runtime then rendered 1,620 presents over 30 seconds and 2,460 after another
+15 seconds following Escape. It reported no unresolved import, WebGPU error, page error, HTTP error, or
+failed request; the only console error was the local server's `/favicon.ico` 404. The page remained in
+`Starting`, so input handling and orderly shutdown remain unverified. See the
+[current-HEAD lifecycle record](target-data/tutorial03-hle-only-current-head-lifecycle-2026-10-13.json).
 
 ### D3D9 fixed-function regression
 

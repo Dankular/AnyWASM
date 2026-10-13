@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-13T18:39:47.107Z",
+  "sourceRevision": "8f1c862",
+  "target": "Diligent Tutorial03_Texturing",
+  "browser": {
+    "name": "Chromium",
+    "version": "151.0.7922.34",
+    "platform": "win32"
+  },
+  "runtime": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "f08482bdc3adb7fd29d0834ad1c97bf737ea99c6f6e8217ad7f817417c9396aa"
+  },
+  "bundle": {
+    "path": "target/Tutorial03_Texturing-hle-only.awb",
+    "sha256": "fc6d43dbdae75e0457d78dfe2c6ea58a6aed7342ba682e4912f500a3d7590c25",
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11"
+  },
+  "firstFrame": {
+    "draws": 59,
+    "presents": 30,
+    "passes": 119,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": [],
+    "unresolvedImportStop": false
+  },
+  "after30Seconds": {
+    "draws": 3239,
+    "presents": 1620,
+    "passes": 6479,
+    "pipelines": 2,
+    "webgpuErrors": [],
+    "status": "Starting",
+    "terminalStatus": null,
+    "exitCode": null
+  },
+  "afterEscapeAnd15Seconds": {
+    "draws": 4919,
+    "presents": 2460,
+    "passes": 9839,
+    "pipelines": 2,
+    "webgpuErrors": [],
+    "status": "Starting",
+    "terminalStatus": null,
+    "exitCode": null
+  },
+  "errors": {
+    "pageErrors": [],
+    "httpErrors": [],
+    "failedRequests": [],
+    "consoleErrors": [
+      {
+        "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "url": "http://localhost:8927/favicon.ico"
+      }
+    ]
+  },
+  "interpretation": "The current-source HLE-only run rendered continuously through 30 seconds and another 15 seconds after Escape. No unresolved MSVCP import or sample-resource failure was observed. The page did not report terminal status; guest input handling and orderly shutdown remain unverified."
+}
