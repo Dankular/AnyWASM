@@ -3844,3 +3844,131 @@ mod onexit_tests {
         onexit_table_lifecycle_uses_guest_width_and_reverse_callback_order(CpuMode::X86_64);
     }
 }
+
+#[cfg(test)]
+mod msvc_streambuf_tests {
+    use super::{msvc_basic_streambuf_char_uflow, msvc_basic_streambuf_char_xsgetn};
+    use super::{msvc_basic_streambuf_wchar_uflow, msvc_basic_streambuf_wchar_xsgetn};
+    use crate::process::Process;
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, R8, RCX, RDX, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
+
+    const OBJECT: u64 = 0x40000;
+    const VTABLE: u64 = OBJECT + 0x100;
+    const INPUT: u64 = OBJECT + 0x200;
+    const OUTPUT: u64 = OBJECT + 0x300;
+    const STACK: u64 = 0x80000;
+    const CODE: u64 = 0x50000;
+
+    fn process() -> Process {
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OBJECT, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(CODE, PAGE_SIZE, PROT_RWX));
+        p.cpu.mode = CpuMode::X86_64;
+        p.cpu.gpr[RSP] = STACK + 0x800;
+        p.wr64(OBJECT, VTABLE).unwrap();
+        p.wr64(OBJECT + 0x38, OBJECT + 0x28).unwrap();
+        p.wr64(OBJECT + 0x50, OBJECT + 0x48).unwrap();
+        p
+    }
+
+    fn set_args(p: &mut Process, this: u64, buffer: u64, count: u64) {
+        p.cpu.gpr[RCX] = this;
+        p.cpu.gpr[RDX] = buffer;
+        p.cpu.gpr[R8] = count;
+    }
+
+    fn install_base_input_virtuals(p: &mut Process, wide: bool) {
+        let (underflow_name, uflow_name) = if wide {
+            (
+                "__anywasm_basic_streambuf_wchar_underflow",
+                "__anywasm_basic_streambuf_wchar_uflow",
+            )
+        } else {
+            (
+                "__anywasm_basic_streambuf_char_underflow",
+                "__anywasm_basic_streambuf_char_uflow",
+            )
+        };
+        let underflow = p.thunk_for("msvcp", underflow_name, false).unwrap();
+        let uflow = p.thunk_for("msvcp", uflow_name, false).unwrap();
+        p.wr64(VTABLE + 6 * 8, underflow).unwrap();
+        p.wr64(VTABLE + 7 * 8, uflow).unwrap();
+    }
+
+    #[test]
+    fn narrow_uflow_and_xsgetn_advance_buffer_and_stop_at_eof() {
+        let mut p = process();
+        install_base_input_virtuals(&mut p, false);
+        p.write_bytes(INPUT, b"abc").unwrap();
+        p.wr64(OBJECT + 0x28, INPUT).unwrap();
+        p.wr32(OBJECT + 0x48, 3).unwrap();
+
+        set_args(&mut p, OBJECT, OUTPUT, 0);
+        assert_eq!(msvc_basic_streambuf_char_uflow(&mut p), Ok(b'a' as u64));
+        assert_eq!(p.rd64(OBJECT + 0x28).unwrap(), INPUT + 1);
+        assert_eq!(p.rd32(OBJECT + 0x48).unwrap(), 2);
+
+        set_args(&mut p, OBJECT, OUTPUT, 4);
+        assert_eq!(msvc_basic_streambuf_char_xsgetn(&mut p), Ok(2));
+        assert_eq!(p.read_bytes(OUTPUT, 2).unwrap(), b"bc");
+        assert_eq!(p.rd64(OBJECT + 0x28).unwrap(), INPUT + 3);
+        assert_eq!(p.rd32(OBJECT + 0x48).unwrap(), 0);
+
+        set_args(&mut p, OBJECT, OUTPUT, 1);
+        assert_eq!(msvc_basic_streambuf_char_uflow(&mut p), Ok(u32::MAX as u64));
+        set_args(&mut p, OBJECT, OUTPUT, u64::MAX);
+        assert_eq!(msvc_basic_streambuf_char_xsgetn(&mut p), Ok(0));
+    }
+
+    #[test]
+    fn wide_uflow_and_xsgetn_copy_utf16_code_units() {
+        let mut p = process();
+        install_base_input_virtuals(&mut p, true);
+        p.wr16(INPUT, 0x0041).unwrap();
+        p.wr16(INPUT + 2, 0x20ac).unwrap();
+        p.wr16(INPUT + 4, 0x03a9).unwrap();
+        p.wr64(OBJECT + 0x28, INPUT).unwrap();
+        p.wr32(OBJECT + 0x48, 3).unwrap();
+
+        set_args(&mut p, OBJECT, OUTPUT, 0);
+        assert_eq!(msvc_basic_streambuf_wchar_uflow(&mut p), Ok(0x0041));
+        set_args(&mut p, OBJECT, OUTPUT, 3);
+        assert_eq!(msvc_basic_streambuf_wchar_xsgetn(&mut p), Ok(2));
+        assert_eq!(p.rd16(OUTPUT).unwrap(), 0x20ac);
+        assert_eq!(p.rd16(OUTPUT + 2).unwrap(), 0x03a9);
+        assert_eq!(p.rd16(OBJECT + 0x48).unwrap(), 0);
+        set_args(&mut p, OBJECT, OUTPUT, 1);
+        assert_eq!(
+            msvc_basic_streambuf_wchar_uflow(&mut p),
+            Ok(u16::MAX as u64)
+        );
+    }
+
+    #[test]
+    fn uflow_calls_virtual_underflow_and_consumes_its_refilled_area() {
+        let mut p = process();
+        const UNDERFLOW: u64 = CODE + 0x100;
+        let mut code = vec![0x48, 0xb8]; // mov rax, address of _Gnext
+        code.extend_from_slice(&(OBJECT + 0x28).to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xba]); // mov rdx, input character address
+        code.extend_from_slice(&INPUT.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x89, 0x10]); // mov [rax], rdx
+        code.extend_from_slice(&[0x48, 0xb8]); // mov rax, address of _Gcount
+        code.extend_from_slice(&(OBJECT + 0x48).to_le_bytes());
+        code.extend_from_slice(&[0xc7, 0x00, 1, 0, 0, 0]); // mov dword ptr [rax], 1
+        code.extend_from_slice(&[0xb8, b'z', 0, 0, 0, 0xc3]); // mov eax, 'z'; ret
+        p.write_bytes(UNDERFLOW, &code).unwrap();
+        p.wr64(VTABLE + 6 * 8, UNDERFLOW).unwrap();
+        p.wr64(OBJECT + 0x28, 0).unwrap();
+        p.wr32(OBJECT + 0x48, 0).unwrap();
+        p.wr8(INPUT, b'z').unwrap();
+
+        set_args(&mut p, OBJECT, OUTPUT, 0);
+        assert_eq!(msvc_basic_streambuf_char_uflow(&mut p), Ok(b'z' as u64));
+        assert_eq!(p.rd64(OBJECT + 0x28).unwrap(), INPUT + 1);
+        assert_eq!(p.rd32(OBJECT + 0x48).unwrap(), 0);
+    }
+}

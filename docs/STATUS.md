@@ -463,17 +463,19 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   including locale and condition-variable paths, then reached the configured cap inside D3DCompiler
   without an unresolved-import stop. This guest-only trace made no `Present`; browser render evidence is
   recorded separately. See `docs/target-data/tutorial03-hle-cli-30m-2026-10-13.json`. The current-source
-  analyzer report lists 223 implemented / 28 missing static imports for
-  Tutorial03, including 54 of 65 MSVCP140 imports; all 18 VCRUNTIME140 imports in that report are
+  analyzer report lists 227 implemented / 24 missing static imports for
+  Tutorial03, including 58 of 65 MSVCP140 imports; all 18 VCRUNTIME140 imports in that report are
   handled. Narrow and wide `basic_streambuf` defaults cover `showmanyc`, `setbuf`, `sync`,
   `imbue`, `underflow`, `uflow`, and `xsgetn`; wide `_Lock` and `_Unlock` are no-ops. The
   input methods use the observed x64 MSVC read-area layout and preserve virtual dispatch when
-  `underflow` or `uflow` is overridden. The handlers compile, but no runtime fixture or browser
-  replay has exercised them yet, and the checked-in static import report predates this addition.
+  `underflow` or `uflow` is overridden. Three focused runtime tests pass for narrow and wide buffered
+  reads, EOF, and virtual underflow refill. A fresh HLE-only browser replay rendered the textured cube
+  and continued for 15 seconds without an unresolved-import stop; it does not establish that this
+  selected render path called these specific input methods. The static import report was regenerated.
   The HLE copies and destroys MSVC `std::exception` message data using guest
   allocations and PE32/PE32+ pointer layouts. `_purecall` now invokes the process-wide handler
-  installed by `_set_purecall_handler` and terminates the guest if the handler returns. These
-  additions have compile and static-analysis evidence, but no runtime fixture yet. The full report is in
+  installed by `_set_purecall_handler` and terminates the guest if the handler returns; this `_purecall`
+  path has compile and static-analysis evidence but no runtime fixture yet. The full report is in
   `docs/target-imports/tutorial03-current-source.json`; its preflight is static
   review only. These local DLLs are not a product package. The first
   browser report with that package stopped at unsupported `VPERMILPS xmm0,xmm5,0x55` with zero GPU
@@ -492,7 +494,7 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   uninitialized auxiliary ostream during insertion of the ANSI string `\x1b[39m`; that capture
   predates the current stream handlers. An earlier analyzer snapshot reported 165 implemented /
   86 missing imports, including 61 of 65 MSVCP140 imports missing. The current-source report now
-  records 223 implemented / 28 missing, including 11 of 65 MSVCP140 imports missing. The local
+  records 227 implemented / 24 missing, including 7 of 65 MSVCP140 imports missing. The local
   runtime DLLs are not a product dependency or redistribution decision.
   A separate HLE-only browser bundle of Tutorial01_HelloTriangle, also without local MSVC/UCRT DLLs,
   now renders the colored triangle at the normal 250,000-instruction worker slice: 659 draws, 330
@@ -512,6 +514,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `/favicon.ico`. It also remained in `Starting`. See
   [`tutorial03-hle-first-frame-recheck-2026-10-13.json`](target-data/tutorial03-hle-first-frame-recheck-2026-10-13.json)
   and [`the captured frame`](images/tutorial03-hle-only-first-frame-recheck-2026-10-13.png).
+  A further current-source run rebuilt the HLE-only browser module from `ba39f00`: it rendered the cube
+  after 39.6 seconds with 59 draws and 30 presents, then continued for 15 seconds to 1,919 draws and
+  960 presents. There were no WebGPU errors, page errors, HTTP errors, failed requests, or unresolved
+  import stops; the only console error was the favicon 404. The page still had no terminal status.
+  The source hash, bundle hash, counters, and both captures are recorded in
+  [`tutorial03-hle-only-current-source-recheck-2026-10-13.json`](target-data/tutorial03-hle-only-current-source-recheck-2026-10-13.json).
   Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in

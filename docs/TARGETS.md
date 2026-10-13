@@ -9,6 +9,14 @@ HLE-only browser replay without local MSVC/UCRT DLLs continued rendering; its 45
 2,759 draws, 1,380 presents, 5,519 passes, two pipelines, and zero WebGPU validation errors. It ended
 with the page still in `Starting`, without terminal process status. The only 404 was the browser's
 `/favicon.ico` request; the page context reported no failed requests or HTTP errors for sample resources.
+The 2026-10-13 current-source recheck rebuilt from `ba39f00` and rendered the HLE-only textured cube
+after 39.6 seconds: 59 draws, 30 presents, 119 passes, two pipelines, and 16 Asyncify yield/resume
+pairs. After another 15 seconds it recorded 1,919 draws and 960 presents, still with no WebGPU errors,
+unresolved-import stop, page error, failed request, or HTTP error. Chromium 151 logged only the favicon
+404. The page remained in `Starting`, so later imports and orderly shutdown remain unverified. See the
+[current-source report](target-data/tutorial03-hle-only-current-source-recheck-2026-10-13.json) and
+[canvas capture](images/tutorial03-hle-only-current-source-recheck-2026-10-13.png). This current
+evidence contradicts the claim that Tutorial03 stops at an unresolved MSVCP140 import before rendering.
 On 2026-10-13, HLE-only Tutorial01 and Tutorial03 first-frame captures showed the colored triangle and
 textured cube in cooperative CPU mode, with no local MSVC/UCRT DLLs and no unresolved runtime MSVCP
 import before either frame. Both pages stayed active; the captures do not establish later imports or
@@ -259,13 +267,14 @@ The VFS and trace log are ignored local artifacts and are not produced by the no
 
 ### HLE-only Tutorial03 import probe
 
-The CLI rebuilt from the current worktree analyzed the dynamic-runtime Tutorial03 executable with its
-Release directory. The current report lists 210 implemented and 41 missing static imports. It
-implements 44 of 65 `MSVCP140.dll` imports and 15 of 18 `VCRUNTIME140.dll` imports;
-`VCRUNTIME140_1.dll`'s `__CxxFrameHandler4` is implemented. The missing imports are listed in
-[`target-imports/tutorial03-current-source.json`](target-imports/tutorial03-current-source.json).
-The analyzer preflight is `review`, `staticOnly: true`, and does not guarantee runtime success. These
-counts do not show which imports the selected D3D11 path reaches.
+An earlier CLI analysis of the dynamic-runtime Tutorial03 executable reported 210 implemented and 41
+missing static imports, including 44 of 65 `MSVCP140.dll` imports and 15 of 18 `VCRUNTIME140.dll`
+imports. The latest analyzer report, regenerated from the current source, lists 227 implemented and
+24 missing imports, including 58 of 65 MSVCP140 imports and all 18 VCRUNTIME140 imports. The four
+newly implemented imports are narrow and wide `basic_streambuf::uflow` and `basic_streambuf::xsgetn`.
+The report is [`target-imports/tutorial03-current-source.json`](target-imports/tutorial03-current-source.json).
+Its preflight is `review`, `staticOnly: true`, and does not guarantee runtime success or prove that
+these specific input methods are reached by the sample.
 
 A short HLE-only VFS contained the tutorial executable, Diligent D3D11 DLLs, D3DCompiler, shaders,
 and logo, with MSVC/UCRT runtime DLLs omitted. A run configured for 1,000,000 guest steps loaded
@@ -339,7 +348,10 @@ sample lifecycle question open.
 
 A fresh 45-second rerun recorded 2,759 draws, 1,380 presents, 5,519 passes, two pipelines, and an
 empty WebGPU error list. It again remained in `Starting` with no terminal status. The browser context
-reported no failed requests or HTTP error responses; the only console 404 was `/favicon.ico`.
+reported no failed requests or HTTP error responses; the only console 404 was `/favicon.ico`. The
+later current-source run above verifies the same first frame after the stream-buffer HLE addition and
+observes 15 seconds of continued rendering, but does not establish that Tutorial03 calls `uflow` or
+`xsgetn` on this path.
 
 ### Tutorial01 HLE-only browser frame
 

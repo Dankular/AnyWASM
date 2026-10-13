@@ -1,0 +1,109 @@
+{
+  "capturedAt": "2026-10-13T15:54:09.855Z",
+  "target": "Diligent Tutorial03_Texturing",
+  "browser": {
+    "name": "Chromium",
+    "version": "151.0.7922.34",
+    "platform": "win32"
+  },
+  "runtime": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "183a97bc0bdb825599fad66b7108f9277ceb99ab659173c3a768de3f0b15be3a"
+  },
+  "bundle": {
+    "path": "target/Tutorial03_Texturing-hle-only.awb",
+    "sha256": "fc6d43dbdae75e0457d78dfe2c6ea58a6aed7342ba682e4912f500a3d7590c25",
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11",
+    "cpuMode": "cooperative"
+  },
+  "firstFrameElapsedMs": 39574,
+  "firstFrame": {
+    "stats": {
+      "type": "gpu",
+      "draws": 59,
+      "dispatches": 0,
+      "presents": 30,
+      "passes": 119,
+      "pipelines": 2,
+      "lastComputeUavs": [],
+      "errors": [],
+      "asyncify": {
+        "yields": 16,
+        "resumes": 16
+      }
+    },
+    "status": "Starting Tutorial03_Texturing-hle-only.awb…",
+    "terminal": "\u001b[39mDiligent Engine: Info: Using adapter 0: 'AnyWASM WebGPU adapter'\n\u001b[39mDiligent Engine: Info: Using adapter 0: 'AnyWASM WebGPU adapter'\n",
+    "gpuInfo": {
+      "type": "gpuinfo",
+      "info": {},
+      "features": [
+        "float32-blendable",
+        "depth32float-stencil8",
+        "rg11b10ufloat-renderable",
+        "bgra8unorm-storage",
+        "depth-clip-control",
+        "texture-compression-bc",
+        "dual-source-blending",
+        "clip-distances",
+        "core-features-and-limits",
+        "float32-filterable",
+        "indirect-first-instance"
+      ]
+    }
+  },
+  "readback": {
+    "width": 1280,
+    "height": 1024,
+    "nonBlackPixels": 1310720,
+    "nonTransparentPixels": 1310720,
+    "centerPixel": [
+      32,
+      130,
+      211,
+      255
+    ]
+  },
+  "afterWait": {
+    "stats": {
+      "type": "gpu",
+      "draws": 1919,
+      "dispatches": 0,
+      "presents": 960,
+      "passes": 3839,
+      "pipelines": 2,
+      "lastComputeUavs": [],
+      "errors": [],
+      "asyncify": {
+        "yields": 16,
+        "resumes": 16
+      }
+    },
+    "status": "Starting Tutorial03_Texturing-hle-only.awb…",
+    "statusCode": null,
+    "exitCode": null,
+    "terminal": "\u001b[39mDiligent Engine: Info: Using adapter 0: 'AnyWASM WebGPU adapter'\n\u001b[39mDiligent Engine: Info: Using adapter 0: 'AnyWASM WebGPU adapter'\n"
+  },
+  "errors": {
+    "pageErrors": [],
+    "consoleErrors": [
+      {
+        "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "location": {
+          "url": "http://localhost:8919/favicon.ico",
+          "lineNumber": 0,
+          "columnNumber": 0
+        }
+      }
+    ],
+    "httpErrors": [],
+    "failedRequests": []
+  },
+  "screenshots": {
+    "readback": "docs/images/tutorial03-hle-only-current-source-readback-2026-10-13.png",
+    "canvas": "docs/images/tutorial03-hle-only-current-source-recheck-2026-10-13.png"
+  },
+  "sourceCommit": "ba39f00d654a1ca02521a1550c80951e47ab6d12",
+  "interpretation": "HLE-only Tutorial03 rendered a visible textured cube, then continued for a 15-second observation window with no unresolved-import stop, page error, HTTP error, failed request, or WebGPU error. The page remained in Starting with no terminal status, so later imports and orderly shutdown remain unverified."
+}
