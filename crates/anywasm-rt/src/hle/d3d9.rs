@@ -404,7 +404,7 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
             | "SetSoftwareVertexProcessing",
         ) => 2,
         ("IDirect3DDevice9", "SetStreamSource") => 5,
-        ("IDirect3DDevice9", "SetTextureStageState" | "SetSamplerState") => 4,
+        ("IDirect3DDevice9", "GetSamplerState" | "SetTextureStageState" | "SetSamplerState") => 4,
         ("IDirect3DDevice9", "DrawPrimitive") => 4,
         ("IDirect3DDevice9", "DrawPrimitiveUP") => 5,
         ("IDirect3DDevice9", "DrawIndexedPrimitive") => 7,
@@ -523,6 +523,7 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "GetVertexShader") => |p| get_shader9(p, true),
         ("IDirect3DDevice9", "GetPixelShader") => |p| get_shader9(p, false),
         ("IDirect3DDevice9", "SetTexture") => set_texture,
+        ("IDirect3DDevice9", "GetSamplerState") => get_sampler_state,
         ("IDirect3DDevice9", "SetSamplerState") => set_sampler_state,
         ("IDirect3DDevice9", "SetTextureStageState") => set_texture_stage_state,
         (
@@ -992,6 +993,31 @@ fn d3d9_sampler_state(p: &Process, device: u64, stage: u32, state: u32, default:
         .get(&(device, stage, state))
         .copied()
         .unwrap_or(default)
+}
+
+fn get_sampler_state(p: &mut Process) -> R {
+    let (device, stage, state, out) = (p.arg(0), p.arg(1) as u32, p.arg(2) as u32, p.arg(3));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if stage > 1 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let default = match state {
+        1..=3 | 5..=6 => 1,  // address wrap and point min/mag filters
+        7 | 8 | 9 | 11 => 0, // no mip filter, zero LOD bias/level, and disabled sRGB
+        10 => 1,             // maximum anisotropy
+        _ => return Ok(D3DERR_NOTAVAILABLE),
+    };
+    let value = d3d9_sampler_state(p, device, stage, state, default);
+    p.wr32(out, value)?;
+    Ok(S_OK)
 }
 
 fn set_sampler_state(p: &mut Process) -> R {
@@ -3514,6 +3540,74 @@ mod tests {
             ]
             .concat(),
         );
+    }
+
+    #[test]
+    fn get_sampler_state_returns_defaults_and_saved_values() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 32,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [(4, device as u32), (8, 1), (12, 10), (16, 8)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "SetSamplerState").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::GetSamplerState"),
+            Some(16)
+        );
+        let get_sampler_state = method("IDirect3DDevice9", "GetSamplerState")
+            .expect("GetSamplerState should be dispatched");
+
+        for (offset, value) in [
+            (4, device as u32),
+            (8, 1),   // sampler 1
+            (12, 10), // D3DSAMP_MAXANISOTROPY
+            (16, OUT as u32),
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(get_sampler_state(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 8);
+
+        for (state, expected) in [(2, 1), (7, 0), (8, 0), (9, 0), (11, 0)] {
+            p.wr32(STACK + 12, state).unwrap();
+            assert_eq!(get_sampler_state(&mut p).unwrap(), S_OK);
+            assert_eq!(p.rd32(OUT).unwrap(), expected, "sampler state {state}");
+        }
+
+        p.wr32(OUT, 0xdead_beef).unwrap();
+        p.wr32(STACK + 12, 4).unwrap(); // D3DSAMP_BORDERCOLOR is outside this HLE slice.
+        assert_eq!(get_sampler_state(&mut p).unwrap(), D3DERR_NOTAVAILABLE);
+        assert_eq!(p.rd32(OUT).unwrap(), 0xdead_beef);
+        p.wr32(STACK + 8, 2).unwrap();
+        p.wr32(STACK + 12, 10).unwrap();
+        assert_eq!(get_sampler_state(&mut p).unwrap(), D3DERR_NOTAVAILABLE);
+        p.wr32(STACK + 8, 1).unwrap();
+        p.wr32(STACK + 16, 0).unwrap();
+        assert_eq!(get_sampler_state(&mut p).unwrap(), E_POINTER);
     }
 
     #[test]
