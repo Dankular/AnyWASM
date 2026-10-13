@@ -286,8 +286,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   a partial RG8_UNORM texel copy and a BC1 block copy that preserve neighboring destination data,
   DXBC clip/discard, 2D and 3D mip generation, fractional-LOD linear filtering, an 8x anisotropic
   sampler request, instance step rates, render-to-texture, multiple render targets, cube/array/3D
-  texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, a D24S8 depth/alpha-to-coverage
-  combination, and D3D11.1 constant-buffer ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
+  texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, D24S8 depth with
+  alpha-to-coverage and complementary sample masks, and D3D11.1 constant-buffer ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
   rendering, stage-0 SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH,
   signed-add, modulate-add, texture/factor-alpha blending, DOTPRODUCT3, and all alpha-test
   comparison functions at equality. These

@@ -1331,6 +1331,20 @@ try {
       command(17, words(0, 9)); command(17, words(1, 13)); command(29, words(3, 0)); // near half-alpha red
       command(17, words(0, 10)); command(17, words(1, 14)); command(29, words(3, 0)); // far green fills uncovered samples
       command(47, words(19, 0, 3, 0, 28));
+      command(4, words(50, 16, 16, 1, 1, 28, 0x20, 0, 4, 0)); // 4x RGBA8 sample-mask/depth target
+      command(12, words(51, 0, 50, 28, 4, 0, 1, 0, 1));
+      command(4, words(52, 16, 16, 1, 1, 44, 0x40, 0, 4, 0)); // 4x typeless D24S8 depth resource
+      command(12, words(53, 1, 52, 45, 3, 0, 1, 0, 1));
+      command(4, words(54, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      command(21, words(1, 51, 53));
+      command(26, words(8, 0));
+      command(27, words(51, 0, 0, 0x3f800000, 0x3f800000)); // clear blue
+      command(28, words(53, 3, 0x3f800000, 0)); // clear D24 depth/stencil
+      command(24, words(0, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0x5));
+      command(17, words(0, 9)); command(17, words(1, 12)); command(29, words(3, 0)); // near red on samples 0 and 2
+      command(24, words(0, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0xa));
+      command(17, words(0, 10)); command(17, words(1, 11)); command(29, words(3, 0)); // far green on samples 1 and 3
+      command(47, words(54, 0, 50, 0, 28));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
@@ -1338,10 +1352,11 @@ try {
       const d32Pixels = await gpu.readBackTexture(15);
       const d16Pixels = await gpu.readBackTexture(18);
       const coverageDepthPixels = await gpu.readBackTexture(19);
+      const sampleMaskDepthPixels = await gpu.readBackTexture(54);
       const centerOf = (data) => Array.from(data.data.slice((8 * data.width + 8) * 4, (8 * data.width + 8) * 4 + 4));
       const result = { d24Center: centerOf(pixels), d32Center: centerOf(d32Pixels), d16Center: centerOf(d16Pixels),
         coverageDepthCenter: centerOf(coverageDepthPixels),
-        draws: gpu.stats.draws, errors: gpu.stats.errors };
+        sampleMaskDepthCenter: centerOf(sampleMaskDepthPixels), draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -1349,7 +1364,7 @@ try {
     }
   });
   check('D3D11 4x D24S8 depth testing keeps the nearer draw through color resolve',
-    multisampledDepthResult.draws === 8 && multisampledDepthResult.errors?.length === 0
+    multisampledDepthResult.draws === 10 && multisampledDepthResult.errors?.length === 0
       && near(multisampledDepthResult.d24Center || [], [0, 255, 0, 255], 1),
     JSON.stringify(multisampledDepthResult));
   check('D3D11 4x D32_FLOAT depth testing keeps the nearer draw through color resolve',
@@ -1365,6 +1380,10 @@ try {
       && (multisampledDepthResult.coverageDepthCenter?.[0] ?? 0) > 0
       && (multisampledDepthResult.coverageDepthCenter?.[1] ?? 0) > 0
       && multisampledDepthResult.coverageDepthCenter?.[2] === 0,
+    JSON.stringify(multisampledDepthResult));
+  check('D3D11 4x D24S8 depth testing composes with sample masks across samples',
+    multisampledDepthResult.errors?.length === 0
+      && near(multisampledDepthResult.sampleMaskDepthCenter || [], [128, 128, 0, 255], 1),
     JSON.stringify(multisampledDepthResult));
 
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');
