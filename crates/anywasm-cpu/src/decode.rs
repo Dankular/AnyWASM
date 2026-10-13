@@ -165,7 +165,11 @@ pub enum Op {
     Adox,
     Andn,
     Blsi,
+    Blsmsk,
+    Blsr,
+    Bextr,
     Bzhi,
+    Rorx,
     Pdep,
     Pext,
     Mulx,
@@ -799,15 +803,26 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
     }
     if map == 2 && opcode == 0xf3 && pp == 0 && !l {
         let m = parse_modrm(d, pfx)?;
-        if m.reg != 3 {
-            return Err(DecodeError::Unsupported("VEX BLSI opcode extension"));
-        }
-        let mut i = blank(Op::Blsi);
-        i.osz = if pfx.w() { 8 } else { 4 };
+        let op = match m.reg {
+            1 => Op::Blsr,
+            2 => Op::Blsmsk,
+            3 => Op::Blsi,
+            _ => return Err(DecodeError::Unsupported("VEX bit-scan opcode extension")),
+        };
+        let mut i = blank(op);
+        i.osz = if pfx.w() && !pfx.mode32 { 8 } else { 4 };
         i.ops = [Opnd::Gpr(vvvv), m.rm_opnd(RK::G, pfx), Opnd::None];
         return Ok(i);
     }
     if map == 3 {
+        if opcode == 0xf0 && pp == 3 && !l && vvvv_encoded == 0xf {
+            let m = parse_modrm(d, pfx)?;
+            let mut i = blank(Op::Rorx);
+            i.osz = if pfx.w() && !pfx.mode32 { 8 } else { 4 };
+            i.ops = [m.reg_opnd(RK::G, pfx), m.rm_opnd(RK::G, pfx), Opnd::None];
+            i.imm = d.u8()? as i64;
+            return Ok(i);
+        }
         if matches!(opcode, 0x04 | 0x05) && pp == 1 && !pfx.w() && vvvv_encoded == 0xf {
             let m = parse_modrm(d, pfx)?;
             let mut i = blank(if opcode == 0x04 {
@@ -962,6 +977,7 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         }
         let mut i = match (opcode, pp) {
             (0xf2, 0) => blank(Op::Andn),
+            (0xf7, 0) => blank(Op::Bextr),
             (0xf5, 0) => blank(Op::Bzhi),
             (0xf5, 2) => blank(Op::Pext),
             (0xf5, 3) => blank(Op::Pdep),

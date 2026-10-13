@@ -415,10 +415,9 @@ fn crc32c(crc: u32, data: u64, sz: u8) -> u32 {
     c
 }
 
-/// CPUID leaves reported to the guest. Features that are not implemented (AVX, BMI, AES, ...)
-/// are deliberately hidden so well-behaved software selects its SSE2 paths.
+/// CPUID leaves reported to the guest. Features without complete instruction coverage (AVX, AES,
+/// and others) are deliberately hidden so software selects supported paths.
 pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
-    let _ = sub;
     match leaf {
         0 => [
             0x16,
@@ -444,6 +443,7 @@ pub fn cpuid(leaf: u32, sub: u32) -> [u32; 4] {
             // SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, CX16, MOVBE
             [0x000306c3, 0x0001_0800, ecx, edx]
         }
+        7 if sub == 0 => [0, 1 << 3 | 1 << 8, 0, 0], // BMI1, BMI2
         7 => [0, 0, 0, 0],
         0x8000_0000 => [0x8000_0008, 0, 0, 0],
         0x8000_0001 => [0, 0, 1 | 1 << 5, 1 << 11 | 1 << 20 | 1 << 29],
@@ -1035,14 +1035,58 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             cpu.set_flag(SF, result & sgn(sz) != 0);
             cpu.set_flag(PF, parity(result));
         }
-        Op::Blsi => {
+        Op::Blsi | Op::Blsmsk | Op::Blsr => {
             let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
-            let result = source.wrapping_neg() & source & msk(sz);
+            let result = match i.op {
+                Op::Blsi => source.wrapping_neg() & source,
+                Op::Blsmsk => source.wrapping_sub(1) ^ source,
+                Op::Blsr => source.wrapping_sub(1) & source,
+                _ => unreachable!(),
+            } & msk(sz);
             wr(cpu, mem, &i.ops[0], sz, result)?;
-            cpu.set_flag(CF, source != 0);
+            cpu.set_flag(
+                CF,
+                if i.op == Op::Blsi {
+                    source != 0
+                } else {
+                    source == 0
+                },
+            );
             cpu.set_flag(OF, false);
             cpu.set_flag(SF, result & sgn(sz) != 0);
+            cpu.set_flag(ZF, i.op != Op::Blsmsk && result == 0);
+        }
+        Op::Bextr => {
+            let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
+            let control = rd(cpu, mem, &i.ops[2], sz, 0)?;
+            let width = sz as u32 * 8;
+            let start = (control & 0xff) as u32;
+            let length = ((control >> 8) & 0xff) as u32;
+            let result = if start >= width || length == 0 {
+                0
+            } else {
+                let count = length.min(width - start);
+                let mask = if count == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << count) - 1
+                };
+                (source >> start) & mask
+            };
+            cpu.set_flag(CF, false);
+            cpu.set_flag(OF, false);
             cpu.set_flag(ZF, result == 0);
+            wr(cpu, mem, &i.ops[0], sz, result)?;
+        }
+        Op::Rorx => {
+            let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
+            let count = (i.imm as u32) & (sz as u32 * 8 - 1);
+            let result = if sz == 4 {
+                (source as u32).rotate_right(count) as u64
+            } else {
+                source.rotate_right(count)
+            };
+            wr(cpu, mem, &i.ops[0], sz, result)?;
         }
         Op::Bzhi => {
             let source = rd(cpu, mem, &i.ops[1], sz, 0)?;

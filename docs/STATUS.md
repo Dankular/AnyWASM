@@ -103,10 +103,16 @@
 - Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic,
   including packed-single `VADDPS`/`VMULPS`, `VPERMILPS`/`VPERMILPD`, XOR, rounding/conversion,
   `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the exact target-grounded
-  list in `CLAUDE.md`). A general BMI2 slice also adds `SARX`, `PDEP`, `PEXT`, and `MULX`; BZHI now
+  list in `CLAUDE.md`). BMI coverage includes BMI1 `ANDN`, `BEXTR`, `BLSI`, `BLSMSK`, `BLSR`, and
+  `TZCNT`, plus BMI2 `BZHI`, `MULX`, `PDEP`, `PEXT`, `RORX`, `SARX`, `SHLX`, and `SHRX`; BZHI
   handles both 32-bit and 64-bit operands. The target BZHI memory form is also checked against the
-  host CPU on Linux CI across index boundary cases, excluding undefined AF/PF. Overall AVX/AVX2/BMI
-  coverage remains incomplete; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
+  host CPU on Linux CI across index boundary cases, excluding undefined AF/PF. Guest CPUID
+  advertises BMI1 and BMI2 now that their instruction families are implemented; incomplete feature
+  families remain hidden. Encoding and behavior references: [Intel SDM, Vol. 2A](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2a-manual.pdf),
+  [Vol. 2B](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf),
+  and [Vol. 1 CPUID definitions](https://cdrdv2-public.intel.com/868137/325462-089-sdm-vol-1-2abcd-3abcd-4.pdf).
+  AVX/AVX2 coverage remains incomplete; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain
+  open.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (opt-in prototype, default disabled):** Rust emits leading NOPs,
