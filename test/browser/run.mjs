@@ -5115,9 +5115,19 @@ try {
         Texture1DArray<float4> source : register(t0);
         SamplerState sourceSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
-          return position.x < 32.0
-            ? source.SampleLevel(sourceSampler, float2(0.5, 0.0), 1.0)
-            : source.SampleLevel(sourceSampler, float2(0.5, 1.0), 2.0);
+          if (position.x < 20.0) {
+            return source.SampleLevel(sourceSampler, float2(0.5, 0.0), 1.0);
+          }
+          if (position.x >= 44.0) {
+            return source.SampleLevel(sourceSampler, float2(0.5, 1.0), 2.0);
+          }
+          uint width, elements, levels;
+          if (position.y < 32.0) {
+            source.GetDimensions(0, width, elements, levels);
+          } else {
+            source.GetDimensions(1, width, elements, levels);
+          }
+          return float4(float(width) / 16.0, float(elements) / 4.0, float(levels) / 8.0, 1.0);
         }
       `, 'main', 'ps_5_0');
       const stream = [];
@@ -5164,8 +5174,14 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackTexture(9);
-      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { mip1Layer0: at(16), mip2Layer1: at(48), errors: gpu.stats.errors };
+      const at = (x, y = 32) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      const result = {
+        mip1Layer0: at(16),
+        mip2Layer1: at(48),
+        dimensionsMip0: at(32, 16),
+        dimensionsMip1: at(32, 48),
+        errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -5175,7 +5191,9 @@ try {
   check('D3D11 Texture1DArray samples nonzero mips and array layers through its 2D backing texture',
     !texture1dArrayResult.error && texture1dArrayResult.errors?.length === 0
       && near(texture1dArrayResult.mip1Layer0 || [], [255, 0, 0, 255], 1)
-      && near(texture1dArrayResult.mip2Layer1 || [], [0, 255, 0, 255], 1),
+      && near(texture1dArrayResult.mip2Layer1 || [], [0, 255, 0, 255], 1)
+      && near(texture1dArrayResult.dimensionsMip0 || [], [64, 128, 96, 255], 1)
+      && near(texture1dArrayResult.dimensionsMip1 || [], [32, 128, 96, 255], 1),
     JSON.stringify(texture1dArrayResult));
 
   const texture1dArrayUavResult = await page.evaluate(async () => {

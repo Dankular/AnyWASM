@@ -33,7 +33,7 @@ function deferNonFiniteF32StoreConstants(spirv) {
     const first = words[at], wordCount = first >>> 16, opcode = first & 0xffff;
     if (wordCount === 0 || at + wordCount > words.length) return spirv;
     if (opcode === 22 && wordCount === 3) floatTypes.set(words[at + 1], words[at + 2]); // OpTypeFloat
-    if (opcode === 21 && wordCount === 4) intTypes.push({ id: words[at + 1], width: words[at + 2], signed: words[at + 3] }); // OpTypeInt
+    if (opcode === 21 && wordCount === 4) intTypes.push({ id: words[at + 1], width: words[at + 2], signed: words[at + 3], at }); // OpTypeInt
     if (opcode === 32 && wordCount === 4) pointerTypes.set(words[at + 1], { storage: words[at + 2], pointee: words[at + 3] }); // OpTypePointer
     if ([59, 65, 66, 67, 83].includes(opcode) && wordCount >= 3) resultTypes.set(words[at + 2], words[at + 1]);
     if (opcode === 43 && wordCount === 4) { // OpConstant with an f32 bit pattern
@@ -59,9 +59,23 @@ function deferNonFiniteF32StoreConstants(spirv) {
     return group;
   };
   let nextId = words[3];
-  const intPointer = [...pointerTypes.entries()].find(([, type]) => type.storage === 7 && type.pointee === intType.id);
+  const moveIntTypeForward = intType.at > firstConstantAt;
+  const intTypeId = moveIntTypeForward ? nextId++ : intType.id;
+  if (moveIntTypeForward) {
+    // Rewritten constants must not refer to an integer type declared later in
+    // the module. Give the moved declaration its own ID so existing uses keep
+    // their original type ordering.
+    insertionAt(firstConstantAt).types.push((4 << 16) | 21, intTypeId, intType.width, intType.signed); // OpTypeInt
+  }
+  const intPointer = [...pointerTypes.entries()].find(([, type]) => type.storage === 7 && type.pointee === intTypeId);
   const intPointerTypeId = intPointer ? intPointer[0] : nextId++;
-  if (!intPointer) insertionAt(firstConstantAt).types.push((4 << 16) | 32, intPointerTypeId, 7, intType.id); // OpTypePointer Function i32
+  if (!intPointer) {
+    if (moveIntTypeForward) {
+      insertionAt(firstConstantAt).types.push((4 << 16) | 32, intPointerTypeId, 7, intTypeId); // OpTypePointer Function i32
+    } else {
+      insertionAt(intType.at + 4).types.push((4 << 16) | 32, intPointerTypeId, 7, intTypeId); // OpTypePointer Function i32
+    }
+  }
 
   for (const constant of constants) {
     const matchingStores = stores.filter((s) => s.objectId === constant.id);
@@ -91,12 +105,12 @@ function deferNonFiniteF32StoreConstants(spirv) {
     const variableId = nextId++;
     insertionAt(variableAt).variables.push((4 << 16) | 59, intPointerTypeId, variableId, 7); // OpVariable Function
     insertionAt(initializerAt).initializers.push((3 << 16) | 62, variableId, constant.id); // initialize the integer bits once
-    words[constant.at + 1] = intType.id;
+    words[constant.at + 1] = intTypeId;
     for (const store of matchingStores) {
       const loadId = nextId++, bitcastId = nextId++;
       words[store.at + 2] = bitcastId;
       insertionAt(store.at).operations.push(
-        (4 << 16) | 61, intType.id, loadId, variableId, // OpLoad
+        (4 << 16) | 61, intTypeId, loadId, variableId, // OpLoad
         (4 << 16) | 124, constant.typeId, bitcastId, loadId, // OpBitcast
       );
     }
@@ -423,10 +437,15 @@ function lowerOneDimensionalImagesToTwoDimensional(spirv) {
   }
   if (unsupported || !changed) return unsupported ? spirv : bytes;
 
-  let firstConstant = output.findIndex((inst, index) => index > 0 && [41, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52].includes(inst[0] & 0xffff));
-  if (firstConstant < 0) firstConstant = output.findIndex((inst, index) => index > 0 && [54, 59].includes(inst[0] & 0xffff));
-  if (firstConstant < 0) return spirv;
-  output.splice(firstConstant, 0, ...newTypes);
+  for (const type of newTypes) {
+    const componentType = type[2];
+    const typeIndex = output.findIndex((inst, index) => index > 0
+      && [21, 22].includes(inst[0] & 0xffff) && inst[1] === componentType);
+    if (typeIndex < 0) return spirv;
+    // The component type can occur after early constants in vkd3d output, so
+    // place each synthesized vector immediately after its actual scalar type.
+    output.splice(typeIndex + 1, 0, type);
+  }
   for (const constant of newConstants) {
     const typeId = constant[1];
     const typeIndex = output.findIndex((inst, index) => index > 0

@@ -1,0 +1,24 @@
+[package]
+name = "winebrowser-shader-wgsl"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+naga = { path = "naga", default-features = false, features = ["spv-in", "wgsl-out", "wgsl-in"] }
+wasm-bindgen = "=0.2.121"
+
+[patch.crates-io]
+naga-types = { path = "naga-types" }
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

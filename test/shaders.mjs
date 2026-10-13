@@ -90,6 +90,64 @@ check('Texture1D GetDimensions reports the backing width and mip count',
     && /textureNumLevels\(t0_\)/.test(texture1dDimensionsPs.wgsl)
     && !/texture_1d(?:<|_array)/.test(texture1dDimensionsPs.wgsl),
   texture1dDimensionsPs.wgsl);
+let texture1dArrayDimensionsPs, texture1dArrayDimensionsError = '';
+try {
+  texture1dArrayDimensionsPs = t.translate(t.compileHlsl(`
+    Texture1DArray<float4> image : register(t0);
+    float4 main() : SV_Target {
+      uint width, elements, levels;
+      image.GetDimensions(0, width, elements, levels);
+      return float4(width, elements, levels, 1.0);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { texture1dArrayDimensionsError = String(error); }
+check('Texture1DArray GetDimensions lowers its width, element count, and mip count',
+  /var\s+t0_:\s*texture_2d_array<f32>/.test(texture1dArrayDimensionsPs?.wgsl || '')
+    && /textureDimensions\(t0_,\s*0i\)/.test(texture1dArrayDimensionsPs?.wgsl || '')
+    && /textureNumLayers\(t0_\)/.test(texture1dArrayDimensionsPs?.wgsl || '')
+    && /textureNumLevels\(t0_\)/.test(texture1dArrayDimensionsPs?.wgsl || ''),
+  texture1dArrayDimensionsError || texture1dArrayDimensionsPs?.wgsl || 'translation returned no WGSL');
+let texture2dArrayDimensionsPs, texture2dArrayDimensionsError = '';
+try {
+  texture2dArrayDimensionsPs = t.translate(t.compileHlsl(`
+    Texture2DArray<float4> image : register(t0);
+    float4 main() : SV_Target {
+      uint width, height, elements, levels;
+      image.GetDimensions(0, width, height, elements, levels);
+      return float4(width, height, elements, levels);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { texture2dArrayDimensionsError = String(error); }
+check('Texture2DArray GetDimensions lowers spatial size, layers, and mip count',
+  /var\s+t0_:\s*texture_2d_array<f32>/.test(texture2dArrayDimensionsPs?.wgsl || '')
+    && /textureDimensions\(t0_,\s*0i\)/.test(texture2dArrayDimensionsPs?.wgsl || '')
+    && /textureNumLayers\(t0_\)/.test(texture2dArrayDimensionsPs?.wgsl || '')
+    && /textureNumLevels\(t0_\)/.test(texture2dArrayDimensionsPs?.wgsl || ''),
+  texture2dArrayDimensionsError || texture2dArrayDimensionsPs?.wgsl || 'translation returned no WGSL');
+let texture1dArraySampleQueryPs, texture1dArraySampleQueryError = '';
+try {
+  texture1dArraySampleQueryPs = t.translate(t.compileHlsl(`
+    Texture1DArray<float4> image : register(t0);
+    SamplerState smp : register(s0);
+    float4 main(float4 position : SV_Position) : SV_Target {
+      if (position.x < 20.0) {
+        return image.SampleLevel(smp, float2(0.5, 0.0), 1.0);
+      }
+      if (position.x >= 44.0) {
+        return image.SampleLevel(smp, float2(0.5, 1.0), 2.0);
+      }
+      uint width, elements, levels;
+      if (position.y < 32.0) image.GetDimensions(0, width, elements, levels);
+      else image.GetDimensions(1, width, elements, levels);
+      return float4(float(width) / 16.0, float(elements) / 4.0, float(levels) / 8.0, 1.0);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { texture1dArraySampleQueryError = String(error); }
+check('Texture1DArray sampling and GetDimensions translate together',
+  /textureSampleLevel\(t0_,\s*s0_/.test(texture1dArraySampleQueryPs?.wgsl || '')
+    && /textureDimensions\(t0_,\s*0i\)/.test(texture1dArraySampleQueryPs?.wgsl || '')
+    && /textureNumLayers\(t0_\)/.test(texture1dArraySampleQueryPs?.wgsl || ''),
+  texture1dArraySampleQueryError || texture1dArraySampleQueryPs?.wgsl || 'translation returned no WGSL');
 let texture1dArrayPs, texture1dArrayError = '';
 try {
   texture1dArrayPs = t.translate(t.compileHlsl(`
