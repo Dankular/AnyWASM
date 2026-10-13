@@ -314,8 +314,10 @@ register-stack subset):
       returns `[128, 0, 0, 255]` and `[64, 0, 0, 255]` for cube indices 0 and 1 and reports its view
       dimensions, with no WebGPU validation errors. An R10G10B10A2_UNORM cube-array view beginning at
       face 6 returns `[64, 128, 192, 255]` and `[192, 64, 128, 255]` for the selected cubes and reports
-      two cubes and one mip with no WebGPU validation errors. An RGBA8_SRGB cube-array view beginning
-      at face 6
+      two cubes and one mip with no WebGPU validation errors. An R11G11B10_FLOAT cube-array view also
+      decodes packed colors `[128, 64, 255, 255]` and `[255, 128, 64, 255]` for the two selected cubes,
+      reports two cubes and one mip, and produces no WebGPU validation errors. An RGBA8_SRGB cube-array
+      view beginning at face 6
       selects both cubes and returns linearized colors [55, 13, 134, 255] and [13, 134, 55, 128],
       with alpha preserved and no WebGPU validation errors. The bundled vkd3d compiler reports E5005 for
       `SampleCmpBias`/`SampleCmpGrad` under `ps_5_0` and E5033 (unknown target profile) for `ps_6_0`
@@ -329,7 +331,7 @@ register-stack subset):
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
       view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_UNORM, and R16_SNORM;
-      the sRGB and R10G10B10A2_UNORM cube-array samples are also verified. Other sampled dimensions/
+      the sRGB and R10G10B10A2_UNORM/R11G11B10_FLOAT cube-array samples are also verified. Other sampled dimensions/
       formats, anisotropic footprints, cube-array SampleCmpBias/SampleCmpGrad, and array/3D format cases
       remain open. An 8x anisotropic BC4_UNORM Texture2D BORDER test covers Sample, SampleBias, and
       SampleGrad with constant interior values and channel-correct edge blends.
