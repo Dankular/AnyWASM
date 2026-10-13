@@ -336,8 +336,8 @@ register-stack subset):
       methods, with no WebGPU validation errors. Combined depth/stencil SRVs use the aspect-specific
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
-      view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_FLOAT, R16_UNORM, and
-      R16_SNORM;
+      view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_FLOAT, R16_UNORM,
+      R16_SNORM, and point-sampled R32_FLOAT with an unfilterable-float binding for Texture3D;
       the sRGB and R10G10B10A2_UNORM/R11G11B10_FLOAT cube-array samples are also verified. Other sampled dimensions/
       formats, anisotropic footprints, cube-array SampleCmpBias/SampleCmpGrad, and array/3D format cases
       remain open. An 8x anisotropic BC4_UNORM Texture2D BORDER test covers Sample, SampleBias, and

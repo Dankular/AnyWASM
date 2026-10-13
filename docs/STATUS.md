@@ -373,7 +373,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   ordering, and state restoration. Compute browser fixtures cover
   typed R32/RGBA textures, structured/raw/typed buffer ranges, and a 3D texture UAV. The selected
   Diligent SDF shader dispatches and produces finite values on readback; broader format coverage and
-  pixel equivalence remain unverified.
+  pixel equivalence remain unverified. A Chromium pixel regression also covers point-sampled
+  Texture3D R32_FLOAT with an unfilterable-float binding and BORDER coordinates.
 - **Pixel verification paths:** D3D11 back-buffer checks run in test mode (`?test=1`), which skips
   swap-chain presentation so the test can map the back buffer directly. A separate Chromium run
   without test mode captures the visible 640x480 canvas and checks the triangle's clear colour and
