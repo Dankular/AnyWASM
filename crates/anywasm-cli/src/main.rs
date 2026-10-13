@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! anywasm analyze <exe> [--json]          compatibility report (which imports are implemented)
-//! anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]
-//! anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--args "..."]
+//! anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--hook SPEC]... [--trace-imports|--trace-modules] [--max-steps N] [-- args...]
+//! anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--hook SPEC]... [--args "..."]
 //! ```
 
 use anywasm_pe::{canonical_dll, ImportName, Pe};
@@ -386,6 +386,7 @@ struct Opts {
     args: Vec<String>,
     cmdline: Option<String>,
     cwd: Option<String>,
+    hooks: Vec<String>,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
@@ -401,6 +402,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         args: vec![],
         cmdline: None,
         cwd: None,
+        hooks: vec![],
     };
     let mut it = args.iter();
     let mut have_exe = false;
@@ -423,6 +425,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             }
             "--args" => o.cmdline = Some(it.next().ok_or("--args needs a value")?.clone()),
             "--cwd" => o.cwd = Some(it.next().ok_or("--cwd needs a value")?.clone()),
+            "--hook" => o.hooks.push(it.next().ok_or("--hook needs a value")?.clone()),
             "--" => {
                 o.args = it.cloned().collect();
                 break;
@@ -505,6 +508,7 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         }
         return Err(error);
     }
+    p.install_native_hooks(&o.hooks)?;
     if std::env::var_os("ANYWASM_GTA_STARTUP_PROBE_SKIP_EVENT15").is_some() {
         const BRANCH: u64 = 0x748851;
         let opcode = p
@@ -623,6 +627,7 @@ fn pack(o: &Opts) -> Result<(), String> {
             }
         }),
         cwd,
+        hooks: o.hooks.clone(),
         files,
     };
     let bytes = b.to_bytes();
@@ -638,7 +643,7 @@ fn pack(o: &Opts) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--trace-imports|--trace-modules] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--args \"cmdline\"]";
+    let usage = "usage:\n  anywasm analyze <exe> [--dir D] [--json]\n  anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--hook SPEC]... [--trace-imports|--trace-modules] [--max-steps N] [-- args...]\n  anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--hook SPEC]... [--args \"cmdline\"]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);

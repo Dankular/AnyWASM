@@ -2316,6 +2316,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(len_for(&out, true))
         },
         "sscanf" | "__stdio_common_vsscanf" => sscanf,
+        "vsscanf" => vsscanf,
         "getenv" | "_wgetenv" => |p| {
             let k = p.read_cstr(p.arg(0))?;
             match p.env.iter().find(|(a, _)| a.eq_ignore_ascii_case(&k)).map(|(_, v)| v.clone()) {
@@ -2895,11 +2896,40 @@ fn fopen_impl(p: &mut Process, name: &str, mode: &str) -> R {
     Ok(fp)
 }
 
+/// Where scanf-family conversions find their destination pointers.
+#[derive(Clone, Copy)]
+enum ScanArgs {
+    /// Variadic call: destinations follow the format as the 3rd, 4th, ... Win64 arguments.
+    Variadic,
+    /// `va_list` call: x64 MSVC `va_list` is a pointer to consecutive 8-byte argument slots.
+    VaList(u64),
+}
+
 /// Minimal sscanf: %d %i %u %x %ld %lld %f %lf %s %c %n and literal matching.
 fn sscanf(p: &mut Process) -> R {
-    let (s, f) = (p.read_cstr_raw(p.arg(0))?, p.read_cstr_raw(p.arg(1))?);
+    scan_core(p, p.arg(0), p.arg(1), ScanArgs::Variadic)
+}
+
+/// `int vsscanf(const char *buffer, const char *format, va_list args)` with the x64 MSVC `va_list`
+/// representation. Shares every conversion with `sscanf`.
+fn vsscanf(p: &mut Process) -> R {
+    scan_core(p, p.arg(0), p.arg(1), ScanArgs::VaList(p.arg(2)))
+}
+
+fn scan_core(p: &mut Process, buffer: u64, format: u64, args: ScanArgs) -> R {
+    let (s, f) = (p.read_cstr_raw(buffer)?, p.read_cstr_raw(format)?);
     let mut si = 0usize;
-    let mut slot = 2usize;
+    let mut slot = 0usize;
+    macro_rules! next_dst {
+        () => {{
+            let dst = match args {
+                ScanArgs::Variadic => p.arg(2 + slot),
+                ScanArgs::VaList(list) => p.rd64(list + 8 * slot as u64)?,
+            };
+            slot += 1;
+            dst
+        }};
+    }
     let mut count = 0u64;
     let mut fi = 0usize;
     while fi < f.len() {
@@ -2946,8 +2976,7 @@ fn sscanf(p: &mut Process) -> R {
                 if used == 0 {
                     break;
                 }
-                let dst = p.arg(slot);
-                slot += 1;
+                let dst = next_dst!();
                 if long >= 1 {
                     p.wr64(dst, v as u64)?
                 } else {
@@ -2961,8 +2990,7 @@ fn sscanf(p: &mut Process) -> R {
                 if used == 0 {
                     break;
                 }
-                let dst = p.arg(slot);
-                slot += 1;
+                let dst = next_dst!();
                 if long >= 1 {
                     p.wr64(dst, v.to_bits())?
                 } else {
@@ -2980,8 +3008,7 @@ fn sscanf(p: &mut Process) -> R {
                 if end == si {
                     break;
                 }
-                let dst = p.arg(slot);
-                slot += 1;
+                let dst = next_dst!();
                 let mut v = s[si..end].to_vec();
                 v.push(0);
                 p.write_bytes(dst, &v)?;
@@ -2992,15 +3019,13 @@ fn sscanf(p: &mut Process) -> R {
                 if si >= s.len() {
                     break;
                 }
-                let dst = p.arg(slot);
-                slot += 1;
+                let dst = next_dst!();
                 p.wr8(dst, s[si])?;
                 si += 1;
                 count += 1;
             }
             b'n' => {
-                let dst = p.arg(slot);
-                slot += 1;
+                let dst = next_dst!();
                 p.wr32(dst, si as u32)?;
             }
             b'%' => {

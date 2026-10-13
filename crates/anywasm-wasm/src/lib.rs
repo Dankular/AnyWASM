@@ -57,6 +57,7 @@ pub unsafe extern "C" fn aw_free(ptr: *mut u8, n: usize) {
 pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     let bytes = std::slice::from_raw_parts(ptr, len);
     let res = Bundle::from_bytes(bytes).and_then(|b| {
+        let hooks = b.hooks.clone();
         let (vfs, exe, cmd, cwd) = b.into_vfs_with_cwd();
         let mut p = Process::new(vfs);
         if let Some(cwd) = cwd {
@@ -69,6 +70,7 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
             p.current_directory = cwd;
         }
         p.load_exe(&exe, cmd.as_deref())?;
+        p.install_native_hooks(&hooks)?;
         Ok(p)
     });
     match res {

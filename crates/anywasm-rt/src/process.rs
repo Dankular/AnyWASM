@@ -320,6 +320,8 @@ pub struct Process {
     pub current_thread_id: u32,
     pub next_thread_id: u32,
     current_teb_base: u64,
+    /// Guest function entries replaced by host implementations (see `install_native_hooks`).
+    pub native_hooks: Vec<(u64, String)>,
     /// Active guest C++ exception unwind depth, kept per guest thread.
     pub guest_exception_depths: HashMap<u32, u32>,
     pub current_thread_is_guest: bool,
@@ -980,6 +982,7 @@ impl Process {
             current_thread_id: 0x1004,
             next_thread_id: 0x1008,
             current_teb_base: TEB_ADDR,
+            native_hooks: Vec::new(),
             guest_exception_depths: HashMap::new(),
             current_thread_is_guest: false,
             current_thread_state: ThreadState::Running,
@@ -2046,6 +2049,100 @@ impl Process {
         });
         self.thunk_index.insert((group, name.to_string()), addr);
         Some(addr)
+    }
+
+    /// Redirect guest functions to host implementations ("native hooks").
+    ///
+    /// Each spec is `<module>+<rva>[:<hex prologue>]=<group>!<name>`, e.g.
+    /// `game.exe+0x2290d4:4883ec28=crt!strlen`. The guest function at `module base + rva` is
+    /// overwritten with `mov rax, <thunk>; jmp rax`, so every execution engine (interpreter, block
+    /// cache, emitted code) reaches the existing HLE thunk with the Win64 argument registers and
+    /// the caller's return address untouched. The host function must therefore have the same
+    /// signature and calling convention as the guest function it replaces; the optional prologue
+    /// bytes guard against patching the wrong function in a different build of the image.
+    /// Any malformed spec, unknown module, unmapped or mismatching target, or unknown host
+    /// function is an error: nothing is silently skipped.
+    pub fn install_native_hooks(&mut self, specs: &[String]) -> Result<usize, String> {
+        if specs.is_empty() {
+            return Ok(0);
+        }
+        if self.cpu.mode != CpuMode::X86_64 {
+            return Err("native hooks are only supported for x64 images".into());
+        }
+        for spec in specs {
+            let (target, host) = spec
+                .split_once('=')
+                .ok_or_else(|| format!("hook `{spec}`: expected <module>+<rva>[:<bytes>]=<group>!<name>"))?;
+            let (location, expect) = match target.split_once(':') {
+                Some((l, e)) => (l, Some(e)),
+                None => (target, None),
+            };
+            let (module, rva) = location
+                .rsplit_once('+')
+                .ok_or_else(|| format!("hook `{spec}`: missing `+<rva>`"))?;
+            let rva = match rva.strip_prefix("0x").or_else(|| rva.strip_prefix("0X")) {
+                Some(hex) => u64::from_str_radix(hex, 16),
+                None => rva.parse(),
+            }
+            .map_err(|_| format!("hook `{spec}`: bad rva `{rva}`"))?;
+            let (group, name) = host
+                .split_once('!')
+                .ok_or_else(|| format!("hook `{spec}`: host function must be <group>!<name>"))?;
+            let group: &'static str = match group {
+                "crt" => "crt",
+                "kernel32" => "kernel32",
+                "ntdll" => "ntdll",
+                other => return Err(format!("hook `{spec}`: unsupported host group `{other}`")),
+            };
+            let index = self
+                .module_by_name(module)
+                .ok_or_else(|| format!("hook `{spec}`: module `{module}` is not loaded"))?;
+            let m = &self.modules[index];
+            if m.hle_group.is_some() || rva >= m.size {
+                return Err(format!("hook `{spec}`: rva {rva:#x} is outside module `{module}`"));
+            }
+            let address = m.base + rva;
+            if let Some(expect) = expect {
+                if expect.len() % 2 != 0 || !expect.bytes().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("hook `{spec}`: bad prologue hex `{expect}`"));
+                }
+                let want: Vec<u8> = (0..expect.len() / 2)
+                    .map(|i| u8::from_str_radix(&expect[2 * i..2 * i + 2], 16).unwrap())
+                    .collect();
+                let have = self
+                    .mem
+                    .read_vec(address, want.len())
+                    .map_err(|e| format!("hook `{spec}`: cannot read {address:#x}: {e:?}"))?;
+                if have != want {
+                    return Err(format!(
+                        "hook `{spec}`: bytes at {address:#x} are {have:02x?}, expected {want:02x?}; \
+                         this is not the function the hook was written for"
+                    ));
+                }
+            }
+            // The 12-byte stub must not spill into the next function. Leaf functions often have no
+            // `.pdata` entry, so this can only be checked when the image records the function.
+            if let Some(f) = m.runtime_functions.iter().find(|f| f.begin_address as u64 == rva) {
+                let len = f.end_address.saturating_sub(f.begin_address);
+                if len < 12 {
+                    return Err(format!(
+                        "hook `{spec}`: the function at {address:#x} is only {len} bytes long; the 12-byte hook stub would overwrite its neighbour"
+                    ));
+                }
+            }
+            let thunk = self
+                .thunk_for(group, name, false)
+                .ok_or_else(|| format!("hook `{spec}`: host function {group}!{name} is not implemented"))?;
+            // mov rax, imm64 ; jmp rax
+            let mut stub = vec![0x48, 0xb8];
+            stub.extend_from_slice(&thunk.to_le_bytes());
+            stub.extend_from_slice(&[0xff, 0xe0]);
+            self.mem
+                .write_force(address, &stub)
+                .map_err(|e| format!("hook `{spec}`: cannot patch {address:#x}: {e:?}"))?;
+            self.native_hooks.push((address, format!("{group}!{name}")));
+        }
+        Ok(specs.len())
     }
 
     // ── loading ──────────────────────────────────────────────────────────────

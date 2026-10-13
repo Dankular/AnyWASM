@@ -33,6 +33,7 @@ fi
 build slist_test console kernel32.lib
 build compute console kernel32.lib
 build reloc console kernel32.lib
+build hookme console kernel32.lib
 build d3dprobe windows kernel32.lib user32.lib d3d11.lib
 build input_test windows kernel32.lib user32.lib
 build capture_test windows kernel32.lib user32.lib

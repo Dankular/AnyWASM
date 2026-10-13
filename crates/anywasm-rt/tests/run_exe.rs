@@ -633,3 +633,74 @@ atexit handler ran\n";
     assert_eq!(out, expected);
     assert_eq!(err, "to stderr\n");
 }
+
+// ── native hooks: guest C-library routines replaced by host implementations ──
+
+fn run_hookme(hooks: &[&str]) -> (Stop, String, Process) {
+    let name = "hookme.exe";
+    let mut vfs = Vfs::new();
+    vfs.insert(name, fixture(name));
+    let mut p = Process::new(vfs);
+    p.load_exe(name, None).unwrap();
+    let base = p.modules[p.module_by_name(name).unwrap()].base;
+    // Specs name functions by their exported symbol: <module>+<rva>=<host function>.
+    let specs: Vec<String> = hooks
+        .iter()
+        .map(|h| {
+            let (export, host) = h.split_once('=').unwrap();
+            let addr = p.modules[p.module_by_name(name).unwrap()].exports[export];
+            format!("{name}+{:#x}={host}", addr - base)
+        })
+        .collect();
+    p.install_native_hooks(&specs).unwrap();
+    let stop = p.run_to_end(500_000_000);
+    let out = String::from_utf8_lossy(&p.take_stdout()).into_owned();
+    (stop, out, p)
+}
+
+#[test]
+fn native_hooks_match_guest_routines_and_cut_instruction_count() {
+    // Expected checksum computed independently in Python from the fixture's algorithm.
+    const CHECKSUM: &str = "checksum=17736370693611592511\r\n";
+    // The guest's my_vsscanf is a placeholder returning -99 until a hook gives it behaviour.
+    let (stop, plain_out, plain) = run_hookme(&[]);
+    assert!(matches!(stop, Stop::Exit(0)), "{stop:?}");
+    assert_eq!(plain_out, format!("{CHECKSUM}scan=-99\r\n"));
+    let expected = format!("{CHECKSUM}scan=5 a=12 name=abc f2=7 ll=-7 x=31\r\n");
+
+    // strcmp is deliberately not hooked: the guest returns the byte difference while msvcrt-style
+    // strcmp returns only the sign, so it does not satisfy the hook contract for this program.
+    let (stop, hooked_out, hooked) = run_hookme(&[
+        "my_strlen=crt!strlen",
+        "my_memcpy=crt!memcpy",
+        "my_memset=crt!memset",
+        "my_memcmp=crt!memcmp",
+        "my_vsscanf=crt!vsscanf",
+    ]);
+    assert!(matches!(stop, Stop::Exit(0)), "{stop:?}");
+    assert_eq!(hooked_out, expected, "hooked run must match the independent expectation");
+    assert_eq!(hooked.native_hooks.len(), 5);
+    assert!(
+        hooked.cpu.icount * 4 < plain.cpu.icount,
+        "hooks should retire far fewer guest instructions: {} vs {}",
+        hooked.cpu.icount,
+        plain.cpu.icount
+    );
+    eprintln!("native hooks: {} -> {} guest instructions", plain.cpu.icount, hooked.cpu.icount);
+}
+
+#[test]
+fn native_hooks_fail_loudly_on_bad_specs() {
+    let mut vfs = Vfs::new();
+    vfs.insert("hookme.exe", fixture("hookme.exe"));
+    let mut p = Process::new(vfs);
+    p.load_exe("hookme.exe", None).unwrap();
+    let err = |spec: &str, p: &mut Process| p.install_native_hooks(&[spec.to_string()]).unwrap_err();
+    assert!(err("hookme.exe+0x1000=crt!no_such_function", &mut p).contains("not implemented"));
+    assert!(err("missing.exe+0x1000=crt!strlen", &mut p).contains("not loaded"));
+    assert!(err("hookme.exe+0x1000", &mut p).contains("expected"));
+    assert!(err("hookme.exe+0xffffff=crt!strlen", &mut p).contains("outside"));
+    // my_strlen starts with `mov rax,-1` (48 c7 c0 ff ff ff ff); a wrong prologue must be refused.
+    assert!(err("hookme.exe+0x1000:deadbeef=crt!strlen", &mut p).contains("not the function"));
+    assert!(p.install_native_hooks(&["hookme.exe+0x1000:48c7c0ffffffff=crt!strlen".into()]).is_ok());
+}

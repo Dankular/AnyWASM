@@ -11,6 +11,8 @@ pub struct Bundle {
     pub exe: String,
     pub cmdline: Option<String>,
     pub cwd: Option<String>,
+    /// Native hook specs (`<module>+<rva>[:<bytes>]=<group>!<name>`), see `Process::install_native_hooks`.
+    pub hooks: Vec<String>,
     pub files: Vec<(String, Vec<u8>)>,
 }
 
@@ -22,6 +24,9 @@ impl Bundle {
         }
         if let Some(cwd) = &self.cwd {
             manifest.push_str(&format!("cwd={}\n", cwd.replace('\n', " ")));
+        }
+        for hook in &self.hooks {
+            manifest.push_str(&format!("hook={}\n", hook.replace('\n', " ")));
         }
         let mut entries: Vec<(&str, &[u8])> = vec![("__manifest__", manifest.as_bytes())];
         entries.extend(self.files.iter().map(|(n, d)| (n.as_str(), d.as_slice())));
@@ -85,6 +90,7 @@ impl Bundle {
                             "exe" => bundle.exe = v.to_string(),
                             "cmdline" => bundle.cmdline = Some(v.to_string()),
                             "cwd" => bundle.cwd = Some(v.to_string()),
+                            "hook" => bundle.hooks.push(v.to_string()),
                             _ => {}
                         }
                     }
@@ -123,6 +129,7 @@ mod tests {
             exe: "a.exe".into(),
             cmdline: Some("\"a.exe\" x".into()),
             cwd: Some("C:\\games".into()),
+            hooks: vec![],
             files: vec![("a.exe".into(), vec![1, 2, 3]), ("d\\x.dll".into(), vec![])],
         };
         let r = Bundle::from_bytes(&b.to_bytes()).unwrap();
@@ -138,6 +145,7 @@ mod tests {
             exe: "a.exe".into(),
             cmdline: None,
             cwd: None,
+            hooks: vec![],
             files: vec![("a.exe".into(), vec![9])],
         };
         let decoded = Bundle::from_bytes(&b.to_bytes()).unwrap();
@@ -155,6 +163,7 @@ mod tests {
             exe: "a.exe".into(),
             cmdline: None,
             cwd: None,
+            hooks: vec![],
             files: vec![("a.exe".into(), vec![9; 10])],
         }
         .to_bytes();
