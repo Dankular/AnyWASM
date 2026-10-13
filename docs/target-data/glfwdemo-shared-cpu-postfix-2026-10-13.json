@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-13",
+  "target": "DiligentSamples GLFWDemo.exe",
+  "harness": "test/browser/target.mjs",
+  "bundle": {
+    "sha256": "BAA0598336F938B40BE9CBF48105CB7CF848B78A06732454EFC6EF4D2C8F7214",
+    "path": "%TEMP%/anywasm-glfwdemo-hle-sab.awb"
+  },
+  "runtimeWasmSha256": "FC841F7FF8E17CA1A20415A5BD6C5F5669A0C370BD7B4B098D7830A377C2048B",
+  "cpuWorkerWasmSha256": "0E2BD16811D28AE35A3243AE8481AC2E76F20A62BF8B3301A4BD305FF24379CD",
+  "browser": "Google Chrome 151.0.7922.34",
+  "crossOriginIsolated": true,
+  "workerSliceBudget": 250000,
+  "captureBound": "First GPU frame and progress/thread snapshot; harness timeout 240 seconds",
+  "runs": [
+    {
+      "mode": "cooperative",
+      "workerCount": 0,
+      "progressTraceInstructions": 580775860,
+      "sharedWorkerRetiredInstructions": "0",
+      "twoContextParallelBatches": 0,
+      "maxConcurrentWorkerSlices": 0,
+      "gpu": {
+        "draws": 3,
+        "dispatches": 1,
+        "presents": 3,
+        "passes": 6,
+        "pipelines": 2,
+        "asyncifyYields": 16,
+        "asyncifyResumes": 16,
+        "webGpuErrors": 0
+      },
+      "capture": {
+        "path": "tmp/glfwdemo-coop-postfix-20261013.png",
+        "sha256": "B8FD849BC43D9F221A27C31C6228F9296F8FE8BBDDF61A5E26EF70C365D79980",
+        "width": 1024,
+        "height": 768,
+        "nonTransparentPixels": 589824,
+        "nonBlackPixels": 589824,
+        "centerRgba": [23, 255, 32, 255],
+        "greenMarker": { "x": 511.5, "y": 383.5, "pixels": 16 }
+      }
+    },
+    {
+      "mode": "shared-cpu-workers",
+      "workerCount": 2,
+      "progressTraceInstructions": 580840618,
+      "sharedWorkerRetiredInstructions": "1330011",
+      "twoContextParallelBatches": 0,
+      "maxConcurrentWorkerSlices": 1,
+      "gpu": {
+        "draws": 30,
+        "dispatches": 1,
+        "presents": 30,
+        "passes": 60,
+        "pipelines": 2,
+        "asyncifyYields": 3959330,
+        "asyncifyResumes": 3959330,
+        "webGpuErrors": 0
+      },
+      "threads": [
+        { "id": "0x1004", "packedDebugState": 2, "state": "running" },
+        {
+          "id": "0x1008",
+          "packedDebugState": 67076,
+          "packedDebugStateHex": "0x10604",
+          "state": "blocked",
+          "waitKind": "condition",
+          "guestThread": true
+        }
+      ],
+      "processStatusAtCapture": "Starting",
+      "terminalStatus": null,
+      "importStop": null,
+      "capture": {
+        "path": "tmp/glfwdemo-shared-postfix-20261013.png",
+        "sha256": "11FF5C58F836148D22611A940E9A3B9B8DA364A227D212FCCDA713E4FE401EAB",
+        "width": 1024,
+        "height": 768,
+        "nonTransparentPixels": 589824,
+        "nonBlackPixels": 589824,
+        "centerRgba": [23, 255, 32, 255],
+        "greenMarker": { "x": 511.5, "y": 383.5, "pixels": 16 }
+      }
+    }
+  ],
+  "interpretation": "The current shared-worker runtime retained the worker mode and rendered the target, but the snapshot had only one running guest thread: thread 0x1008 was blocked on a condition variable. No two-context batch or concurrent slice occurred. Both captures show the first frame and no WebGPU errors; they have different wall layouts and do not provide comparable wall-clock throughput or pixel equivalence."
+}

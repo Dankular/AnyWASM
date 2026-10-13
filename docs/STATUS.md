@@ -502,9 +502,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   regressions cover those transitions and reject entries outside the declared code range.
   `RtlInstallFunctionTableCallback` now stores callback-managed ranges and invokes the guest callback
   lazily from function lookup and SEH frame search, validating the returned entry against the control
-  PC. This path is build-checked but has no callback-specific regression or runtime replay yet; the
-  optional out-of-process debugger callback DLL is not used. Guest-generated-code exception unwinding
-  through a grown or callback table remains unverified.
+  PC. A runtime regression registers one through ntdll, executes the guest callback via
+  `RtlLookupFunctionEntry`, checks the PC/context arguments and returned entry, and verifies range
+  exclusion and deletion. Guest-generated-code exception unwinding through a grown or callback table
+  remains unverified; the optional out-of-process debugger callback DLL is not used.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
   this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested

@@ -1025,6 +1025,15 @@ concurrency. Bundle and capture hashes, run modes, and counters are recorded in
 [`target-data/glfwdemo-shared-cpu-workers-2026-10-13.json`](target-data/glfwdemo-shared-cpu-workers-2026-10-13.json);
 the PNGs are local ignored artifacts under `target/`.
 
+A fresh paired replay after the shared-pool publish-order fix used the current browser runtime and
+the same bundle. Both runs again rendered the first frame without WebGPU errors. The worker run stayed
+in shared-worker mode, retired 1,330,011 instructions, and observed one active slice with no
+two-context batches. Its thread snapshot explains the result: the main thread was running while the
+second guest thread was blocked on a condition variable. This confirms target rendering through the
+current pool but supplies no concurrency or throughput result. The process remained active at
+`Starting`; the captures still have different wall layouts. See
+[`target-data/glfwdemo-shared-cpu-postfix-2026-10-13.json`](target-data/glfwdemo-shared-cpu-postfix-2026-10-13.json).
+
 This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
 directions, a flashlight response for one seed/aim direction, and map regeneration in the selected
 target. A historical controlled replay of the deterministic seed-1 bundle, recorded before the 2026-10-12

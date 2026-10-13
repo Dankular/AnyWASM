@@ -484,7 +484,7 @@ pub fn rtl_capture_context(p: &mut Process) -> R {
 #[cfg(test)]
 mod rtl_pc_to_file_header_tests {
     use super::*;
-    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
     use std::collections::HashMap;
 
     const IMAGE_BASE: u64 = 0x1400_0000_0;
@@ -616,6 +616,72 @@ mod rtl_pc_to_file_header_tests {
 
         assert_eq!(lookup(&mut process), Ok(IMAGE_BASE + 0x1000 + 12));
         assert_eq!(process.rd64(OUTPUT), Ok(IMAGE_BASE));
+    }
+
+    #[test]
+    fn callback_function_table_runs_guest_callback_for_rtl_lookup() {
+        const STACK: u64 = 0x60000;
+        const TABLE_IDENTIFIER: u64 = 0x200003;
+        const TABLE_BASE: u64 = IMAGE_BASE + 0x1000;
+        const TABLE_LENGTH: u64 = 0x400;
+        const CALLBACK: u64 = IMAGE_BASE + 0x180;
+        const CONTEXT: u64 = 0xfeed_beef_cafe_1234;
+        const CONTROL_PC: u64 = TABLE_BASE + 0x140;
+        const ENTRY: u64 = OUTPUT + 0x100;
+        const SEEN_PC: u64 = OUTPUT;
+        const SEEN_CONTEXT: u64 = OUTPUT + 8;
+        const IMAGE_BASE_OUT: u64 = OUTPUT + 16;
+
+        let mut process = process_with_guest_image();
+        assert!(process.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        process.cpu.gpr[RSP] = STACK + 0x800;
+        process.wr32(ENTRY, 0x100).unwrap();
+        process.wr32(ENTRY + 4, 0x200).unwrap();
+        process.wr32(ENTRY + 8, 0x300).unwrap();
+
+        let mut callback_code = vec![0x48, 0xb8]; // mov rax, SEEN_PC
+        callback_code.extend_from_slice(&SEEN_PC.to_le_bytes());
+        callback_code.extend_from_slice(&[0x48, 0x89, 0x08]); // mov [rax], rcx
+        callback_code.extend_from_slice(&[0x48, 0xb8]); // mov rax, SEEN_CONTEXT
+        callback_code.extend_from_slice(&SEEN_CONTEXT.to_le_bytes());
+        callback_code.extend_from_slice(&[0x48, 0x89, 0x10]); // mov [rax], rdx
+        callback_code.extend_from_slice(&[0x48, 0xb8]); // mov rax, ENTRY
+        callback_code.extend_from_slice(&ENTRY.to_le_bytes());
+        callback_code.push(0xc3); // ret
+        process.write_bytes(CALLBACK, &callback_code).unwrap();
+
+        let install = crate::hle::lookup("ntdll", "RtlInstallFunctionTableCallback").unwrap();
+        process.cpu.gpr[RCX] = TABLE_IDENTIFIER;
+        process.cpu.gpr[RDX] = TABLE_BASE;
+        process.cpu.gpr[R8] = TABLE_LENGTH;
+        process.cpu.gpr[R9] = CALLBACK;
+        process.wr64(process.cpu.gpr[RSP] + 0x28, CONTEXT).unwrap();
+        assert_eq!(install(&mut process), Ok(1));
+
+        let lookup = crate::hle::lookup("ntdll", "RtlLookupFunctionEntry").unwrap();
+        process.cpu.gpr[RCX] = CONTROL_PC;
+        process.cpu.gpr[RDX] = IMAGE_BASE_OUT;
+        assert_eq!(lookup(&mut process), Ok(ENTRY));
+
+        assert_eq!(process.rd64(SEEN_PC), Ok(CONTROL_PC));
+        assert_eq!(process.rd64(SEEN_CONTEXT), Ok(CONTEXT));
+        assert_eq!(process.rd64(IMAGE_BASE_OUT), Ok(TABLE_BASE));
+
+        process.cpu.gpr[RCX] = TABLE_BASE + TABLE_LENGTH;
+        process.cpu.gpr[RDX] = IMAGE_BASE_OUT;
+        assert_eq!(lookup(&mut process), Ok(0));
+        assert_eq!(process.rd64(SEEN_PC), Ok(CONTROL_PC));
+        assert_eq!(process.rd64(IMAGE_BASE_OUT), Ok(0));
+
+        let delete = crate::hle::lookup("ntdll", "RtlDeleteFunctionTable").unwrap();
+        process.cpu.gpr[RCX] = TABLE_IDENTIFIER;
+        assert_eq!(delete(&mut process), Ok(1));
+        process.cpu.gpr[RCX] = CONTROL_PC;
+        process.cpu.gpr[RDX] = IMAGE_BASE_OUT;
+        assert_eq!(lookup(&mut process), Ok(0));
+        assert_eq!(process.rd64(SEEN_PC), Ok(CONTROL_PC));
+        assert_eq!(process.rd64(IMAGE_BASE_OUT), Ok(0));
     }
 
     #[test]
