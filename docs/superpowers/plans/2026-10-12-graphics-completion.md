@@ -71,6 +71,7 @@
 - [x] Forward the `OMSetBlendState` sample mask into WebGPU multisample state and its pipeline cache key; the 4x RGBA8 resolve regression verifies that mask `0x5` preserves two of four samples.
 - [x] Pixel-check 4x resolve output for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, R10G10B10A2_UNORM, and R11G11B10_FLOAT render targets; the packed normalized and unsigned-float resolve channels match the fractional shader output, and alpha-to-coverage and sample-mask resolves preserve the untouched blue background.
 - [x] Table-test 2x/4x/8x quality reporting for the seven advertised color formats and three depth formats, and representative unsupported formats; accept typeless D24S8 4x depth-resource creation; pixel-check near/far depth testing with 4x D32_FLOAT, D24S8, and D16 attachments plus RGBA8 color resolves.
+- [x] Report `D3D11_FORMAT_SUPPORT_DEPTH_STENCIL` only for the four typed DSV formats; a unit regression checks D32, D32S8, D24S8, and D16 support while RGBA16_FLOAT, RGBA8, and R8 omit the bit.
 - [x] Combine 4x D24S8 depth testing with alpha-to-coverage: a near half-alpha red draw and farther green draw resolve to red/green samples with no WebGPU errors.
 - [x] Verify `IndependentBlendEnable` with two render targets: target 0 adds red to its blue clear while target 1 overwrites green with blue.
 - [x] Implement D3D11 `SRC1_COLOR`, `INV_SRC1_COLOR`, `SRC1_ALPHA`, and `INV_SRC1_ALPHA` blend factors using the second pixel-shader output; browser pixels verify each factor.

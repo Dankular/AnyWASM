@@ -296,7 +296,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   response along an unobstructed SDF ray. The triangle canvas screenshot checks its clear colour
   and centre pixel.
   Four-sample depth tests also cover D32_FLOAT, D24S8, and D16_UNORM attachments; each keeps the
-  nearer draw through an RGBA8 color resolve. Remaining D3D11 gaps include broader copy/mip/format
+  nearer draw through an RGBA8 color resolve. `CheckFormatSupport` reports depth-stencil support
+  only for typed DSV formats. Remaining D3D11 gaps include broader copy/mip/format
   combinations, more format/resolve and sampler pixel comparisons, render-state cross-products,
   non-event query semantics, geometry/tessellation, and additional staging layouts. Deferred contexts
   and command lists have focused Rust tests for creation/type/flags, recording, finish/reset, execute

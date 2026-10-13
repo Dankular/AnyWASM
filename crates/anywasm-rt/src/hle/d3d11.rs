@@ -79,12 +79,14 @@ const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
 const DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: u32 = 91;
 const DXGI_FORMAT_R32_TYPELESS: u32 = 39;
 const DXGI_FORMAT_D32_FLOAT: u32 = 40;
+const DXGI_FORMAT_D32_FLOAT_S8X24_UINT: u32 = 20;
 const DXGI_FORMAT_R24G8_TYPELESS: u32 = 44;
 const DXGI_FORMAT_D24_UNORM_S8_UINT: u32 = 45;
 const DXGI_FORMAT_R16_TYPELESS: u32 = 53;
 const DXGI_FORMAT_D16_UNORM: u32 = 55;
 const D3D11_FORMAT_SUPPORT_BUFFER: u32 = 0x1;
 const D3D11_FORMAT_SUPPORT_CPU_LOCKABLE: u32 = 0x0002_0000;
+const D3D11_FORMAT_SUPPORT_DEPTH_STENCIL: u32 = 0x0001_0000;
 const D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW: u32 = 0x0200_0000;
 const D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE: u32 = 0x80;
 const D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE: u32 = 0x0004_0000;
@@ -110,6 +112,16 @@ fn supports_4x_multisample_depth_stencil(format: u32) -> bool {
     )
 }
 
+fn supports_depth_stencil(format: u32) -> bool {
+    matches!(
+        format,
+        DXGI_FORMAT_D32_FLOAT
+            | DXGI_FORMAT_D32_FLOAT_S8X24_UINT
+            | DXGI_FORMAT_D24_UNORM_S8_UINT
+            | DXGI_FORMAT_D16_UNORM
+    )
+}
+
 fn supports_4x_multisample_depth_resource(format: u32) -> bool {
     matches!(
         format,
@@ -130,7 +142,10 @@ fn format_support_flags(format: u32) -> u32 {
     if format == DXGI_FORMAT_UNKNOWN {
         return D3D11_FORMAT_SUPPORT_BUFFER | D3D11_FORMAT_SUPPORT_CPU_LOCKABLE;
     }
-    let mut flags = 0x0003_ffff; // common sampling, render-target and texture capabilities
+    let mut flags = 0x0002_ffff; // common sampling, render-target and texture capabilities
+    if supports_depth_stencil(format) {
+        flags |= D3D11_FORMAT_SUPPORT_DEPTH_STENCIL;
+    }
     if supports_4x_multisample_render_target(format) {
         flags |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE
             | D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
@@ -2888,6 +2903,24 @@ mod tests {
         );
         assert_eq!(format_support_flags(54) & TYPED_UAV, 0); // DXGI_FORMAT_R16_FLOAT
         assert_eq!(format_support_flags(61) & TYPED_UAV, 0); // DXGI_FORMAT_R8_UNORM
+    }
+
+    #[test]
+    fn format_support_advertises_depth_stencil_only_for_depth_formats() {
+        for format in [20, 40, 45, 55] {
+            assert_ne!(
+                format_support_flags(format) & D3D11_FORMAT_SUPPORT_DEPTH_STENCIL,
+                0,
+                "DXGI format {format} should support depth-stencil views"
+            );
+        }
+        for format in [10, 28, 61] {
+            assert_eq!(
+                format_support_flags(format) & D3D11_FORMAT_SUPPORT_DEPTH_STENCIL,
+                0,
+                "DXGI format {format} should not advertise depth-stencil support"
+            );
+        }
     }
 
     #[test]
