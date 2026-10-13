@@ -286,6 +286,8 @@ register-stack subset):
       verifying format-specific channel defaults.
       Texture3D R8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a
       3D edge footprint, verifying channel defaults and edge weighting.
+      Texture1DArray R8_UNORM sampling returns `[128, 0, 0, 255]` from mip 1/layer 0 and
+      `[64, 0, 0, 255]` from mip 2/layer 1; the dimension-query pixels match the RGBA8 array case.
       TextureCube SRV selects the expected
       color for all six
       signed-axis directions and linearly blends taps across +X/+Y, +X/+Z, and +X/-Y boundaries to

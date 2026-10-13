@@ -5179,12 +5179,28 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackTexture(9);
-      const at = (x, y = 32) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      stream.length = 0;
+      command(53, words(13, 4, 3, 2, 61, 0x8, 0, 0)); // R8_UNORM Texture1DArray
+      command(12, words(14, 2, 13, 61, 3, 0, 3, 0, 2)); // full Texture1DArray SRV
+      const uploadR8 = (mip, slice, width, value) => {
+        const texels = new Uint8Array(width).fill(value);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(13, mip, slice, 0, 0, width, 1, width, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      };
+      uploadR8(1, 0, 2, 128); uploadR8(2, 1, 1, 64);
+      command(19, words(1, 0, 1, 14)); command(29, words(3, 0)); gpu.execute(append());
+      const r8Pixels = await gpu.readBackTexture(9);
+      const at = (data, x, y = 32) => Array.from(data.data.slice((y * data.width + x) * 4, (y * data.width + x) * 4 + 4));
       const result = {
-        mip1Layer0: at(16),
-        mip2Layer1: at(48),
-        dimensionsMip0: at(32, 16),
-        dimensionsMip1: at(32, 48),
+        mip1Layer0: at(pixels, 16),
+        mip2Layer1: at(pixels, 48),
+        dimensionsMip0: at(pixels, 32, 16),
+        dimensionsMip1: at(pixels, 32, 48),
+        r8Mip1Layer0: at(r8Pixels, 16),
+        r8Mip2Layer1: at(r8Pixels, 48),
+        r8DimensionsMip0: at(r8Pixels, 32, 16),
+        r8DimensionsMip1: at(r8Pixels, 32, 48),
         errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -5200,6 +5216,14 @@ try {
       && near(texture1dArrayResult.dimensionsMip0 || [], [64, 128, 96, 255], 1)
       && near(texture1dArrayResult.dimensionsMip1 || [], [32, 128, 96, 255], 1),
     JSON.stringify(texture1dArrayResult));
+  check('D3D11 Texture1DArray R8_UNORM sampling preserves channel defaults across mips and layers',
+    !texture1dArrayResult.error
+      && near(texture1dArrayResult.r8Mip1Layer0 || [], [128, 0, 0, 255], 1)
+      && near(texture1dArrayResult.r8Mip2Layer1 || [], [64, 0, 0, 255], 1)
+      && near(texture1dArrayResult.r8DimensionsMip0 || [], [64, 128, 96, 255], 1)
+      && near(texture1dArrayResult.r8DimensionsMip1 || [], [32, 128, 96, 255], 1),
+    JSON.stringify({ mip1Layer0: texture1dArrayResult.r8Mip1Layer0, mip2Layer1: texture1dArrayResult.r8Mip2Layer1,
+      dimensionsMip0: texture1dArrayResult.r8DimensionsMip0, dimensionsMip1: texture1dArrayResult.r8DimensionsMip1 }));
 
   const texture1dArrayUavResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
