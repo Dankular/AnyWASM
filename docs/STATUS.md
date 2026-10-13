@@ -378,7 +378,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   canvas pixels outside the checked triangle case, and large-game memory limits remain unverified.
   GTA's AGP header/index and requested byte ranges have been exercised in Chromium; the package
   library verifies the AWB and index hashes during install and keeps the AGP payload remote. A
-  comparable speed result for the latest bounded range scheduler remains open. The web build is
+  60-second Chrome 155 New Game profile with three-chunk read-ahead reached the loading artwork and
+  measured 2.97 M instructions/s between the 30- and 60-second checkpoints versus 2.60 M/s for the
+  recorded on-demand baseline. This is one run; repeated paired profiles are still needed for a stable
+  speed result. See [`the profile`](target-data/gta-newgame-range-cache-profile-2026-10-13.json).
+  The web build is
   `wasm32-unknown-unknown`; the browser buffers the full `.awb`, copies it into WASM memory, and the
   bundle parser duplicates its files into the VFS. This source audit does not measure peak memory;
   see [`BROWSER_SUPPORT.md`](BROWSER_SUPPORT.md).

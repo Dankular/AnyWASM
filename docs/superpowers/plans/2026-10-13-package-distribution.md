@@ -56,4 +56,4 @@
 
 - [x] Emit a SHA-256 checked AWB manifest and local catalog record while preserving the compact entry point. `-MetadataOnly` validated the existing local AWB/AGP against the installed file index and wrote both sidecars.
 - [x] Schedule demand range reads ahead of speculative work, cap active requests at four, and prefetch at most three upcoming chunks.
-- [ ] Compare a bounded New Game profile with the recorded baseline. The current run stopped at 653 presents before New Game, so there is no comparable speed result; record this limit in `docs/TARGETS.md`.
+- [x] Compare a bounded New Game profile with the recorded baseline. A fresh Chrome 155 run reached the New Game loading artwork and recorded 30- and 60-second checkpoints; it measured 2.97 M instructions/s between them versus 2.60 M/s for the on-demand baseline and 3.37 M/s for the earlier one-chunk run. One comparison does not establish a stable speedup; see `docs/target-data/gta-newgame-range-cache-profile-2026-10-13.json`.

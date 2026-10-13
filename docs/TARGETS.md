@@ -1110,11 +1110,22 @@ was also activated for a bounded replay, but that run remained at 653 presents a
 a comparable New Game measurement.
 
 The follow-up scheduler caps range requests at four and queues three same-file chunks for look-ahead.
-Its attempted rerun did not pass the harness's 990-present New Game checkpoint: it remained at 653
-presents, startup phase 5, 22 Asyncify yields/resumes, and no pending asset range while the
-instruction counter advanced from 69.3M to 81.8M. This run is not comparable with the New Game
-baseline, so it provides no performance result for the wider look-ahead. The earlier 374,493,314
-instruction capture belongs to the one-chunk read-ahead run.
+An initial attempt did not pass the harness's 990-present New Game checkpoint: it remained at 653
+presents, startup phase 5, and 22 Asyncify yields/resumes. A fresh Chrome 155.0.8059.40 run reached
+the checkpoint and selected New Game. At 30 seconds it had retired 262,173,658 instructions, made
+67 AGP range requests, and completed 53 Asyncify yields/resumes. At 60 seconds it had retired
+351,161,901 instructions, made 70 requests, completed 56 yields/resumes, and reached 1,020
+presents. Every AGP response was HTTP 206, there was no pending range request at either checkpoint,
+and WebGPU reported no validation errors. The 60-second capture shows the New Game loading artwork;
+the process remained in `Starting` and did not reach gameplay.
+
+Against the recorded on-demand baseline, the current run retired 0.17% more instructions at 30
+seconds and 3.37% more at 60 seconds. Its measured 30-to-60-second rate was 2.97 M instructions/s,
+compared with 2.60 M/s in the baseline and 3.37 M/s in the earlier one-chunk read-ahead run. This is
+one comparison, not a stable speedup claim; the earlier 653-present attempt was not comparable.
+Hashes, request counts, and exact checkpoints are in
+[`target-data/gta-newgame-range-cache-profile-2026-10-13.json`](target-data/gta-newgame-range-cache-profile-2026-10-13.json).
+The current screenshot remains a local ignored artifact under `target/`.
 
 ### Browser package library
 

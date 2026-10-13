@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-10-13",
+  "target": "Grand Theft Auto: San Andreas New Game loading profile",
+  "entry": "gta_sa.exe",
+  "browser": {
+    "name": "Chrome",
+    "version": "155.0.8059.40",
+    "platform": "Windows x64"
+  },
+  "runtime": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "fc841f7ff8e17ca1a20415a5bd6c5f5669a0c370bd7b4b098d7830a377c2048b"
+  },
+  "bundle": {
+    "path": "web/demo/gta_sa_regular.awb",
+    "sha256": "c60d6cd1fbae51f50e78f1157ffa0c640332c641f1ca292ce1eec54061e237ef"
+  },
+  "assetPackage": {
+    "path": "web/demo/gta_sa.agp",
+    "sha256": "8300eca6c726f2b13975c6eb3964b96ea7c66c658412c3f6a758c689c00774d2",
+    "lengthBytes": 5013432573
+  },
+  "run": {
+    "executionMode": "cooperative",
+    "workerInstructionSlice": 250000,
+    "cacheMaxConcurrentFetches": 4,
+    "cacheReadAheadChunks": 3,
+    "newGameProfileSeconds": 60,
+    "checkpointsAreSecondsAfterNewGameSelection": true
+  },
+  "checkpoints": [
+    {
+      "seconds": 30,
+      "startupPhase": 8,
+      "guestInstructions": 262173658,
+      "agpRangeRequests": 67,
+      "agpRangeResponses206": 67,
+      "asyncifyYields": 53,
+      "asyncifyResumes": 53,
+      "draws": 2488,
+      "presents": 990,
+      "pendingAssetRange": false,
+      "webGpuErrors": []
+    },
+    {
+      "seconds": 60,
+      "startupPhase": 8,
+      "guestInstructions": 351161901,
+      "agpRangeRequests": 70,
+      "agpRangeResponses206": 70,
+      "asyncifyYields": 56,
+      "asyncifyResumes": 56,
+      "draws": 2694,
+      "presents": 1020,
+      "pendingAssetRange": false,
+      "webGpuErrors": []
+    }
+  ],
+  "recordedBaseline": {
+    "onDemand256KiBCache": {
+      "seconds30": {
+        "guestInstructions": 261716763,
+        "agpRangeRequests": 68,
+        "asyncifyYields": 53,
+        "asyncifyResumes": 53
+      },
+      "seconds60": {
+        "guestInstructions": 339709519,
+        "agpRangeRequests": 70,
+        "asyncifyYields": 55,
+        "asyncifyResumes": 55,
+        "presents": 990
+      }
+    },
+    "oneChunkReadAhead": {
+      "seconds30": {
+        "guestInstructions": 273439130,
+        "agpRangeRequests": 68,
+        "asyncifyYields": 53,
+        "asyncifyResumes": 53
+      },
+      "seconds60": {
+        "guestInstructions": 374493314,
+        "agpRangeRequests": 71,
+        "asyncifyYields": 56,
+        "asyncifyResumes": 56,
+        "presents": 1080
+      }
+    }
+  },
+  "comparison": {
+    "currentVsOnDemandInstructionsPct": {
+      "seconds30": 0.17,
+      "seconds60": 3.37
+    },
+    "guestRateBetweenSeconds30And60Mips": {
+      "onDemand256KiB": 2.6,
+      "oneChunkReadAhead": 3.37,
+      "threeChunkReadAhead": 2.97
+    },
+    "interpretation": "This single current run reached the New Game loading artwork and is close to the recorded on-demand baseline. The measured rates vary across the prior one-chunk run; this does not establish a stable speedup or attribute the difference to read-ahead."
+  },
+  "page": {
+    "status": "Starting gta_sa.exe…",
+    "terminalStatus": null,
+    "exitCode": null,
+    "gameplayReached": false,
+    "webGpuErrors": [],
+    "consoleErrors": ["one generic 404; the harness did not capture its URL"]
+  },
+  "localScreenshot": "target/gta-package-newgame-profile-20261013-canvas-60s.png"
+}
