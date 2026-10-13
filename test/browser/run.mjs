@@ -1967,6 +1967,10 @@ try {
         result.copyBc2 = await copyCompressedBlocks(66, 67, 74, 0x60);
         stream.length = 0;
         result.copyBc5 = await copyCompressedBlocks(68, 69, 83, 0x80);
+        stream.length = 0;
+        result.copyBc6 = await copyCompressedBlocks(70, 71, 95, 0x20);
+        stream.length = 0;
+        result.copyBc7 = await copyCompressedBlocks(72, 73, 98, 0x40);
       } else result.copyBcSkipped = true;
 
       stream.length = 0;
@@ -2037,9 +2041,9 @@ try {
       || copyRegionResult.copyBc3?.copiedBlock?.join(',') === copyRegionResult.copyBc3?.expectedCopiedBlock?.join(',')
         && copyRegionResult.copyBc3?.untouchedBlock?.join(',') === copyRegionResult.copyBc3?.expectedUntouchedBlock?.join(','),
     JSON.stringify(copyRegionResult.copyBc3 || { skipped: copyRegionResult.copyBcSkipped }));
-  for (const format of ['Bc2', 'Bc5']) {
+  for (const [format, label] of [['Bc2', 'BC2'], ['Bc5', 'BC5'], ['Bc6', 'BC6H'], ['Bc7', 'BC7']]) {
     const copy = copyRegionResult[`copy${format}`];
-    check(`D3D11 CopySubresourceRegion copies one aligned ${format.toUpperCase()} block and preserves its neighbour`,
+    check(`D3D11 CopySubresourceRegion copies one aligned ${label} block and preserves its neighbour`,
       copyRegionResult.copyBcSkipped
         || copy?.copiedBlock?.join(',') === copy?.expectedCopiedBlock?.join(',')
           && copy?.untouchedBlock?.join(',') === copy?.expectedUntouchedBlock?.join(','),
