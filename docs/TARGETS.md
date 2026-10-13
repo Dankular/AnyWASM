@@ -709,8 +709,10 @@ filter. PE32 phase-two callbacks can now start a nested `RtlUnwind`; the new tra
 and the callback's registration is skipped after validating it against the active chain. An
 `RtlUnwind` target remains registered and its handler is not called. The synthetic guest-handler
 regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback` covers this behavior; there is no
-compiled target fixture yet. Redirects from the selected C++ catch frame, nested x64 `RtlUnwindEx`,
-non-null unwind history tables, and redirects outside the pre-searched frames remain unsupported.
+compiled target fixture yet. Nested x64 `RtlUnwindEx` from a phase-two callback now takes over the
+active unwind when its context and target match the pre-searched frames. Redirects from the selected
+C++ catch frame, nested targets behind the active frame, non-null unwind history tables, and targets
+outside the pre-searched frames remain unsupported.
 The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
