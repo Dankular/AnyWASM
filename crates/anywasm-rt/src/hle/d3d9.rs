@@ -404,7 +404,10 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
             | "SetSoftwareVertexProcessing",
         ) => 2,
         ("IDirect3DDevice9", "SetStreamSource") => 5,
-        ("IDirect3DDevice9", "GetSamplerState" | "SetTextureStageState" | "SetSamplerState") => 4,
+        (
+            "IDirect3DDevice9",
+            "GetSamplerState" | "GetTextureStageState" | "SetTextureStageState" | "SetSamplerState",
+        ) => 4,
         ("IDirect3DDevice9", "DrawPrimitive") => 4,
         ("IDirect3DDevice9", "DrawPrimitiveUP") => 5,
         ("IDirect3DDevice9", "DrawIndexedPrimitive") => 7,
@@ -525,6 +528,7 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "SetTexture") => set_texture,
         ("IDirect3DDevice9", "GetSamplerState") => get_sampler_state,
         ("IDirect3DDevice9", "SetSamplerState") => set_sampler_state,
+        ("IDirect3DDevice9", "GetTextureStageState") => get_texture_stage_state,
         ("IDirect3DDevice9", "SetTextureStageState") => set_texture_stage_state,
         (
             "IDirect3DDevice9",
@@ -2701,6 +2705,40 @@ fn set_texture_stage_state(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
+fn get_texture_stage_state(p: &mut Process) -> R {
+    let (device, stage, state, out) = (p.arg(0), p.arg(1) as u32, p.arg(2) as u32, p.arg(3));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if stage > 1 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let default = match (state, stage) {
+        (1, 0) => 4,          // D3DTSS_COLOROP defaults to MODULATE on stage 0
+        (1, 1) | (4, 1) => 1, // stage 1 color/alpha operations default to DISABLE
+        (2 | 5, _) => 2,      // color/alpha arg1 defaults to TEXTURE
+        (3 | 6, _) => 1,      // color/alpha arg2 defaults to CURRENT
+        (4, 0) => 2,          // D3DTSS_ALPHAOP defaults to SELECTARG1 on stage 0
+        (26 | 27, _) => 1,    // COLORARG0/ALPHAARG0 default to CURRENT
+        _ => return Ok(D3DERR_NOTAVAILABLE),
+    };
+    let value = p
+        .extra
+        .com
+        .d3d9_texture_stage_states
+        .get(&(device, stage, state))
+        .copied()
+        .unwrap_or(default);
+    p.wr32(out, value)?;
+    Ok(S_OK)
+}
+
 fn declaration_fvf(p: &Process, address: u64) -> Result<Option<(u32, Vec<u8>)>, Stop> {
     if address == 0 {
         return Ok(None);
@@ -3608,6 +3646,101 @@ mod tests {
         p.wr32(STACK + 8, 1).unwrap();
         p.wr32(STACK + 16, 0).unwrap();
         assert_eq!(get_sampler_state(&mut p).unwrap(), E_POINTER);
+    }
+
+    #[test]
+    fn get_texture_stage_state_returns_defaults_and_saved_values() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 32,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        let get_texture_stage_state = method("IDirect3DDevice9", "GetTextureStageState")
+            .expect("GetTextureStageState should be dispatched");
+        for (stage, state, expected) in [
+            (0, 1, 4), // stage 0 COLOROP defaults to MODULATE
+            (0, 2, 2), // COLORARG1 defaults to TEXTURE
+            (0, 3, 1), // COLORARG2 defaults to CURRENT
+            (0, 4, 2), // ALPHAOP defaults to SELECTARG1
+            (0, 5, 2),
+            (0, 6, 1),
+            (0, 26, 1),
+            (0, 27, 1),
+            (1, 1, 1), // stage 1 COLOROP defaults to DISABLE
+            (1, 2, 2),
+            (1, 3, 1),
+            (1, 4, 1), // stage 1 ALPHAOP defaults to DISABLE
+            (1, 5, 2),
+            (1, 6, 1),
+            (1, 26, 1),
+            (1, 27, 1),
+        ] {
+            for (offset, value) in [
+                (4, device as u32),
+                (8, stage),
+                (12, state),
+                (16, OUT as u32),
+            ] {
+                p.wr32(STACK + offset, value).unwrap();
+            }
+            assert_eq!(get_texture_stage_state(&mut p).unwrap(), S_OK);
+            assert_eq!(
+                p.rd32(OUT).unwrap(),
+                expected,
+                "stage {stage} state {state}"
+            );
+        }
+
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::GetTextureStageState"),
+            Some(16)
+        );
+        for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, 17)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "SetTextureStageState").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        p.wr32(STACK + 16, OUT as u32).unwrap();
+        assert_eq!(get_texture_stage_state(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 17);
+        assert!(p.extra.gpu.buf.is_empty(), "getter must not emit GPU state");
+
+        p.wr32(OUT, 0xdead_beef).unwrap();
+        p.wr32(STACK + 12, 7).unwrap(); // bump matrix state is unsupported.
+        assert_eq!(
+            get_texture_stage_state(&mut p).unwrap(),
+            D3DERR_NOTAVAILABLE
+        );
+        assert_eq!(p.rd32(OUT).unwrap(), 0xdead_beef);
+        p.wr32(STACK + 8, 2).unwrap();
+        p.wr32(STACK + 12, 1).unwrap();
+        assert_eq!(
+            get_texture_stage_state(&mut p).unwrap(),
+            D3DERR_NOTAVAILABLE
+        );
+        p.wr32(STACK + 8, 0).unwrap();
+        p.wr32(STACK + 16, 0).unwrap();
+        assert_eq!(get_texture_stage_state(&mut p).unwrap(), E_POINTER);
     }
 
     #[test]
