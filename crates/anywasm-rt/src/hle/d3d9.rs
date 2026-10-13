@@ -510,6 +510,7 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "Clear") => clear,
         ("IDirect3DDevice9", "SetViewport") => set_viewport,
         ("IDirect3DDevice9", "GetViewport") => get_viewport,
+        ("IDirect3DDevice9", "GetScissorRect") => get_scissor_rect,
         ("IDirect3DDevice9", "SetScissorRect") => set_scissor_rect,
         ("IDirect3DDevice9", "SetFVF") => set_fvf,
         ("IDirect3DDevice9", "GetFVF") => get_fvf,
@@ -1368,6 +1369,15 @@ fn create_device(p: &mut Process) -> R {
             .f32(0.0)
             .f32(1.0),
     );
+    p.extra.gpu.emit(
+        op::SET_SCISSORS,
+        Pk::new()
+            .u32(1)
+            .i32(0)
+            .i32(0)
+            .i32(width as i32)
+            .i32(height as i32),
+    );
     if params != 0 {
         p.wr32(params, width)?;
         p.wr32(params + 4, height)?;
@@ -1395,6 +1405,10 @@ fn create_device(p: &mut Process) -> R {
         device,
         [0, 0, width, height, 0.0f32.to_bits(), 1.0f32.to_bits()],
     );
+    p.extra
+        .com
+        .d3d9_scissor_rects
+        .insert(device, [0, 0, width, height]);
     p.wrptr(out, device)?;
     if auto_depth {
         if multisample != 0 {
@@ -2250,8 +2264,16 @@ fn set_render_target(p: &mut Process) -> R {
     if index != 0 {
         return Ok(D3DERR_INVALIDCALL);
     }
-    let rtv = match com::kind_of(p, surface) {
-        Some(com::Kind::Direct3DSurface9 { rtv, .. }) => rtv,
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let (rtv, width, height) = match com::kind_of(p, surface) {
+        Some(com::Kind::Direct3DSurface9 {
+            rtv, width, height, ..
+        }) => (rtv, width, height),
         _ => return Ok(D3DERR_INVALIDCALL),
     };
     if let Some(o) = p.extra.com.objs.get_mut(&device) {
@@ -2273,6 +2295,32 @@ fn set_render_target(p: &mut Process) -> R {
     p.extra
         .gpu
         .emit(op::SET_RENDER_TARGETS, Pk::new().u32(1).u32(id).u32(dsv_id));
+    let viewport = [0, 0, width, height, 0.0f32.to_bits(), 1.0f32.to_bits()];
+    p.extra.com.d3d9_viewports.insert(device, viewport);
+    p.extra.gpu.emit(
+        op::SET_VIEWPORTS,
+        Pk::new()
+            .u32(1)
+            .f32(0.0)
+            .f32(0.0)
+            .f32(width as f32)
+            .f32(height as f32)
+            .f32(0.0)
+            .f32(1.0),
+    );
+    p.extra
+        .com
+        .d3d9_scissor_rects
+        .insert(device, [0, 0, width, height]);
+    p.extra.gpu.emit(
+        op::SET_SCISSORS,
+        Pk::new()
+            .u32(1)
+            .i32(0)
+            .i32(0)
+            .i32(width as i32)
+            .i32(height as i32),
+    );
     Ok(S_OK)
 }
 
@@ -2420,19 +2468,53 @@ fn get_viewport(p: &mut Process) -> R {
 }
 
 fn set_scissor_rect(p: &mut Process) -> R {
-    let rect = p.arg(1);
+    let (device, rect) = (p.arg(0), p.arg(1));
     if rect == 0 {
         return Ok(E_POINTER);
     }
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let rect = [
+        p.rd32(rect)?,
+        p.rd32(rect + 4)?,
+        p.rd32(rect + 8)?,
+        p.rd32(rect + 12)?,
+    ];
+    p.extra.com.d3d9_scissor_rects.insert(device, rect);
     p.extra.gpu.emit(
         op::SET_SCISSORS,
         Pk::new()
             .u32(1)
-            .i32(p.rd32(rect)? as i32)
-            .i32(p.rd32(rect + 4)? as i32)
-            .i32(p.rd32(rect + 8)? as i32)
-            .i32(p.rd32(rect + 12)? as i32),
+            .i32(rect[0] as i32)
+            .i32(rect[1] as i32)
+            .i32(rect[2] as i32)
+            .i32(rect[3] as i32),
     );
+    Ok(S_OK)
+}
+
+fn get_scissor_rect(p: &mut Process) -> R {
+    let (device, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(com::Kind::Direct3DDevice9 { width, height, .. }) = com::kind_of(p, device) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let rect = p
+        .extra
+        .com
+        .d3d9_scissor_rects
+        .get(&device)
+        .copied()
+        .unwrap_or([0, 0, width, height]);
+    for (index, value) in rect.into_iter().enumerate() {
+        p.wr32(out + index as u64 * 4, value)?;
+    }
     Ok(S_OK)
 }
 
@@ -2996,6 +3078,178 @@ mod tests {
     use anywasm_cpu::cpu::RSP;
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
     use anywasm_cpu::CpuMode;
+
+    #[test]
+    fn get_scissor_rect_tracks_updates_and_resets_with_render_target() {
+        const STACK: u64 = 0x10000;
+        const DATA: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, DATA] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        let get_scissor_rect = method("IDirect3DDevice9", "GetScissorRect")
+            .expect("GetScissorRect should be dispatched");
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK + 4, device as u32).unwrap();
+        p.wr32(STACK + 8, DATA as u32).unwrap();
+        assert_eq!(get_scissor_rect(&mut p).unwrap(), S_OK);
+        let read_rect = |p: &Process, address: u64| {
+            (0..4)
+                .map(|index| p.rd32(address + index * 4).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(read_rect(&p, DATA), [0, 0, 640, 480]);
+
+        let requested = [(-4i32) as u32, 5, 17, 23];
+        for (index, value) in requested.into_iter().enumerate() {
+            p.wr32(DATA + 0x40 + index as u64 * 4, value).unwrap();
+        }
+        p.wr32(STACK + 8, (DATA + 0x40) as u32).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "SetScissorRect").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands.last().expect("SetScissorRect should emit state");
+        assert_eq!(*opcode, op::SET_SCISSORS);
+        assert_eq!(
+            payload,
+            &[
+                1u32.to_le_bytes(),
+                (-4i32).to_le_bytes(),
+                5i32.to_le_bytes(),
+                17i32.to_le_bytes(),
+                23i32.to_le_bytes(),
+            ]
+            .concat(),
+        );
+        p.wr32(STACK + 8, DATA as u32).unwrap();
+        assert_eq!(get_scissor_rect(&mut p).unwrap(), S_OK);
+        assert_eq!(read_rect(&p, DATA), requested);
+
+        let rtv = com::create(
+            &mut p,
+            "ID3D11RenderTargetView",
+            com::Kind::View {
+                vk: com::ViewKind::Rtv,
+                id: 7,
+                resource: 0,
+            },
+        );
+        let surface = com::create(
+            &mut p,
+            "IDirect3DSurface9",
+            com::Kind::Direct3DSurface9 {
+                device,
+                texture_id: 0,
+                level: 0,
+                rtv,
+                width: 20,
+                height: 12,
+                format: 21,
+            },
+        );
+        for (offset, value) in [(4, device as u32), (8, 0), (12, surface as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "SetRenderTarget").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        p.wr32(STACK + 8, DATA as u32).unwrap();
+        assert_eq!(get_scissor_rect(&mut p).unwrap(), S_OK);
+        assert_eq!(read_rect(&p, DATA), [0, 0, 20, 12]);
+        assert_eq!(
+            gpu::decode(&p.extra.gpu.buf).last().unwrap().0,
+            op::SET_SCISSORS
+        );
+        assert_eq!(
+            method("IDirect3DDevice9", "GetViewport").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        assert_eq!(
+            (0..6)
+                .map(|index| p.rd32(DATA + index * 4).unwrap())
+                .collect::<Vec<_>>(),
+            [0, 0, 20, 12, 0.0f32.to_bits(), 1.0f32.to_bits()]
+        );
+
+        p.wr32(STACK + 8, 0).unwrap();
+        assert_eq!(get_scissor_rect(&mut p).unwrap(), E_POINTER);
+    }
+
+    #[test]
+    fn create_device_emits_the_full_target_default_scissor_rect() {
+        const STACK: u64 = 0x10000;
+        const PARAMS: u64 = 0x11000;
+        const OUT: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, PARAMS, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let d3d9 = com::create(&mut p, "IDirect3D9", com::Kind::Direct3D9);
+        for (offset, value) in [
+            (0, 640),
+            (4, 480),
+            (8, 21), // D3DFMT_A8R8G8B8
+            (12, 1),
+            (16, 0), // no multisampling
+            (28, 0), // default device window
+            (32, 1), // windowed
+            (36, 0), // no automatic depth surface
+        ] {
+            p.wr32(PARAMS + offset, value).unwrap();
+        }
+        for (offset, value) in [
+            (4, d3d9 as u32),
+            (8, 0),  // default adapter
+            (12, 1), // D3DDEVTYPE_HAL
+            (16, 0), // default focus window
+            (20, 0), // behavior flags
+            (24, PARAMS as u32),
+            (28, OUT as u32),
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        p.cpu.gpr[RSP] = STACK;
+        assert_eq!(
+            method("IDirect3D9", "CreateDevice").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, payload) = commands
+            .iter()
+            .find(|(opcode, _)| *opcode == op::SET_SCISSORS)
+            .expect("CreateDevice should initialize the full-target scissor rectangle");
+        assert_eq!(
+            payload,
+            &[
+                1u32.to_le_bytes(),
+                0i32.to_le_bytes(),
+                0i32.to_le_bytes(),
+                640i32.to_le_bytes(),
+                480i32.to_le_bytes(),
+            ]
+            .concat(),
+        );
+    }
 
     #[test]
     fn get_viewport_returns_device_defaults_and_tracks_set_viewport() {

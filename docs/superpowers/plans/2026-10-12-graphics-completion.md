@@ -150,6 +150,7 @@
 
 - [ ] Cover remaining texture operations and multi-stage behavior, including PREMODULATE and bump-environment operations where their required state exists.
 - [x] Verify two-stage PREMODULATE for color and alpha: stage 0 passes arg1, then stage 1 SELECTARG1 CURRENT multiplies by its texture; Chromium checks `[0, 128, 64, 64]`. HLE tests reject stage-1 PREMODULATE, bump-environment color/alpha operations, and bump matrix states 7–10 on both stages without mutating state or emitting GPU commands.
+- [x] Cover D3D9 viewport/scissor queries and state transitions: `GetViewport` and `GetScissorRect` round-trip their setter state; `CreateDevice` initializes the full-target scissor rectangle, and `SetRenderTarget` resets viewport and scissor state to the new surface bounds. Focused HLE tests check fields and emitted GPU commands. Microsoft documents the full-viewport defaults and target-size resets ([SetRenderTarget](https://learn.microsoft.com/en-us/windows/win32/api/d3d9/nf-d3d9-idirect3ddevice9-setrendertarget), [scissor test](https://learn.microsoft.com/en-us/windows/win32/direct3d9/scissor-test)).
 - [ ] Extend state, resource, surface, shader, and device methods from observed target calls; add guest-side and pixel regressions per method.
 - [ ] Verify alpha/color argument selectors, stage transitions, and unsupported combinations against the D3D9 operation definitions.
 
