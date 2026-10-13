@@ -465,9 +465,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   recorded separately. See `docs/target-data/tutorial03-hle-cli-30m-2026-10-13.json`. The current-source
   analyzer report lists 223 implemented / 28 missing static imports for
   Tutorial03, including 54 of 65 MSVCP140 imports; all 18 VCRUNTIME140 imports in that report are
-  handled. Narrow and wide `basic_streambuf` base defaults now cover `showmanyc`, `setbuf`,
-  `sync`, and `imbue`; wide `_Lock` and `_Unlock` are no-ops. `uflow` and `xsgetn` remain
-  unsupported. The HLE copies and destroys MSVC `std::exception` message data using guest
+  handled. Narrow and wide `basic_streambuf` defaults cover `showmanyc`, `setbuf`, `sync`,
+  `imbue`, `underflow`, `uflow`, and `xsgetn`; wide `_Lock` and `_Unlock` are no-ops. The
+  input methods use the observed x64 MSVC read-area layout and preserve virtual dispatch when
+  `underflow` or `uflow` is overridden. The handlers compile, but no runtime fixture or browser
+  replay has exercised them yet, and the checked-in static import report predates this addition.
+  The HLE copies and destroys MSVC `std::exception` message data using guest
   allocations and PE32/PE32+ pointer layouts. `_purecall` now invokes the process-wide handler
   installed by `_set_purecall_handler` and terminates the guest if the handler returns. These
   additions have compile and static-analysis evidence, but no runtime fixture yet. The full report is in

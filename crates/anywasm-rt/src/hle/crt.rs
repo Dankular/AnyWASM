@@ -516,6 +516,171 @@ fn msvc_basic_streambuf_wchar_xsputn(p: &mut Process) -> R {
     msvc_basic_streambuf_xsputn(p, "wchar", 2)
 }
 
+/// The base `basic_streambuf` underflow method reports EOF when no input source
+/// has been installed.
+fn msvc_basic_streambuf_underflow(_p: &mut Process, char_size: usize) -> R {
+    Ok(if char_size == 1 {
+        u32::MAX as u64
+    } else {
+        u16::MAX as u64
+    })
+}
+
+fn msvc_basic_streambuf_char_underflow(p: &mut Process) -> R {
+    msvc_basic_streambuf_underflow(p, 1)
+}
+
+fn msvc_basic_streambuf_wchar_underflow(p: &mut Process) -> R {
+    msvc_basic_streambuf_underflow(p, 2)
+}
+
+fn msvc_streambuf_get_area(p: &Process, this: u64) -> Result<(u64, u64, u64, i32), Stop> {
+    let next_cell = p.rd64(this + 0x38)?;
+    let next = if next_cell == 0 {
+        0
+    } else {
+        p.rd64(next_cell)?
+    };
+    let count_cell = p.rd64(this + 0x50)?;
+    let count = if next == 0 || count_cell == 0 {
+        0
+    } else {
+        p.rd32(count_cell)? as i32
+    };
+    Ok((next_cell, count_cell, next, count))
+}
+
+fn msvc_basic_streambuf_uflow(p: &mut Process, char_size: usize) -> R {
+    let this = p.arg(0);
+    let eof = if char_size == 1 {
+        u32::MAX as u64
+    } else {
+        u16::MAX as u64
+    };
+    let (next_cell, count_cell, next, count) = msvc_streambuf_get_area(p, this)?;
+    if next != 0 && count > 0 {
+        let character = if char_size == 1 {
+            p.rd8(next)? as u64
+        } else {
+            p.rd16(next)? as u64
+        };
+        p.wr64(
+            next_cell,
+            next.checked_add(char_size as u64)
+                .ok_or_else(|| Stop::Crash("streambuf get pointer overflow".into()))?,
+        )?;
+        p.wr32(count_cell, (count - 1) as u32)?;
+        return Ok(character);
+    }
+
+    // The base uflow delegates to virtual underflow. A derived streambuf can
+    // populate its get area there; the base underflow above reports EOF.
+    let vtable = p.rd64(this)?;
+    let underflow = p.rd64(vtable + 6 * 8)?;
+    let character = p.call_guest(underflow, &[this])?;
+    if character == eof {
+        return Ok(eof);
+    }
+
+    let (next_cell, count_cell, next, count) = msvc_streambuf_get_area(p, this)?;
+    if next == 0 || count <= 0 {
+        return Err(Stop::Crash(
+            "streambuf underflow returned a character without an available get position".into(),
+        ));
+    }
+    let buffered = if char_size == 1 {
+        p.rd8(next)? as u64
+    } else {
+        p.rd16(next)? as u64
+    };
+    p.wr64(
+        next_cell,
+        next.checked_add(char_size as u64)
+            .ok_or_else(|| Stop::Crash("streambuf get pointer overflow".into()))?,
+    )?;
+    p.wr32(count_cell, (count - 1) as u32)?;
+    Ok(buffered)
+}
+
+fn msvc_basic_streambuf_char_uflow(p: &mut Process) -> R {
+    msvc_basic_streambuf_uflow(p, 1)
+}
+
+fn msvc_basic_streambuf_wchar_uflow(p: &mut Process) -> R {
+    msvc_basic_streambuf_uflow(p, 2)
+}
+
+fn msvc_basic_streambuf_xsgetn(p: &mut Process, char_size: usize) -> R {
+    let this = p.arg(0);
+    let destination = p.arg(1);
+    let mut remaining = p.cpu.gpr[R8] as i64;
+    if remaining <= 0 {
+        return Ok(0);
+    }
+
+    let mut copied = 0u64;
+    while remaining > 0 {
+        let (next_cell, count_cell, next, count) = msvc_streambuf_get_area(p, this)?;
+        if next != 0 && count > 0 {
+            let elements = remaining.min(count as i64) as usize;
+            let byte_count = elements
+                .checked_mul(char_size)
+                .ok_or_else(|| Stop::Crash("streambuf read size overflow".into()))?;
+            let source = p.read_bytes(next, byte_count)?;
+            let destination_offset = copied
+                .checked_mul(char_size as u64)
+                .and_then(|offset| destination.checked_add(offset))
+                .ok_or_else(|| Stop::Crash("streambuf destination overflow".into()))?;
+            p.write_bytes(destination_offset, &source)?;
+            let advance = byte_count as u64;
+            p.wr64(
+                next_cell,
+                next.checked_add(advance)
+                    .ok_or_else(|| Stop::Crash("streambuf get pointer overflow".into()))?,
+            )?;
+            p.wr32(count_cell, (count - elements as i32) as u32)?;
+            copied += elements as u64;
+            remaining -= elements as i64;
+            continue;
+        }
+
+        // The base xsgetn repeatedly calls virtual uflow once its buffered
+        // input is exhausted, preserving behavior for derived streambufs.
+        let vtable = p.rd64(this)?;
+        let uflow = p.rd64(vtable + 7 * 8)?;
+        let character = p.call_guest(uflow, &[this])?;
+        let eof = if char_size == 1 {
+            u32::MAX as u64
+        } else {
+            u16::MAX as u64
+        };
+        if character == eof {
+            break;
+        }
+        let destination_offset = copied
+            .checked_mul(char_size as u64)
+            .and_then(|offset| destination.checked_add(offset))
+            .ok_or_else(|| Stop::Crash("streambuf destination overflow".into()))?;
+        if char_size == 1 {
+            p.wr8(destination_offset, character as u8)?;
+        } else {
+            p.wr16(destination_offset, character as u16)?;
+        }
+        copied += 1;
+        remaining -= 1;
+    }
+
+    Ok(copied)
+}
+
+fn msvc_basic_streambuf_char_xsgetn(p: &mut Process) -> R {
+    msvc_basic_streambuf_xsgetn(p, 1)
+}
+
+fn msvc_basic_streambuf_wchar_xsgetn(p: &mut Process) -> R {
+    msvc_basic_streambuf_xsgetn(p, 2)
+}
+
 /// The base `basic_streambuf<char>::sync()` succeeds without doing anything.
 fn msvc_basic_streambuf_char_sync(_p: &mut Process) -> R {
     Ok(0)
@@ -1539,6 +1704,25 @@ fn msvc_basic_streambuf_default(p: &mut Process, char_type: &str, xsputn_name: &
         .thunk_for("msvcp", xsputn_name, true)
         .expect("creating the MSVCP basic_streambuf xsputn thunk");
     p.wr64(vtable + 9 * 8, xsputn)?;
+    let (underflow_name, uflow_name, xsgetn_name) = if char_type == "wchar" {
+        (
+            "__anywasm_basic_streambuf_wchar_underflow",
+            "__anywasm_basic_streambuf_wchar_uflow",
+            "__anywasm_basic_streambuf_wchar_xsgetn",
+        )
+    } else {
+        (
+            "__anywasm_basic_streambuf_char_underflow",
+            "__anywasm_basic_streambuf_char_uflow",
+            "__anywasm_basic_streambuf_char_xsgetn",
+        )
+    };
+    for (slot, name) in [(6, underflow_name), (7, uflow_name), (8, xsgetn_name)] {
+        let target = p
+            .thunk_for("msvcp", name, true)
+            .expect("creating an MSVCP basic_streambuf input thunk");
+        p.wr64(vtable + slot * 8, target)?;
+    }
     let sync = p
         .thunk_for("msvcp", "__anywasm_basic_streambuf_char_sync", true)
         .expect("creating the MSVCP basic_streambuf sync thunk");
@@ -1635,6 +1819,30 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "__anywasm_basic_streambuf_wchar_xsputn"
         | "?xsputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEB_W_J@Z" => {
             msvc_basic_streambuf_wchar_xsputn
+        }
+        "__anywasm_basic_streambuf_char_underflow"
+        | "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ" => {
+            msvc_basic_streambuf_char_underflow
+        }
+        "__anywasm_basic_streambuf_wchar_underflow"
+        | "?underflow@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAGXZ" => {
+            msvc_basic_streambuf_wchar_underflow
+        }
+        "__anywasm_basic_streambuf_char_uflow"
+        | "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ" => {
+            msvc_basic_streambuf_char_uflow
+        }
+        "__anywasm_basic_streambuf_wchar_uflow"
+        | "?uflow@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAAGXZ" => {
+            msvc_basic_streambuf_wchar_uflow
+        }
+        "__anywasm_basic_streambuf_char_xsgetn"
+        | "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z" => {
+            msvc_basic_streambuf_char_xsgetn
+        }
+        "__anywasm_basic_streambuf_wchar_xsgetn"
+        | "?xsgetn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@MEAA_JPEA_W_J@Z" => {
+            msvc_basic_streambuf_wchar_xsgetn
         }
         "__anywasm_basic_streambuf_char_sync" => msvc_basic_streambuf_char_sync,
         "__anywasm_standard_streambuf_char_overflow" => msvc_standard_streambuf_char_overflow,
