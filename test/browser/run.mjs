@@ -5538,6 +5538,7 @@ try {
       `, 'main', 'vs_5_0');
       const pixel = tool.compileHlsl(`
         TextureCubeArray<float4> source : register(t0);
+        TextureCubeArray<float4> halfSource : register(t1);
         SamplerState sourceSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
           if (position.y >= 32.0) {
@@ -5545,6 +5546,10 @@ try {
             if (position.x < 32.0) source.GetDimensions(0, width, height, elements, levels);
             else source.GetDimensions(1, width, height, elements, levels);
             return float4(float(width) / 4.0, float(height) / 4.0, float(elements) / 16.0, float(levels) / 2.0);
+          }
+          if (position.y < 16.0) {
+            float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
+            return halfSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
           }
           float4 coordinate = position.x < 20.0 ? float4(1.0, 0.0, 0.0, 0.0)
             : position.x < 40.0 ? float4(1.0, 0.0, 0.0, 1.0)
@@ -5577,6 +5582,8 @@ try {
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
       command(4, words(3, 4, 4, 2, 18, 28, 0x8, 0, 1, 0x4));
       command(12, words(5, 2, 3, 28, 10, 0, 2, 6, 2)); // two mips, first face 6, two cubes
+      command(4, words(11, 4, 4, 1, 18, 10, 0x8, 0, 1, 0x4)); // RGBA16_FLOAT cube array
+      command(12, words(12, 2, 11, 10, 10, 0, 1, 6, 2)); // two cubes starting at face 6
       const cubeFaces = [
         [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255]],
         [[0, 255, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255]],
@@ -5595,6 +5602,14 @@ try {
         mip1Payload.set(words(3, 1, slice, 0, 0, 2, 2, 8, mip1Texels.length));
         mip1Payload.set(mip1Texels, 36); command(5, mip1Payload);
       }
+      for (let slice = 0; slice < 18; slice++) {
+        const values = slice < 12 ? [0x3400, 0x3800, 0x3c00, 0x3c00] : [0x3c00, 0x3400, 0x3800, 0x3c00];
+        const texels = new Uint8Array(128), texelView = new DataView(texels.buffer);
+        for (let i = 0; i < 16; i++) values.forEach((value, channel) => texelView.setUint16(i * 8 + channel * 2, value, true));
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(11, 0, slice, 0, 0, 4, 4, 32, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      }
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
       samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
@@ -5602,7 +5617,7 @@ try {
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
-      command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 2, 5, 12)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y = 16) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
@@ -5610,9 +5625,12 @@ try {
         selectedCube0: at(10),
         selectedCube1: at(30),
         selectedCube0Edge: at(54),
+        selectedHalfCube0: at(10, 8),
+        selectedHalfCube1: at(50, 8),
         dimensions: at(10, 48),
         mip1Dimensions: at(42, 48),
         viewDimension: gpu.views.get(5)?.cache?.dim,
+        halfViewDimension: gpu.views.get(12)?.cache?.dim,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -5622,11 +5640,14 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 TextureCubeArray SRV selects the requested face and cube range',
+  check('D3D11 TextureCubeArray SRVs select cube ranges from RGBA8_UNORM and RGBA16_FLOAT',
     cubeArrayResult.draws === 1 && cubeArrayResult.errors?.length === 0
       && cubeArrayResult.viewDimension === 'cube-array'
+      && cubeArrayResult.halfViewDimension === 'cube-array'
       && near(cubeArrayResult.selectedCube0 || [], [0, 255, 0, 255], 1)
       && near(cubeArrayResult.selectedCube1 || [], [0, 0, 255, 255], 1)
+      && near(cubeArrayResult.selectedHalfCube0 || [], [64, 128, 255, 255], 1)
+      && near(cubeArrayResult.selectedHalfCube1 || [], [255, 64, 128, 255], 1)
       && near(cubeArrayResult.selectedCube0Edge || [], [0, 128, 128, 255], 2)
       && near(cubeArrayResult.dimensions || [], [255, 255, 32, 255], 1)
       && near(cubeArrayResult.mip1Dimensions || [], [128, 128, 32, 255], 1),

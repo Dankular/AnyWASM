@@ -24,6 +24,10 @@ levels. `GetDimensions(0)` returns 4x4 and `GetDimensions(1)` returns 2x2; both 
 and two levels. The captured normalized pixels were `[255,255,32,255]` and `[128,128,32,255]`.
 Cube samples, the +X/+Y seam, and mip queries completed with one draw and no WebGPU errors.
 
+The cube-array fixture also samples a selected two-cube RGBA16_FLOAT view beginning at face 6.
+Half-float texels `[0.25,0.5,1,1]` and `[1,0.25,0.5,1]` read back as `[64,127,255,255]` and
+`[255,64,127,255]`, with one draw and zero WebGPU errors.
+
 Focused depth cube-array comparison regression on 2026-10-13: Chrome `155.0.8059.40` on Windows x64.
 The synthetic D3D11 fixture covers implicit `SampleCmp` and `SampleCmpLevelZero` on selected two-cube
 D32_FLOAT, D16_UNORM, D24_UNORM_S8, and D32_FLOAT_S8X24 SRVs starting at face 6. D24 uses R24G8_TYPELESS

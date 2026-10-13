@@ -294,7 +294,8 @@ register-stack subset):
       pixel regression uses this compiler workaround. `TextureCubeArray.SampleLevel` now validates in
       the pinned Naga bridge with `CUBE_ARRAY_TEXTURES` enabled. Chromium samples indices 0 and 1 from
       a two-cube view beginning at face 6, verifies the +X/+Y linear seam, and reads the expected
-      width, height, cube count, and mip count with no WebGPU validation errors. The bundled vkd3d
+      width, height, cube count, and mip count with no WebGPU validation errors. A selected RGBA16_FLOAT
+      cube-array view returns its two expected half-float colors with no WebGPU validation errors. The bundled vkd3d
       compiler rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad`
       untestable. `Texture1DArray` and `Texture2DArray` `GetDimensions` now pass through Naga's image
       size and layer queries; shader tests and Chromium pixels verify mip 0/1 widths, two elements,
