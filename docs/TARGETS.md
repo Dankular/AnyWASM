@@ -706,11 +706,11 @@ the captured caller, following the Windows Research Kernel dispatcher. This sent
 compile-verified but has no runtime fixture yet. A null `TargetFrame` now runs all termination
 handlers and dispatches the preserved unwind record through vectored handlers and the top-level
 filter. PE32 phase-two callbacks can now start a nested `RtlUnwind`; the new transfer takes over,
-and the callback's registration is skipped after validating it against the active chain. This is
-covered by the synthetic guest-handler regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback`;
-there is no compiled target fixture yet. Redirects from the selected C++ catch frame, nested x64
-`RtlUnwindEx`, non-null unwind history tables, and redirects outside the pre-searched frames remain
-unsupported.
+and the callback's registration is skipped after validating it against the active chain. An
+`RtlUnwind` target remains registered and its handler is not called. The synthetic guest-handler
+regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback` covers this behavior; there is no
+compiled target fixture yet. Redirects from the selected C++ catch frame, nested x64 `RtlUnwindEx`,
+non-null unwind history tables, and redirects outside the pre-searched frames remain unsupported.
 The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32

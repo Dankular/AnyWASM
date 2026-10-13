@@ -926,10 +926,9 @@ fn unwind_to_rtl32_inner(
     let unwind_flags = p.rd32(unwind.exception_record + 4)? | EXCEPTION_UNWINDING;
     let mut index = 0;
     let mut collided_count = 0;
-    let unwind_count = target_index.map_or(frames.len(), |target| target + 1);
+    let unwind_count = target_index.unwrap_or(frames.len());
     while index < unwind_count {
         let frame = frames[index];
-        let target_unwind = target_index == Some(index);
         if skip_handler.is_some_and(|skipped| skipped.registration == frame.registration) {
             if skip_handler.is_some_and(|skipped| {
                 skipped.next != frame.next || skipped.handler != frame.handler
@@ -945,10 +944,6 @@ fn unwind_to_rtl32_inner(
                     frame.registration
                 )));
             }
-            if target_unwind {
-                p.wr32(unwind.exception_record + 4, unwind_flags)?;
-                return resume_rtl_unwind32(p, &unwind, context_record);
-            }
             p.wr32(TEB_ADDR, frame.next)?;
             index += 1;
             continue;
@@ -956,9 +951,7 @@ fn unwind_to_rtl32_inner(
         p.wr32(
             unwind.exception_record + 4,
             unwind_flags
-                | if target_unwind {
-                    EXCEPTION_TARGET_UNWIND
-                } else if unwind.target_frame == 0 {
+                | if unwind.target_frame == 0 {
                     EXCEPTION_EXIT_UNWIND
                 } else {
                     0
@@ -1006,11 +999,6 @@ fn unwind_to_rtl32_inner(
                     "PE32 RtlUnwind collision without a target frame is unsupported".into(),
                 ));
             };
-            if target_unwind {
-                return Err(Stop::Crash(
-                    "PE32 RtlUnwind collided from its selected target frame".into(),
-                ));
-            }
             collided_count += 1;
             if collided_count > MAX_SEH_FRAMES {
                 return Err(Stop::Crash(format!(
@@ -1031,14 +1019,23 @@ fn unwind_to_rtl32_inner(
                 "PE32 ExceptionList changed while RtlUnwind processed frame {frame_address:#x}"
             )));
         }
-        if !target_unwind {
-            p.wr32(TEB_ADDR, frame.next)?;
-        }
+        p.wr32(TEB_ADDR, frame.next)?;
         index += 1;
-        if target_unwind {
-            p.wr32(unwind.exception_record + 4, unwind_flags)?;
-            return resume_rtl_unwind32(p, &unwind, context_record);
+    }
+
+    if let Some(target) = target_index {
+        let target_frame = frames[target];
+        let target_address = target_frame.registration as u64;
+        if p.rd32(TEB_ADDR)? != target_frame.registration
+            || p.rd32(target_address)? != target_frame.next
+            || p.rd32(target_address + 4)? != target_frame.handler
+        {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind target frame {target_address:#x} changed during unwind"
+            )));
         }
+        p.wr32(unwind.exception_record + 4, unwind_flags)?;
+        return resume_rtl_unwind32(p, &unwind, context_record);
     }
 
     if unwind.target_frame == EXCEPTION_CHAIN_END as u64 {
@@ -1935,7 +1932,7 @@ mod tests {
         assert_eq!(process.cpu.rip, NESTED_LANDING);
         assert_eq!(process.cpu.gpr[RAX], NESTED_RETURN as u64);
         assert_eq!(process.rd32(FIRST_CALLS).unwrap(), 1);
-        assert_eq!(process.rd32(TARGET_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(TARGET_CALLS).unwrap(), 0);
         assert_eq!(process.rd32(TEB_ADDR).unwrap(), TARGET_FRAME as u32);
     }
 
