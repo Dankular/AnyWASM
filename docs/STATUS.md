@@ -291,8 +291,9 @@
   the target, and resumes through the selected catch funclet. A compile-only MSVC 19.29 x86 assembly
   probe confirmed compiler-generated handler thunks place the absolute FuncInfo pointer in EAX
   before jumping to `__CxxFrameHandler3`. The handler and dispatcher compile, but no PE32 C++ runtime
-  fixture has exercised this path yet. Custom x86 catch-copy closures, x86 EH4, and nested/collided
-  SEH unwind dispositions remain unsupported.
+  fixture has exercised this path yet. PE32 EH3 by-value catches now range-check the thrown object
+  and invoke the metadata copy helper when present, matching the x64 path; this addition is also
+  compile-only. X86 EH4 and nested/collided SEH unwind dispositions remain unsupported.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   Historical `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` runs with `--mode d3d11` reached
   virtual D3D11 device discovery/creation before stopping at the unresolved `MSVCP140.dll`

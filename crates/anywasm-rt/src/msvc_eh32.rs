@@ -694,7 +694,19 @@ fn build_catch_object32(
         .adjusted_object_address
         .checked_add(source_size as u64)
         .ok_or_else(|| malformed("x86 thrown object range overflows"))?;
+    let thrown_size = exception
+        .throw_info
+        .catchable_types
+        .first()
+        .map(|catchable| catchable.size_or_offset)
+        .ok_or_else(|| malformed("x86 ThrowInfo has no primary catchable type"))?;
+    let thrown_end = exception
+        .object_address
+        .checked_add(thrown_size as u64)
+        .ok_or_else(|| malformed("x86 primary thrown object range overflows"))?;
     if matched.adjusted_object_address < exception.object_address
+        || source_end > thrown_end
+        || source_end <= matched.adjusted_object_address
         || p.mem
             .prot_of(matched.adjusted_object_address)
             .is_none_or(|prot| prot & PROT_R == 0)
@@ -706,10 +718,11 @@ fn build_catch_object32(
     }
     if matched.by_reference {
         p.wr32(destination, matched.adjusted_object_address as u32)?;
-    } else if matched.copy_function.is_some() {
-        return Err(unsupported(
-            "x86 catch copy-constructor closures are not implemented",
-        ));
+    } else if let Some(copy_function) = matched.copy_function {
+        p.call_guest(
+            copy_function,
+            &[destination, matched.adjusted_object_address],
+        )?;
     } else {
         let bytes = p.read_bytes(matched.adjusted_object_address, source_size as usize)?;
         p.write_bytes(destination, &bytes)?;
