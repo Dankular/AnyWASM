@@ -523,6 +523,57 @@ try {
       && JSON.stringify(normalized16CopyResult.readbacks) === JSON.stringify([
         [0x1234, 0x1235, 0x8000, 0xffff], [0x1234, 0x1235, 0x8000, 0x7fff],
       ]), JSON.stringify(normalized16CopyResult));
+  const normalized16PartialCopyResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      // Exercise the half-float fallback even on adapters that support exact R32_FLOAT sampling.
+      gpu.features = new Set(Array.from(gpu.features).filter((feature) => feature !== 'float32-filterable'));
+      const formats = [
+        { dxgi: 56, source: [0x4444, 0x1235, 0x5555, 0x2345], destination: [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666], expected: [0x1111, 0x1235, 0x3333, 0x4444, 0x2345, 0x6666] },
+        { dxgi: 58, source: [0x4444, 0xedcb, 0x5555, 0x1235], destination: [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666], expected: [0x1111, 0xedcb, 0x3333, 0x4444, 0x1235, 0x6666] },
+      ];
+      const wordsToBytes = (words) => {
+        const bytes = new Uint8Array(words.length * 2), view = new DataView(bytes.buffer);
+        words.forEach((word, index) => view.setUint16(index * 2, word, true));
+        return bytes;
+      };
+      const readbacks = [], backingFormats = [];
+      for (const [index, format] of formats.entries()) {
+        const sourceId = 40 + index * 3, destinationId = sourceId + 1, stagingId = sourceId + 2;
+        const sourceBytes = wordsToBytes(format.source), destinationBytes = wordsToBytes(format.destination);
+        gpu.createTexture(sourceId, 2, 2, 1, 1, format.dxgi, 0x8, 0, 0);
+        gpu.textureWrite(sourceId, 0, 0, 0, 0, 2, 2, 4, sourceBytes.length, sourceBytes);
+        gpu.createTexture(destinationId, 3, 2, 1, 1, format.dxgi, 0x8, 0, 0);
+        gpu.textureWrite(destinationId, 0, 0, 0, 0, 3, 2, 6, destinationBytes.length, destinationBytes);
+        const operation = new DataView(new ArrayBuffer(14 * 4));
+        [destinationId, 0, 1, 0, 0, sourceId, 0, 1, 0, 0, 2, 2, 1, 1]
+          .forEach((value, word) => operation.setUint32(word * 4, value, true));
+        gpu.copyRegion(operation);
+        gpu.createTexture(stagingId, 3, 2, 1, 1, format.dxgi, 0, 3, 0);
+        gpu.copyResource(stagingId, destinationId);
+        backingFormats.push(gpu.res.get(destinationId).format);
+        gpu.flush();
+        await gpu.device.queue.onSubmittedWorkDone();
+        const bytes = await gpu.readBackResource(stagingId);
+        readbacks.push(Array.from({ length: 6 }, (_, pixel) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(pixel * 2, true)));
+      }
+      const errors = gpu.stats.errors;
+      gpu.device.destroy();
+      return { readbacks, backingFormats, errors };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  check('D3D11 R16_UNORM/SNORM partial copies preserve copied and untouched words on Map(READ)',
+    !normalized16PartialCopyResult.error && normalized16PartialCopyResult.errors?.length === 0
+      && JSON.stringify(normalized16PartialCopyResult.backingFormats) === JSON.stringify(['r16float', 'r16float'])
+      && JSON.stringify(normalized16PartialCopyResult.readbacks) === JSON.stringify([
+        [0x1111, 0x1235, 0x3333, 0x4444, 0x2345, 0x6666],
+        [0x1111, 0xedcb, 0x3333, 0x4444, 0x1235, 0x6666],
+      ]), JSON.stringify(normalized16PartialCopyResult));
   check('D3D11 staging R16_UINT Map(READ) preserves unsigned words',
     triText.includes('staging R16_UINT readback=0000,0001,7fff,ffff row_pitch=4'), triText);
   check('D3D11 staging R16_SINT Map(READ) preserves signed words',
