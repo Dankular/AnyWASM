@@ -779,13 +779,30 @@ fn inline_address_shape(address: MemOp) -> bool {
         && (address.index == 0xff || address.index < 16)
 }
 
+/// `(count, value type)` local declarations of every emitted function (0x7f = i32, 0x7e = i64).
+const LOCAL_GROUPS: [(u8, u8); 12] = [
+    (0x01, 0x7f),
+    (0x01, 0x7e),
+    (0x01, 0x7f),
+    (0x04, 0x7f),
+    (0x10, 0x7e),
+    (0x20, 0x7e),
+    (0x03, 0x7e),
+    (0x03, 0x7e),
+    (0x01, 0x7f),
+    (0x03, 0x7e),
+    (0x01, 0x7f),
+    (0x01, 0x7f),
+];
+
 fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Vec<u8> {
     let mut code = Vec::new();
     // Locals: execution scratch, GPRs, both XMM lanes, RIP/count/TSC, and 64-bit ALU scratch.
-    code.extend_from_slice(&[
-        0x0b, 0x01, 0x7f, 0x01, 0x7e, 0x01, 0x7f, 0x04, 0x7f, 0x10, 0x7e, 0x20, 0x7e, 0x03, 0x7e,
-        0x03, 0x7e, 0x01, 0x7f, 0x03, 0x7e, 0x01, 0x7f, 0x01, 0x7f,
-    ]);
+    // The declared group count is derived from the table, so it cannot drift from the groups.
+    code.push(LOCAL_GROUPS.len() as u8);
+    for (count, value_type) in LOCAL_GROUPS {
+        code.extend_from_slice(&[count, value_type]);
+    }
     let (initial_gprs, written_gprs, initial_xmms, written_xmms) = register_masks(instructions);
     for register in 0..16 {
         if initial_gprs & (1 << register) != 0 {
@@ -1615,6 +1632,8 @@ fn emit_inc32(dst: u8, code: &mut Vec<u8>) {
     code.push(0x21);
     uleb(ALU64_RESULT_LOCAL, code);
     emit_add32(dst, AddSource::Immediate(1), code);
+    code.push(0x20); // store address: the state pointer
+    uleb(0, code);
     code.push(0x20);
     uleb(0, code);
     code.push(0x29); // i64.load RFLAGS

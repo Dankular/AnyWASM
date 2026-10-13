@@ -27,8 +27,12 @@ r = await run('crt_test.exe', ['--args', '"C:\\crt_test.exe" first "second arg"'
 check('crt_test.exe (real msvcrt imports) matches on shared memory', r.status === Status.EXITED && r.exitCode === 7 && r.out.includes('sscanf=3 x+y=46 word=hello'), JSON.stringify(r).slice(0, 400));
 r = await run('parallel_test.exe');
 check('parallel_test.exe cooperative threads on shared memory', r.status === Status.EXITED && r.exitCode === 0 && r.out.includes('t0=5133 t1=4459 total=9592'), JSON.stringify(r));
-// NOTE: emitted-block execution on shared memory is not covered yet: the import rewrite in
-// web/anywasm.js (withSharedMemoryImport) is unverified because forced emission produced no
-// compilations in this harness for the plain build either (cause not yet found).
+// Dynamic WASM emission must work when the runtime's memory is shared: emitted modules have to
+// import it as a shared memory, so the loader rewrites their import declaration.
+const plain = await run('compute.exe');
+const emitted = await run('compute.exe', [], { jitMinPrefix: 1 });
+check('compute.exe on shared memory (emission off)', plain.status === Status.EXITED && plain.exitCode === 0 && plain.out.includes('fp=609'), JSON.stringify(plain).slice(0, 300));
+check('emitted blocks compile and run against the shared memory', emitted.jit.compilations > 0 && emitted.jit.executions > 0 && emitted.jit.fallbacks === 0, JSON.stringify(emitted.jit));
+check('output with emitted blocks is identical to the interpreter', emitted.status === plain.status && emitted.exitCode === plain.exitCode && emitted.out === plain.out, `${emitted.out}\n--\n${plain.out}`);
 console.log(failures ? `\n${failures} FAILED` : '\nshared runtime smoke passed');
 process.exit(failures ? 1 : 0);
