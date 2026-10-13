@@ -1,9 +1,11 @@
 # Shared WebAssembly Memory for Parallel Guest Threads
 
-**Status:** the browser has an opt-in `?sharedCpuWorkers` path that offloads the active guest context
-through a shared-memory CPU worker and returns to the coordinator at HLE and fault boundaries. This
-first runtime hookup is serial; concurrent guest-thread scheduling and x87 execution in the worker
-remain unimplemented.
+**Status:** the opt-in `?sharedCpuWorkers` path dispatches distinct runnable x64 guest contexts to
+two no-std CPU workers over shared guest-frame memory; the coordinator owns HLE, faults, exceptions,
+and process state. The parallel fixture verifies overlapping slices, interlocked shared memory,
+per-thread TLS/TEB values, and stack isolation. The separate `?inPlaceCpu` variant and its worker
+artifacts link successfully, but its browser path has not been replayed. Worker x87 execution,
+worker-side JIT, and target-level parallelism/performance remain open.
 
 ## Goal and scope
 
@@ -25,10 +27,11 @@ sample rendering path. Those remain in the parent runtime goal.
 - `web/serve.mjs` already returns `Cross-Origin-Opener-Policy: same-origin` and
   `Cross-Origin-Embedder-Policy: require-corp`. `web/main.js` enables the experimental path when the
   page URL contains `?sharedCpuWorkers`.
-- `web/worker.js` creates one `AnyWasm` coordinator and can dispatch its active guest context to one
-  nested CPU worker. The worker stops at the HLE range or a CPU fault; the coordinator imports the
-  shared snapshot, handles that boundary, then republishes state. Other execution stays cooperative.
-  `web/build.sh` builds the normal runtime and a separate shared-memory CPU-worker artifact.
+- `web/worker.js` creates one `AnyWasm` coordinator and dispatches up to two distinct runnable guest
+  contexts through `dispatchBatch`. Workers stop at HLE, fault, exit, or quantum boundaries; the
+  coordinator imports their contexts, handles process-wide effects, then republishes state. The
+  normal browser runtime remains cooperative unless shared-worker mode is explicitly requested.
+  `web/build.sh` builds the default runtime and separate shared-memory CPU-worker artifact.
 - `crates/anywasm-wasm/src/lib.rs` stores one process in `static mut STATE`; its safety comment
   depends on a single-threaded Wasm instance and no re-entrant host calls.
 - Guest memory is not currently the Wasm linear memory. `crates/anywasm-cpu/src/mem.rs` implements a
@@ -36,9 +39,10 @@ sample rendering path. Those remain in the parent runtime goal.
   JIT accesses its own CPU state and translation-cache entries through the Wasm linear memory, while
   guest loads and stores go through the separate `Memory` object.
 - `Process` owns the scheduler, guest thread table, handles, VFS, module state, HLE state, virtual
-  clock, output buffers, and GPU command stream. Its current ready queue selects one guest CPU at a
-  time. Each `GuestThread` already has a separate `Cpu`, stack bounds, TLS/FLS values, last error,
-  and wait state.
+  clock, output buffers, and GPU command stream. Each `GuestThread` has a separate `Cpu`, stack
+  bounds, TLS/FLS values, last error, and wait state. The shared runnable-context query publishes
+  several eligible guest contexts to distinct worker slots while the coordinator remains the owner
+  of scheduling and process-wide mutations.
 - `web/anywasm.js` transfers the Wasm and `.awb` `ArrayBuffer`s to the worker. Game data uses the
   existing range-fetch path. SAB is therefore for shared guest execution state, not a replacement
   for those transfer and streaming paths.
@@ -65,8 +69,9 @@ sample rendering path. Those remain in the parent runtime goal.
   integer/control-flow and SSE instructions; x87 execution remains behind the ordinary std feature.
   No-std SSE rounding is implemented in core, and scalar square root uses an iterative f64
   approximation. A cross-origin-isolated Chrome smoke now starts the nested CPU worker through
-  `?sharedCpuWorkers` and runs `hello.exe` to exit 0. This exercises worker initialization and a
-  serial active-context handoff, but does not prove concurrent guest-thread execution.
+  `?sharedCpuWorkers` and runs `hello.exe` to exit 0. A later `parallel_test.exe` browser fixture
+  exercises concurrent contexts, TEB/TLS isolation, a locked shared counter, worker overlap, and
+  startup fallback; its exact run is recorded in `docs/TARGETS.md`.
 
 ## Feasibility spike result (2026-10-12)
 
@@ -86,10 +91,14 @@ sample rendering path. Those remain in the parent runtime goal.
   the metadata check and still emits Rust's unstable-target-feature warning. The browser smoke
   confirms module instantiation and a clean guest exit, but not multi-thread scheduling or target
   rendering.
-- Result: the full-runtime-per-worker layout remains blocked. The separate CPU-worker boundary now
-  executes bounded integer/control-flow and SSE slices over validated shared guest frames, but does
-  not yet share the process's live page backing or coordinator scheduling state; x87 execution
-  remains std-only.
+- Follow-up on 2026-10-13: the dedicated shared-runtime build applied `--no-check-features` to the
+  coordinator as well, and both the coordinator and in-place worker linked for wasm32 release. This
+  is build evidence only; an in-place browser replay is not recorded.
+- Result: the full-runtime-per-worker layout remains blocked because it would share process statics
+  and allocator state. The separate CPU-worker boundary executes bounded integer/control-flow and
+  SSE slices over validated shared guest frames and now schedules multiple guest contexts. The
+  default pool copies frame snapshots at quiescent boundaries; the in-place variant can address the
+  runtime frame store directly. x87 execution remains std-only.
 
 ### Revised candidate architecture
 
@@ -117,15 +126,15 @@ and snapshot-import C-ABI functions, plus per-thread `Cpu` context export/import
 784-byte aligned layout. Import accounts newly retired worker instructions in the coordinator's
 process counter, and advances the scheduler quantum when the imported context is the active thread.
 `AnyWasm` provides host methods that copy page and CPU snapshots through caller-owned buffers.
-`web/shared-cpu-pool.js` and `web/shared-cpu-worker.js` now construct the matching shared ABI,
-reserve disjoint Wasm stacks, and claim/collect worker slots; `web/build.sh` emits the separate worker
-module with its stack pointer export. The `?sharedCpuWorkers` path currently dispatches only the
-coordinator's active context, preserving the single TEB/TLS view; it replays HLE and faulting
-instructions on the coordinator. At quiescent handoffs, the shared pool can grow its mapping and
-frame regions while keeping worker stacks at stable offsets; it falls back to cooperative execution
-if that growth exceeds the 1 GiB shared-memory limit or cannot be allocated. True concurrent guest
-threads still need per-thread TEB/TLS isolation and scheduler handoff, plus a browser worker exercise
-and target replay.
+`web/shared-cpu-pool.js` and `web/shared-cpu-worker.js` construct the matching shared ABI, reserve
+disjoint Wasm stacks, and claim/collect worker slots. The `?sharedCpuWorkers` path dispatches up to
+two coordinator-published runnable contexts and replays HLE and faulting instructions on the
+coordinator. At quiescent handoffs, the copied-frame pool can grow its mapping and frame regions
+while keeping worker stacks at stable offsets; it falls back to cooperative execution if growth
+exceeds the 1 GiB shared-memory limit or cannot be allocated. `?inPlaceCpu` builds the coordinator
+and worker against one imported shared Wasm memory, with worker stacks and ABI regions kept outside
+runtime static data. The parallel fixture verifies overlap and per-thread state isolation; the
+selected Diligent and GTA replays have not demonstrated two runnable guest contexts at once.
 
 ## Success criteria
 
