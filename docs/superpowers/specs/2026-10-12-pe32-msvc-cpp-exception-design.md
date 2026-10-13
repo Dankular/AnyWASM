@@ -37,6 +37,10 @@ behavior.
   actual per-function thunk: it reads the registration node, performs its stack-cookie checks, loads
   the absolute `FuncInfo` address into EAX, then jumps to `__CxxFrameHandler3`. The runtime uses EAX
   for the function metadata and the registration node's `state` field for the active state.
+- An x86 direct-entry build of the same C++ fixture with MSVC 19.44.35214 and the default `/EHsc`
+  settings (without `/d2FH4-`) imports `__CxxFrameHandler3` and `_CxxThrowException`, matching the
+  explicit `/d2FH4-` control build. This default x86 image provides no evidence of an FH4 handler
+  thunk or metadata ABI.
 
 ## Design
 
@@ -94,8 +98,9 @@ silently selecting a handler.
   exception specifications, `exception_ptr`, and future compiler encodings remain out of scope.
   The installed MSVC 14.29 and 14.44 `ehdata_forceinclude.h` headers set
   `_EH_RELATIVE_FUNCINFO` to `0` for native x86; EH4's relative function metadata path is enabled
-  for x64/ARM targets. Keep PE32 C++ FH4 unsupported until a native x86 image demonstrates a
-  concrete handler thunk and metadata ABI.
+  for x64/ARM targets. The MSVC 19.44 default x86 fixture also imports `__CxxFrameHandler3`.
+  Keep PE32 C++ FH4 unsupported until a native x86 image demonstrates a concrete handler thunk and
+  metadata ABI.
 - One direct cross-registration-frame catch transfer and inner-frame destructor are fixture-verified.
   Other frame layouts remain untested. X86 catch-copy functions use the guest `__thiscall` ABI with
   checked destination and source ranges. On a selected catch, the PE32 handler now calls the
