@@ -25,13 +25,16 @@ reimplemented system libraries, recompile shaders, and **fail loudly** on anythi
 | `crates/anywasm-pe` | Dependency-free PE32/PE32+ parser |
 | `crates/anywasm-cpu` | Paged memory, decoder, interpreter (integer, SSE–SSE4.2, x87 as f64), `DecodeCache` |
 | `crates/anywasm-rt` | Loader, TEB/PEB, HLE thunks, kernel32/ntdll/msvcrt/user32/winmm/dxgi/d3d11, GPU command stream, VFS, `.awb` bundles |
+| `crates/anywasm-cpu-state` | `no_std` architectural CPU state and the shared-worker ABI |
+| `crates/anywasm-cpu-worker` | Worker module that runs CPU slices over shared guest memory |
 | `crates/anywasm-cli` | `anywasm analyze | run | pack` |
 | `crates/anywasm-wasm` | C-ABI WASM build (`aw_*` exports) |
 | `web/` | `anywasm.js`, `worker.js`, `gpu.js` (WebGPU executor), `shaders.js`, vendored vkd3d-shader + Naga |
 | `fixtures/` | C test programs + built `.exe` (`fixtures/build.sh`; clang/lld-link + mingw-w64) |
 | `test/` | `wasm_smoke.mjs`, `bench.mjs`, `shaders.mjs`, Chromium and cross-engine Playwright browser checks |
 | `tools/` | `gen_corpus.py` (diff corpus), `gen_vtables.py` (COM vtable slots from mingw headers) |
-| `docs/STATUS.md`, `docs/EVALUATION.md`, `THIRD_PARTY.md` | Honest status, prior-art evaluation, licences |
+| `scripts/` | Asyncify, CPU-worker build and GTA packing scripts |
+| `docs/STATUS.md`, `docs/TARGETS.md`, `docs/BROWSER_SUPPORT.md`, `docs/EVALUATION.md`, `THIRD_PARTY.md` | Verified status, real-target acceptance log, browser matrix, prior-art evaluation, licences |
 
 ## How to build and test
 ```
@@ -410,7 +413,12 @@ register-stack subset):
 
 ## 5. Tooling, CI, repo hygiene
 - [x] **Copy `ci/web.yml` to `.github/workflows/`** (mirrored as `web.yml`; requires `workflow` scope).
-- [x] Confirm GitHub Actions is green on commits after `bd6f0bd` (incl. `631ba66`).
+- [ ] **CI is red.** `Rust` and `WASM` workflows pass through `bd6f0bd` (and `631ba66` was not
+      checked at that time) but fail on every push inspected from 2026-10-12 to 2026-10-13, including
+      branch head `ef301dd`. Confirmed from the `Rust` log for `4caaf0c`:
+      `E0432 unresolved import crate::mem` at `anywasm-cpu/src/x87.rs:521` while compiling
+      `anywasm-cpu-state` lib tests; it builds locally with `cargo test -p anywasm-cpu-state
+      --no-run`, so root cause is **unknown**. `WASM` workflow failure reason not yet read.
 - [x] Removed the tracked two-line root `out.txt` added in `800f4e1` and deleted in `1c8246c`.
       `fixtures/crt_test.c` separately writes a guest `out.txt` during its CRT test.
 - [x] Silence/resolve compiler warnings (e.g. unused `ERROR_ACCESS_DENIED` in `kernel32.rs`).

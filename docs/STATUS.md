@@ -87,8 +87,15 @@
   resume callbacks across worker slices; one normal-slice target replay is recorded in
   `docs/TARGETS.md`. Full data and
   reproduction commands are in `docs/TARGETS.md`.
-- CI (GitHub Actions, user-provided workflow): `cargo build` + `cargo test` pass, including the
-  hardware-differential suite, on the hosted runner.
+- CI (GitHub Actions, `.github/workflows/rust.yml` and `web.yml`; `ci/web.yml` mirrors the latter):
+  the `Rust` and `WASM` workflows passed through commit `bd6f0bd`, including the
+  hardware-differential suite on the hosted runner. **As of 2026-10-13 they are failing** on the
+  branch head `ef301dd` and on the 20+ preceding pushes I inspected. The job log for the `Rust`
+  run on `4caaf0c` shows `error[E0432]: unresolved import crate::mem` at
+  `crates/anywasm-cpu-state/src/../../anywasm-cpu/src/x87.rs:521` when building the
+  `anywasm-cpu-state` lib tests; `cargo test -p anywasm-cpu-state --no-run` succeeds locally, so
+  the cause is not yet established (not investigated further; the `WASM` workflow failure reasons
+  were not read). Treat "tests pass" claims in this file as local results until CI is green.
 
 ## Known limits (not hidden)
 - x87 is modelled with f64, not 80-bit; transcendentals compared to 1e-9 relative tolerance.

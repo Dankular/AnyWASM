@@ -16,11 +16,15 @@ jobs:
       run: npm ci
     - name: Build wasm module and CLI
       run: |
-        cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
+        cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release --features jit-test-api
         node scripts/asyncify-wasm.mjs
         cargo build -p anywasm-cli
     - name: Run executables through the WASM build under Node
       run: node test/wasm_smoke.mjs
+    - name: Verify Asyncify-backed asset range reads
+      run: node test/wasm_asset_stream_smoke.mjs
+    - name: Verify browser asset range cache and local server
+      run: node --test test/assets.test.mjs
     - name: Record interpreter benchmark
       shell: bash
       run: |
