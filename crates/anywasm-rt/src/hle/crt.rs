@@ -34,6 +34,8 @@ const MSVC_STD_OSTREAM_VTABLE: &str = "msvcp:std::ostream:vtable";
 const MSVC_STD_STREAMBUF_VTABLE: &str = "msvcp:std::streambuf:vtable";
 const MSVC_STD_OSTREAM_VBTABLE: &str = "msvcp:std::ostream:vbtable";
 const MSVC_STD_LOCALE: &str = "msvcp:std::locale";
+const ONEXIT_INITIAL_CAPACITY: u64 = 32;
+const ONEXIT_MAX_ENTRIES: u64 = 1 << 20;
 
 /// Data imports (variables): returns the guest address of the cell and initialises it.
 pub fn data_import(p: &mut Process, name: &str, size: u64) -> Result<u64, Stop> {
@@ -1737,20 +1739,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(if p.arg(0) != 0 { 0 } else { u64::MAX })
         },
         "_initialize_onexit_table" => |p| {
-            let t = p.arg(0);
-            if t != 0 {
-                p.wr64(t, 0)?;
-                p.wr64(t + 8, 0)?;
-                p.wr64(t + 16, 0)?;
-            }
-            Ok(0)
+            initialize_onexit_table(p)
         },
-        "_register_onexit_function" => |p| {
-            let f = p.arg(1);
-            p.atexit.push(f);
-            Ok(0)
-        },
-        "_execute_onexit_table" => |_| Ok(0),
+        "_register_onexit_function" => register_onexit_function,
+        "_execute_onexit_table" => execute_onexit_table,
         "exit" | "_exit" | "quick_exit" | "_Exit" => |p| {
             let c = p.arg(0) as u32;
             p.finish_exit(c).map(|_| 0)
@@ -2461,6 +2453,221 @@ fn ctype_table(p: &mut Process) -> u64 {
         p.extra.ctype_table = a + 2;
     }
     p.extra.ctype_table
+}
+
+fn onexit_pointer_width(p: &Process) -> u64 {
+    if p.cpu.mode == CpuMode::X86_32 {
+        4
+    } else {
+        8
+    }
+}
+
+fn onexit_sentinel(p: &Process) -> u64 {
+    if p.cpu.mode == CpuMode::X86_32 {
+        u32::MAX as u64
+    } else {
+        u64::MAX
+    }
+}
+
+fn read_onexit_pointer(p: &Process, address: u64) -> Result<u64, Stop> {
+    if p.cpu.mode == CpuMode::X86_32 {
+        Ok(p.rd32(address)? as u64)
+    } else {
+        p.rd64(address)
+    }
+}
+
+fn write_onexit_pointer(p: &mut Process, address: u64, value: u64) -> Result<(), Stop> {
+    if p.cpu.mode == CpuMode::X86_32 {
+        p.wr32(address, value as u32)
+    } else {
+        p.wr64(address, value)
+    }
+}
+
+fn onexit_table_fields(p: &Process, table: u64) -> Result<[u64; 3], Stop> {
+    let width = onexit_pointer_width(p);
+    let second = table
+        .checked_add(width)
+        .ok_or_else(|| Stop::Crash("onexit table address overflow".into()))?;
+    let third = second
+        .checked_add(width)
+        .ok_or_else(|| Stop::Crash("onexit table address overflow".into()))?;
+    Ok([
+        read_onexit_pointer(p, table)?,
+        read_onexit_pointer(p, second)?,
+        read_onexit_pointer(p, third)?,
+    ])
+}
+
+fn write_onexit_table_fields(
+    p: &mut Process,
+    table: u64,
+    fields: [u64; 3],
+) -> Result<(), Stop> {
+    let width = onexit_pointer_width(p);
+    for (index, value) in fields.into_iter().enumerate() {
+        let address = table
+            .checked_add(index as u64 * width)
+            .ok_or_else(|| Stop::Crash("onexit table address overflow".into()))?;
+        write_onexit_pointer(p, address, value)?;
+    }
+    Ok(())
+}
+
+fn initialize_onexit_table(p: &mut Process) -> Result<u64, Stop> {
+    let table = p.arg(0);
+    if table == 0 {
+        return Ok(u64::MAX);
+    }
+    write_onexit_table_fields(p, table, [0; 3])?;
+    Ok(0)
+}
+
+fn register_onexit_function(p: &mut Process) -> Result<u64, Stop> {
+    let table = p.arg(0);
+    if table == 0 {
+        return Ok(u64::MAX);
+    }
+    let function = p.arg(1);
+    let width = onexit_pointer_width(p);
+    let [mut first, mut last, mut end] = onexit_table_fields(p, table)?;
+    let sentinel = onexit_sentinel(p);
+    if [first, last, end] == [sentinel; 3] {
+        return Ok(u64::MAX);
+    }
+    if [first, last, end] == [0; 3] {
+        let bytes = ONEXIT_INITIAL_CAPACITY * width;
+        first = kernel32::alloc_block(p, bytes, false);
+        if first == 0 {
+            return Ok(u64::MAX);
+        }
+        let Some(new_end) = first.checked_add(bytes) else {
+            kernel32::free_block(p, first);
+            return Ok(u64::MAX);
+        };
+        last = first;
+        end = new_end;
+    } else {
+        let Some(capacity_bytes) = end.checked_sub(first) else {
+            return Ok(u64::MAX);
+        };
+        let Some(used_bytes) = last.checked_sub(first) else {
+            return Ok(u64::MAX);
+        };
+        let Some(heap_bytes) = p.heap.size_of(first) else {
+            return Ok(u64::MAX);
+        };
+        if first == 0
+            || end < last
+            || capacity_bytes == 0
+            || capacity_bytes % width != 0
+            || used_bytes % width != 0
+            || capacity_bytes > heap_bytes
+            || capacity_bytes / width > ONEXIT_MAX_ENTRIES
+        {
+            return Ok(u64::MAX);
+        }
+    }
+
+    if last == end {
+        let capacity = (end - first) / width;
+        let Some(new_capacity) = capacity.checked_mul(2) else {
+            return Ok(u64::MAX);
+        };
+        if new_capacity == 0 || new_capacity > ONEXIT_MAX_ENTRIES {
+            return Ok(u64::MAX);
+        }
+        let used_bytes = last - first;
+        let new_bytes = new_capacity * width;
+        let new_first = kernel32::realloc_block(p, first, new_bytes, 0)?;
+        if new_first == 0 {
+            return Ok(u64::MAX);
+        }
+        let Some(new_end) = new_first.checked_add(new_bytes) else {
+            kernel32::free_block(p, new_first);
+            write_onexit_table_fields(p, table, [0; 3])?;
+            return Ok(u64::MAX);
+        };
+        first = new_first;
+        let Some(new_last) = first.checked_add(used_bytes) else {
+            kernel32::free_block(p, first);
+            write_onexit_table_fields(p, table, [0; 3])?;
+            return Ok(u64::MAX);
+        };
+        last = new_last;
+        end = new_end;
+    }
+
+    let Some(new_last) = last.checked_add(width) else {
+        return Ok(u64::MAX);
+    };
+    write_onexit_pointer(p, last, function)?;
+    last = new_last;
+    write_onexit_table_fields(p, table, [first, last, end])?;
+    Ok(0)
+}
+
+fn execute_onexit_table(p: &mut Process) -> Result<u64, Stop> {
+    let table = p.arg(0);
+    if table == 0 {
+        return Ok(u64::MAX);
+    }
+    let [first, last, end] = onexit_table_fields(p, table)?;
+    let sentinel = onexit_sentinel(p);
+    if [first, last, end] == [sentinel; 3] {
+        return Ok(u64::MAX);
+    }
+    let width = onexit_pointer_width(p);
+    let callbacks = if [first, last, end] == [0; 3] {
+        Vec::new()
+    } else {
+        let Some(capacity_bytes) = end.checked_sub(first) else {
+            return Ok(u64::MAX);
+        };
+        let Some(used_bytes) = last.checked_sub(first) else {
+            return Ok(u64::MAX);
+        };
+        let Some(heap_bytes) = p.heap.size_of(first) else {
+            return Ok(u64::MAX);
+        };
+        if first == 0
+            || end < last
+            || capacity_bytes == 0
+            || capacity_bytes % width != 0
+            || used_bytes % width != 0
+            || capacity_bytes > heap_bytes
+            || used_bytes > capacity_bytes
+            || capacity_bytes / width > ONEXIT_MAX_ENTRIES
+        {
+            return Ok(u64::MAX);
+        }
+        let count = used_bytes / width;
+        let mut callbacks = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            callbacks.push(read_onexit_pointer(p, first + index * width)?);
+        }
+        callbacks
+    };
+
+    // Mark the table invalid before callbacks run. Reuse requires initialization again.
+    write_onexit_table_fields(p, table, [sentinel; 3])?;
+    let mut callback_result = Ok(());
+    for callback in callbacks.into_iter().rev() {
+        if callback != 0 {
+            if let Err(stop) = p.call_guest(callback, &[]) {
+                callback_result = Err(stop);
+                break;
+            }
+        }
+    }
+    if first != 0 {
+        kernel32::free_block(p, first);
+    }
+    callback_result?;
+    Ok(0)
 }
 
 fn initterm(p: &mut Process, check: bool) -> R {
