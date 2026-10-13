@@ -136,6 +136,8 @@ pub enum Stop {
     ThreadExit(u32),
     /// Internal marker consumed by the active guest exception dispatcher.
     GuestUnwind(GuestUnwind),
+    /// Internal control transfer used when a nested x64 exception escapes an HLE handler call.
+    GuestExceptionTransfer,
     /// Internal x86 C++ catch transfer consumed by the PE32 exception dispatcher.
     GuestCatch32(GuestCatch32),
     /// Internal x86 C SEH transfer consumed by the PE32 exception dispatcher.
@@ -374,6 +376,8 @@ pub struct Process {
     pub native_hooks: Vec<(u64, String)>,
     /// Active guest C++ exception unwind depth, kept per guest thread.
     pub guest_exception_depths: HashMap<u32, u32>,
+    /// x64 language-handler dispatcher contexts suspended while guest callbacks run.
+    pub(crate) active_exception_dispatchers: Vec<(u32, u64, u64)>,
     /// PE32 EH3 registration frames whose unwind funclets are currently executing.
     pub(crate) active_cpp_unwind_frames: Vec<(u32, u64)>,
     pub current_thread_is_guest: bool,
@@ -1053,6 +1057,7 @@ impl Process {
             current_teb_base: TEB_ADDR,
             native_hooks: Vec::new(),
             guest_exception_depths: HashMap::new(),
+            active_exception_dispatchers: Vec::new(),
             active_cpp_unwind_frames: Vec::new(),
             current_thread_is_guest: false,
             current_thread_state: ThreadState::Running,
@@ -3068,6 +3073,9 @@ impl Process {
             self.nested += 1;
             let r = self.run_until_magic();
             self.nested -= 1;
+            if matches!(&r, Err(Stop::GuestExceptionTransfer)) {
+                return Err(Stop::GuestExceptionTransfer);
+            }
             let ret = self.cpu.gpr[RAX] as u32 as u64;
             let keep_exit = self.exit_code;
             self.cpu = saved;
@@ -3098,6 +3106,9 @@ impl Process {
         self.nested += 1;
         let r = self.run_until_magic();
         self.nested -= 1;
+        if matches!(&r, Err(Stop::GuestExceptionTransfer)) {
+            return Err(Stop::GuestExceptionTransfer);
+        }
         let ret = self.cpu.gpr[RAX];
         // Preserve nothing from the callee except the return value.
         let keep_exit = self.exit_code;
@@ -4353,6 +4364,11 @@ impl Process {
                     return Stop::Crash(
                         "RtlUnwindEx transfer escaped its active guest exception dispatcher".into(),
                     )
+                }
+                Err(Stop::GuestExceptionTransfer) => {
+                    // A nested exception restored a guest handler context outside one or more
+                    // active HLE callback frames. Resume from that context without returning
+                    // through the abandoned callbacks.
                 }
                 Err(Stop::GuestCatch32(_)) => {
                     return Stop::Crash(

@@ -1,6 +1,6 @@
 # MSVC C++ exception fixtures
 
-`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes seven fixtures under
+`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes eight fixtures under
 the ignored `target/msvc-cpp-eh/` directory. The EH4 compile prints `cl /Bv`, including the
 compiler and linker versions, so a run can be tied to the toolchain that emitted the metadata.
 
@@ -13,6 +13,8 @@ compiler and linker versions, so a run can be tied to the toolchain that emitted
   invokes `std::terminate` even when an outer `catch (...)` could otherwise catch it.
 - `terminate-unhandled-x86.exe` verifies the same termination when the nested exception has no
   matching handler.
+- `seh-x64.exe` exercises PE32+ C `__try`/`__except`/`__finally` through the x64 scope-table
+  personality with the normal MSVC CRT startup.
 - `seh-x86.exe` exercises PE32 C `__try`/`__except`/`__finally` with the normal MSVC CRT startup.
 - The binaries dynamically import the MSVC/UCRT runtime; the script does not copy runtime DLLs.
 
@@ -41,8 +43,8 @@ The C++ fixtures return 0 only when all paths pass. Their return codes identify 
 | 93 | Catch-all handler selected instead of the typed handler |
 | 94 | Thrown-object destructor did not run exactly once after the catch |
 
-`seh-x86.exe` returns 0 only when filter selection, exception continuation, nested exception handling,
-and both normal and unwind-time termination handlers pass:
+`seh-x64.exe` and `seh-x86.exe` return 0 only when filter selection, exception continuation, nested
+exception handling, and both normal and unwind-time termination handlers pass:
 
 | Exit code | Case |
 |---:|---|
@@ -67,13 +69,15 @@ Build and inspect the imported exception entry points from the repository root:
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-dynamic.exe
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-x86-dynamic.exe
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-x86-direct.exe
+.\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\seh-x64.exe
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\seh-x86.exe
 .\target\debug\anywasm.exe run .\target\msvc-cpp-eh\eh3-x86-dynamic.exe --max-steps 2000000
 .\target\debug\anywasm.exe run .\target\msvc-cpp-eh\eh3-x86-direct.exe --max-steps 2000000
+.\target\debug\anywasm.exe run .\target\msvc-cpp-eh\seh-x64.exe --max-steps 2000000
 .\target\debug\anywasm.exe run .\target\msvc-cpp-eh\seh-x86.exe --max-steps 2000000
 ```
 
-To run the five fixtures through the browser runtime without MSVC/UCRT DLLs, build the browser WASM
+To run the eight fixtures through the browser runtime without MSVC/UCRT DLLs, build the browser WASM
 from the current source and run the Chromium smoke test:
 
 ```powershell
@@ -151,7 +155,15 @@ registration chain, skips the already-unwound frame, and checks the target conte
 does not exercise a compiler-generated collided handler. Full nested-frame bookkeeping, collided
 unwind integration with the compiled fixture, and every compiler-specific EH4 layout remain open.
 
-On 2026-10-13, the rebuilt release WASM and Asyncify module ran all five fixture packages in
+The x64 C SEH fixture was also built with MSVC 19.44.35214.0 and returned 0 under the current-source
+HLE CLI with a 2,000,000-step cap. It verifies that a nested exception escaping an `__except` filter
+continues search from the suspended x64 handler frame, reaches the outer handler, and transfers out
+of the abandoned HLE callback stack. It also raises a new exception from an active `__finally` during
+phase-two unwind and checks that the in-flight exception is replaced without invoking that termination
+handler twice. The earlier seven-package Chromium result predates `seh-x64.exe`; the browser fixture
+script now includes it, but that updated package set has not yet been replayed.
+
+On 2026-10-13, the rebuilt release WASM and Asyncify module ran all seven existing fixture packages in
 `test/browser/exception-fixtures.mjs` under Chromium. Every package exited 0 and the page reported no
 JavaScript errors. The `seh-x86` package includes the filter-raised and `__finally` exception cases
 above.

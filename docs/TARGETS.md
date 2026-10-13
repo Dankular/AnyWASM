@@ -698,21 +698,25 @@ language handler, and second-pass unwinding through `RtlUnwindEx` resumes at the
 synthetic regression checks handler calls, active unwind-stack use, flags, target RIP/RSP, and return
 value. The bounded target replay confirms the catch path.
 
-The runtime also has synthetic x64 SEH coverage for vectored-handler registration, ordering,
-removal, and first-chance dispatch; a generic `RaiseException` code with arbitrary parameters; a
-catch-all scope-table landing pad; filter callbacks receiving `EXCEPTION_POINTERS` and the
-establisher frame; filter-requested continuation; and `__finally` calls during unwind. These fixtures
-build the `.pdata`/scope-table records directly; they do not establish compatibility with a separately
-compiled real-world `__try` binary. Synthetic tests also cover vectored-continue ordering and ignored
-callback returns, plus top-level filter replacement and resumption with a modified context. PE32
-exception support is partial: synthetic tests cover `RaiseException` through an x86 registration
-handler and CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fixture verifies
-filter selection, continuation, and normal and unwind-time `__finally` execution. Native and
-HLE-only runs now also verify a nested exception escaping a filter to an outer handler and an
-exception raised during `__finally`. A synthetic handler test covers disposition 2 setting
-`EXCEPTION_NESTED_CALL` before search continues. PE32 search now tracks the x86 dispatcher registration
-pointer and clears the nested flag when it reaches that registration; the clear transition has no
-runtime fixture yet. A second-pass x64 test covers disposition 3 by
+The runtime has synthetic x64 SEH coverage for vectored-handler registration, ordering, removal,
+first-chance dispatch, a generic `RaiseException` code with arbitrary parameters, a catch-all
+scope-table landing pad, filter callbacks receiving `EXCEPTION_POINTERS` and the establisher frame,
+filter-requested continuation, and `__finally` calls during unwind. The compiled `seh-x64.exe`
+fixture now verifies compiler-generated C `__try`/`__except`/`__finally`, including a nested exception
+that escapes a filter, re-enters the active handler frame, and reaches an outer catch. It also checks
+that an exception raised from a running termination handler replaces the in-flight exception without
+running that `__finally` twice. The current-source HLE CLI run returns 0. The browser fixture list
+includes `seh-x64.exe`, but the prior seven-package Chromium run predates that addition and does not
+verify this new binary. Synthetic tests also cover vectored-continue ordering and ignored callback
+returns, plus top-level filter replacement and resumption with a modified context. PE32 exception
+support is partial: synthetic tests cover `RaiseException` through an x86 registration handler and
+CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fixture verifies filter selection,
+continuation, and normal and unwind-time `__finally` execution. Native and HLE-only runs also verify a
+nested exception escaping a filter to an outer handler and an exception raised during `__finally`. A
+synthetic handler test covers disposition 2 setting `EXCEPTION_NESTED_CALL` before search continues.
+PE32 search now tracks the x86 dispatcher registration pointer and clears the nested flag when it
+reaches that registration; the clear transition has no runtime fixture yet. A second-pass x64 test
+covers disposition 3 by
 redirecting to another searched frame, checking the resumed handler's unwind, target, and collided
 flags, and preserving restored register state. X64 first-pass search also has a synthetic retry test:
 the handler changes the dispatcher control PC within the loaded function; the resumed call sees the

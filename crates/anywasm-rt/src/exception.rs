@@ -79,6 +79,7 @@ struct ExceptionFrame {
     function_entry: u64,
     establisher: u64,
     context: Context64,
+    resume_scope_index: Option<u32>,
 }
 
 /// Search guest frames for language handlers for a raised exception.
@@ -219,6 +220,82 @@ fn dispatch_context_exception(
     result
 }
 
+fn finish_nested_exception_transfer(
+    p: &mut Process,
+    result: Result<u64, Stop>,
+    crossed_handler_callback_boundary: bool,
+) -> Result<u64, Stop> {
+    if crossed_handler_callback_boundary {
+        return match result {
+            Ok(_) => {
+                // The restored guest context is already beyond the HLE callback frames. Do not
+                // let dispatch_thunk consume the normal RaiseException return path for them.
+                p.skip_ret = false;
+                Err(Stop::GuestExceptionTransfer)
+            }
+            Err(stop) => Err(stop),
+        };
+    }
+    result
+}
+
+fn call_guest_with_exception_dispatcher(
+    p: &mut Process,
+    dispatcher_context: u64,
+    address: u64,
+    args: &[u64],
+) -> Result<u64, Stop> {
+    let thread_id = p.current_thread_id;
+    let exception_record = args.first().copied().unwrap_or(0);
+    p.active_exception_dispatchers
+        .push((thread_id, dispatcher_context, exception_record));
+    let result = p.call_guest(address, args);
+    if p.active_exception_dispatchers.pop()
+        != Some((thread_id, dispatcher_context, exception_record))
+    {
+        return Err(Stop::Crash(
+            "active x64 exception dispatcher stack was corrupted".into(),
+        ));
+    }
+    result
+}
+
+fn active_exception_dispatcher_frame(
+    p: &Process,
+    thread_id: u32,
+) -> Result<Option<ExceptionFrame>, Stop> {
+    let Some((_, dispatcher_context, exception_record)) = p
+        .active_exception_dispatchers
+        .iter()
+        .rev()
+        .find(|(active_thread, _, _)| *active_thread == thread_id)
+    else {
+        return Ok(None);
+    };
+    let context_record = p.rd64(*dispatcher_context + DISPATCHER_CONTEXT_RECORD)?;
+    if context_record == 0 {
+        return Err(Stop::Crash(
+            "active x64 exception dispatcher has no frame context".into(),
+        ));
+    }
+    let establisher = p.rd64(*dispatcher_context + DISPATCHER_ESTABLISHER_FRAME)?;
+    let resumed_scope_index = if *exception_record != 0
+        && p.rd32(*exception_record + 4)? & EXCEPTION_UNWINDING != 0
+    {
+        Some(p.rd32(*dispatcher_context + DISPATCHER_SCOPE_INDEX)?)
+    } else {
+        None
+    };
+    Ok(Some(ExceptionFrame {
+        control_pc: p.rd64(*dispatcher_context + DISPATCHER_CONTROL_PC)?,
+        image_base: p.rd64(*dispatcher_context + DISPATCHER_IMAGE_BASE)?,
+        function_entry: p.rd64(*dispatcher_context + DISPATCHER_FUNCTION_ENTRY)?,
+        establisher,
+        context: read_context(p, context_record)?,
+        resume_scope_index: resumed_scope_index,
+    }))
+}
+
 fn dispatch_context_exception_inner(
     p: &mut Process,
     code: u32,
@@ -253,14 +330,45 @@ fn dispatch_context_exception_inner(
     let mut search_flags = flags;
     let mut search_history_table = 0;
     let mut nested_frame = 0;
+    let mut crossed_handler_callback_boundary = false;
+    let mut resumed_handler_scope = None;
 
     if dispatch_vectored_exception_handlers(p, exception_record, context_record)? {
         return resume_exception(p, exception_record, context_record, skip_ret_on_resume);
     }
 
     for frame_number in 0..MAX_EXCEPTION_FRAMES {
+        if control_pc == crate::process::RET_MAGIC {
+            if let Some(frame) = active_exception_dispatcher_frame(p, p.current_thread_id)? {
+                if frame.context.gpr[RSP] <= last_rsp {
+                    return Err(Stop::Crash(format!(
+                        "nested exception dispatcher frame did not advance the guest stack ({last_rsp:#x} -> {:#x})",
+                        frame.context.gpr[RSP]
+                    )));
+                }
+                if p.trace_imports {
+                    p.stderr.extend_from_slice(
+                        format!(
+                            "[seh] resume nested search at active handler frame pc={:#x} establisher={:#x}\n",
+                            frame.control_pc, frame.establisher
+                        )
+                        .as_bytes(),
+                    );
+                }
+                context = frame.context.clone();
+                control_pc = frame.control_pc;
+                last_rsp = context.gpr[RSP];
+                search_flags |= EXCEPTION_NESTED_CALL;
+                nested_frame = frame.establisher;
+                resumed_handler_scope = frame
+                    .resume_scope_index
+                    .map(|scope| (frame.establisher, scope));
+                crossed_handler_callback_boundary = true;
+                continue;
+            }
+        }
         if control_pc == 0 || last_rsp < stack_limit || last_rsp >= stack_base {
-            return dispatch_unhandled_exception(
+            let result = dispatch_unhandled_exception(
                 p,
                 exception_record,
                 context_record,
@@ -271,9 +379,14 @@ fn dispatch_context_exception_inner(
                     "search left guest stack after {frame_number} frames (pc={control_pc:#x}, rsp={last_rsp:#x})"
                 ),
             );
+            return finish_nested_exception_transfer(
+                p,
+                result,
+                crossed_handler_callback_boundary,
+            );
         }
         let Some((module_base, function_entry)) = lookup_frame(p, control_pc)? else {
-            return dispatch_unhandled_exception(
+            let result = dispatch_unhandled_exception(
                 p,
                 exception_record,
                 context_record,
@@ -281,6 +394,11 @@ fn dispatch_context_exception_inner(
                 search_flags,
                 skip_ret_on_resume,
                 format!("search reached non-module PC {control_pc:#x} after {frame_number} frames"),
+            );
+            return finish_nested_exception_transfer(
+                p,
+                result,
+                crossed_handler_callback_boundary,
             );
         };
         let frame_context = context.clone();
@@ -310,13 +428,17 @@ fn dispatch_context_exception_inner(
             function_entry,
             establisher,
             context: frame_context.clone(),
+            resume_scope_index: resumed_handler_scope
+                .take()
+                .filter(|(active_establisher, _)| *active_establisher == establisher)
+                .map(|(_, scope_index)| scope_index),
         };
         frames.push(frame.clone());
 
         if result.handler != 0 {
             // Windows passes the original exception context to every first-pass handler.
             // The per-frame context is carried separately by the dispatcher walk.
-            let mut scope_index = 0;
+            let mut scope_index = frame.resume_scope_index.unwrap_or(0);
             let mut collision_count = 0;
             let mut collision_redirected = false;
             let disposition = loop {
@@ -346,7 +468,9 @@ fn dispatch_context_exception_inner(
                         .as_bytes(),
                     );
                 }
-                let disposition = match p.call_guest(
+                let disposition = match call_guest_with_exception_dispatcher(
+                    p,
+                    dispatcher_context,
                     result.handler,
                     &[
                         exception_record,
@@ -363,7 +487,11 @@ fn dispatch_context_exception_inner(
                         p.wr32(exception_record + 4, search_flags)?;
                         dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
                         restore_exception_context(p, context_record, skip_ret_on_resume)?;
-                        return Ok(0);
+                        return finish_nested_exception_transfer(
+                            p,
+                            Ok(0),
+                            crossed_handler_callback_boundary,
+                        );
                     }
                     Err(stop) => return Err(stop),
                 };
@@ -421,11 +549,16 @@ fn dispatch_context_exception_inner(
                             "noncontinuable exception code={code:#x} cannot continue execution"
                         )));
                     }
-                    return resume_exception(
+                    let result = resume_exception(
                         p,
                         exception_record,
                         context_record,
                         skip_ret_on_resume,
+                    );
+                    return finish_nested_exception_transfer(
+                        p,
+                        result,
+                        crossed_handler_callback_boundary,
                     );
                 }
                 EXCEPTION_NESTED_EXCEPTION => {
@@ -477,7 +610,7 @@ fn dispatch_context_exception_inner(
             )));
         }
         if next_pc == 0 {
-            return dispatch_unhandled_exception(
+            let result = dispatch_unhandled_exception(
                 p,
                 exception_record,
                 context_record,
@@ -485,6 +618,11 @@ fn dispatch_context_exception_inner(
                 search_flags,
                 skip_ret_on_resume,
                 format!("search exhausted the guest stack after {frame_number} frames"),
+            );
+            return finish_nested_exception_transfer(
+                p,
+                result,
+                crossed_handler_callback_boundary,
             );
         }
         context = caller_context;
@@ -1057,16 +1195,20 @@ fn complete_guest_unwind(
             continue;
         }
         let scope_index = redirected_scope_index.take().unwrap_or_else(|| {
-            if index == target_index {
-                target_scope_index
-            } else {
-                0
-            }
+            frame.resume_scope_index.unwrap_or_else(|| {
+                if index == target_index {
+                    target_scope_index
+                } else {
+                    0
+                }
+            })
         });
         if index < target_index {
             let next_frame = &frames[index + 1];
-            if caller_context.rip != next_frame.context.rip
+            if caller_context.rip != crate::process::RET_MAGIC
+                && (caller_context.rip != next_frame.context.rip
                 || caller_context.gpr[RSP] != next_frame.context.gpr[RSP]
+                )
             {
                 return Err(Stop::Crash(format!(
                     "RtlUnwindEx frame walk diverged after {:#x}: next=({:#x},{:#x}), searched=({:#x},{:#x})",
@@ -1126,7 +1268,9 @@ fn complete_guest_unwind(
                 0
             };
         p.wr32(unwind.exception_record + 4, phase_two_flags)?;
-        let disposition = match p.call_guest(
+        let disposition = match call_guest_with_exception_dispatcher(
+            p,
+            dispatcher_context,
             result.handler,
             &[
                 unwind.exception_record,
@@ -1546,6 +1690,7 @@ fn resolve_collided_search_frame(
         function_entry,
         establisher,
         context: restored_context,
+        resume_scope_index: None,
     };
     Ok((redirect_frame, result, scope_index))
 }
@@ -3598,6 +3743,7 @@ mod tests {
             function_entry: IMAGE_BASE + 0x500,
             establisher: TARGET_FRAME,
             context: target_context,
+            resume_scope_index: None,
         }];
         let unwind = GuestUnwind {
             target_frame: TARGET_FRAME,
@@ -3706,6 +3852,7 @@ mod tests {
                 function_entry: IMAGE_BASE + 0x500,
                 establisher: ORIGINAL_RSP,
                 context: first_context,
+                resume_scope_index: None,
             },
             ExceptionFrame {
                 control_pc: target_pc,
@@ -3713,6 +3860,7 @@ mod tests {
                 function_entry: IMAGE_BASE + 0x50c,
                 establisher: ORIGINAL_RSP + 8,
                 context: target_context,
+                resume_scope_index: None,
             },
         ];
         let unwind = GuestUnwind {
@@ -3882,6 +4030,7 @@ mod tests {
                 function_entry: IMAGE_BASE + 0x500,
                 establisher: ORIGINAL_RSP,
                 context: first_context,
+                resume_scope_index: None,
             },
             ExceptionFrame {
                 control_pc: target_pc,
@@ -3889,6 +4038,7 @@ mod tests {
                 function_entry: IMAGE_BASE + 0x50c,
                 establisher: ORIGINAL_RSP + 8,
                 context: target_context,
+                resume_scope_index: None,
             },
         ];
         let unwind = GuestUnwind {
@@ -4091,6 +4241,7 @@ mod tests {
             function_entry: IMAGE_BASE + 0x500,
             establisher: FRAME_RSP,
             context: frame_context,
+            resume_scope_index: None,
         }];
         let unwind = GuestUnwind {
             target_frame: FRAME_RSP,
@@ -4233,6 +4384,7 @@ mod tests {
                 function_entry: IMAGE_BASE + 0x500,
                 establisher: ORIGINAL_RSP,
                 context: first_context,
+                resume_scope_index: None,
             },
             ExceptionFrame {
                 control_pc: target_pc,
@@ -4240,6 +4392,7 @@ mod tests {
                 function_entry: target_function_entry,
                 establisher: target_frame,
                 context: target_context,
+                resume_scope_index: None,
             },
         ];
         let unwind = GuestUnwind {

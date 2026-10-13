@@ -617,6 +617,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             eprintln!("\nanywasm: internal guest unwind escaped its exception dispatcher");
             Ok(ExitCode::from(1))
         }
+        Stop::GuestExceptionTransfer => {
+            eprintln!("\nanywasm: internal nested exception transfer escaped its dispatcher");
+            Ok(ExitCode::from(1))
+        }
         Stop::GuestCatch32(_) => {
             eprintln!("\nanywasm: internal PE32 C++ catch transfer escaped its exception dispatcher");
             Ok(ExitCode::from(1))

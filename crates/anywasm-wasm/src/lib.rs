@@ -175,6 +175,10 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             s.message = b"internal guest unwind escaped its exception dispatcher".to_vec();
             3
         }
+        Stop::GuestExceptionTransfer => {
+            s.message = b"internal nested exception transfer escaped its dispatcher".to_vec();
+            3
+        }
         Stop::GuestCatch32(_) => {
             s.message = b"internal PE32 C++ catch transfer escaped its exception dispatcher".to_vec();
             3

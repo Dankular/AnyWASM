@@ -14,6 +14,7 @@ const fixtureCases = [
   { name: 'eh4-dynamic', status: '1', exitCode: '0' },
   { name: 'eh3-x86-dynamic', status: '1', exitCode: '0' },
   { name: 'eh3-x86-direct', status: '1', exitCode: '0' },
+  { name: 'seh-x64', status: '1', exitCode: '0' },
   { name: 'seh-x86', status: '1', exitCode: '0' },
   { name: 'terminate-x86', status: '3', exitCode: '0', message: 'std::terminate was called' },
   { name: 'terminate-unhandled-x86', status: '3', exitCode: '0', message: 'std::terminate was called' },

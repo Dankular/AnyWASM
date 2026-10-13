@@ -45,6 +45,11 @@ foreach ($variant in $variants) {
         $variant.ExtraFlags + ' /Fe:"' + $output + '" "' + $source + '"'
     $commands += 'if errorlevel 1 exit /b %errorlevel%'
 }
+$x64SehOutput = Join-Path $outputDirectory 'seh-x64.exe'
+$sehSource = Join-Path $PSScriptRoot 'seh_fixture.c'
+$x64SehObject = Join-Path $outputDirectory 'seh_fixture_x64.obj'
+$commands += 'cl.exe /nologo /MD /Od /W4 /Fo:"' + $x64SehObject + '" /Fe:"' + $x64SehOutput + '" "' + $sehSource + '"'
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
 
 # PE32 uses the legacy absolute-pointer EH3 format.
 $setupX86 = 'call "{0}" -no_logo -arch=x86 -host_arch=x64' -f $devCmd
@@ -72,7 +77,7 @@ $commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- /DTE
     '/link /ENTRY:main /DEFAULTLIB:vcruntime.lib /DEFAULTLIB:ucrt.lib'
 $commands += 'if errorlevel 1 exit /b %errorlevel%'
 $x86SehOutput = Join-Path $outputDirectory 'seh-x86.exe'
-$x86SehSource = Join-Path $PSScriptRoot 'seh_fixture.c'
+$x86SehSource = $sehSource
 $x86SehObject = Join-Path $outputDirectory 'seh_fixture.obj'
 $commands += 'cl.exe /nologo /MD /Od /W4 /Fo:"' + $x86SehObject + '" /Fe:"' + $x86SehOutput + '" "' + $x86SehSource + '"'
 $commands += 'if errorlevel 1 exit /b %errorlevel%'
