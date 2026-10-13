@@ -211,6 +211,21 @@ check('TextureCubeArray GetDimensions lowers size, cube count, and mip count',
     && /textureNumLayers\(t0_\)/.test(textureCubeArrayDimensionsPs?.wgsl || '')
     && /textureNumLevels\(t0_\)/.test(textureCubeArrayDimensionsPs?.wgsl || ''),
   textureCubeArrayDimensionsError || textureCubeArrayDimensionsPs?.wgsl || 'translation returned no WGSL');
+let textureCubeArrayComparePs, textureCubeArrayCompareError = '';
+try {
+  textureCubeArrayComparePs = t.translate(t.compileHlsl(`
+    TextureCubeArray<float> image : register(t0);
+    SamplerComparisonState smp : register(s0);
+    float4 main(float4 coordinate : TEXCOORD0, float reference : TEXCOORD1) : SV_Target {
+      float comparison = image.SampleCmpLevelZero(smp, coordinate, reference);
+      return float4(comparison, comparison, comparison, 1.0);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { textureCubeArrayCompareError = String(error); }
+check('TextureCubeArray SampleCmpLevelZero lowers to depth cube-array comparison sampling',
+  /texture_depth_cube_array/.test(textureCubeArrayComparePs?.wgsl || '')
+    && /textureSampleCompareLevel\(/.test(textureCubeArrayComparePs?.wgsl || ''),
+  textureCubeArrayCompareError || textureCubeArrayComparePs?.wgsl || 'translation returned no WGSL');
 let threw = false; try { t.compileHlsl('float4 x( {', 'x', 'ps_5_0'); } catch (e) { threw = /HLSL/.test(e.message); }
 check('syntax errors reported', threw);
 let sdfWgsl = '', sdfError = '';

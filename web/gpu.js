@@ -1565,7 +1565,8 @@ export class GpuExecutor {
     if (v.kind === 0 || v.kind === 1) { // render attachments: one mip, one layer, '2d'
       d.dimension = '2d'; d.baseMipLevel = v.mip; d.mipLevelCount = 1;
       const oneDArray = tex.dimension === '1d' && (v.kind === 1 ? v.dim === 2 : v.dim === 3);
-      d.baseArrayLayer = oneDArray ? v.slice : v.dim === 5 || v.dim === 4 && v.slices > 1 ? v.slice : 0;
+      const arrayAttachment = v.dim === 5 || v.dim === 4 && (v.slice !== 0 || v.slices > 1);
+      d.baseArrayLayer = oneDArray || arrayAttachment ? v.slice : 0;
       d.arrayLayerCount = 1;
     } else {
       d.baseMipLevel = v.mip; d.mipLevelCount = Math.min(v.mips || tex.mips, tex.mips - v.mip);
