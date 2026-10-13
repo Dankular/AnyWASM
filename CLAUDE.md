@@ -315,10 +315,12 @@ register-stack subset):
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
       view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
-      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 and R8_UNORM cases remain open.
+      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8, R8_UNORM, and RG8_UNORM cases remain open.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
       sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; Rust HLE tests cover the reports and
-      command fields, while Chromium verifies the resolve pixels. `Map(READ)` executes older
+      command fields, while Chromium verifies the resolve pixels. Chromium also tests near/far depth
+      with 4x D32_FLOAT, D24S8, and D16_UNORM attachments and resolves the retained green draw to RGBA8.
+      `Map(READ)` executes older
       commands already transferred to the host-visible GPU queue before its current HLE batch,
       preserving order across shared CPU slices; the default shared-worker triangle fixture verifies
       the staging values. Other format/resolve combinations and render-state combinations remain open.
@@ -370,9 +372,10 @@ register-stack subset):
       other capabilities in a 16-byte regression. GPU counters and predication remain unsupported. Browser fixtures
       cover every typed UAV texture format currently advertised by the HLE across R32, RG32, RGBA8,
       RGBA16, and RGBA32 formats, plus structured/raw/typed buffer UAV ranges and a 3D texture UAV.
-      UAV formats outside that advertised set, geometry/hull/domain shaders, general staging read-back, deferred
-      contexts/command lists, `SV_` system values beyond the basics, tiled resources, and honest
-      feature-level reporting remain open.
+      Deferred contexts and command lists have Rust coverage for creation/type/flags, recording,
+      finish/reset, execute ordering, and state restoration. UAV formats outside the advertised set,
+      geometry/hull/domain shaders, additional staging layouts, `SV_` system values beyond those tested,
+      tiled resources, and honest feature-level reporting remain open.
 - [~] **Shader toolchain**: broader DXBC coverage in vkd3d-shader → SPIR-V → Naga → WGSL; a captured
       Diligent GLFW Demo SDF shader now has a regression for its non-finite integer-register bit
       patterns and translates through a runtime bitcast. The target's draw-parameter uniform and UAV

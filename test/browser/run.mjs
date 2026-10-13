@@ -1283,6 +1283,12 @@ try {
       command(4, words(5, 16, 16, 1, 1, 44, 0x40, 0, 4, 0)); // 4x typeless D24S8 depth resource
       command(12, words(6, 1, 5, 45, 3, 0, 1, 0, 1)); // D24S8 DSV
       command(4, words(7, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample resolve target
+      command(4, words(13, 16, 16, 1, 1, 40, 0x40, 0, 4, 0)); // 4x D32_FLOAT depth resource
+      command(12, words(14, 1, 13, 40, 3, 0, 1, 0, 1)); // D32_FLOAT DSV
+      command(4, words(15, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // D32 color resolve target
+      command(4, words(16, 16, 16, 1, 1, 55, 0x40, 0, 4, 0)); // 4x D16_UNORM depth resource
+      command(12, words(17, 1, 16, 55, 3, 0, 1, 0, 1)); // D16_UNORM DSV
+      command(4, words(18, 16, 16, 1, 1, 28, 0x20, 0, 1, 0)); // D16 color resolve target
       const depthState = new Uint8Array(56), depthView = new DataView(depthState.buffer);
       depthView.setUint32(0, 8, true); depthView.setUint32(4, 1, true);
       depthView.setUint32(8, 1, true); depthView.setUint32(12, 2, true); // depth enabled, write ALL, LESS
@@ -1296,12 +1302,27 @@ try {
       command(17, words(0, 9)); command(17, words(1, 11)); command(29, words(3, 0)); // near green
       command(17, words(0, 10)); command(17, words(1, 12)); command(29, words(3, 0)); // far red must fail
       command(47, words(7, 0, 3, 0, 28));
+      command(21, words(1, 4, 14));
+      command(27, words(4, 0, 0, 0, 0x3f800000));
+      command(28, words(14, 1, 0x3f800000, 0)); // clear D32 depth
+      command(17, words(0, 9)); command(17, words(1, 11)); command(29, words(3, 0));
+      command(17, words(0, 10)); command(17, words(1, 12)); command(29, words(3, 0));
+      command(47, words(15, 0, 3, 0, 28));
+      command(21, words(1, 4, 17));
+      command(27, words(4, 0, 0, 0, 0x3f800000));
+      command(28, words(17, 1, 0x3f800000, 0)); // clear D16 depth
+      command(17, words(0, 9)); command(17, words(1, 11)); command(29, words(3, 0));
+      command(17, words(0, 10)); command(17, words(1, 12)); command(29, words(3, 0));
+      command(47, words(18, 0, 3, 0, 28));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackTexture(7);
-      const center = Array.from(pixels.data.slice((8 * pixels.width + 8) * 4, (8 * pixels.width + 8) * 4 + 4));
-      const result = { center, draws: gpu.stats.draws, errors: gpu.stats.errors };
+      const d32Pixels = await gpu.readBackTexture(15);
+      const d16Pixels = await gpu.readBackTexture(18);
+      const centerOf = (data) => Array.from(data.data.slice((8 * data.width + 8) * 4, (8 * data.width + 8) * 4 + 4));
+      const result = { d24Center: centerOf(pixels), d32Center: centerOf(d32Pixels), d16Center: centerOf(d16Pixels),
+        draws: gpu.stats.draws, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -1309,8 +1330,16 @@ try {
     }
   });
   check('D3D11 4x D24S8 depth testing keeps the nearer draw through color resolve',
-    multisampledDepthResult.draws === 2 && multisampledDepthResult.errors?.length === 0
-      && near(multisampledDepthResult.center || [], [0, 255, 0, 255], 1),
+    multisampledDepthResult.draws === 6 && multisampledDepthResult.errors?.length === 0
+      && near(multisampledDepthResult.d24Center || [], [0, 255, 0, 255], 1),
+    JSON.stringify(multisampledDepthResult));
+  check('D3D11 4x D32_FLOAT depth testing keeps the nearer draw through color resolve',
+    multisampledDepthResult.errors?.length === 0
+      && near(multisampledDepthResult.d32Center || [], [0, 255, 0, 255], 1),
+    JSON.stringify(multisampledDepthResult));
+  check('D3D11 4x D16_UNORM depth testing keeps the nearer draw through color resolve',
+    multisampledDepthResult.errors?.length === 0
+      && near(multisampledDepthResult.d16Center || [], [0, 255, 0, 255], 1),
     JSON.stringify(multisampledDepthResult));
 
   await page.goto('http://localhost:8099/index.html?run=d3d11_textured&test=1');

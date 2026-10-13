@@ -294,9 +294,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   SDF output, W movement, and Tab map regeneration; two fresh random-map runs measure a flashlight
   response along an unobstructed SDF ray. The triangle canvas screenshot checks its clear colour
   and centre pixel.
-  Remaining D3D11 gaps include other buffer-copy classes, more format/resolve and sampler pixel
-  comparisons, render-state combinations, other query types, geometry/tessellation, general staging
-  read-back, deferred contexts, and system values beyond the basics. Compute browser fixtures cover
+  Four-sample depth tests also cover D32_FLOAT, D24S8, and D16_UNORM attachments; each keeps the
+  nearer draw through an RGBA8 color resolve. Remaining D3D11 gaps include broader copy/mip/format
+  combinations, more format/resolve and sampler pixel comparisons, render-state cross-products,
+  non-event query semantics, geometry/tessellation, and additional staging layouts. Deferred contexts
+  and command lists have focused Rust tests for creation/type/flags, recording, finish/reset, execute
+  ordering, and state restoration. Compute browser fixtures cover
   typed R32/RGBA textures, structured/raw/typed buffer ranges, and a 3D texture UAV. The selected
   Diligent SDF shader dispatches and produces finite values on readback; broader format coverage and
   pixel equivalence remain unverified.
