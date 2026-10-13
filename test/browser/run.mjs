@@ -5756,13 +5756,15 @@ try {
         TextureCubeArray<float4> source : register(t0);
         TextureCubeArray<float4> halfSource : register(t1);
         TextureCubeArray<float> r8Source : register(t2);
+        TextureCubeArray<float2> rg8Source : register(t3);
         SamplerState sourceSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
           if (position.y >= 32.0) {
             uint width, height, elements, levels;
             if (position.x < 32.0) source.GetDimensions(0, width, height, elements, levels);
             else if (position.x < 48.0) source.GetDimensions(1, width, height, elements, levels);
-            else r8Source.GetDimensions(0, width, height, elements, levels);
+            else if (position.x < 56.0) r8Source.GetDimensions(0, width, height, elements, levels);
+            else rg8Source.GetDimensions(0, width, height, elements, levels);
             return float4(float(width) / 4.0, float(height) / 4.0, float(elements) / 16.0, float(levels) / 2.0);
           }
           if (position.y < 16.0) {
@@ -5770,6 +5772,11 @@ try {
             if (position.y < 8.0) return halfSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
             float value = r8Source.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
             return float4(value, 0.0, 0.0, 1.0);
+          }
+          if (position.y < 24.0) {
+            float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
+            float2 value = rg8Source.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
+            return float4(value, 0.0, 1.0);
           }
           float4 coordinate = position.x < 20.0 ? float4(1.0, 0.0, 0.0, 0.0)
             : position.x < 40.0 ? float4(1.0, 0.0, 0.0, 1.0)
@@ -5806,6 +5813,8 @@ try {
       command(12, words(12, 2, 11, 10, 10, 0, 1, 6, 2)); // two cubes starting at face 6
       command(4, words(15, 4, 4, 1, 18, 61, 0x8, 0, 1, 0x4)); // R8_UNORM cube array
       command(12, words(16, 2, 15, 61, 10, 0, 1, 6, 2)); // two R8 cubes starting at face 6
+      command(4, words(17, 4, 4, 1, 18, 49, 0x8, 0, 1, 0x4)); // RG8_UNORM cube array
+      command(12, words(18, 2, 17, 49, 10, 0, 1, 6, 2)); // two RG8 cubes starting at face 6
       const cubeFaces = [
         [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255]],
         [[0, 255, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255]],
@@ -5839,6 +5848,14 @@ try {
         payload.set(words(15, 0, slice, 0, 0, 4, 4, 4, texels.length));
         payload.set(texels, 36); command(5, payload);
       }
+      for (let slice = 0; slice < 18; slice++) {
+        const value = slice < 6 ? [255, 0] : slice < 12 ? [128, 64] : [64, 192];
+        const texels = new Uint8Array(32);
+        for (let i = 0; i < 16; i++) texels.set(value, i * 2);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(17, 0, slice, 0, 0, 4, 4, 8, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      }
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
       samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
@@ -5846,10 +5863,10 @@ try {
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
-      command(21, words(1, 2, 0)); command(19, words(1, 0, 3, 5, 12, 16)); command(20, words(1, 0, 1, 6));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 4, 5, 12, 16, 18)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x, y = 16) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
+      const at = (x, y = 24) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
       const result = {
         selectedCube0: at(10),
         selectedCube1: at(30),
@@ -5858,11 +5875,15 @@ try {
         selectedHalfCube1: at(50, 4),
         selectedR8Cube0: at(10, 12),
         selectedR8Cube1: at(50, 12),
+        selectedRG8Cube0: at(10, 20),
+        selectedRG8Cube1: at(50, 20),
         dimensions: at(10, 48),
         r8Dimensions: at(50, 48),
+        rg8Dimensions: at(58, 48),
         mip1Dimensions: at(42, 48),
         viewDimension: gpu.views.get(5)?.cache?.dim,
         halfViewDimension: gpu.views.get(12)?.cache?.dim,
+        rg8ViewDimension: gpu.views.get(18)?.cache?.dim,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -5890,6 +5911,13 @@ try {
       && near(cubeArrayResult.r8Dimensions || [], [255, 255, 32, 128], 1),
     JSON.stringify({ selectedCube0: cubeArrayResult.selectedR8Cube0, selectedCube1: cubeArrayResult.selectedR8Cube1,
       dimensions: cubeArrayResult.r8Dimensions, errors: cubeArrayResult.errors }));
+  check('D3D11 TextureCubeArray RG8_UNORM selects cube ranges and preserves channel defaults',
+    cubeArrayResult.rg8ViewDimension === 'cube-array'
+      && near(cubeArrayResult.selectedRG8Cube0 || [], [128, 64, 0, 255], 1)
+      && near(cubeArrayResult.selectedRG8Cube1 || [], [64, 192, 0, 255], 1)
+      && near(cubeArrayResult.rg8Dimensions || [], [255, 255, 32, 128], 1),
+    JSON.stringify({ cube0: cubeArrayResult.selectedRG8Cube0, cube1: cubeArrayResult.selectedRG8Cube1,
+      dimensions: cubeArrayResult.rg8Dimensions, view: cubeArrayResult.rg8ViewDimension, errors: cubeArrayResult.errors }));
 
   const cubeArrayCompareResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
