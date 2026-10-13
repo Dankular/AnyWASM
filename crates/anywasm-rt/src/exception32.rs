@@ -93,7 +93,10 @@ pub(crate) fn rtl_unwind(p: &mut Process) -> Result<u64, Stop> {
     }
     p.wr32(exception_record + 4, flags)?;
 
-    let target_ip = if target_frame == 0 || requested_ip == 0 {
+    let target_ip = if target_frame == 0
+        || target_frame == EXCEPTION_CHAIN_END as u64
+        || requested_ip == 0
+    {
         return_ip as u64
     } else {
         requested_ip
@@ -873,7 +876,7 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
             unwind_flags
                 | if target_unwind {
                     EXCEPTION_TARGET_UNWIND
-                } else if target_index.is_none() {
+                } else if unwind.target_frame == 0 {
                     EXCEPTION_EXIT_UNWIND
                 } else {
                     0
@@ -915,8 +918,7 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
         if disposition == EXCEPTION_COLLIDED_UNWIND {
             let Some(target) = target_index else {
                 return Err(Stop::Crash(
-                    "PE32 exit unwind collided before reaching the end of the registration chain"
-                        .into(),
+                    "PE32 RtlUnwind collision without a target frame is unsupported".into(),
                 ));
             };
             if target_unwind {
@@ -950,29 +952,44 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
         index += 1;
         if target_unwind {
             p.wr32(unwind.exception_record + 4, unwind_flags)?;
-            p.cpu.gpr = context.gpr;
-            p.cpu.rip = context.eip as u64;
-            p.cpu.rflags = context.eflags as u64;
-            p.skip_ret = false;
-            if p.trace_imports {
-                p.stderr.extend_from_slice(
-                    format!(
-                        "[seh32] RtlUnwind transfer frame={:#010x} ip={:#010x} esp={:#010x} return={:#010x}\n",
-                        unwind.target_frame,
-                        unwind.target_ip,
-                        context.gpr[RSP] as u32,
-                        context.gpr[RAX] as u32
-                    )
-                    .as_bytes(),
-                );
-            }
-            return Ok(0);
+            return resume_rtl_unwind32(p, &unwind, &context);
         }
+    }
+
+    if unwind.target_frame == EXCEPTION_CHAIN_END as u64 {
+        // The x86 dispatcher uses EXCEPTION_CHAIN_END to request a full chain
+        // unwind that resumes at the captured caller, without exit-unwind flags.
+        p.wr32(unwind.exception_record + 4, unwind_flags)?;
+        return resume_rtl_unwind32(p, &unwind, &context);
     }
 
     Err(Stop::Crash(
         "PE32 RtlUnwind exit unwind reached the end of the registration chain".into(),
     ))
+}
+
+fn resume_rtl_unwind32(
+    p: &mut Process,
+    unwind: &GuestUnwind32,
+    context: &Context32,
+) -> Result<u64, Stop> {
+    p.cpu.gpr = context.gpr;
+    p.cpu.rip = context.eip as u64;
+    p.cpu.rflags = context.eflags as u64;
+    p.skip_ret = false;
+    if p.trace_imports {
+        p.stderr.extend_from_slice(
+            format!(
+                "[seh32] RtlUnwind transfer frame={:#010x} ip={:#010x} esp={:#010x} return={:#010x}\n",
+                unwind.target_frame,
+                unwind.target_ip,
+                context.gpr[RSP] as u32,
+                context.gpr[RAX] as u32
+            )
+            .as_bytes(),
+        );
+    }
+    Ok(0)
 }
 
 pub(crate) fn complete_guest_unwind32(
@@ -1029,7 +1046,7 @@ fn active_unwind_frames32(
         }
         registration = next;
     }
-    if target_frame == 0 {
+    if target_frame == 0 || target_frame == EXCEPTION_CHAIN_END as u64 {
         Ok((frames, None))
     } else {
         Err(Stop::Crash(format!(

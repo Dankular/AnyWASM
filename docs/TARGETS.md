@@ -700,10 +700,13 @@ The dispatcher layout and redirect rule follow the x86 unwind path in the
 [Windows Research Kernel source](https://github.com/mic101/windows/blob/master/WRK-v1.2/base/ntos/rtl/i386/exdsptch.c).
 `ntdll!RtlUnwind` has an initial PE32 implementation: it walks the active registration chain, calls
 unwind handlers, and transfers to the requested target IP with the supplied return value. The main
-run loop consumes direct requests outside exception search. There is no runtime regression for this
-path yet; exit-unwind completion and calls from phase-two handlers remain unsupported. Redirects
-from the selected C++ catch frame, nested x64 `RtlUnwindEx`,
-non-null unwind history tables, and redirects outside the pre-searched frames remain unsupported.
+run loop consumes direct requests outside exception search. It now handles the x86
+`EXCEPTION_CHAIN_END` sentinel by unwinding the full chain without exit-unwind flags and resuming at
+the captured caller, following the Windows Research Kernel dispatcher. This sentinel path is
+compile-verified but has no runtime fixture yet. `TargetFrame = NULL` exit-unwind completion and calls
+from phase-two handlers remain unsupported. Redirects from the selected C++ catch frame, nested x64
+`RtlUnwindEx`, non-null unwind history tables, and redirects outside the pre-searched frames remain
+unsupported.
 The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
