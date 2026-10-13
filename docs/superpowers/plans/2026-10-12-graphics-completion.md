@@ -137,6 +137,7 @@
 **Files:** `crates/anywasm-rt/src/hle/d3d9.rs`, `crates/anywasm-rt/src/hle/gpu.rs`, `web/gpu.js`, `test/browser/run.mjs`
 
 - [ ] Cover remaining texture operations and multi-stage behavior, including PREMODULATE and bump-environment operations where their required state exists.
+- [x] Verify two-stage PREMODULATE for color and alpha: stage 0 passes arg1, then stage 1 SELECTARG1 CURRENT multiplies by its texture; Chromium checks `[0, 128, 64, 64]` and the D3D9 HLE test covers stage propagation plus unsupported stage-1 PREMODULATE/bump ops. Bump-environment mapping and broader cascades remain open.
 - [ ] Extend state, resource, surface, shader, and device methods from observed target calls; add guest-side and pixel regressions per method.
 - [ ] Verify alpha/color argument selectors, stage transitions, and unsupported combinations against the D3D9 operation definitions.
 

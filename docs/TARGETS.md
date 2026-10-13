@@ -14,6 +14,14 @@ stream-buffer lock/unlock, `good`, `sputn`/`xsputn`, `setstate`, uncaught-except
 unsigned-integer insertion, the stream and iostream destructors, and `sputc`, then faulted at
 `tutorial03_texturing.exe+0x34fc` while inserting the ANSI string `\x1b[39m`. Static imports remain a
 packaging concern when those DLLs are absent.
+
+### D3D9 fixed-function regression
+
+A separate synthetic Chromium command-stream regression (not a selected-target run) verifies two-stage
+PREMODULATE. Stage 0 passes arg1; stage 1 SELECTARG1 CURRENT multiplies the prior color and alpha by
+its texture. The center pixel is `[0, 128, 64, 64]` with no WebGPU validation errors. Bump-environment
+mapping and broader multi-stage cascades remain open.
+
 The HLE-only Tutorial01 HelloTriangle also rendered its colored triangle in Chromium without local
 MSVC/UCRT DLLs. At the 250,000-instruction worker slice, the bounded capture reported 659 draws,
 330 presents, two pipelines, 16 Asyncify yields/resumes, and no WebGPU validation errors. The page

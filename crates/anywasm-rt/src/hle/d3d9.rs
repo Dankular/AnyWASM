@@ -941,7 +941,7 @@ fn set_texture(p: &mut Process) -> R {
     ) {
         return Ok(D3DERR_INVALIDCALL);
     }
-    if stage != 0 {
+    if stage > 1 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let view = if texture == 0 {
@@ -1001,7 +1001,7 @@ fn set_sampler_state(p: &mut Process) -> R {
     ) {
         return Ok(D3DERR_INVALIDCALL);
     }
-    if stage != 0 {
+    if stage > 1 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
@@ -2469,11 +2469,11 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
             *current = fvf;
         }
     }
-    let stage_state = |state, default| {
+    let stage_state = |stage, state, default| {
         p.extra
             .com
             .d3d9_texture_stage_states
-            .get(&(device, 0, state))
+            .get(&(device, stage, state))
             .copied()
             .unwrap_or(default)
     };
@@ -2483,12 +2483,12 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
             .u32(fvf)
             .u32(width)
             .u32(height)
-            .u32(stage_state(1, 4)) // D3DTSS_COLOROP = D3DTOP_MODULATE
-            .u32(stage_state(2, 2)) // D3DTSS_COLORARG1 = D3DTA_TEXTURE
-            .u32(stage_state(3, 1)) // D3DTSS_COLORARG2 = D3DTA_CURRENT
-            .u32(stage_state(4, 2)) // D3DTSS_ALPHAOP = D3DTOP_SELECTARG1
-            .u32(stage_state(5, 2)) // D3DTSS_ALPHAARG1 = D3DTA_TEXTURE
-            .u32(stage_state(6, 1)) // D3DTSS_ALPHAARG2 = D3DTA_CURRENT
+            .u32(stage_state(0, 1, 4)) // D3DTSS_COLOROP = D3DTOP_MODULATE
+            .u32(stage_state(0, 2, 2)) // D3DTSS_COLORARG1 = D3DTA_TEXTURE
+            .u32(stage_state(0, 3, 1)) // D3DTSS_COLORARG2 = D3DTA_CURRENT
+            .u32(stage_state(0, 4, 2)) // D3DTSS_ALPHAOP = D3DTOP_SELECTARG1
+            .u32(stage_state(0, 5, 2)) // D3DTSS_ALPHAARG1 = D3DTA_TEXTURE
+            .u32(stage_state(0, 6, 1)) // D3DTSS_ALPHAARG2 = D3DTA_CURRENT
             .u32(
                 p.extra
                     .com
@@ -2497,8 +2497,16 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
                     .copied()
                     .unwrap_or(u32::MAX),
             )
-            .u32(stage_state(26, 1)) // D3DTSS_COLORARG0 = D3DTA_CURRENT
-            .u32(stage_state(27, 1)), // D3DTSS_ALPHAARG0 = D3DTA_CURRENT
+            .u32(stage_state(0, 26, 1)) // D3DTSS_COLORARG0 = D3DTA_CURRENT
+            .u32(stage_state(0, 27, 1)) // D3DTSS_ALPHAARG0 = D3DTA_CURRENT
+            .u32(stage_state(1, 1, 1)) // stage 1 defaults to D3DTOP_DISABLE
+            .u32(stage_state(1, 26, 1))
+            .u32(stage_state(1, 2, 2))
+            .u32(stage_state(1, 3, 1))
+            .u32(stage_state(1, 4, 1))
+            .u32(stage_state(1, 27, 1))
+            .u32(stage_state(1, 5, 2))
+            .u32(stage_state(1, 6, 1)),
     );
     Ok(S_OK)
 }
@@ -2512,13 +2520,15 @@ fn set_texture_stage_state(p: &mut Process) -> R {
     ) {
         return Ok(D3DERR_INVALIDCALL);
     }
-    if stage != 0 {
+    if stage > 1 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
-        1 => matches!(value, 1..=16 | 18..=21 | 24..=26), // selected, blend, modulate-add, dot-product, and triadic ops
-        2 | 3 | 5 | 6 | 26 | 27 => value <= 2,            // diffuse/current or texture arguments
-        4 => matches!(value, 2..=16 | 25..=26), // selected, arithmetic, blend, and triadic alpha ops
+        1 if stage == 0 => matches!(value, 1..=17 | 18..=21 | 24..=26), // stage-0 ops, including PREMODULATE
+        1 => matches!(value, 1..=2), // stage 1: disable or select an argument
+        2 | 3 | 5 | 6 | 26 | 27 => value <= 2, // diffuse/current or texture arguments
+        4 if stage == 0 => matches!(value, 2..=17 | 25..=26), // stage-0 alpha ops, including PREMODULATE
+        4 => matches!(value, 1..=2), // stage-1 disable or select an argument
         _ => false,
     };
     if !valid {
@@ -3178,7 +3188,28 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 words,
-                [0x144, 64, 64, color_op, 2, 1, 2, 2, 1, u32::MAX, 1, 1]
+                [
+                    0x144,
+                    64,
+                    64,
+                    color_op,
+                    2,
+                    1,
+                    2,
+                    2,
+                    1,
+                    u32::MAX,
+                    1,
+                    1,
+                    1,
+                    1,
+                    2,
+                    1,
+                    1,
+                    1,
+                    2,
+                    1,
+                ]
             );
         }
         for alpha_op in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 25, 26] {
@@ -3203,7 +3234,28 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 words,
-                [0x144, 64, 64, 26, 2, 1, alpha_op, 2, 1, u32::MAX, 1, 1]
+                [
+                    0x144,
+                    64,
+                    64,
+                    26,
+                    2,
+                    1,
+                    alpha_op,
+                    2,
+                    1,
+                    u32::MAX,
+                    1,
+                    1,
+                    1,
+                    1,
+                    2,
+                    1,
+                    1,
+                    1,
+                    2,
+                    1,
+                ]
             );
         }
         for (state, value, color_arg0, alpha_arg0) in [(26, 2, 2, 1), (27, 2, 2, 2)] {
@@ -3239,8 +3291,78 @@ mod tests {
                     1,
                     u32::MAX,
                     color_arg0,
-                    alpha_arg0
+                    alpha_arg0,
+                    1,
+                    1,
+                    2,
+                    1,
+                    1,
+                    1,
+                    2,
+                    1
                 ]
+            );
+        }
+
+        // PREMODULATE is supported for color and alpha at stage 0. Stage 1
+        // can select CURRENT, while PREMODULATE and bump operations stay unsupported.
+        for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, 17)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(set_texture_stage_state(&mut p).unwrap(), S_OK);
+        for (offset, value) in [(4, device as u32), (8, 0), (12, 4), (16, 17)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(set_texture_stage_state(&mut p).unwrap(), S_OK);
+        for (state, value) in [(1, 2), (2, 1), (4, 2), (5, 1)] {
+            for (offset, word) in [(4, device as u32), (8, 1), (12, state), (16, value)] {
+                p.wr32(STACK + offset, word).unwrap();
+            }
+            assert_eq!(set_texture_stage_state(&mut p).unwrap(), S_OK);
+        }
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, payload) = commands
+            .iter()
+            .rev()
+            .find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
+            .expect("stage-1 state should update the fixed-function shader state");
+        let words = payload
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            words,
+            [
+                0x144,
+                64,
+                64,
+                17,
+                2,
+                1,
+                17,
+                2,
+                1,
+                u32::MAX,
+                2,
+                2,
+                2,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1
+            ]
+        );
+        for (stage, value) in [(1, 4), (1, 17), (0, 22), (0, 23), (1, 22), (1, 23)] {
+            for (offset, word) in [(4, device as u32), (8, stage), (12, 1), (16, value)] {
+                p.wr32(STACK + offset, word).unwrap();
+            }
+            assert_eq!(
+                set_texture_stage_state(&mut p).unwrap(),
+                D3DERR_NOTAVAILABLE,
+                "operation {value} at stage {stage}"
             );
         }
     }

@@ -1125,6 +1125,14 @@ export class GpuExecutor {
           dv.byteLength >= 40 ? u(9) : 0xffffffff,
           dv.byteLength >= 44 ? u(10) : 1,
           dv.byteLength >= 48 ? u(11) : 1,
+          dv.byteLength >= 52 ? u(12) : 1,
+          dv.byteLength >= 56 ? u(13) : 1,
+          dv.byteLength >= 60 ? u(14) : 2,
+          dv.byteLength >= 64 ? u(15) : 1,
+          dv.byteLength >= 68 ? u(16) : 1,
+          dv.byteLength >= 72 ? u(17) : 1,
+          dv.byteLength >= 76 ? u(18) : 2,
+          dv.byteLength >= 80 ? u(19) : 1,
         );
         break;
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
@@ -1444,7 +1452,7 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
-  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1) {
+  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1, colorOp1 = 1, colorArg01 = 1, colorArg11 = 2, colorArg21 = 1, alphaOp1 = 1, alphaArg01 = 1, alphaArg11 = 2, alphaArg21 = 1) {
     if (fvf === 0) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
@@ -1458,7 +1466,7 @@ export class GpuExecutor {
       this.log(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
-    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}`;
+    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}/${colorOp1}/${colorArg01}/${colorArg11}/${colorArg21}/${alphaOp1}/${alphaArg01}/${alphaArg11}/${alphaArg21}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
       const transformed = fvf === 0x44 || fvf === 0x144;
@@ -1513,7 +1521,7 @@ export class GpuExecutor {
       const alphaA = channelArg(alphaArg1, 'a'), alphaB = channelArg(alphaArg2, 'a');
       const textureFactorAlpha = (((textureFactor >>> 24) & 0xff) / 255).toFixed(8);
       const colorExpr = colorOp === 1 ? 'input.color.rgb'
-        : colorOp === 2 ? colorA
+        : colorOp === 2 || colorOp === 17 ? colorA
         : colorOp === 3 ? colorB
         : colorOp === 4 ? `(${colorA} * ${colorB})`
         : colorOp === 5 ? `((${colorA} * ${colorB}) * 2.0)`
@@ -1535,7 +1543,7 @@ export class GpuExecutor {
         : colorOp === 25 ? `(${color0} + (${colorA} * ${colorB}))`
         : colorOp === 26 ? `((${color0} * ${colorA}) + ((1.0 - ${color0}) * ${colorB}))`
         : 'input.color.rgb';
-      const alphaExpr = alphaOp === 2 ? alphaA
+      const alphaExpr = alphaOp === 2 || alphaOp === 17 ? alphaA
         : alphaOp === 3 ? alphaB
         : alphaOp === 4 ? `(${alphaA} * ${alphaB})`
         : alphaOp === 5 ? `((${alphaA} * ${alphaB}) * 2.0)`
@@ -1552,12 +1560,38 @@ export class GpuExecutor {
         : alphaOp === 25 ? `(${alpha0} + (${alphaA} * ${alphaB}))`
         : alphaOp === 26 ? `((${alpha0} * ${alphaA}) + ((1.0 - ${alpha0}) * ${alphaB}))`
         : 'input.color.a';
+      const stage1Enabled = textured && (colorOp1 !== 1 || alphaOp1 !== 1);
+      const stage1ColorArg = (argument) => argument === 2 ? 'texel1.rgb'
+        : argument === 1 ? 'stage1CurrentColor' : 'input.color.rgb';
+      const stage1AlphaArg = (argument) => argument === 2 ? 'texel1.a'
+        : argument === 1 ? 'stage1CurrentAlpha' : 'input.color.a';
+      const stage1ColorA = stage1ColorArg(colorArg11), stage1ColorB = stage1ColorArg(colorArg21);
+      const stage1AlphaA = stage1AlphaArg(alphaArg11), stage1AlphaB = stage1AlphaArg(alphaArg21);
+      const stage1ColorExpr = colorOp1 === 1 ? 'stage0Color'
+        : colorOp1 === 2 ? stage1ColorA
+        : colorOp1 === 3 ? stage1ColorB
+        : colorOp1 === 4 ? `(${stage1ColorA} * ${stage1ColorB})`
+        : 'stage0Color';
+      const stage1AlphaExpr = alphaOp1 === 1 ? 'stage0Alpha'
+        : alphaOp1 === 2 ? stage1AlphaA
+        : alphaOp1 === 3 ? stage1AlphaB
+        : alphaOp1 === 4 ? `(${stage1AlphaA} * ${stage1AlphaB})`
+        : 'stage0Alpha';
+      const texturedOutput = stage1Enabled
+        ? `vec4<f32>(${stage1ColorExpr}, ${stage1AlphaExpr})`
+        : `vec4<f32>(${colorExpr}, ${alphaExpr})`;
       const texturedCode = textured ? `${code}
         @group(1) @binding(0) var d3d9Texture: texture_2d<f32>;
         @group(2) @binding(0) var d3d9Sampler: sampler;
+        ${stage1Enabled ? '@group(1) @binding(1) var d3d9Texture1: texture_2d<f32>;\n        @group(2) @binding(1) var d3d9Sampler1: sampler;' : ''}
         @fragment fn fsTextured(input: VertexOutput) -> @location(0) vec4<f32> {
           let texel = textureSample(d3d9Texture, d3d9Sampler, input.uv);
-          return vec4<f32>(${colorExpr}, ${alphaExpr});
+          ${stage1Enabled ? `let texel1 = textureSample(d3d9Texture1, d3d9Sampler1, input.uv);
+          let stage0Color = ${colorExpr};
+          let stage0Alpha = ${alphaExpr};
+          let stage1CurrentColor = ${colorOp === 17 ? '(stage0Color * texel1.rgb)' : 'stage0Color'};
+          let stage1CurrentAlpha = ${alphaOp === 17 ? '(stage0Alpha * texel1.a)' : 'stage0Alpha'};` : ''}
+          return ${texturedOutput};
         }
       ` : null;
       const texturedModule = texturedCode ? this.device.createShaderModule({ code: texturedCode }) : null;
@@ -1583,10 +1617,14 @@ export class GpuExecutor {
           stage: 1,
           module: texturedModule,
           entry: 'fsTextured',
-          descriptors: [{ type: 0, register: 0, resourceType: 4 }, { type: 3, register: 0 }],
+          descriptors: [
+            { type: 0, register: 0, resourceType: 4 },
+            { type: 3, register: 0 },
+            ...(stage1Enabled ? [{ type: 0, register: 1, resourceType: 4 }, { type: 3, register: 1 }] : []),
+          ],
           cbSizes: {},
           usesDrawParameters: false,
-          fixedFunction: { source: texturedCode, output: `vec4<f32>(${colorExpr}, ${alphaExpr})` },
+          fixedFunction: { source: texturedCode, output: texturedOutput },
         } : null,
       };
       this.fixedFunctionShaders.set(key, fixed);
@@ -1862,7 +1900,7 @@ export class GpuExecutor {
     let vs = this.shaders.get(st.shader[0]);
     let psId = st.shader[1];
     let ps = this.shaders.get(psId);
-    if (ps?.texturedVariant && st.srv[1][0]) {
+    if (ps?.texturedVariant && (st.srv[1][0] || st.srv[1][1])) {
       psId = ps.texturedVariant;
       ps = this.shaders.get(psId);
     }

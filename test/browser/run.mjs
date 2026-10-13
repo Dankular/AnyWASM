@@ -3124,13 +3124,22 @@ try {
       texel.set([255, 0, 0, 128, 0, 255, 0, 128, 0, 0, 255, 128, 255, 255, 255, 128], 36);
       command(5, texel);
       command(12, words(14, 2, 13, 28, 4, 0, 1, 0, 1)); // texture SRV
-      command(19, words(1, 0, 1, 14));
+      command(4, words(19, 2, 2, 1, 1, 28, 8, 0, 1, 0)); // stage-1 texture
+      const stage1Texels = new Uint8Array(52);
+      stage1Texels.set(words(19, 0, 0, 0, 0, 2, 2, 8, 16));
+      for (let i = 0; i < 4; i++) stage1Texels.set([0, 255, 128, 128], 36 + i * 4);
+      command(5, stage1Texels);
+      command(12, words(20, 2, 19, 28, 4, 0, 1, 0, 1)); // stage-1 texture SRV
+      command(19, words(1, 0, 2, 14, 20));
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 15, true); samplerView.setUint32(4, 0x15, true); // linear min/mag/mip
       samplerView.setUint32(8, 1, true); samplerView.setUint32(12, 1, true); samplerView.setUint32(16, 1, true);
       samplerView.setUint32(24, 1, true); samplerView.setUint32(28, 8, true);
       samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
       command(8, sampler); command(20, words(1, 0, 1, 15));
+      const stage1Sampler = sampler.slice();
+      new DataView(stage1Sampler.buffer).setUint32(0, 16, true);
+      command(8, stage1Sampler); command(20, words(1, 1, 1, 16));
       command(45, words(0x144, 64, 64, 2, 2, 1, 2, 2, 1)); // stage 0 selects texture color and alpha
       command(2, words(11, 84, 1, 0, 0, 28));
       const vertices = new Uint8Array(84), view = new DataView(vertices.buffer);
@@ -3215,6 +3224,26 @@ try {
       const lerpPixel = await renderOperation(26, setupSignedArgs, 2, 0xffffffff, 1);
       const alphaMultiplyAddPixel = await renderOperation(2, setupSignedAlphaArgs, 25, 0xffffffff, 1, 2);
       const alphaLerpPixel = await renderOperation(2, setupSignedAlphaArgs, 26, 0xffffffff, 1, 2);
+      stream.length = 0;
+      command(5, texel);
+      command(27, clear);
+      command(45, words(0x144, 64, 64, 17, 2, 1, 17, 2, 1, 0xffffffff, 1, 1,
+        2, 1, 1, 2, 2, 1, 1, 2));
+      command(16, words(4)); command(29, words(3, 0));
+      gpu.execute(append());
+      const premodulatePixels = await gpu.readBackbuffer(1);
+      const premodulatePixel = Array.from(premodulatePixels.data.slice((20 * premodulatePixels.width + 32) * 4,
+        (20 * premodulatePixels.width + 32) * 4 + 4));
+      stream.length = 0;
+      command(5, texel);
+      command(27, clear);
+      command(45, words(0x144, 64, 64, 17, 2, 1, 17, 2, 1, 0xffffffff, 1, 1,
+        2, 1, 2, 1, 2, 1, 2, 1));
+      command(16, words(4)); command(29, words(3, 0));
+      gpu.execute(append());
+      const stage1TexturePixels = await gpu.readBackbuffer(1);
+      const stage1TexturePixel = Array.from(stage1TexturePixels.data.slice((20 * stage1TexturePixels.width + 32) * 4,
+        (20 * stage1TexturePixels.width + 32) * 4 + 4));
       const mirrorOnceSampler = sampler.slice();
       new DataView(mirrorOnceSampler.buffer).setUint32(8, 5, true);
       const mirrorOnceVertices = vertices.slice(), mirrorOnceView = new DataView(mirrorOnceVertices.buffer);
@@ -3257,6 +3286,8 @@ try {
         lerpPixel,
         alphaMultiplyAddPixel,
         alphaLerpPixel,
+        premodulatePixel,
+        stage1TexturePixel,
         mirrorOncePixel,
         blendedDiffuseAlphaPixel,
         blendedTextureAlphaPixel,
@@ -3274,7 +3305,7 @@ try {
     }
   });
   check('D3D9 stage-0 SELECTARG1 samples texture RGB and texture alpha',
-    d3d9TextureResult.draws === 37 && d3d9TextureResult.errors.length === 0
+    d3d9TextureResult.draws === 39 && d3d9TextureResult.errors.length === 0
       && near(d3d9TextureResult.selectedPixel, [127, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
   check('D3D9 fixed-function MIRROR_ONCE mirrors negative UVs before linear filtering',
@@ -3282,11 +3313,15 @@ try {
   check('D3D9 stage-0 MODULATE multiplies texture RGB by diffuse vertex color',
     near(d3d9TextureResult.modulatedPixel, [127, 0, 0, 128], 2), JSON.stringify(d3d9TextureResult));
   check('D3D9 stage-0 SELECTARG2, MODULATE2X, ADD, and SUBTRACT match pixel equations',
-    d3d9TextureResult.draws === 37 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
+    d3d9TextureResult.draws === 39 && near(d3d9TextureResult.selectedArg2Pixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.modulated2xPixel, [255, 0, 0, 128], 2)
       && near(d3d9TextureResult.addedPixel, [255, 127, 127, 128], 2)
       && near(d3d9TextureResult.subtractedPixel, [0, 127, 127, 128], 2),
     JSON.stringify(d3d9TextureResult));
+  check('D3D9 PREMODULATE passes stage 0 arg1 and premultiplies stage 1 CURRENT by the next texture',
+    d3d9TextureResult.errors.length === 0 && near(d3d9TextureResult.premodulatePixel || [], [0, 128, 64, 64], 2)
+      && near(d3d9TextureResult.stage1TexturePixel || [], [0, 255, 128, 128], 2),
+    JSON.stringify({ pixel: d3d9TextureResult.premodulatePixel, stage1Texture: d3d9TextureResult.stage1TexturePixel, errors: d3d9TextureResult.errors }));
   check('D3D9 stage-0 alpha BLENDDIFFUSEALPHA uses interpolated diffuse alpha',
     near(d3d9TextureResult.alphaBlendDiffusePixel, [115, 115, 115, 79], 2), JSON.stringify(d3d9TextureResult.alphaBlendDiffusePixel));
   check('D3D9 stage-0 alpha BLENDTEXTUREALPHA uses sampled texture alpha',
