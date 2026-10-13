@@ -3004,6 +3004,95 @@ mod tests {
     }
 
     #[test]
+    fn exception_search_uses_a_grown_dynamic_function_table() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const TABLE: u64 = IMAGE_BASE + 0x900;
+        const ADD_OUTPUT: u64 = INFO + 0x280;
+        const CALLER: u64 = IMAGE_BASE + 0x110;
+        const EXCEPTION_HANDLER: u64 = IMAGE_BASE + 0x600;
+        const TOP_LEVEL_FILTER: u64 = IMAGE_BASE + 0x780;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const HANDLER_MARKER: u64 = INFO + 0x2a0;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x160;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process
+            .mem
+            .map(crate::process::TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process
+            .wr64(crate::process::TEB_ADDR + 0x08, STACK + PAGE_SIZE)
+            .unwrap();
+        process
+            .wr64(crate::process::TEB_ADDR + 0x10, STACK)
+            .unwrap();
+        let mut module = test_module();
+        module.runtime_functions.clear();
+        process.modules.push(module);
+
+        let add = crate::hle::lookup("ntdll", "RtlAddGrowableFunctionTable").unwrap();
+        let grow = crate::hle::lookup("ntdll", "RtlGrowFunctionTable").unwrap();
+        process.cpu.gpr[RSP] = STACK + 0x500;
+        process.cpu.gpr[RCX] = ADD_OUTPUT;
+        process.cpu.gpr[RDX] = TABLE;
+        process.cpu.gpr[R8] = 0;
+        process.cpu.gpr[R9] = 4;
+        process.wr64(STACK + 0x528, IMAGE_BASE).unwrap();
+        process.wr64(STACK + 0x530, IMAGE_BASE + 0x2000).unwrap();
+        assert_eq!(add(&mut process), Ok(0));
+        let table_handle = process.rd64(ADD_OUTPUT).unwrap();
+        assert_ne!(table_handle, 0);
+
+        process.wr32(TABLE, 0x100).unwrap();
+        process.wr32(TABLE + 4, 0x120).unwrap();
+        process.wr32(TABLE + 8, 0x300).unwrap();
+        process.cpu.gpr[RCX] = table_handle;
+        process.cpu.gpr[RDX] = 1;
+        assert_eq!(grow(&mut process), Ok(0));
+
+        process.wr8(IMAGE_BASE + 0x300, 0x09).unwrap(); // version 1, EHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process
+            .wr32(IMAGE_BASE + 0x304, (EXCEPTION_HANDLER - IMAGE_BASE) as u32)
+            .unwrap();
+
+        let mut exception_handler = vec![0x48, 0xb8]; // mov rax, HANDLER_MARKER
+        exception_handler.extend_from_slice(&HANDLER_MARKER.to_le_bytes());
+        exception_handler.extend_from_slice(&[
+            0xc7, 0x00, 1, 0, 0, 0, // mov dword ptr [rax], 1
+            0xb8, 1, 0, 0, 0, // EXCEPTION_CONTINUE_SEARCH
+            0xc3,
+        ]);
+        process
+            .write_bytes(EXCEPTION_HANDLER, &exception_handler)
+            .unwrap();
+
+        let mut top_filter = vec![0x48, 0x8b, 0x41, 0x08]; // mov rax, [rcx + ContextRecord]
+        top_filter.extend_from_slice(&[0x48, 0xba]); // mov rdx, LANDING_PAD
+        top_filter.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        top_filter.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+        process.write_bytes(TOP_LEVEL_FILTER, &top_filter).unwrap();
+        process.top_level_exception_filter = TOP_LEVEL_FILTER;
+
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+        process.wr64(RAISE_RSP + 8, IMAGE_BASE + 0x120).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(HANDLER_MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert!(process.skip_ret);
+    }
+
+    #[test]
     fn callback_managed_function_table_participates_in_phase_two_unwind() {
         const IMAGE_BASE: u64 = 0x1400_0000_0;
         const TABLE_IDENTIFIER: u64 = 0x200007;
