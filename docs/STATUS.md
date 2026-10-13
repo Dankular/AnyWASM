@@ -102,10 +102,11 @@
   [AMD64 Architecture Programmer's Manual, Volume 1](https://docs.amd.com/v/u/en-US/24592_3.24).
 - Selected VEX instructions are decoded for target-used scalar/vector moves and arithmetic,
   including packed-single `VADDPS`/`VMULPS`, `VPERMILPS`/`VPERMILPD`, XOR, rounding/conversion,
-  `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the exact list in
-  `CLAUDE.md`). The target BZHI memory form is also checked against the host CPU on
-  Linux CI across index boundary cases, excluding undefined AF/PF. This is not broad AVX/AVX2/BMI
-  coverage; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
+  `VEXTRACTF128`, `VZEROUPPER`, `ANDN`, `SHLX`, `SHRX`, and `BZHI` (see the exact target-grounded
+  list in `CLAUDE.md`). A general BMI2 slice also adds `SARX`, `PDEP`, `PEXT`, and `MULX`; BZHI now
+  handles both 32-bit and 64-bit operands. The target BZHI memory form is also checked against the
+  host CPU on Linux CI across index boundary cases, excluding undefined AF/PF. Overall AVX/AVX2/BMI
+  coverage remains incomplete; EVEX, FMA, MMX, AES/PCLMUL, and 16-bit/segment modes remain open.
 - Diff corpus covers single instructions and x87 sequences; control flow, push/pop and syscall are
   covered only by the end-to-end programs.
 - **Dynamic WASM emission (opt-in prototype, default disabled):** Rust emits leading NOPs,

@@ -1045,19 +1045,62 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             cpu.set_flag(ZF, result == 0);
         }
         Op::Bzhi => {
-            let source = rd(cpu, mem, &i.ops[1], 4, 0)? as u32;
-            let index = (rd(cpu, mem, &i.ops[2], 4, 0)? as u32) & 0xff;
-            let carry = index > 31;
+            let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
+            let index = rd(cpu, mem, &i.ops[2], sz, 0)? & 0xff;
+            let width = sz as u64 * 8;
+            let carry = index >= width;
             let result = if carry {
                 source
             } else {
-                source & ((1u32 << index) - 1)
+                source & ((1u64 << index) - 1)
             };
             cpu.set_flag(CF, carry);
             cpu.set_flag(ZF, result == 0);
-            cpu.set_flag(SF, result & 0x8000_0000 != 0);
+            cpu.set_flag(SF, result & sgn(sz) != 0);
             cpu.set_flag(OF, false);
-            wr(cpu, mem, &i.ops[0], 4, result as u64)?;
+            wr(cpu, mem, &i.ops[0], sz, result)?;
+        }
+        Op::Pdep => {
+            let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
+            let mask = rd(cpu, mem, &i.ops[2], sz, 0)?;
+            let width = sz as u32 * 8;
+            let mut result = 0u64;
+            let mut source_bit = 0u32;
+            for mask_bit in 0..width {
+                let bit = 1u64 << mask_bit;
+                if mask & bit != 0 {
+                    if source & (1u64 << source_bit) != 0 {
+                        result |= bit;
+                    }
+                    source_bit += 1;
+                }
+            }
+            wr(cpu, mem, &i.ops[0], sz, result)?;
+        }
+        Op::Pext => {
+            let source = rd(cpu, mem, &i.ops[1], sz, 0)?;
+            let mask = rd(cpu, mem, &i.ops[2], sz, 0)?;
+            let width = sz as u32 * 8;
+            let mut result = 0u64;
+            let mut result_bit = 0u32;
+            for source_bit in 0..width {
+                let bit = 1u64 << source_bit;
+                if mask & bit != 0 {
+                    if source & bit != 0 {
+                        result |= 1u64 << result_bit;
+                    }
+                    result_bit += 1;
+                }
+            }
+            wr(cpu, mem, &i.ops[0], sz, result)?;
+        }
+        Op::Mulx => {
+            let width = sz as u32 * 8;
+            let implicit_source = cpu.gpr[RDX] & msk(sz);
+            let source = rd(cpu, mem, &i.ops[2], sz, 0)?;
+            let product = implicit_source as u128 * source as u128;
+            wr(cpu, mem, &i.ops[1], sz, product as u64)?;
+            wr(cpu, mem, &i.ops[0], sz, (product >> width) as u64)?;
         }
         Op::Shlx => {
             let width = (i.osz * 8) as u32;
@@ -1071,6 +1114,17 @@ pub fn exec<M: GuestMemory>(cpu: &mut Cpu, mem: &mut M, i: &Inst) -> ExecResult<
             let value = rd(cpu, mem, &i.ops[1], i.osz, 0)?;
             let count = (rd(cpu, mem, &i.ops[2], i.osz, 0)? & (width as u64 - 1)) as u32;
             wr(cpu, mem, &i.ops[0], i.osz, value >> count)?;
+        }
+        Op::Sarx => {
+            let width = (i.osz * 8) as u32;
+            let value = rd(cpu, mem, &i.ops[1], i.osz, 0)?;
+            let count = (rd(cpu, mem, &i.ops[2], i.osz, 0)? & (width as u64 - 1)) as u32;
+            let result = if i.osz == 4 {
+                ((value as u32 as i32) >> count) as u32 as u64
+            } else {
+                ((value as i64) >> count) as u64
+            };
+            wr(cpu, mem, &i.ops[0], i.osz, result)?;
         }
         Op::Cmpxchg => {
             let acc = cpu.gpr[RAX] & msk(sz);

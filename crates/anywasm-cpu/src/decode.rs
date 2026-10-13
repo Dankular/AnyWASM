@@ -166,7 +166,11 @@ pub enum Op {
     Andn,
     Blsi,
     Bzhi,
+    Pdep,
+    Pext,
+    Mulx,
     Shlx,
+    Sarx,
     Shrx,
     // control flow
     Jmp,
@@ -958,14 +962,18 @@ fn decode_vex(d: &mut Dec, pfx: &Pfx, map: u8, opcode: u8, vex: u8) -> R<Inst> {
         }
         let mut i = match (opcode, pp) {
             (0xf2, 0) => blank(Op::Andn),
-            (0xf5, 0) if !pfx.w() => blank(Op::Bzhi),
+            (0xf5, 0) => blank(Op::Bzhi),
+            (0xf5, 2) => blank(Op::Pext),
+            (0xf5, 3) => blank(Op::Pdep),
+            (0xf6, 3) => blank(Op::Mulx),
             (0xf7, 1) => blank(Op::Shlx),
+            (0xf7, 2) => blank(Op::Sarx),
             (0xf7, 3) => blank(Op::Shrx),
             _ => return Err(DecodeError::Unsupported("VEX3 0F38 instruction")),
         };
         let m = parse_modrm(d, pfx)?;
-        i.osz = if pfx.w() { 8 } else { 4 };
-        i.ops = if opcode == 0xf2 {
+        i.osz = if pfx.w() && !pfx.mode32 { 8 } else { 4 };
+        i.ops = if matches!(i.op, Op::Andn | Op::Pdep | Op::Pext | Op::Mulx) {
             [
                 m.reg_opnd(RK::G, pfx),
                 Opnd::Gpr(vvvv),
