@@ -155,6 +155,63 @@ test('rejects shared-worker startup without cross-origin isolation', async () =>
   }
 });
 
+test('terminates every worker when startup fails after a sibling is ready', async () => {
+  const previousIsolation = Object.getOwnPropertyDescriptor(globalThis, 'crossOriginIsolated');
+  const previousWorker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  const terminated = [];
+  let nextWorker = 0;
+  class FakeWorker {
+    constructor() {
+      this.index = nextWorker++;
+    }
+    postMessage(message) {
+      if (message.type !== 'init') return;
+      queueMicrotask(() => {
+        if (this.index === 0) {
+          this.onmessage({ data: {
+            type: 'ready',
+            workerIndex: this.index,
+            heapBase: 1024,
+            initialStackPointer: 2048,
+          } });
+        } else {
+          this.onmessage({ data: {
+            type: 'worker-error',
+            workerIndex: this.index,
+            message: 'worker startup failed',
+          } });
+        }
+      });
+    }
+    terminate() {
+      terminated.push(this.index);
+    }
+  }
+  Object.defineProperty(globalThis, 'crossOriginIsolated', {
+    configurable: true,
+    value: true,
+  });
+  Object.defineProperty(globalThis, 'Worker', {
+    configurable: true,
+    value: FakeWorker,
+  });
+  try {
+    const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+    await assert.rejects(SharedCpuWorkerPool.create({
+      workerWasm: module,
+      workerCount: 2,
+      contextCount: 2,
+      pageCount: 1,
+    }), /worker startup failed/);
+    assert.deepEqual(terminated, [0, 1], 'startup failure must terminate ready and failing workers');
+  } finally {
+    if (previousIsolation) Object.defineProperty(globalThis, 'crossOriginIsolated', previousIsolation);
+    else delete globalThis.crossOriginIsolated;
+    if (previousWorker) Object.defineProperty(globalThis, 'Worker', previousWorker);
+    else delete globalThis.Worker;
+  }
+});
+
 test('disposal rejects pending worker requests and terminates every worker', async () => {
   const pool = makePool({ workerCount: 2 });
   let rejectPending;

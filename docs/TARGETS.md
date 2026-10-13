@@ -48,9 +48,9 @@ instructions, and a batch containing both guest contexts. The guest writes disti
 for each thread and updates a shared total with a locked instruction; the harness checks
 `t0=5133 t1=4459 total=9592` and exit code 0. `test/shared-cpu-pool.test.mjs` also checks that two
 contexts occupy separate worker slots and context offsets while sharing one process-wide
-instruction reservation. It verifies failed-worker cleanup, pool disposal, and rejection when
-cross-origin isolation is absent. The standalone no-std overlap probe directly observed two
-workers active at once and checked atomic totals, context checksums, and stack guards. These
+instruction reservation. It verifies failed-worker cleanup, partial-startup cleanup, pool disposal,
+and rejection when cross-origin isolation is absent. The standalone no-std overlap probe directly
+observed two workers active at once and checked atomic totals, context checksums, and stack guards. These
 synthetic results do not establish target performance or Diligent acceptance.
 
 ## Sources and build
