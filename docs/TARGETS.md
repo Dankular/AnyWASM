@@ -67,7 +67,8 @@ mainTls=0x5555 mainLast=0x6666 rendezvous=2 stack=2`, exit code 0, and an observ
 active worker slices. The Chrome 155.0.8059.40 run retired 908,335 worker instructions across 11
 two-context batches. It also caught an x64 guest-thread entry stack bug: the runtime omitted the
 32-byte home area, so a compiled stack local landed beyond its allocated stack. Thread entry now
-starts at `stack_base - 0x28`, matching the main-thread ABI setup. See
+starts at `stack_base - 0x28`, placing the return address and home area according to the Win64
+function-entry convention. See
 [`target-data/shared-cpu-overlap-2026-10-13.json`](target-data/shared-cpu-overlap-2026-10-13.json).
 `MODE=fault` runs
 `fixtures/shared_fault_test.exe`: a shared-worker breakpoint returns to the coordinator, the
