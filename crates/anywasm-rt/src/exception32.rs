@@ -1868,6 +1868,78 @@ mod tests {
     }
 
     #[test]
+    fn pe32_nested_rtl_unwind_takes_over_a_phase_two_callback() {
+        const TARGET_FRAME: u64 = STACK + 0x180;
+        const TARGET_HANDLER: u64 = CODE + 0x240;
+        const NESTED_LANDING: u64 = CODE + 0xa0;
+        const FIRST_CALLS: u64 = MARKER + 0x10;
+        const TARGET_CALLS: u64 = MARKER + 0x14;
+        const OUTER_EXCEPTION_RECORD: u64 = CODE + 0x700;
+        const NESTED_RETURN: u32 = 0x1357_9bdf;
+
+        let mut process = process_with_frame_handler();
+        let rtl_unwind = process.thunk_for("ntdll", "RtlUnwind", false).unwrap();
+        process.wr32(FRAME, TARGET_FRAME as u32).unwrap();
+        process.wr32(TARGET_FRAME, u32::MAX).unwrap();
+        process
+            .wr32(TARGET_FRAME + 4, TARGET_HANDLER as u32)
+            .unwrap();
+
+        // The first unwind callback initiates a second unwind to TARGET_FRAME.
+        let mut handler = vec![0xb9]; // mov ecx, FIRST_CALLS
+        handler.extend_from_slice(&(FIRST_CALLS as u32).to_le_bytes());
+        handler.extend_from_slice(&[
+            0xff, 0x01, // inc dword ptr [ecx]
+            0x68, // push NESTED_RETURN
+        ]);
+        handler.extend_from_slice(&NESTED_RETURN.to_le_bytes());
+        handler.extend_from_slice(&[
+            0x68, 0, 0, 0, 0,    // push NULL ExceptionRecord
+            0x68, // push NESTED_LANDING
+        ]);
+        handler.extend_from_slice(&(NESTED_LANDING as u32).to_le_bytes());
+        handler.push(0x68); // push TARGET_FRAME
+        handler.extend_from_slice(&(TARGET_FRAME as u32).to_le_bytes());
+        handler.push(0xb8); // mov eax, RtlUnwind thunk
+        handler.extend_from_slice(&(rtl_unwind as u32).to_le_bytes());
+        handler.extend_from_slice(&[
+            0xff, 0xd0, // call eax
+            0x31, 0xc0, // unreachable: xor eax, eax
+            0xc2, 0x10, 0x00, // ret 16
+        ]);
+        process.write_bytes(HANDLER, &handler).unwrap();
+
+        let mut target_handler = vec![0xb9]; // mov ecx, TARGET_CALLS
+        target_handler.extend_from_slice(&(TARGET_CALLS as u32).to_le_bytes());
+        target_handler.extend_from_slice(&[
+            0xff, 0x01, // inc dword ptr [ecx]
+            0xb8, 1, 0, 0, 0, // ExceptionContinueSearch
+            0xc2, 0x10, 0x00, // ret 16
+        ]);
+        process
+            .write_bytes(TARGET_HANDLER, &target_handler)
+            .unwrap();
+
+        process.wr32(OUTER_EXCEPTION_RECORD + 4, 0).unwrap();
+        let outer_context = context_from_cpu(&process.cpu, (CODE + 0x40) as u32, RAISE_RSP as u32);
+        let outer_unwind = GuestUnwind32 {
+            target_frame: TARGET_FRAME,
+            target_ip: (CODE + 0x60) as u64,
+            exception_record: OUTER_EXCEPTION_RECORD,
+            return_value: 0x2468,
+            context_gpr: outer_context.gpr,
+            context_eflags: outer_context.eflags,
+        };
+
+        assert_eq!(unwind_to_rtl32(&mut process, outer_unwind), Ok(0));
+        assert_eq!(process.cpu.rip, NESTED_LANDING);
+        assert_eq!(process.cpu.gpr[RAX], NESTED_RETURN as u64);
+        assert_eq!(process.rd32(FIRST_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(TARGET_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), TARGET_FRAME as u32);
+    }
+
+    #[test]
     fn nested_exception_disposition_marks_the_record_and_continues_search() {
         const OUTER_FRAME: u64 = STACK + 0x180;
         const OUTER_HANDLER: u64 = CODE + 0x180;
