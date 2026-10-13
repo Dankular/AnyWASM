@@ -1168,9 +1168,10 @@ protection. Mod overlays remain unverified.
 - The corrected seed-1 route now reaches its teleport and a controlled terminal stop. Flashlight
   behavior at more aim positions, other gameplay states, other UAV formats, and general staging
   readback remain untested.
-- The virtual registry now keeps process-local volatile keys and values. The `RegOpenKeyExA`,
-  `RegCreateKeyExA`, `RegSetValueExA`, `RegQueryValueExA`, and `RegCloseKey` slice supports
-  case-insensitive key/value lookup, nested create/open, two-pass value sizing, and `ERROR_MORE_DATA`.
+- The virtual registry now keeps process-local volatile keys and values. The `RegOpenKeyA`,
+  `RegOpenKeyExA`, `RegCreateKeyExA`, `RegSetValueExA`, `RegQueryValueExA`, and `RegCloseKey` slice
+  supports case-insensitive key/value lookup, nested create/open, two-pass value sizing, and
+  `ERROR_MORE_DATA`.
   It has no seeded target configuration, persistence, enumeration, or wide-character API support;
   add values only when target evidence identifies the path and required contents.
 - HLE-only Tutorial01 and Tutorial03 now have visible cooperative-mode first-frame captures without

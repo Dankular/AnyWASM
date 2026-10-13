@@ -21,6 +21,7 @@ extern "C" {
 
 pub fn lookup(name: &str) -> Option<HleFn> {
     match name {
+        "RegOpenKeyA" => Some(reg_open_key_a),
         "RegOpenKeyExA" => Some(reg_open_key_ex_a),
         "RegCreateKeyExA" => Some(reg_create_key_ex_a),
         "RegSetValueExA" => Some(reg_set_value_ex_a),
@@ -85,16 +86,51 @@ fn registry_value_name(name: &str) -> String {
 
 /// Opens predefined roots and keys created in this process's volatile registry.
 fn reg_open_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
+    let (root, subkey, options, access, result) = (
+        process.arg(0),
+        process.arg(1),
+        process.arg(2) as u32 as u64,
+        process.arg(3) as u32,
+        process.arg(4),
+    );
+    open_key_a(
+        process,
+        root,
+        subkey,
+        options,
+        access,
+        result,
+        "RegOpenKeyExA",
+    )
+}
+
+fn reg_open_key_a(process: &mut Process) -> Result<u64, Stop> {
+    let (root, subkey, result) = (process.arg(0), process.arg(1), process.arg(2));
+    open_key_a(
+        process,
+        root,
+        subkey,
+        0,
+        0x0002_0019,
+        result,
+        "RegOpenKeyA",
+    )
+}
+
+fn open_key_a(
+    process: &mut Process,
+    root: u64,
+    subkey_ptr: u64,
+    options: u64,
+    access: u32,
+    result_ptr: u64,
+    api_name: &str,
+) -> Result<u64, Stop> {
     const ERROR_SUCCESS: u64 = 0;
     const ERROR_FILE_NOT_FOUND: u64 = 2;
     const ERROR_INVALID_HANDLE: u64 = 6;
     const ERROR_INVALID_PARAMETER: u64 = 87;
     const REG_OPTION_OPEN_LINK: u64 = 8;
-    let root = process.arg(0);
-    let subkey_ptr = process.arg(1);
-    let options = process.arg(2) as u32 as u64;
-    let access = process.arg(3) as u32;
-    let result_ptr = process.arg(4);
     let subkey = if subkey_ptr == 0 {
         String::new()
     } else {
@@ -104,7 +140,7 @@ fn reg_open_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
     if process.trace_imports {
         process.stderr.extend_from_slice(
             format!(
-                "[registry] RegOpenKeyExA root={root:#x} subkey={subkey:?} options={options:#x} access={access:#x}\n"
+                "[registry] {api_name} root={root:#x} subkey={subkey:?} options={options:#x} access={access:#x}\n"
             )
             .as_bytes(),
         );
