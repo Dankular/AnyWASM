@@ -311,10 +311,11 @@
   copy, and catch transfer. The catch funclet runs with its parent EBP and saved throw-site ESP, then
   returns the post-catch continuation in EAX. PE32 CRT initializer arrays now use four-byte entries,
   and `InitializeSListHead` clears the 8-byte x86 or 16-byte x64 header. A normal `/MD` PE32 startup
-  advances through its initializers but still reaches the unimplemented `_except_handler4_common`
-  import while dispatching an access violation. The analyzer now accepts supported I386/PE32 and
-  AMD64/PE32+ pairs. X86 EH4, general PE32 CRT startup, and nested/collided SEH unwind dispositions
-  remain unsupported.
+  now reaches `crt!exit` and returns 0; the startup trace exposed and fixed its missing stdcall cleanup
+  for `InitializeSListHead`. The startup image imports `_except_handler4_common`, which remains
+  unimplemented if an exception enters that EH4 handler. The analyzer now accepts supported I386/PE32
+  and AMD64/PE32+ pairs. X86 EH4, broader PE32 API compatibility, and nested/collided SEH unwind
+  dispositions remain unsupported.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   Historical `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` runs with `--mode d3d11` reached
   virtual D3D11 device discovery/creation before stopping at the unresolved `MSVCP140.dll`

@@ -46,11 +46,15 @@ foreach ($variant in $variants) {
     $commands += 'if errorlevel 1 exit /b %errorlevel%'
 }
 
-# PE32 uses the legacy absolute-pointer EH3 format.  Enter main directly so this fixture
-# isolates C++ EH from the separate EH4 wrapper used by the MSVC CRT startup object.
+# PE32 uses the legacy absolute-pointer EH3 format.
 $setupX86 = 'call "{0}" -no_logo -arch=x86 -host_arch=x64' -f $devCmd
 $commands += $setupX86
 $commands += 'if errorlevel 1 exit /b %errorlevel%'
+$x86StartupOutput = Join-Path $outputDirectory 'eh3-x86-dynamic.exe'
+$commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /W4 /d2FH4- ' +
+    '/Fe:"' + $x86StartupOutput + '" "' + $source + '"'
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
+# Direct entry isolates C++ EH from the separate EH4 wrapper used by the MSVC CRT startup object.
 $x86Output = Join-Path $outputDirectory 'eh3-x86-direct.exe'
 $commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- ' +
     '/Fe:"' + $x86Output + '" "' + $source + '" ' +

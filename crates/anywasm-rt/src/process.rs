@@ -537,6 +537,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "UnmapViewOfFile",
                     "GetSystemInfo",
                     "IsProcessorFeaturePresent",
+                    "InitializeSListHead",
                     "ReleaseMutex",
                     "FreeEnvironmentStringsA",
                     "FreeEnvironmentStringsW",
@@ -4909,6 +4910,7 @@ mod scheduler_tests {
             stdcall_stack_bytes("kernel32", "RemoveVectoredExceptionHandler"),
             4
         );
+        assert_eq!(stdcall_stack_bytes("kernel32", "InitializeSListHead"), 4);
         assert_eq!(stdcall_stack_bytes("kernel32", "TlsSetValue"), 8);
         assert_eq!(stdcall_stack_bytes("kernel32", "GetCurrentThreadId"), 0);
         assert_eq!(stdcall_stack_bytes("kernel32", "GetVersionExA"), 4);
