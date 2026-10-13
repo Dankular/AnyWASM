@@ -3,9 +3,10 @@
 **Status:** the opt-in `?sharedCpuWorkers` path dispatches distinct runnable x64 guest contexts to
 two no-std CPU workers over shared guest-frame memory; the coordinator owns HLE, faults, exceptions,
 and process state. The parallel fixture verifies overlapping slices, interlocked shared memory,
-per-thread TLS/TEB values, and stack isolation. The separate `?inPlaceCpu` variant and its worker
-artifacts link successfully, but its browser path has not been replayed. Worker x87 execution,
-worker-side JIT, and target-level parallelism/performance remain open.
+per-thread TLS/TEB values, and stack isolation. The `?inPlaceCpu` coordinator/worker build also passes
+the browser parallel fixture, including two overlapping worker slices and teardown with outstanding
+pool allocations. Worker x87 execution, worker-side JIT, and target-level parallelism/performance
+remain open.
 
 ## Goal and scope
 
@@ -72,6 +73,12 @@ sample rendering path. Those remain in the parent runtime goal.
   `?sharedCpuWorkers` and runs `hello.exe` to exit 0. A later `parallel_test.exe` browser fixture
   exercises concurrent contexts, TEB/TLS isolation, a locked shared counter, worker overlap, and
   startup fallback; its exact run is recorded in `docs/TARGETS.md`.
+- The separate in-place browser build imports one shared `WebAssembly.Memory` for the coordinator and
+  CPU workers. In Chrome 155, `parallel_test.exe` exited 0 with two workers, 84 parallel batches,
+  861,861 worker-retired instructions, correct shared counter/TLS/TEB/rendezvous/stack results, and
+  pool teardown after worker disposal. The replay establishes the in-place synthetic path. Target
+  performance remains unverified; see
+  [`the in-place disposal replay`](../../target-data/shared-cpu-inplace-dispose-2026-10-13.json).
 
 ## Feasibility spike result (2026-10-12)
 
