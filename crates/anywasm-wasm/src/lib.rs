@@ -179,6 +179,10 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             s.message = b"internal PE32 C++ catch transfer escaped its exception dispatcher".to_vec();
             3
         }
+        Stop::GuestSehTransfer32(_) => {
+            s.message = b"internal PE32 SEH transfer escaped its exception dispatcher".to_vec();
+            3
+        }
     }
 }
 
