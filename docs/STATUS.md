@@ -247,8 +247,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   feasibility probe reached two concurrent no-std Wasm workers with disjoint contexts/stacks, an
   exact shared atomic count, and a measured maximum concurrency of two. Full-runtime-shaped
   instances alias mutable statics and a stand-in cursor value; the probe does not exercise `std`'s
-  allocator, and the production runtime still cannot link against shared memory because its
-  prebuilt `std` lacks atomics/bulk-memory. A coordinator/CPU-worker split is documented in
+  allocator. The default `web/anywasm_wasm.wasm` remains a private-memory coordinator. A separate
+  `?inPlaceCpu` build uses imported shared memory and LLD's `--no-check-features` to bypass missing
+  atomics/bulk-memory metadata in the installed prebuilt `std`; on 2026-10-13, both the shared
+  coordinator and in-place CPU-worker release artifacts linked with those flags. This confirms the
+  build, not a browser replay of the in-place path. A coordinator/CPU-worker split is documented in
   [`sharedarraybuffer-guest-threads-design.md`](superpowers/specs/2026-10-12-sharedarraybuffer-guest-threads-design.md);
   `anywasm-cpu-state` contains the `no_std` fixed-layout CPU context, decoder, generic instruction
   executor, versioned shared-memory header, atomic worker-slot handoff, and permission-checked
