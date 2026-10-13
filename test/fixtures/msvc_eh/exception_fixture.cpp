@@ -81,11 +81,29 @@ __declspec(noinline) static int destructor_during_unwind() {
     return g_destructorRuns == 1 ? 0 : 2;
 }
 
+__declspec(noinline) static void throw_from_inner_frame() {
+    DestructorProbe probe;
+    throw Derived{};
+}
+
+__declspec(noinline) static int catch_from_outer_frame() {
+    g_destructorRuns = 0;
+    try {
+        throw_from_inner_frame();
+    } catch (const Base& value) {
+        if (value.tag != kBaseTag) return 1;
+    } catch (...) {
+        return 2;
+    }
+    return g_destructorRuns == 1 ? 0 : 3;
+}
+
 int main() {
     if (catch_derived_by_value() != 0) return 10;
     if (catch_base_by_reference() != 0) return 20;
     if (catch_all_second_exception() != 0) return 30;
     if (nested_catch() != 0) return 40;
     if (destructor_during_unwind() != 0) return 50;
+    if (catch_from_outer_frame() != 0) return 60;
     return 0;
 }

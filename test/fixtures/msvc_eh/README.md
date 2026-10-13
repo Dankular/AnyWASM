@@ -21,6 +21,7 @@ The C++ fixtures return 0 only when all paths pass. Their return codes identify 
 | 30 | Catch a second exception with `catch (...)` |
 | 40 | Catch through nested try blocks |
 | 50 | Run the local destructor during exception unwind |
+| 60 | Catch across a registration frame and run the inner-frame destructor |
 
 `seh-x86.exe` returns 0 only when filter selection, exception continuation, and both normal and
 unwind-time termination handlers pass:
@@ -100,3 +101,10 @@ verified `EXCEPTION_CONTINUE_SEARCH`, `EXCEPTION_CONTINUE_EXECUTION`, exception-
 EH4 registration record and cookie-encoded scope table, validates local cookies with the image's
 `__security_check_cookie`, and transfers to the selected handler through the PE32 dispatcher. This
 does not yet cover nested/collided unwind dispositions or every compiler-specific EH4 layout.
+
+On 2026-10-13, the C++ fixture added exit code 60 for a cross-registration-frame transfer: a noinline
+callee owns a `DestructorProbe` and throws `Derived`, while its caller catches `Base` by reference and
+checks the inner destructor ran exactly once. The native `eh3-x86-direct.exe`, HLE-only emulation of
+that direct-entry image with a 2,000,000-step cap, and HLE-only emulation of the normal-startup
+`eh3-x86-dynamic.exe` all returned 0. This verifies this direct caller/callee catch path; it does not
+cover arbitrary frame layouts, nested/collided unwind dispositions, or custom catch-copy closures.

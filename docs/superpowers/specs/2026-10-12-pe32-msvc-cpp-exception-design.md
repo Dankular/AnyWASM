@@ -1,8 +1,9 @@
 # Native MSVC C++ Exception Support for PE32
 
-**Status:** EH3 metadata search and a bounded second-pass catch transfer are implemented and compile,
-but have not been exercised with a native x86 fixture. The broader compatibility goal remains active
-across Win32, PE32, DLLs, graphics, CPU features, browser, and packaging.
+**Status:** EH3 metadata search and bounded second-pass catch transfer are implemented. A native
+x86 fixture verifies one caller/callee catch transfer with inner-frame destructor execution. The
+broader compatibility goal remains active across Win32, PE32, DLLs, graphics, CPU features, browser,
+and packaging.
 
 ## Goal
 
@@ -59,7 +60,8 @@ node's current state. The compile-only fixture established that its compiler thu
 `FuncInfo` in EAX; it is not passed through an x64-style dispatcher context. A selected catch is
 recorded during search, then the dispatcher performs a second pass over registrations through the
 target, runs EH state actions, unlinks frames above the target, and installs the saved target stack
-and catch IP in the x86 `CONTEXT`. Runtime behavior of this transfer remains unverified.
+and catch IP in the x86 `CONTEXT`. A native x86 fixture now verifies one caller/callee catch transfer
+and confirms the inner-frame destructor runs once.
 
 The first-pass handler searches active try blocks in compiler order, matches typed catches and
 catch-all only for native C++ exceptions, and records a target catch together with its registration
@@ -90,9 +92,10 @@ silently selecting a handler.
 - x64 PE32+ EH3/EH4 parsing and dispatch remain on the existing code path.
 - `/EHa` conversion of arbitrary CPU faults into C++ catches, CLR/WinRT exceptions, x86 EH4,
   exception specifications, `exception_ptr`, and future compiler encodings remain out of scope.
-- Cross-registration-frame catch transfer is implemented but unverified. Custom x86 catch-copy
-  closures and the post-catch thrown-object destructor are not implemented; trivial by-value copies
-  use a checked guest-memory copy. Nested/collided SEH unwind dispositions remain unsupported.
+- One direct cross-registration-frame catch transfer and inner-frame destructor are fixture-verified.
+  Other frame layouts remain untested. Custom x86 catch-copy closures and the post-catch
+  thrown-object destructor are not implemented; trivial by-value copies use a checked guest-memory
+  copy. Nested/collided SEH unwind dispositions remain unsupported.
 - Unwind funclets execute as guest code and lower their registration state before running. Nested
   exception behavior during cleanup has not been verified.
 - An unmatched C++ exception continues through outer registration frames, then follows the existing
@@ -107,8 +110,8 @@ silently selecting a handler.
   unmatched propagation to an outer frame, nested try blocks, and destructor order during target
   and intervening-frame unwind.
 - A native MSVC x86 `/MD /EHsc` fixture built with EH4 disabled covers typed, base, catch-all,
-  nested, by-value/by-reference, and destructor cases. Require matching native and emulator exit
-  results both with the runtime DLLs present and with HLE-only imports.
+  nested, by-value/by-reference, destructor, and one cross-registration-frame case. Native and
+  HLE-only direct-entry and normal-startup runs return matching zero exit results.
 - Existing PE32 SEH/VEH tests, the x64 EH3/EH4 fixture suite, `cargo test -p anywasm-rt`, and
   `cargo build --workspace` remain green.
 

@@ -343,8 +343,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   runtime and returns 0 for by-value and adjusted-reference catches, catch-all, nested try/catch, and
   destructor execution during unwind. This exercised the PE32 EH3 search, two-pass unwind, by-value
   copy, and catch transfer. The catch funclet runs with its parent EBP and saved throw-site ESP, then
-  returns the post-catch continuation in EAX. PE32 CRT initializer arrays now use four-byte entries,
-  and `InitializeSListHead` clears the 8-byte x86 or 16-byte x64 header. A normal `/MD` PE32 startup
+  returns the post-catch continuation in EAX. A new cross-frame fixture case throws from a noinline
+  callee with an active destructor and catches by base reference in its caller; native x86 and HLE-only
+  direct-entry and normal-startup runs all returned 0 under the 2,000,000-step cap. This verifies
+  caller/callee registration transfer and inner-frame cleanup for this case. PE32 CRT initializer
+  arrays now use four-byte entries, and `InitializeSListHead` clears the 8-byte x86 or 16-byte x64
+  header. A normal `/MD` PE32 startup
   now reaches `crt!exit` and returns 0; the startup trace exposed and fixed its missing stdcall cleanup
   for `InitializeSListHead`. `_except_handler4_common` now decodes the PE32 registration and scope
   records, checks image-local security cookies, runs filters and `__finally` handlers, and transfers
@@ -427,8 +431,9 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
   this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested
-  x64 CPU-fault subset and PE32 linked-handler subsets. PE32 C++ EH3's outer-frame catch-transfer
-  path remains unverified. The bounded PE32 `_except_handler4_common` subset is implemented and
+  x64 CPU-fault subset and PE32 linked-handler subsets. One direct PE32 C++ EH3 outer-frame catch and
+  inner-frame destructor path is verified; other frame layouts remain untested. The bounded PE32
+  `_except_handler4_common` subset is implemented and
   fixture-tested for continue-search, continue-execution, exception-code access, and normal or
   unwind-time `__finally` execution. Nested/collided unwind dispositions, custom catch-copy
   closures, and other compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
