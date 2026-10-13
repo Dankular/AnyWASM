@@ -7,6 +7,8 @@ static const int kDerivedTag = 0x2468;
 static volatile int g_destructorRuns = 0;
 static volatile int g_copyRuns = 0;
 static volatile int g_thrownObjectDestructorRuns = 0;
+static volatile int g_nestedCleanupCaught = 0;
+static const int kNestedCleanupCode = 0x3579;
 
 struct Prefix {
     unsigned long long words[2];
@@ -27,6 +29,16 @@ struct Derived : Prefix, Base {
 
 struct DestructorProbe {
     ~DestructorProbe() { ++g_destructorRuns; }
+};
+
+struct NestedCleanupProbe {
+    ~NestedCleanupProbe() {
+        try {
+            throw kNestedCleanupCode;
+        } catch (int value) {
+            g_nestedCleanupCaught = value;
+        }
+    }
 };
 
 struct CopyProbe {
@@ -95,6 +107,19 @@ __declspec(noinline) static int destructor_during_unwind() {
         return 1;
     }
     return g_destructorRuns == 1 ? 0 : 2;
+}
+
+__declspec(noinline) static int nested_exception_during_unwind() {
+    g_nestedCleanupCaught = 0;
+    try {
+        NestedCleanupProbe probe;
+        throw Derived{};
+    } catch (const Base& value) {
+        if (value.tag != kBaseTag) return 1;
+    } catch (...) {
+        return 2;
+    }
+    return g_nestedCleanupCaught == kNestedCleanupCode ? 0 : 3;
 }
 
 __declspec(noinline) static void throw_from_inner_frame() {
@@ -180,6 +205,10 @@ int main() {
     if (destructor_during_unwind() != 0) return 50;
 #if defined(_M_IX86)
     CHECK_MAIN_STACK(85);
+#endif
+    if (nested_exception_during_unwind() != 0) return 51;
+#if defined(_M_IX86)
+    CHECK_MAIN_STACK(88);
 #endif
     if (catch_from_outer_frame() != 0) return 60;
 #if defined(_M_IX86)

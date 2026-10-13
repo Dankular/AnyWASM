@@ -1,6 +1,6 @@
 # MSVC C++ exception fixtures
 
-`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes five fixtures under
+`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes seven fixtures under
 the ignored `target/msvc-cpp-eh/` directory. The EH4 compile prints `cl /Bv`, including the
 compiler and linker versions, so a run can be tied to the toolchain that emitted the metadata.
 
@@ -9,6 +9,10 @@ compiler and linker versions, so a run can be tied to the toolchain that emitted
 - `eh3-x86-dynamic.exe` is a PE32 build with the normal MSVC CRT startup and legacy FH3 metadata.
 - `eh3-x86-direct.exe` is a PE32 build using legacy FH3. It enters `main` directly to isolate the
   C++ EH path from the CRT startup's EH4 wrapper.
+- `terminate-x86.exe` verifies that an exception escaping a destructor during stack unwinding
+  invokes `std::terminate` even when an outer `catch (...)` could otherwise catch it.
+- `terminate-unhandled-x86.exe` verifies the same termination when the nested exception has no
+  matching handler.
 - `seh-x86.exe` exercises PE32 C `__try`/`__except`/`__finally` with the normal MSVC CRT startup.
 - The binaries dynamically import the MSVC/UCRT runtime; the script does not copy runtime DLLs.
 
@@ -21,6 +25,7 @@ The C++ fixtures return 0 only when all paths pass. Their return codes identify 
 | 30 | Catch a second exception with `catch (...)` |
 | 40 | Catch through nested try blocks |
 | 50 | Run the local destructor during exception unwind |
+| 51 | Catch a nested C++ exception raised and handled inside an unwind destructor |
 | 60 | Catch across a registration frame and run the inner-frame destructor |
 | 71 | Nontrivial catch-by-value object has the wrong copied value |
 | 72 | Nontrivial catch-by-value copy constructor did not run |
@@ -163,3 +168,9 @@ run inside the catch body, then requires exactly one destructor call after the h
 native x86 direct/startup and x64 EH3/EH4 fixture binaries all return 0. HLE-only x86 direct/startup
 and x64 EH3/EH4 fixture runs also return 0. The x86 handler calls the executable unwind function
 recorded in `ThrowInfo` after the catch funclet returns and before it installs the catch continuation.
+
+The `NestedCleanupProbe` throws and catches an integer inside its destructor while a different C++
+exception is being unwound; the outer typed catch still completes. The two `terminate-*-x86.exe`
+fixtures cover exceptions that escape cleanup, both with an outer catch that must not run and with no
+matching handler. Native MSVC exits by fail-fast (`0xC0000409`); the HLE CLI and browser runtime report
+`std::terminate was called during guest C++ exception processing`.

@@ -9,15 +9,17 @@ import { chromium } from 'playwright-core';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const fixtureDirectory = join(repoRoot, 'target', 'msvc-cpp-eh');
-const fixtureNames = [
-  'eh3-dynamic',
-  'eh4-dynamic',
-  'eh3-x86-dynamic',
-  'eh3-x86-direct',
-  'seh-x86',
+const fixtureCases = [
+  { name: 'eh3-dynamic', status: '1', exitCode: '0' },
+  { name: 'eh4-dynamic', status: '1', exitCode: '0' },
+  { name: 'eh3-x86-dynamic', status: '1', exitCode: '0' },
+  { name: 'eh3-x86-direct', status: '1', exitCode: '0' },
+  { name: 'seh-x86', status: '1', exitCode: '0' },
+  { name: 'terminate-x86', status: '3', exitCode: '0', message: 'std::terminate was called' },
+  { name: 'terminate-unhandled-x86', status: '3', exitCode: '0', message: 'std::terminate was called' },
 ];
-const missing = fixtureNames
-  .map((name) => join(fixtureDirectory, `${name}.exe`))
+const missing = fixtureCases
+  .map(({ name }) => join(fixtureDirectory, `${name}.exe`))
   .filter((path) => !existsSync(path));
 if (missing.length) {
   throw new Error(`build MSVC exception fixtures first: ${missing.join(', ')}`);
@@ -28,11 +30,11 @@ const cliPath = join(repoRoot, 'target', 'debug', `anywasm${process.platform ===
 const tempRoot = resolve(tmpdir());
 const tempDirectory = mkdtempSync(join(tempRoot, 'anywasm-browser-exception-'));
 assert.equal(dirname(resolve(tempDirectory)), tempRoot, 'temporary packages must stay in the temp directory');
-const bundles = fixtureNames.map((name) => {
+const bundles = fixtureCases.map(({ name, ...expected }) => {
   const executable = join(fixtureDirectory, `${name}.exe`);
   const bundle = join(tempDirectory, `${name}.awb`);
   execFileSync(cliPath, ['pack', executable, '-o', bundle], { cwd: repoRoot, stdio: 'ignore' });
-  return { name, bundle };
+  return { name, bundle, expected };
 });
 
 const server = spawn(process.execPath, ['web/serve.mjs', '8099'], { cwd: repoRoot, stdio: 'ignore' });
@@ -49,7 +51,7 @@ try {
   await page.goto('http://localhost:8099/index.html?test=1');
 
   const results = [];
-  for (const { name, bundle } of bundles) {
+  for (const { name, bundle, expected } of bundles) {
     const label = `${name}.awb`;
     await page.locator('#file').setInputFiles(bundle);
     await page.waitForFunction((expectedLabel) => {
@@ -62,8 +64,9 @@ try {
       exitCode: status.dataset.exit,
     }));
     const terminalOutput = await page.locator('#term').textContent();
-    assert.equal(result.status, '1', `${label} should exit cleanly: ${JSON.stringify({ result, terminalOutput })}`);
-    assert.equal(result.exitCode, '0', `${label} returned a failing exit code: ${JSON.stringify({ result, terminalOutput })}`);
+    assert.equal(result.status, expected.status, `${label} returned the wrong status: ${JSON.stringify({ result, terminalOutput })}`);
+    assert.equal(result.exitCode, expected.exitCode, `${label} returned the wrong exit code: ${JSON.stringify({ result, terminalOutput })}`);
+    if (expected.message) assert.ok(result.text.includes(expected.message), `${label} missed its diagnostic: ${result.text}`);
     results.push({ fixture: name, ...result });
   }
 

@@ -678,18 +678,22 @@ fn unwind_state_map(
         if let Some(action) = entry.action {
             let previous_ebp = p.cpu.gpr[RBP];
             p.cpu.gpr[RBP] = frame_base;
+            let unwind_marker = (p.current_thread_id, registration);
+            p.active_cpp_unwind_frames.push(unwind_marker);
             let result = p.call_guest(action, &[]);
+            let popped_marker = p.active_cpp_unwind_frames.pop();
+            debug_assert_eq!(popped_marker, Some(unwind_marker));
             p.cpu.gpr[RBP] = previous_ebp;
             if let Err(stop) = result {
-                return Err(match stop {
+                return match stop {
                     Stop::GuestUnwind(_)
                     | Stop::GuestUnwind32(_)
                     | Stop::GuestCatch32(_)
                     | Stop::GuestSehTransfer32(_) => {
-                        unsupported("a guest exception was raised from an x86 C++ unwind funclet")
+                        crate::msvc_eh::std_terminate(p).map(|_| ())
                     }
-                    other => other,
-                });
+                    other => Err(other),
+                };
             }
         }
         state = entry.to_state;

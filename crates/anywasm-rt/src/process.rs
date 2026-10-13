@@ -374,6 +374,8 @@ pub struct Process {
     pub native_hooks: Vec<(u64, String)>,
     /// Active guest C++ exception unwind depth, kept per guest thread.
     pub guest_exception_depths: HashMap<u32, u32>,
+    /// PE32 EH3 registration frames whose unwind funclets are currently executing.
+    pub(crate) active_cpp_unwind_frames: Vec<(u32, u64)>,
     pub current_thread_is_guest: bool,
     pub current_thread_state: ThreadState,
     pub current_wait_order: u64,
@@ -1051,6 +1053,7 @@ impl Process {
             current_teb_base: TEB_ADDR,
             native_hooks: Vec::new(),
             guest_exception_depths: HashMap::new(),
+            active_cpp_unwind_frames: Vec::new(),
             current_thread_is_guest: false,
             current_thread_state: ThreadState::Running,
             current_wait_order: 0,

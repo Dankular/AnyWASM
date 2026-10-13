@@ -42,6 +42,7 @@ const CONTEXT32_EIP: u64 = 0xb8;
 const CONTEXT32_EFLAGS: u64 = 0xc0;
 const CONTEXT32_ESP: u64 = 0xc4;
 const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
+const MSVC_CPP_EXCEPTION: u32 = 0xe06d_7363;
 const STATUS_INTEGER_DIVIDE_BY_ZERO: u32 = 0xc000_0094;
 const STATUS_ILLEGAL_INSTRUCTION: u32 = 0xc000_001d;
 const STATUS_PRIVILEGED_INSTRUCTION: u32 = 0xc000_0096;
@@ -1171,6 +1172,23 @@ fn unwind_to_catch32(
                 catch.target_frame
             ))
         })?;
+    // A handler below the frame whose cleanup is running can catch locally inside the
+    // destructor. Reaching that frame or an older one means the new exception escaped cleanup.
+    if let Some((_, unwind_registration)) = p
+        .active_cpp_unwind_frames
+        .iter()
+        .rev()
+        .find(|(thread_id, _)| *thread_id == p.current_thread_id)
+    {
+        if let Some(unwind_index) = searched_frames
+            .iter()
+            .position(|frame| frame.registration as u64 == *unwind_registration)
+        {
+            if target_index >= unwind_index {
+                return crate::msvc_eh::std_terminate(p);
+            }
+        }
+    }
     let target = searched_frames[target_index];
     let transfer = exception_record + 32;
     for (offset, value) in [
@@ -1534,6 +1552,13 @@ fn unhandled_exception(
     skip_ret_on_resume: bool,
     reason: String,
 ) -> Result<u64, Stop> {
+    if p.rd32(exception_record)? == MSVC_CPP_EXCEPTION
+        && p.active_cpp_unwind_frames
+            .iter()
+            .any(|(thread_id, _)| *thread_id == p.current_thread_id)
+    {
+        return crate::msvc_eh::std_terminate(p);
+    }
     let pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS32_SIZE, true);
     p.wr32(pointers, exception_record as u32)?;
     p.wr32(pointers + 4, context_record as u32)?;

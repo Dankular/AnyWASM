@@ -736,13 +736,14 @@ frames. Synthetic regressions cover a changed outer target and a catch-funclet c
 selected frame. Nested targets behind the active frame, different context records, and targets
 outside the pre-searched frames remain unsupported. Optional history table pointers are validated
 and forwarded to language handlers; the runtime leaves their cache entries unchanged.
-The rebuilt release WASM and
-Asyncify module also pass all five HLE-only exception
-fixture packages in Chromium with no page errors. The compiled PE32
-EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and
-one caller/callee catch transfer; the direct-entry and normal-startup x86 variants return 0 in the
-HLE-only runtime. Full nested-frame bookkeeping, redirects outside the searched x64 frames, history
-table cache updates, other PE32 frame layouts, and broader compiler metadata remain unverified. See
+The rebuilt release WASM and Asyncify module pass five normal HLE-only exception fixture packages
+and two intentional termination packages in Chromium with no page errors. The compiled PE32 EH3
+fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, one
+caller/callee catch transfer, and a nested exception caught inside an unwind destructor. Separate
+x86 cases report `std::terminate` when a second exception escapes cleanup, whether an outer catch
+could otherwise match it or no handler exists. Full nested-frame bookkeeping, redirects outside the
+searched x64 frames, history table cache updates, other PE32 frame layouts, and broader compiler
+metadata remain unverified. See
 [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
 for the fixture matrix and exit-code meanings.
 

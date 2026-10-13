@@ -60,6 +60,17 @@ $commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- ' +
     '/Fe:"' + $x86Output + '" "' + $source + '" ' +
     '/link /ENTRY:main /DEFAULTLIB:vcruntime.lib /DEFAULTLIB:ucrt.lib'
 $commands += 'if errorlevel 1 exit /b %errorlevel%'
+$x86TerminateOutput = Join-Path $outputDirectory 'terminate-x86.exe'
+$x86TerminateSource = Join-Path $PSScriptRoot 'terminate_x86_fixture.cpp'
+$commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- ' +
+    '/Fe:"' + $x86TerminateOutput + '" "' + $x86TerminateSource + '" ' +
+    '/link /ENTRY:main /DEFAULTLIB:vcruntime.lib /DEFAULTLIB:ucrt.lib'
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
+$x86TerminateUnhandledOutput = Join-Path $outputDirectory 'terminate-unhandled-x86.exe'
+$commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- /DTERMINATE_UNHANDLED ' +
+    '/Fe:"' + $x86TerminateUnhandledOutput + '" "' + $x86TerminateSource + '" ' +
+    '/link /ENTRY:main /DEFAULTLIB:vcruntime.lib /DEFAULTLIB:ucrt.lib'
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
 $x86SehOutput = Join-Path $outputDirectory 'seh-x86.exe'
 $x86SehSource = Join-Path $PSScriptRoot 'seh_fixture.c'
 $x86SehObject = Join-Path $outputDirectory 'seh_fixture.obj'

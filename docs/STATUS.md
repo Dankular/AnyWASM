@@ -425,7 +425,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   probe confirmed compiler-generated handler thunks place the absolute FuncInfo pointer in EAX
   before jumping to `__CxxFrameHandler3`. A direct-entry x86 MSVC fixture now runs under the HLE-only
   runtime and returns 0 for by-value and adjusted-reference catches, catch-all, nested try/catch, and
-  destructor execution during unwind. This exercised the PE32 EH3 search, two-pass unwind, by-value
+  destructor execution during unwind. A nested integer exception caught inside a destructor also
+  leaves the outer typed catch intact. If a nested C++ exception escapes a cleanup funclet, the
+  runtime invokes `std::terminate` before a handler in the frame being unwound can catch it; the
+  same behavior applies when no handler matches. Native x86, HLE CLI, and Chromium fixtures cover
+  both escaping cases. This exercised the PE32 EH3 search, two-pass unwind, by-value
   copy, and catch transfer. The catch funclet runs with its parent EBP and saved throw-site ESP, then
   returns the post-catch continuation in EAX. A new cross-frame fixture case throws from a noinline
   callee with an active destructor and catches by base reference in its caller; native x86 and HLE-only

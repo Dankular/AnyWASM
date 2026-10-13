@@ -102,8 +102,10 @@ silently selecting a handler.
   executable ThrowInfo unwind function exactly once after catch-object setup and before restoring
   the catch continuation; the fixture verifies the thrown object stays alive through a by-reference
   catch and is destroyed after the body. Nested/collided SEH unwind dispositions remain unsupported.
-- Unwind funclets execute as guest code and lower their registration state before running. Nested
-  exception behavior during cleanup has not been verified.
+- Unwind funclets execute as guest code and lower their registration state before running. A nested
+  exception caught inside the destructor is allowed to complete. If it escapes the cleanup frame,
+  the runtime calls `std::terminate`, even when an outer C++ handler could match it. The active EH3
+  registration frame distinguishes local cleanup catches from handlers outside the destructor.
 - An unmatched C++ exception continues through outer registration frames, then follows the existing
   top-level filter and unhandled-exception behavior.
 
@@ -118,6 +120,10 @@ silently selecting a handler.
 - A native MSVC x86 `/MD /EHsc` fixture built with EH4 disabled covers typed, base, catch-all,
   nested, by-value/by-reference, destructor, and one cross-registration-frame case. Native and
   HLE-only direct-entry and normal-startup runs return matching zero exit results.
+- Separate native x86 fixtures verify that a destructor exception escaping during stack unwinding
+  terminates before an outer catch runs and when no handler matches. HLE-only CLI and Chromium runs
+  report the `std::terminate` crash; the existing fixture with a locally caught nested exception
+  continues to exit 0.
 - Existing PE32 SEH/VEH tests, the x64 EH3/EH4 fixture suite, `cargo test -p anywasm-rt`, and
   `cargo build --workspace` remain green.
 
@@ -126,6 +132,8 @@ silently selecting a handler.
 - [Microsoft `__CxxFrameHandler3` reference](https://learn.microsoft.com/en-us/windows/win32/memory/cxxframehandler3)
   documents the registration-node arguments and states that context and dispatcher-context inputs
   are unused on Intel processors.
+- [C++ draft, exception handling](https://eel.is/c%2B%2Bdraft/except.throw) says that an exception
+  escaping a destructor invoked during stack unwinding calls `std::terminate`.
 - Local MSVC 14.44 headers `ehdata.h` and `ehdata_values.h` define the x86 registration node,
   absolute-pointer EH3 metadata, exception-record parameter count, and supported EH magic values.
 - Existing x64 design: `docs/superpowers/specs/2026-10-12-msvc-cpp-exception-support-design.md`.
