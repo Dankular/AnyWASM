@@ -3305,7 +3305,7 @@ mod tests {
         }
 
         // PREMODULATE is supported for color and alpha at stage 0. Stage 1
-        // can select CURRENT, while PREMODULATE and bump operations stay unsupported.
+        // can select CURRENT; stage-1 PREMODULATE and bump operations stay unsupported.
         for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, 17)] {
             p.wr32(STACK + offset, value).unwrap();
         }
@@ -3355,15 +3355,32 @@ mod tests {
                 1
             ]
         );
-        for (stage, value) in [(1, 4), (1, 17), (0, 22), (0, 23), (1, 22), (1, 23)] {
-            for (offset, word) in [(4, device as u32), (8, stage), (12, 1), (16, value)] {
+        let gpu_before_unsupported = p.extra.gpu.buf.clone();
+        let states_before_unsupported = p.extra.com.d3d9_texture_stage_states.clone();
+        for (stage, state, value) in [
+            (1, 1, 4),
+            (1, 1, 17),
+            (0, 1, 22),
+            (0, 1, 23),
+            (1, 1, 22),
+            (1, 1, 23),
+            (0, 4, 22),
+            (0, 4, 23),
+            (1, 4, 4),
+            (1, 4, 17),
+            (1, 4, 22),
+            (1, 4, 23),
+        ] {
+            for (offset, word) in [(4, device as u32), (8, stage), (12, state), (16, value)] {
                 p.wr32(STACK + offset, word).unwrap();
             }
             assert_eq!(
                 set_texture_stage_state(&mut p).unwrap(),
                 D3DERR_NOTAVAILABLE,
-                "operation {value} at stage {stage}"
+                "operation {value} at stage {stage}, state {state}"
             );
+            assert_eq!(p.extra.gpu.buf, gpu_before_unsupported);
+            assert_eq!(p.extra.com.d3d9_texture_stage_states, states_before_unsupported);
         }
     }
 
