@@ -564,12 +564,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   filter resumes the guest. A second regression grows a table containing `__C_specific_handler`,
   verifies both search and unwind calls, and transfers through its catch landing pad. The optional
   out-of-process debugger callback DLL is not used.
-  A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
-  executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
-  this path is compile-checked but not runtime-verified. X64 exception search now propagates
-  `EXCEPTION_NESTED_CALL` from an `ExceptionNestedException` disposition to the recorded outer
-  establisher and clears it when that frame is reached; a three-frame runtime regression checks the
-  set and clear transitions. General SEH remains open beyond the tested
+  A tested version 1 `RtlVirtualUnwind` subset is in place. A synthetic runtime regression now
+  dispatches through a mapped executable leaf without a `.pdata` entry, unwinds its return address,
+  and reaches an outer `.pdata` handler before the top-level filter resumes execution. X64 exception
+  search now propagates `EXCEPTION_NESTED_CALL` from an `ExceptionNestedException` disposition to the
+  recorded outer establisher and clears it when that frame is reached; a three-frame runtime regression
+  checks the set and clear transitions. General SEH remains open beyond the tested
   x64 CPU-fault subset and PE32 linked-handler subsets. One direct PE32 C++ EH3 outer-frame catch and
   inner-frame destructor path is verified; other frame layouts remain untested. The bounded PE32
   `_except_handler4_common` subset is implemented and

@@ -3319,6 +3319,69 @@ mod tests {
     }
 
     #[test]
+    fn exception_search_unwinds_through_a_mapped_leaf_without_pdata() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const LEAF_PC: u64 = IMAGE_BASE + 0x220;
+        const OUTER_PC: u64 = IMAGE_BASE + 0x110;
+        const EXCEPTION_HANDLER: u64 = IMAGE_BASE + 0x600;
+        const TOP_LEVEL_FILTER: u64 = IMAGE_BASE + 0x780;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const HANDLER_MARKER: u64 = INFO + 0x280;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x160;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        process.modules.push(test_module());
+
+        process.wr32(IMAGE_BASE + 0x500, 0x100).unwrap();
+        process.wr32(IMAGE_BASE + 0x504, 0x120).unwrap();
+        process.wr32(IMAGE_BASE + 0x508, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 0x09).unwrap(); // version 1, EHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process
+            .wr32(IMAGE_BASE + 0x304, (EXCEPTION_HANDLER - IMAGE_BASE) as u32)
+            .unwrap();
+
+        let mut exception_handler = vec![0x48, 0xb8]; // mov rax, HANDLER_MARKER
+        exception_handler.extend_from_slice(&HANDLER_MARKER.to_le_bytes());
+        exception_handler.extend_from_slice(&[
+            0xc7, 0x00, 1, 0, 0, 0, // mov dword ptr [rax], 1
+            0xb8, 1, 0, 0, 0, // EXCEPTION_CONTINUE_SEARCH
+            0xc3,
+        ]);
+        process
+            .write_bytes(EXCEPTION_HANDLER, &exception_handler)
+            .unwrap();
+
+        let mut top_filter = vec![0x48, 0x8b, 0x41, 0x08]; // mov rax, [rcx + ContextRecord]
+        top_filter.extend_from_slice(&[0x48, 0xba]); // mov rdx, LANDING_PAD
+        top_filter.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        top_filter.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+        process.write_bytes(TOP_LEVEL_FILTER, &top_filter).unwrap();
+        process.top_level_exception_filter = TOP_LEVEL_FILTER;
+
+        process.wr64(RAISE_RSP, LEAF_PC).unwrap();
+        process.wr64(RAISE_RSP + 8, OUTER_PC).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], LEAF_PC);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(HANDLER_MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert!(process.skip_ret);
+    }
+
+    #[test]
     fn exception_context_starts_at_guest_caller_after_hle_return_slot() {
         let mut cpu = Cpu::new();
         cpu.gpr[RSP] = STACK - 8;
