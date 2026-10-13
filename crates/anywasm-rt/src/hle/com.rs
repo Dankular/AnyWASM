@@ -214,6 +214,8 @@ pub struct ComState {
     pub bound_dsv: u64,
     /// Current Direct3D 9 depth-stencil surface per device object.
     pub d3d9_depth_surfaces: HashMap<u64, u64>,
+    /// Current Direct3D 9 viewport per device, stored as the six D3DVIEWPORT9 words.
+    pub d3d9_viewports: HashMap<u64, [u32; 6]>,
     /// Direct3D 9 stream zero binding `(buffer, stride, offset)` per device.
     pub d3d9_stream0: HashMap<u64, (u64, u32, u32)>,
     /// Direct3D 9 index buffer binding per device.
@@ -648,6 +650,7 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
         let o = p.extra.com.objs.remove(&this).unwrap();
         p.extra.com.deferred_contexts.remove(&this);
         if matches!(&o.kind, Kind::Direct3DDevice9 { .. }) {
+            p.extra.com.d3d9_viewports.remove(&this);
             let bound = p
                 .extra
                 .com

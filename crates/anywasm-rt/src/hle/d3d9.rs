@@ -509,6 +509,7 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "BeginScene" | "EndScene") => |_| Ok(S_OK),
         ("IDirect3DDevice9", "Clear") => clear,
         ("IDirect3DDevice9", "SetViewport") => set_viewport,
+        ("IDirect3DDevice9", "GetViewport") => get_viewport,
         ("IDirect3DDevice9", "SetScissorRect") => set_scissor_rect,
         ("IDirect3DDevice9", "SetFVF") => set_fvf,
         ("IDirect3DDevice9", "GetFVF") => get_fvf,
@@ -1389,6 +1390,10 @@ fn create_device(p: &mut Process) -> R {
             height,
             fvf: 0,
         },
+    );
+    p.extra.com.d3d9_viewports.insert(
+        device,
+        [0, 0, width, height, 0.0f32.to_bits(), 1.0f32.to_bits()],
     );
     p.wrptr(out, device)?;
     if auto_depth {
@@ -2353,9 +2358,16 @@ fn clear(p: &mut Process) -> R {
 }
 
 fn set_viewport(p: &mut Process) -> R {
+    let device = p.arg(0);
     let desc = p.arg(1);
     if desc == 0 {
         return Ok(E_POINTER);
+    }
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
     }
     let (x, y, w, h) = (
         p.rd32(desc)?,
@@ -2367,6 +2379,10 @@ fn set_viewport(p: &mut Process) -> R {
         f32::from_bits(p.rd32(desc + 16)?),
         f32::from_bits(p.rd32(desc + 20)?),
     );
+    p.extra
+        .com
+        .d3d9_viewports
+        .insert(device, [x, y, w, h, minz.to_bits(), maxz.to_bits()]);
     p.extra.gpu.emit(
         op::SET_VIEWPORTS,
         Pk::new()
@@ -2378,6 +2394,28 @@ fn set_viewport(p: &mut Process) -> R {
             .f32(minz)
             .f32(maxz),
     );
+    Ok(S_OK)
+}
+
+fn get_viewport(p: &mut Process) -> R {
+    let (device, out) = (p.arg(0), p.arg(1));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    let Some(com::Kind::Direct3DDevice9 { width, height, .. }) = com::kind_of(p, device) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let viewport = p.extra.com.d3d9_viewports.get(&device).copied().unwrap_or([
+        0,
+        0,
+        width,
+        height,
+        0.0f32.to_bits(),
+        1.0f32.to_bits(),
+    ]);
+    for (index, value) in viewport.into_iter().enumerate() {
+        p.wr32(out + index as u64 * 4, value)?;
+    }
     Ok(S_OK)
 }
 
@@ -2958,6 +2996,94 @@ mod tests {
     use anywasm_cpu::cpu::RSP;
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
     use anywasm_cpu::CpuMode;
+
+    #[test]
+    fn get_viewport_returns_device_defaults_and_tracks_set_viewport() {
+        const STACK: u64 = 0x10000;
+        const DATA: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, DATA] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK + 4, device as u32).unwrap();
+        p.wr32(STACK + 8, DATA as u32).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "GetViewport").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let read_viewport = |p: &Process, address: u64| {
+            (0..6)
+                .map(|index| p.rd32(address + index * 4).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read_viewport(&p, DATA),
+            [0, 0, 640, 480, 0.0f32.to_bits(), 1.0f32.to_bits()]
+        );
+
+        let requested = [5, 7, 320, 240, 0.25f32.to_bits(), 0.75f32.to_bits()];
+        for (index, value) in requested.into_iter().enumerate() {
+            p.wr32(DATA + index as u64 * 4, value).unwrap();
+        }
+        p.wr32(STACK + 8, DATA as u32).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "SetViewport").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (opcode, payload) = commands
+            .last()
+            .expect("SetViewport should reach the renderer");
+        assert_eq!(*opcode, op::SET_VIEWPORTS);
+        assert_eq!(
+            payload,
+            &[
+                1u32.to_le_bytes(),
+                5.0f32.to_le_bytes(),
+                7.0f32.to_le_bytes(),
+                320.0f32.to_le_bytes(),
+                240.0f32.to_le_bytes(),
+                0.25f32.to_le_bytes(),
+                0.75f32.to_le_bytes(),
+            ]
+            .concat(),
+        );
+
+        for (index, value) in [device as u32, (DATA + 0x80) as u32]
+            .into_iter()
+            .enumerate()
+        {
+            p.wr32(STACK + 4 + index as u64 * 4, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "GetViewport").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        assert_eq!(read_viewport(&p, DATA + 0x80), requested);
+
+        p.wr32(STACK + 8, 0).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "GetViewport").unwrap()(&mut p).unwrap(),
+            E_POINTER
+        );
+    }
 
     #[test]
     fn create_texture_returns_a_guest_texture_and_emits_a_webgpu_resource() {
