@@ -187,8 +187,8 @@ The VFS and trace log are ignored local artifacts and are not produced by the no
 ### HLE-only Tutorial03 import probe
 
 The CLI rebuilt from the current worktree analyzed the dynamic-runtime Tutorial03 executable with its
-Release directory. The current report lists 209 implemented and 42 missing static imports. It
-implements 43 of 65 `MSVCP140.dll` imports and 15 of 18 `VCRUNTIME140.dll` imports;
+Release directory. The current report lists 210 implemented and 41 missing static imports. It
+implements 44 of 65 `MSVCP140.dll` imports and 15 of 18 `VCRUNTIME140.dll` imports;
 `VCRUNTIME140_1.dll`'s `__CxxFrameHandler4` is implemented. The missing imports are listed in
 [`target-imports/tutorial03-current-source.json`](target-imports/tutorial03-current-source.json).
 The analyzer preflight is `review`, `staticOnly: true`, and does not guarantee runtime success. These

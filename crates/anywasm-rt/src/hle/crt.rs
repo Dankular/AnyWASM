@@ -1153,12 +1153,27 @@ fn msvc_ios_base_set_precision(p: &mut Process) -> R {
     Ok(0)
 }
 
+fn msvc_ios_base_set_width(p: &mut Process) -> R {
+    p.wr64(p.arg(0) + 0x28, p.arg(1))?;
+    Ok(0)
+}
+
 fn msvc_setprecision(p: &mut Process) -> R {
     let output = p.arg(0);
     let precision_setter = p
         .thunk_for("msvcp", "__anywasm_ios_base_set_precision", true)
         .expect("creating the MSVC ios_base precision setter thunk");
     p.wr64(output, precision_setter)?;
+    p.wr64(output + 8, p.arg(1))?;
+    Ok(output)
+}
+
+fn msvc_setw(p: &mut Process) -> R {
+    let output = p.arg(0);
+    let width_setter = p
+        .thunk_for("msvcp", "__anywasm_ios_base_set_width", true)
+        .expect("creating the MSVC ios_base width setter thunk");
+    p.wr64(output, width_setter)?;
     p.wr64(output + 8, p.arg(1))?;
     Ok(output)
 }
@@ -1604,7 +1619,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             msvc_ostream_insert_ios_base_manipulator
         }
         "?setprecision@std@@YA?AU?$_Smanip@_J@1@_J@Z" => msvc_setprecision,
+        "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z" => msvc_setw,
         "__anywasm_ios_base_set_precision" => msvc_ios_base_set_precision,
+        "__anywasm_ios_base_set_width" => msvc_ios_base_set_width,
         "?good@ios_base@std@@QEBA_NXZ" => msvc_ios_base_good,
         "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ" => msvc_ios_base_getloc,
         "__anywasm_locale_facet_incref" => msvc_locale_facet_incref,
