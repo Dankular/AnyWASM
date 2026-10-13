@@ -284,11 +284,11 @@ register-stack subset):
       in-range SampleGrad footprint crossing the right edge are pixel-checked.
       An 8x anisotropic Texture2D comparison SampleCmp and Texture2DArray implicit Sample now have
       edge-crossing BORDER pixels. Texture2DArray SampleGrad and zero-bias SampleBias each return
-      `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. A
-      separate 8x anisotropic R8_UNORM Texture2DArray Sample returns `[76, 0, 0, 255]`, while
-      RG8_UNORM returns `[38, 114, 0, 255]` at that edge, verifying format-specific channel defaults.
-      An 8x anisotropic BC4_UNORM Texture2D SampleGrad also verifies a constant interior and a
-      channel-correct BORDER blend across the right edge.
+      `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. On R8_UNORM
+      and RG8_UNORM Texture2DArray views, 8x anisotropic Sample, SampleGrad, and zero-bias SampleBias
+      each return `[76, 0, 0, 255]` and `[38, 114, 0, 255]` at that edge, verifying channel defaults.
+      An 8x anisotropic BC4_UNORM Texture2D Sample, SampleBias, and SampleGrad also verify a constant
+      interior and channel-correct BORDER blends across the right edge.
       Texture3D R8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a
       3D edge footprint, verifying channel defaults and edge weighting.
       Texture3D RG8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 58, 0, 255]`
