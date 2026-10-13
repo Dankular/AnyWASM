@@ -20,6 +20,7 @@ build verconditionmask_test console kernel32.lib
 build pathfileexists_test console kernel32.lib shlwapi.lib
 build thread_test console kernel32.lib
 build thread_sync_test console kernel32.lib
+build parallel_test console kernel32.lib
 # The freestanding clang/lld path does not provide the CRT object that emits a PE TLS directory.
 # Build this one with a Visual Studio developer environment so libcmt's tlssup.obj emits it.
 if command -v cl.exe >/dev/null && command -v link.exe >/dev/null && [[ -n "${VCToolsInstallDir:-}" ]]; then
