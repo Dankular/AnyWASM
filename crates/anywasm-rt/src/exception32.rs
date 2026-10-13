@@ -994,18 +994,17 @@ fn unwind_to_rtl32_inner(
             Err(stop) => return Err(stop),
         };
         if disposition == EXCEPTION_COLLIDED_UNWIND {
-            let Some(target) = target_index else {
-                return Err(Stop::Crash(
-                    "PE32 RtlUnwind collision without a target frame is unsupported".into(),
-                ));
-            };
             collided_count += 1;
             if collided_count > MAX_SEH_FRAMES {
                 return Err(Stop::Crash(format!(
                     "PE32 RtlUnwind exceeded {MAX_SEH_FRAMES} collided redirects"
                 )));
             }
-            index = resume_collided_unwind32(p, dispatcher_context, &frames, index, target)?;
+            // With no target frame, the end of the active registration chain is
+            // the unwind boundary for a collided redirect.
+            let unwind_boundary = target_index.unwrap_or(frames.len());
+            index =
+                resume_collided_unwind32(p, dispatcher_context, &frames, index, unwind_boundary)?;
             continue;
         }
         if disposition != EXCEPTION_CONTINUE_SEARCH {
@@ -1516,7 +1515,9 @@ fn resume_collided_unwind32(
     }
 
     let next_index = redirect_index + 1;
-    let next_registration = searched_frames[next_index].registration;
+    let next_registration = searched_frames
+        .get(next_index)
+        .map_or(EXCEPTION_CHAIN_END, |frame| frame.registration);
     if head != next_registration {
         return Err(Stop::Crash(format!(
             "PE32 collided unwind next registration {head:#x} does not match searched frame {next_registration:#x}"
@@ -2006,6 +2007,310 @@ mod tests {
         assert_eq!(process.rd32(FIRST_FLAGS).unwrap(), EXCEPTION_UNWINDING);
         assert_eq!(process.rd32(SECOND_FLAGS).unwrap(), EXCEPTION_UNWINDING);
         assert_eq!(process.rd32(TEB_ADDR).unwrap(), EXCEPTION_CHAIN_END);
+        assert_eq!(process.rd32(RETURN_VALUE).unwrap(), UNWIND_RETURN);
+        assert_eq!(process.rd32(RESUMED_ESP).unwrap(), (RAISE_RSP + 20) as u32);
+    }
+
+    #[test]
+    fn rtl_unwind_null_target_completes_exit_unwind_before_unhandled_filter() {
+        const SECOND_FRAME: u64 = STACK + 0x180;
+        const SECOND_HANDLER: u64 = CODE + 0x200;
+        const TOP_FILTER: u64 = CODE + 0x300;
+        const EXCEPTION_RECORD: u64 = CODE + 0x700;
+        const FIRST_CALLS: u64 = MARKER + 0x10;
+        const SECOND_CALLS: u64 = MARKER + 0x14;
+        const FIRST_FLAGS: u64 = MARKER + 0x18;
+        const SECOND_FLAGS: u64 = MARKER + 0x1c;
+        const FILTER_CALLS: u64 = MARKER + 0x20;
+        const FILTER_FLAGS: u64 = MARKER + 0x24;
+        const FILTER_HEAD: u64 = MARKER + 0x28;
+        const FILTER_FIRST_CALLS: u64 = MARKER + 0x2c;
+        const FILTER_SECOND_CALLS: u64 = MARKER + 0x30;
+        const RETURN_VALUE: u64 = MARKER + 0x34;
+        const RESUMED_ESP: u64 = MARKER + 0x38;
+        const CALLER: u64 = CODE + 0x20;
+        const EXIT_CODE: u32 = 9;
+        const UNWIND_RETURN: u32 = 0xaabb_ccdd;
+
+        let mut process = process_with_frame_handler();
+        let rtl_unwind = process.thunk_for("ntdll", "RtlUnwind", false).unwrap();
+        process.wr32(TEB_ADDR, FRAME as u32).unwrap();
+        process.wr32(FRAME, SECOND_FRAME as u32).unwrap();
+        process.wr32(FRAME + 4, HANDLER as u32).unwrap();
+        process.wr32(SECOND_FRAME, EXCEPTION_CHAIN_END).unwrap();
+        process
+            .wr32(SECOND_FRAME + 4, SECOND_HANDLER as u32)
+            .unwrap();
+
+        for (handler, calls, flags) in [
+            (HANDLER, FIRST_CALLS, FIRST_FLAGS),
+            (SECOND_HANDLER, SECOND_CALLS, SECOND_FLAGS),
+        ] {
+            let mut code = vec![
+                0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_RECORD
+                0x8b, 0x50, 0x04, // mov edx, [eax + 4] -- ExceptionFlags
+                0xb9, // mov ecx, flags slot
+            ];
+            code.extend_from_slice(&(flags as u32).to_le_bytes());
+            code.extend_from_slice(&[0x89, 0x11, 0xb9]); // mov [ecx], edx; mov ecx, calls slot
+            code.extend_from_slice(&(calls as u32).to_le_bytes());
+            code.extend_from_slice(&[
+                0xff, 0x01, // inc dword ptr [ecx]
+                0xb8, 1, 0, 0, 0, // ExceptionContinueSearch
+                0xc2, 0x10, 0x00, // ret 16
+            ]);
+            process.write_bytes(handler, &code).unwrap();
+        }
+
+        let mut top_filter = vec![
+            0xa1, // mov eax, [FILTER_CALLS]
+        ];
+        top_filter.extend_from_slice(&(FILTER_CALLS as u32).to_le_bytes());
+        top_filter.extend_from_slice(&[0x40, 0xa3]); // inc eax; mov [FILTER_CALLS], eax
+        top_filter.extend_from_slice(&(FILTER_CALLS as u32).to_le_bytes());
+        top_filter.extend_from_slice(&[
+            0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_POINTERS
+            0x8b, 0x10, // mov edx, [eax] -- EXCEPTION_RECORD
+            0x8b, 0x42, 0x04, // mov eax, [edx + 4] -- ExceptionFlags
+            0xa3, // mov [FILTER_FLAGS], eax
+        ]);
+        top_filter.extend_from_slice(&(FILTER_FLAGS as u32).to_le_bytes());
+        top_filter.extend_from_slice(&[0xa1]); // mov eax, [TEB.ExceptionList]
+        top_filter.extend_from_slice(&(TEB_ADDR as u32).to_le_bytes());
+        top_filter.push(0xa3); // mov [FILTER_HEAD], eax
+        top_filter.extend_from_slice(&(FILTER_HEAD as u32).to_le_bytes());
+        top_filter.push(0xa1); // mov eax, [FIRST_CALLS]
+        top_filter.extend_from_slice(&(FIRST_CALLS as u32).to_le_bytes());
+        top_filter.push(0xa3); // mov [FILTER_FIRST_CALLS], eax
+        top_filter.extend_from_slice(&(FILTER_FIRST_CALLS as u32).to_le_bytes());
+        top_filter.push(0xa1); // mov eax, [SECOND_CALLS]
+        top_filter.extend_from_slice(&(SECOND_CALLS as u32).to_le_bytes());
+        top_filter.push(0xa3); // mov [FILTER_SECOND_CALLS], eax
+        top_filter.extend_from_slice(&(FILTER_SECOND_CALLS as u32).to_le_bytes());
+        top_filter.extend_from_slice(&[
+            0xb8, 0xff, 0xff, 0xff, 0xff, // EXCEPTION_CONTINUE_EXECUTION
+            0xc2, 0x04, 0x00, // ret 4
+        ]);
+        process.write_bytes(TOP_FILTER, &top_filter).unwrap();
+        process.top_level_exception_filter = TOP_FILTER;
+
+        process.wr32(EXCEPTION_RECORD, STATUS_UNWIND).unwrap();
+        process.wr32(EXCEPTION_RECORD + 4, 0).unwrap();
+        process.wr32(RAISE_RSP, CALLER as u32).unwrap();
+        process.wr32(RAISE_RSP + 4, 0).unwrap(); // null TargetFrame: exit unwind
+        process.wr32(RAISE_RSP + 8, 0).unwrap(); // ignored TargetIp
+        process
+            .wr32(RAISE_RSP + 12, EXCEPTION_RECORD as u32)
+            .unwrap();
+        process.wr32(RAISE_RSP + 16, UNWIND_RETURN).unwrap();
+        process
+            .wr32(RAISE_RSP + 20, crate::process::EXIT_MAGIC as u32)
+            .unwrap();
+
+        let mut caller = vec![0xa3]; // mov [RETURN_VALUE], eax
+        caller.extend_from_slice(&(RETURN_VALUE as u32).to_le_bytes());
+        caller.extend_from_slice(&[0x89, 0x25]); // mov [RESUMED_ESP], esp
+        caller.extend_from_slice(&(RESUMED_ESP as u32).to_le_bytes());
+        caller.push(0xb8); // mov eax, EXIT_CODE; ret
+        caller.extend_from_slice(&EXIT_CODE.to_le_bytes());
+        caller.push(0xc3);
+        process.write_bytes(CALLER, &caller).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        process.cpu.rip = rtl_unwind;
+
+        assert_eq!(process.run(300), Stop::Exit(EXIT_CODE));
+        assert_eq!(process.rd32(FIRST_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(SECOND_CALLS).unwrap(), 1);
+        assert_eq!(
+            process.rd32(FIRST_FLAGS).unwrap(),
+            EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+        );
+        assert_eq!(
+            process.rd32(SECOND_FLAGS).unwrap(),
+            EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+        );
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), EXCEPTION_CHAIN_END);
+        assert_eq!(process.rd32(FILTER_CALLS).unwrap(), 1);
+        assert_eq!(
+            process.rd32(FILTER_FLAGS).unwrap(),
+            EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+        );
+        assert_eq!(process.rd32(FILTER_HEAD).unwrap(), EXCEPTION_CHAIN_END);
+        assert_eq!(process.rd32(FILTER_FIRST_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(FILTER_SECOND_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(RETURN_VALUE).unwrap(), UNWIND_RETURN);
+        assert_eq!(process.rd32(RESUMED_ESP).unwrap(), (RAISE_RSP + 20) as u32);
+    }
+
+    #[test]
+    fn rtl_unwind_exit_handles_collided_redirect_to_chain_end() {
+        const SECOND_FRAME: u64 = STACK + 0x180;
+        const THIRD_FRAME: u64 = STACK + 0x1c0;
+        const SECOND_HANDLER: u64 = CODE + 0x200;
+        const THIRD_HANDLER: u64 = CODE + 0x240;
+        const TOP_FILTER: u64 = CODE + 0x300;
+        const EXCEPTION_RECORD: u64 = CODE + 0x700;
+        const FIRST_CALLS: u64 = MARKER + 0x10;
+        const SECOND_CALLS: u64 = MARKER + 0x14;
+        const THIRD_CALLS: u64 = MARKER + 0x18;
+        const FIRST_FLAGS: u64 = MARKER + 0x20;
+        const THIRD_FLAGS: u64 = MARKER + 0x24;
+        const FILTER_CALLS: u64 = MARKER + 0x28;
+        const FILTER_FLAGS: u64 = MARKER + 0x2c;
+        const FILTER_HEAD: u64 = MARKER + 0x30;
+        const FILTER_FIRST_CALLS: u64 = MARKER + 0x34;
+        const FILTER_SECOND_CALLS: u64 = MARKER + 0x38;
+        const FILTER_THIRD_CALLS: u64 = MARKER + 0x3c;
+        const RETURN_VALUE: u64 = MARKER + 0x40;
+        const RESUMED_ESP: u64 = MARKER + 0x44;
+        const CALLER: u64 = CODE + 0x20;
+        const EXIT_CODE: u32 = 9;
+        const UNWIND_RETURN: u32 = 0xaabb_ccdd;
+
+        let mut process = process_with_frame_handler();
+        let rtl_unwind = process.thunk_for("ntdll", "RtlUnwind", false).unwrap();
+        process.wr32(TEB_ADDR, FRAME as u32).unwrap();
+        process.wr32(FRAME, SECOND_FRAME as u32).unwrap();
+        process.wr32(FRAME + 4, HANDLER as u32).unwrap();
+        process.wr32(SECOND_FRAME, THIRD_FRAME as u32).unwrap();
+        process
+            .wr32(SECOND_FRAME + 4, SECOND_HANDLER as u32)
+            .unwrap();
+        process.wr32(THIRD_FRAME, EXCEPTION_CHAIN_END).unwrap();
+        process.wr32(THIRD_FRAME + 4, THIRD_HANDLER as u32).unwrap();
+
+        // The first unwind callback reports that a nested unwind already crossed
+        // the second registration. The dispatcher resumes at the third frame.
+        let mut first_handler = vec![
+            0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_RECORD
+            0x8b, 0x50, 0x04, // mov edx, [eax + 4] -- ExceptionFlags
+            0xb9, // mov ecx, FIRST_FLAGS
+        ];
+        first_handler.extend_from_slice(&(FIRST_FLAGS as u32).to_le_bytes());
+        first_handler.extend_from_slice(&[0x89, 0x11, 0xb9]); // mov [ecx], edx; mov ecx, FIRST_CALLS
+        first_handler.extend_from_slice(&(FIRST_CALLS as u32).to_le_bytes());
+        first_handler.extend_from_slice(&[
+            0xff, 0x01, // inc dword ptr [ecx]
+            0x8b, 0x44, 0x24, 0x10, // mov eax, [esp + 16] -- dispatcher context
+            0xc7, 0x00, // mov dword ptr [eax], SECOND_FRAME
+        ]);
+        first_handler.extend_from_slice(&(SECOND_FRAME as u32).to_le_bytes());
+        first_handler.extend_from_slice(&[
+            0xb8,
+            EXCEPTION_COLLIDED_UNWIND as u8,
+            0,
+            0,
+            0, // return collided unwind
+            0xc2,
+            0x10,
+            0x00, // ret 16
+        ]);
+        process.write_bytes(HANDLER, &first_handler).unwrap();
+
+        for (handler, calls, flags) in [
+            (SECOND_HANDLER, SECOND_CALLS, None),
+            (THIRD_HANDLER, THIRD_CALLS, Some(THIRD_FLAGS)),
+        ] {
+            let mut code = vec![
+                0xb9, // mov ecx, calls slot
+            ];
+            code.extend_from_slice(&(calls as u32).to_le_bytes());
+            code.extend_from_slice(&[0xff, 0x01]); // inc dword ptr [ecx]
+            if let Some(flags) = flags {
+                code.extend_from_slice(&[
+                    0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_RECORD
+                    0x8b, 0x50, 0x04, // mov edx, [eax + 4] -- ExceptionFlags
+                    0xb9, // mov ecx, flags slot
+                ]);
+                code.extend_from_slice(&(flags as u32).to_le_bytes());
+                code.extend_from_slice(&[0x89, 0x11]); // mov [ecx], edx
+            }
+            code.extend_from_slice(&[
+                0xb8, 1, 0, 0, 0, // ExceptionContinueSearch
+                0xc2, 0x10, 0x00, // ret 16
+            ]);
+            process.write_bytes(handler, &code).unwrap();
+        }
+
+        let mut top_filter = vec![
+            0xb9, // mov ecx, FILTER_CALLS
+        ];
+        top_filter.extend_from_slice(&(FILTER_CALLS as u32).to_le_bytes());
+        top_filter.extend_from_slice(&[0xff, 0x01]); // inc dword ptr [ecx]
+        top_filter.extend_from_slice(&[
+            0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_POINTERS
+            0x8b, 0x10, // mov edx, [eax] -- EXCEPTION_RECORD
+            0x8b, 0x42, 0x04, // mov eax, [edx + 4] -- ExceptionFlags
+            0xa3, // mov [FILTER_FLAGS], eax
+        ]);
+        top_filter.extend_from_slice(&(FILTER_FLAGS as u32).to_le_bytes());
+        top_filter.push(0xa1); // mov eax, [TEB.ExceptionList]
+        top_filter.extend_from_slice(&(TEB_ADDR as u32).to_le_bytes());
+        top_filter.push(0xa3); // mov [FILTER_HEAD], eax
+        top_filter.extend_from_slice(&(FILTER_HEAD as u32).to_le_bytes());
+        for (calls, observed) in [
+            (FIRST_CALLS, FILTER_FIRST_CALLS),
+            (SECOND_CALLS, FILTER_SECOND_CALLS),
+            (THIRD_CALLS, FILTER_THIRD_CALLS),
+        ] {
+            top_filter.push(0xa1); // mov eax, [calls]
+            top_filter.extend_from_slice(&(calls as u32).to_le_bytes());
+            top_filter.push(0xa3); // mov [observed], eax
+            top_filter.extend_from_slice(&(observed as u32).to_le_bytes());
+        }
+        top_filter.extend_from_slice(&[
+            0xb8, 0xff, 0xff, 0xff, 0xff, // EXCEPTION_CONTINUE_EXECUTION
+            0xc2, 0x04, 0x00, // ret 4
+        ]);
+        process.write_bytes(TOP_FILTER, &top_filter).unwrap();
+        process.top_level_exception_filter = TOP_FILTER;
+
+        process.wr32(EXCEPTION_RECORD, STATUS_UNWIND).unwrap();
+        process.wr32(EXCEPTION_RECORD + 4, 0).unwrap();
+        process.wr32(RAISE_RSP, CALLER as u32).unwrap();
+        process.wr32(RAISE_RSP + 4, 0).unwrap(); // null TargetFrame: exit unwind
+        process.wr32(RAISE_RSP + 8, 0).unwrap(); // ignored TargetIp
+        process
+            .wr32(RAISE_RSP + 12, EXCEPTION_RECORD as u32)
+            .unwrap();
+        process.wr32(RAISE_RSP + 16, UNWIND_RETURN).unwrap();
+        process
+            .wr32(RAISE_RSP + 20, crate::process::EXIT_MAGIC as u32)
+            .unwrap();
+
+        let mut caller = vec![0xa3]; // mov [RETURN_VALUE], eax
+        caller.extend_from_slice(&(RETURN_VALUE as u32).to_le_bytes());
+        caller.extend_from_slice(&[0x89, 0x25]); // mov [MARKER + 0x44], esp
+        caller.extend_from_slice(&(RESUMED_ESP as u32).to_le_bytes());
+        caller.push(0xb8); // mov eax, EXIT_CODE; ret
+        caller.extend_from_slice(&EXIT_CODE.to_le_bytes());
+        caller.push(0xc3);
+        process.write_bytes(CALLER, &caller).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        process.cpu.rip = rtl_unwind;
+
+        assert_eq!(process.run(400), Stop::Exit(EXIT_CODE));
+        assert_eq!(process.rd32(FIRST_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(SECOND_CALLS).unwrap(), 0);
+        assert_eq!(process.rd32(THIRD_CALLS).unwrap(), 1);
+        assert_eq!(
+            process.rd32(FIRST_FLAGS).unwrap(),
+            EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+        );
+        assert_eq!(
+            process.rd32(THIRD_FLAGS).unwrap(),
+            EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+        );
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), EXCEPTION_CHAIN_END);
+        assert_eq!(process.rd32(FILTER_CALLS).unwrap(), 1);
+        assert_eq!(
+            process.rd32(FILTER_FLAGS).unwrap(),
+            EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+        );
+        assert_eq!(process.rd32(FILTER_HEAD).unwrap(), EXCEPTION_CHAIN_END);
+        assert_eq!(process.rd32(FILTER_FIRST_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(FILTER_SECOND_CALLS).unwrap(), 0);
+        assert_eq!(process.rd32(FILTER_THIRD_CALLS).unwrap(), 1);
         assert_eq!(process.rd32(RETURN_VALUE).unwrap(), UNWIND_RETURN);
         assert_eq!(process.rd32(RESUMED_ESP).unwrap(), (RAISE_RSP + 20) as u32);
     }

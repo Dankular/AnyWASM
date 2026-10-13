@@ -601,12 +601,18 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   remains unverified. `ntdll!RtlUnwind` now captures a PE32 caller context and walks the live
   registration chain through its target, calls unwind handlers, and restores the requested target IP
   and return value. The main run loop also consumes direct PE32 requests outside exception search.
-  The synthetic regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback` covers a nested
-  request during phase two; a compiled target fixture is still missing. Exit-unwind completion
-  remains unsupported. X64 nested `RtlUnwindEx` now takes over the active phase-two walk, including
-  redirects from a selected C++ catch funclet. Synthetic regressions cover a changed outer target
-  and a catch-funclet continuation in the selected frame. Nested targets behind the active frame,
-  different context records, and targets outside the pre-searched frames remain unsupported. The
+  Null-target exit unwind runs termination handlers, supports bounded collided redirects within the
+  active registration chain, then dispatches the preserved unwind record through vectored handlers
+  and the top-level filter after the chain reaches its sentinel. Synthetic regressions
+  `rtl_unwind_null_target_completes_exit_unwind_before_unhandled_filter` and
+  `rtl_unwind_exit_handles_collided_redirect_to_chain_end` cover flags, redirect skipping, filter
+  state, and caller resumption. The nested phase-two request is covered by
+  `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback`. Compiled target fixtures for these
+  PE32 unwind paths are still missing. X64 nested `RtlUnwindEx` now takes over the active phase-two
+  walk, including redirects from a selected C++ catch funclet. Synthetic regressions cover a changed
+  outer target and a catch-funclet continuation in the selected frame. Nested targets behind the
+  active frame, different context records, and targets outside the pre-searched frames remain
+  unsupported. The
   runtime validates and forwards optional history table pointers but does not update their caches.
   Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
   compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
