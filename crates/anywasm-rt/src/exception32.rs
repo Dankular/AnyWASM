@@ -1937,6 +1937,80 @@ mod tests {
     }
 
     #[test]
+    fn rtl_unwind_chain_end_runs_all_handlers_and_resumes_the_guest_caller() {
+        const SECOND_FRAME: u64 = STACK + 0x180;
+        const SECOND_HANDLER: u64 = CODE + 0x200;
+        const FIRST_CALLS: u64 = MARKER + 0x10;
+        const SECOND_CALLS: u64 = MARKER + 0x14;
+        const FIRST_FLAGS: u64 = MARKER + 0x18;
+        const SECOND_FLAGS: u64 = MARKER + 0x1c;
+        const RETURN_VALUE: u64 = MARKER + 0x20;
+        const RESUMED_ESP: u64 = MARKER + 0x24;
+        const CALLER: u64 = CODE + 0x20;
+        const EXIT_CODE: u32 = 9;
+        const UNWIND_RETURN: u32 = 0xaabb_ccdd;
+
+        let mut process = process_with_frame_handler();
+        let rtl_unwind = process.thunk_for("ntdll", "RtlUnwind", false).unwrap();
+        process.wr32(TEB_ADDR, FRAME as u32).unwrap();
+        process.wr32(FRAME, SECOND_FRAME as u32).unwrap();
+        process.wr32(FRAME + 4, HANDLER as u32).unwrap();
+        process.wr32(SECOND_FRAME, EXCEPTION_CHAIN_END).unwrap();
+        process
+            .wr32(SECOND_FRAME + 4, SECOND_HANDLER as u32)
+            .unwrap();
+
+        for (handler, calls, flags) in [
+            (HANDLER, FIRST_CALLS, FIRST_FLAGS),
+            (SECOND_HANDLER, SECOND_CALLS, SECOND_FLAGS),
+        ] {
+            let mut code = vec![
+                0x8b, 0x44, 0x24, 0x04, // mov eax, [esp + 4] -- EXCEPTION_RECORD
+                0x8b, 0x50, 0x04, // mov edx, [eax + 4] -- ExceptionFlags
+                0xb9, // mov ecx, flags slot
+            ];
+            code.extend_from_slice(&(flags as u32).to_le_bytes());
+            code.extend_from_slice(&[0x89, 0x11, 0xb9]); // mov [ecx], edx; mov ecx, calls slot
+            code.extend_from_slice(&(calls as u32).to_le_bytes());
+            code.extend_from_slice(&[
+                0xff, 0x01, // inc dword ptr [ecx]
+                0xb8, 1, 0, 0, 0, // ExceptionContinueSearch
+                0xc2, 0x10, 0x00, // ret 16
+            ]);
+            process.write_bytes(handler, &code).unwrap();
+        }
+
+        process.wr32(RAISE_RSP, CALLER as u32).unwrap();
+        process.wr32(RAISE_RSP + 4, EXCEPTION_CHAIN_END).unwrap();
+        process.wr32(RAISE_RSP + 8, 0).unwrap();
+        process.wr32(RAISE_RSP + 12, 0).unwrap();
+        process.wr32(RAISE_RSP + 16, UNWIND_RETURN).unwrap();
+        process
+            .wr32(RAISE_RSP + 20, crate::process::EXIT_MAGIC as u32)
+            .unwrap();
+
+        let mut caller = vec![0xa3]; // mov [RETURN_VALUE], eax
+        caller.extend_from_slice(&(RETURN_VALUE as u32).to_le_bytes());
+        caller.extend_from_slice(&[0x89, 0x25]); // mov [RESUMED_ESP], esp
+        caller.extend_from_slice(&(RESUMED_ESP as u32).to_le_bytes());
+        caller.extend_from_slice(&[0xb8]); // mov eax, EXIT_CODE; ret
+        caller.extend_from_slice(&EXIT_CODE.to_le_bytes());
+        caller.push(0xc3);
+        process.write_bytes(CALLER, &caller).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        process.cpu.rip = rtl_unwind;
+
+        assert_eq!(process.run(200), Stop::Exit(EXIT_CODE));
+        assert_eq!(process.rd32(FIRST_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(SECOND_CALLS).unwrap(), 1);
+        assert_eq!(process.rd32(FIRST_FLAGS).unwrap(), EXCEPTION_UNWINDING);
+        assert_eq!(process.rd32(SECOND_FLAGS).unwrap(), EXCEPTION_UNWINDING);
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), EXCEPTION_CHAIN_END);
+        assert_eq!(process.rd32(RETURN_VALUE).unwrap(), UNWIND_RETURN);
+        assert_eq!(process.rd32(RESUMED_ESP).unwrap(), (RAISE_RSP + 20) as u32);
+    }
+
+    #[test]
     fn nested_exception_disposition_marks_the_record_and_continues_search() {
         const OUTER_FRAME: u64 = STACK + 0x180;
         const OUTER_HANDLER: u64 = CODE + 0x180;

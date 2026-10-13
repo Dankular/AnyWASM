@@ -715,11 +715,14 @@ The dispatcher layout and redirect rule follow the x86 unwind path in the
 unwind handlers, and transfers to the requested target IP with the supplied return value. The main
 run loop consumes direct requests outside exception search. It now handles the x86
 `EXCEPTION_CHAIN_END` sentinel by unwinding the full chain without exit-unwind flags and resuming at
-the captured caller, following the Windows Research Kernel dispatcher. This sentinel path is
-compile-verified but has no runtime fixture yet. A null `TargetFrame` now runs all termination
-handlers and dispatches the preserved unwind record through vectored handlers and the top-level
-filter. PE32 phase-two callbacks can now start a nested `RtlUnwind`; the new transfer takes over,
-and the callback's registration is skipped after validating it against the active chain. An
+the captured caller, following the Windows Research Kernel dispatcher. The guest-runtime regression
+`rtl_unwind_chain_end_runs_all_handlers_and_resumes_the_guest_caller` enters the `RtlUnwind` thunk
+through `Process::run`, checks both handlers run with unwind-only flags, verifies the chain reaches
+the sentinel, and confirms the return value and stdcall stack cleanup at the resumed caller. A null
+`TargetFrame` now runs all termination handlers and dispatches the preserved unwind record through
+vectored handlers and the top-level filter. PE32 phase-two callbacks can now start a nested
+`RtlUnwind`; the nested transfer takes over the active walk and skips the callback's registration
+after validating it against the active chain. An
 `RtlUnwind` target remains registered and its handler is not called. The synthetic guest-handler
 regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback` covers this behavior; there is no
 compiled target fixture yet. Nested x64 `RtlUnwindEx` from a phase-two callback, including a selected
