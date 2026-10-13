@@ -271,6 +271,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   in-place pool's allocations still outstanding. It does not force or instrument replacement of
   mapping/dirty blocks; see the
   [`in-place disposal replay`](target-data/shared-cpu-inplace-dispose-2026-10-13.json).
+  `node --test test/shared-cpu-pool.test.mjs` passes 13/13; allocator-focused cases assert exact
+  `aw_alloc`/`aw_free` size matches for 16-byte and 64-byte alignment and one-time disposal.
   A coordinator/CPU-worker split is documented in
   [`sharedarraybuffer-guest-threads-design.md`](superpowers/specs/2026-10-12-sharedarraybuffer-guest-threads-design.md);
   `anywasm-cpu-state` contains the `no_std` fixed-layout CPU context, decoder, generic instruction

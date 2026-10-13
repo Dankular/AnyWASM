@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SharedCpuCompletion, SharedCpuWorkerPool } from '../web/shared-cpu-pool.js';
+import { InPlaceSharedCpuPool } from '../web/shared-cpu-inplace-pool.js';
 
 const PAGE_BYTES = 4096;
 
@@ -38,6 +39,77 @@ function makePool({ workerCount = 1, threadIds = [] } = {}) {
   });
   return pool;
 }
+
+function makeInPlaceAllocationPool() {
+  const allocated = new Map();
+  const freed = [];
+  let nextRaw = 0x200003;
+  const pool = Object.create(InPlaceSharedCpuPool.prototype);
+  Object.assign(pool, {
+    anyWasm: {
+      x: {
+        aw_alloc(bytes) {
+          const raw = nextRaw;
+          nextRaw += 0x10000;
+          allocated.set(raw, bytes);
+          return raw;
+        },
+        aw_free(raw, bytes) {
+          assert.equal(bytes, allocated.get(raw), `free size for ${raw.toString(16)} must match aw_alloc`);
+          allocated.delete(raw);
+          freed.push({ raw, bytes });
+        },
+      },
+    },
+    allocations: [],
+    workers: [],
+    waiters: [],
+    busy: [],
+    disposed: false,
+  });
+  return { pool, allocated, freed };
+}
+
+test('in-place pool releases allocations with their original sizes across alignments', () => {
+  const { pool, allocated, freed } = makeInPlaceAllocationPool();
+  const stack = pool.alloc(128, 16);
+  const mappings = pool.alloc(4096, 64);
+
+  pool.release(stack);
+
+  assert.equal(stack.address % 16, 0);
+  assert.deepEqual(freed, [{ raw: stack.raw, bytes: 144 }]);
+  assert.equal(pool.allocations.length, 1);
+  assert.equal(allocated.get(mappings.raw), 4160);
+
+  pool.release(mappings);
+  assert.deepEqual(freed, [
+    { raw: stack.raw, bytes: 144 },
+    { raw: mappings.raw, bytes: 4160 },
+  ]);
+  assert.equal(allocated.size, 0);
+  assert.deepEqual(pool.allocations, []);
+});
+
+test('in-place pool disposal frees every outstanding allocation exactly once', () => {
+  const { pool, allocated, freed } = makeInPlaceAllocationPool();
+  const contexts = pool.alloc(2 * 784, 64);
+  const stacks = pool.alloc(2 * 1024 * 1024, 16);
+  pool.contextBlock = contexts;
+  pool.stackBlock = stacks;
+
+  pool.dispose();
+  pool.dispose();
+
+  assert.deepEqual(freed, [
+    { raw: contexts.raw, bytes: contexts.bytes + 64 },
+    { raw: stacks.raw, bytes: stacks.bytes + 16 },
+  ]);
+  assert.equal(allocated.size, 0);
+  assert.deepEqual(pool.allocations, []);
+  assert.equal(pool.contextBlock, null);
+  assert.equal(pool.stackBlock, null);
+});
 
 test('dispatches distinct contexts together within one process-wide budget', async () => {
   const pool = makePool({ workerCount: 2, threadIds: [10, 20] });
