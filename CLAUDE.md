@@ -298,11 +298,12 @@ register-stack subset):
       compiler rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad`
       untestable. `Texture1DArray` and `Texture2DArray` `GetDimensions` now pass through Naga's image
       size and layer queries; shader tests and Chromium pixels verify mip 0/1 widths, two elements,
-      and three levels. D32_FLOAT and D16_UNORM `TextureCubeArray.SampleCmp` and `SampleCmpLevelZero`
-      with LESS compare two-cube views beginning at face 6; Chromium reads false for cube 0 and true
-      for cube 1 in both formats and sampling methods, with no WebGPU validation errors. Cube-array `GetDimensions` also
-      returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip view. Additional
-      sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
+      and three levels. D32_FLOAT, D16_UNORM, and D24_UNORM_S8 `TextureCubeArray.SampleCmp` and
+      `SampleCmpLevelZero` with LESS compare two-cube views beginning at face 6; Chromium reads false
+      for cube 0 and true for cube 1 in all three formats and sampling methods, with no WebGPU
+      validation errors. D24 depth-only SRVs use the aspect-specific WebGPU depth format. Cube-array
+      `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
+      view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
       `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 samples remain open.
       Other staging formats and subresource layouts, format/resolve combinations, and render-state
       combinations remain open. Staging `Map(READ)`

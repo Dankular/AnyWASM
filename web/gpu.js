@@ -216,6 +216,8 @@ const BYTES = (f) => {
 };
 const isDepth = (f) => f.startsWith('depth');
 const hasStencil = (f) => f.includes('stencil');
+const depthAspectFormat = (f) => f === 'depth24plus-stencil8' ? 'depth24plus'
+  : f === 'depth32float-stencil8' ? 'depth32float' : f;
 
 const CMP = { 1: 'never', 2: 'less', 3: 'equal', 4: 'less-equal', 5: 'greater', 6: 'not-equal', 7: 'greater-equal', 8: 'always' };
 const STENCIL_OP = { 1: 'keep', 2: 'zero', 3: 'replace', 4: 'increment-clamp', 5: 'decrement-clamp', 6: 'invert', 7: 'increment-wrap', 8: 'decrement-wrap' };
@@ -1559,9 +1561,11 @@ export class GpuExecutor {
       return v.cache;
     }
     if (tex.kind !== 'texture') return null;
-    const format = this.viewFormat(v.format, tex);
+    const sourceFormat = this.viewFormat(v.format, tex);
+    const depthOnly = hasStencil(sourceFormat) && v.kind === 2;
+    const format = depthOnly ? depthAspectFormat(sourceFormat) : sourceFormat;
     const d = { format };
-    if (isDepth(format)) d.aspect = hasStencil(format) && v.kind === 2 ? 'depth-only' : 'all';
+    if (isDepth(sourceFormat)) d.aspect = depthOnly ? 'depth-only' : 'all';
     if (v.kind === 0 || v.kind === 1) { // render attachments: one mip, one layer, '2d'
       d.dimension = '2d'; d.baseMipLevel = v.mip; d.mipLevelCount = 1;
       const oneDArray = tex.dimension === '1d' && (v.kind === 1 ? v.dim === 2 : v.dim === 3);
