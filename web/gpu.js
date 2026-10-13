@@ -1245,6 +1245,21 @@ export class GpuExecutor {
     const r = this.res.get(id);
     if (!r) return;
     let uploadData = data, uploadRowPitch = rowPitch;
+    if (r.dxgi === 56 || r.dxgi === 58) {
+      uploadData = new Uint8Array(w * h * 2);
+      uploadRowPitch = w * 2;
+      const source = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const destination = new DataView(uploadData.buffer);
+      for (let row = 0; row < h; row++) {
+        for (let column = 0; column < w; column++) {
+          const offset = row * rowPitch + column * 2;
+          const value = r.dxgi === 56
+            ? source.getUint16(offset, true) / 65535
+            : Math.max(-1, source.getInt16(offset, true) / 32767);
+          destination.setUint16((row * w + column) * 2, floatToHalfBits(value), true);
+        }
+      }
+    }
     if (LEGACY_PACKED_16[r.dxgi]) {
       uploadData = new Uint8Array(w * h * 8);
       uploadRowPitch = w * 8;
@@ -2873,6 +2888,21 @@ export class GpuExecutor {
           }
         }
         return packed;
+      }
+      if (resource.dxgi === 56 || resource.dxgi === 58) {
+        const normalized = new Uint8Array(width * height * depth * 2);
+        const source = new DataView(output.buffer, output.byteOffset, output.byteLength);
+        const destination = new DataView(normalized.buffer);
+        for (let pixel = 0; pixel < width * height * depth; pixel++) {
+          const value = Math.max(resource.dxgi === 56 ? 0 : -1,
+            Math.min(1, halfBitsToFloat(source.getUint16(pixel * 2, true))));
+          if (resource.dxgi === 56) {
+            destination.setUint16(pixel * 2, roundToEven(value * 65535), true);
+          } else {
+            destination.setInt16(pixel * 2, value <= -1 ? -32768 : roundToEven(value * 32767), true);
+          }
+        }
+        return normalized;
       }
       return output;
     } finally {

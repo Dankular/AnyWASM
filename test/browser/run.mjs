@@ -5758,15 +5758,19 @@ try {
         TextureCubeArray<float> r8Source : register(t2);
         TextureCubeArray<float2> rg8Source : register(t3);
         TextureCubeArray<float> r16Source : register(t4);
+        TextureCubeArray<float> r16UnormSource : register(t5);
+        TextureCubeArray<float> r16SnormSource : register(t6);
         SamplerState sourceSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
-          if (position.y >= 40.0) {
+          if (position.y >= 56.0) {
             uint width, height, elements, levels;
-            if (position.x < 32.0) source.GetDimensions(0, width, height, elements, levels);
-            else if (position.x < 48.0) source.GetDimensions(1, width, height, elements, levels);
-            else if (position.x < 56.0) r8Source.GetDimensions(0, width, height, elements, levels);
-            else if (position.x < 60.0) rg8Source.GetDimensions(0, width, height, elements, levels);
-            else r16Source.GetDimensions(0, width, height, elements, levels);
+            if (position.x < 8.0) source.GetDimensions(0, width, height, elements, levels);
+            else if (position.x < 16.0) source.GetDimensions(1, width, height, elements, levels);
+            else if (position.x < 24.0) r8Source.GetDimensions(0, width, height, elements, levels);
+            else if (position.x < 32.0) rg8Source.GetDimensions(0, width, height, elements, levels);
+            else if (position.x < 40.0) r16Source.GetDimensions(0, width, height, elements, levels);
+            else if (position.x < 48.0) r16UnormSource.GetDimensions(0, width, height, elements, levels);
+            else r16SnormSource.GetDimensions(0, width, height, elements, levels);
             return float4(float(width) / 4.0, float(height) / 4.0, float(elements) / 16.0, float(levels) / 2.0);
           }
           if (position.y < 16.0) {
@@ -5785,10 +5789,23 @@ try {
             float value = r16Source.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
             return float4(value, 0.0, 0.0, 1.0);
           }
-          float4 coordinate = position.x < 20.0 ? float4(1.0, 0.0, 0.0, 0.0)
+          if (position.y < 40.0) {
+            float4 coordinate = position.x < 20.0 ? float4(1.0, 0.0, 0.0, 0.0)
             : position.x < 40.0 ? float4(1.0, 0.0, 0.0, 1.0)
             : float4(1.0, 1.0, 0.0, 0.0);
-          return source.SampleLevel(sourceSampler, coordinate, 0.0);
+            return source.SampleLevel(sourceSampler, coordinate, 0.0);
+          }
+          if (position.y < 48.0) {
+            float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
+            float value = r16UnormSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
+            return float4(value, 0.0, 0.0, 1.0);
+          }
+          if (position.y < 56.0) {
+            float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
+            float value = r16SnormSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
+            return float4(value, 0.0, 0.0, 1.0);
+          }
+          return float4(0.0, 0.0, 0.0, 1.0);
         }
       `, 'main', 'ps_5_0');
       const stream = [];
@@ -5824,6 +5841,10 @@ try {
       command(12, words(18, 2, 17, 49, 10, 0, 1, 6, 2)); // two RG8 cubes starting at face 6
       command(4, words(19, 4, 4, 1, 18, 54, 0x8, 0, 1, 0x4)); // R16_FLOAT cube array
       command(12, words(20, 2, 19, 54, 10, 0, 1, 6, 2)); // two R16_FLOAT cubes starting at face 6
+      command(4, words(21, 4, 4, 1, 18, 56, 0x8, 0, 1, 0x4)); // R16_UNORM cube array
+      command(12, words(22, 2, 21, 56, 10, 0, 1, 6, 2)); // two R16_UNORM cubes starting at face 6
+      command(4, words(23, 4, 4, 1, 18, 58, 0x8, 0, 1, 0x4)); // R16_SNORM cube array
+      command(12, words(24, 2, 23, 58, 10, 0, 1, 6, 2)); // two R16_SNORM cubes starting at face 6
       const cubeFaces = [
         [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255]],
         [[0, 255, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255]],
@@ -5873,6 +5894,18 @@ try {
         payload.set(words(19, 0, slice, 0, 0, 4, 4, 8, texels.length));
         payload.set(texels, 36); command(5, payload);
       }
+      const uploadR16Slices = (id, valueForSlice) => {
+        for (let slice = 0; slice < 18; slice++) {
+          const value = valueForSlice(slice);
+          const texels = new Uint8Array(32), texelView = new DataView(texels.buffer);
+          for (let i = 0; i < 16; i++) texelView.setUint16(i * 2, value, true);
+          const payload = new Uint8Array(36 + texels.length);
+          payload.set(words(id, 0, slice, 0, 0, 4, 4, 8, texels.length));
+          payload.set(texels, 36); command(5, payload);
+        }
+      };
+      uploadR16Slices(21, (slice) => slice < 6 ? 0 : slice < 12 ? 0x8000 : 0x4000);
+      uploadR16Slices(23, (slice) => slice < 6 ? 0 : slice < 12 ? 0x4000 : 0x2000);
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
       samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
@@ -5880,7 +5913,7 @@ try {
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
-      command(21, words(1, 2, 0)); command(19, words(1, 0, 5, 5, 12, 16, 18, 20)); command(20, words(1, 0, 1, 6));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 7, 5, 12, 16, 18, 20, 22, 24)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y = 32) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
@@ -5896,15 +5929,23 @@ try {
         selectedRG8Cube1: at(50, 20),
         selectedR16Cube0: at(10, 28),
         selectedR16Cube1: at(50, 28),
-        dimensions: at(10, 48),
-        r8Dimensions: at(50, 48),
-        rg8Dimensions: at(58, 48),
-        r16Dimensions: at(62, 48),
-        mip1Dimensions: at(42, 48),
+        selectedR16UnormCube0: at(10, 44),
+        selectedR16UnormCube1: at(50, 44),
+        selectedR16SnormCube0: at(10, 52),
+        selectedR16SnormCube1: at(50, 52),
+        dimensions: at(4, 60),
+        mip1Dimensions: at(12, 60),
+        r8Dimensions: at(20, 60),
+        rg8Dimensions: at(28, 60),
+        r16Dimensions: at(36, 60),
+        r16UnormDimensions: at(44, 60),
+        r16SnormDimensions: at(52, 60),
         viewDimension: gpu.views.get(5)?.cache?.dim,
         halfViewDimension: gpu.views.get(12)?.cache?.dim,
         rg8ViewDimension: gpu.views.get(18)?.cache?.dim,
         r16ViewDimension: gpu.views.get(20)?.cache?.dim,
+        r16UnormViewDimension: gpu.views.get(22)?.cache?.dim,
+        r16SnormViewDimension: gpu.views.get(24)?.cache?.dim,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
       };
@@ -5946,6 +5987,20 @@ try {
       && near(cubeArrayResult.r16Dimensions || [], [255, 255, 32, 128], 1),
     JSON.stringify({ cube0: cubeArrayResult.selectedR16Cube0, cube1: cubeArrayResult.selectedR16Cube1,
       dimensions: cubeArrayResult.r16Dimensions, view: cubeArrayResult.r16ViewDimension, errors: cubeArrayResult.errors }));
+  check('D3D11 TextureCubeArray R16_UNORM normalizes samples across cube ranges',
+    cubeArrayResult.errors?.length === 0 && cubeArrayResult.r16UnormViewDimension === 'cube-array'
+      && near(cubeArrayResult.selectedR16UnormCube0 || [], [128, 0, 0, 255], 1)
+      && near(cubeArrayResult.selectedR16UnormCube1 || [], [64, 0, 0, 255], 1)
+      && near(cubeArrayResult.r16UnormDimensions || [], [255, 255, 32, 128], 1),
+    JSON.stringify({ cube0: cubeArrayResult.selectedR16UnormCube0, cube1: cubeArrayResult.selectedR16UnormCube1,
+      dimensions: cubeArrayResult.r16UnormDimensions, view: cubeArrayResult.r16UnormViewDimension, errors: cubeArrayResult.errors }));
+  check('D3D11 TextureCubeArray R16_SNORM normalizes signed samples across cube ranges',
+    cubeArrayResult.errors?.length === 0 && cubeArrayResult.r16SnormViewDimension === 'cube-array'
+      && near(cubeArrayResult.selectedR16SnormCube0 || [], [128, 0, 0, 255], 1)
+      && near(cubeArrayResult.selectedR16SnormCube1 || [], [64, 0, 0, 255], 1)
+      && near(cubeArrayResult.r16SnormDimensions || [], [255, 255, 32, 128], 1),
+    JSON.stringify({ cube0: cubeArrayResult.selectedR16SnormCube0, cube1: cubeArrayResult.selectedR16SnormCube1,
+      dimensions: cubeArrayResult.r16SnormDimensions, view: cubeArrayResult.r16SnormViewDimension, errors: cubeArrayResult.errors }));
 
   const cubeArrayCompareResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
