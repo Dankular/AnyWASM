@@ -422,14 +422,15 @@ register-stack subset):
       scheduling under JIT and offscreen canvas resize after transfer remain open.
 
 ## 4. CPU correctness
-- [~] **AVX/BMI instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
+- [~] **AVX instruction coverage**: selected VEX forms now cover target-used VMOVUPS/APS,
       VMOVDQA/DQU, VMOVSS/SD, VPXOR/VXORPS, VADDSS/VDIVSS, VCOMISS/VUCOMISS, VROUNDSS,
       VCVTSI2SS/VCVTTSS2SI, VEXTRACTF128, VZEROUPPER, ANDN, SHLX, SHRX, BZHI, VPBROADCASTD,
       VPADDD, VMOVDQU, VMOVQ, VPEXTRD/Q, VCMPEQSS, VBLENDVPS, VPERMILPS/PD, VMOVD, and BLSI.
       Target-grounded packed-single VADDPS/VMULPS now support XMM and YMM forms; Tutorial03's
       observed sequence exercises the XMM forms beside VPERMILPS.
-      These are exact target-grounded forms, not broad AVX/AVX2/BMI2 support. Remaining
-      AVX/AVX2/BMI/FMA and AES/PCLMUL/MMX instructions are open.
+      These are exact target-grounded forms, not broad AVX/AVX2 support. BMI1 and BMI2 instruction
+      families are implemented and advertised through CPUID. Remaining AVX/AVX2/FMA and
+      AES/PCLMUL/MMX instructions are open.
 - [ ] **x87 precision**: currently f64, not 80-bit; implement soft-float 80-bit if a target needs it.
 - [x] Document `rcpps`/`rsqrtps` approximation behavior. Intel and AMD specify a maximum relative
       error of `1.5 × 2^-12`, without fixing exact result bits (confirmed by the linked manuals);
