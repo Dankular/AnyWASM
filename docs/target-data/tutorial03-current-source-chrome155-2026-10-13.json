@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-13T21:15:35+01:00",
+  "sourceRevision": "2cb03e4",
+  "target": "Diligent Tutorial03_Texturing",
+  "bundle": {
+    "path": "target/Tutorial03_Texturing-hle-only.awb",
+    "sha256": "fc6d43dbdae75e0457d78df5c2e6ea58a6aed7342ba682e4912f500a3d7590c25",
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11"
+  },
+  "runtime": {
+    "buildCommand": "cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release --target-dir C:\\Users\\sysadmin\\AppData\\Local\\Temp\\anywasm-current-wasm-2026-10-13",
+    "asyncifyCommand": "node scripts/asyncify-wasm.mjs <release wasm> <asyncified wasm>",
+    "sha256": "6481a007b4e489240c5cb021681b04e9f6b8a33cbb552a0da66bc95fc59014cc",
+    "bytes": 3116870
+  },
+  "browser": {
+    "name": "Chrome",
+    "version": "155.0.8059.40",
+    "crossOriginIsolated": true
+  },
+  "normalModeVisibleCanvas": {
+    "launchMode": "cooperative default; no sharedCpuWorkers parameter",
+    "runtime": "current-branch Asyncify artifact supplied through the Playwright browser context route",
+    "firstVisibleFrameSecondsAfterAdapterLog": 30,
+    "canvas": {
+      "width": 640,
+      "height": 513,
+      "coloredPixels": 328320,
+      "visualContent": "textured Diligent logo cube",
+      "screenshot": "docs/images/tutorial03-current-source-chrome155-2026-10-13.png"
+    },
+    "statusAtCapture": "Starting",
+    "terminalStatus": null,
+    "pageErrors": [],
+    "failedRequests": [],
+    "httpErrors": [],
+    "console404": "http://localhost:8141/favicon.ico"
+  },
+  "directBackbufferRun": {
+    "draws": 59,
+    "dispatches": 0,
+    "presents": 30,
+    "passes": 119,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": [],
+    "readbackVisualContent": "textured Diligent logo cube"
+  },
+  "interpretation": "The current-branch HLE-only Tutorial03 path rendered a visible frame without reaching an unresolved MSVCP import. Static analysis still lists missing imports, but none blocked this frame. The page remained in Starting, so later imports and orderly shutdown remain unverified."
+}

@@ -17,6 +17,14 @@ unresolved-import stop, page error, failed request, or HTTP error. Chromium 151 
 [current-source report](target-data/tutorial03-hle-only-current-source-recheck-2026-10-13.json) and
 [canvas capture](images/tutorial03-hle-only-current-source-recheck-2026-10-13.png). This current
 evidence contradicts the claim that Tutorial03 stops at an unresolved MSVCP140 import before rendering.
+On 2026-10-13, I rebuilt and Asyncify-processed the runtime from commit `2cb03e4`, then routed that
+artifact into Chrome 155.0.8059.40 for a fresh HLE-only Tutorial03 replay. The normal visible canvas
+showed the textured Diligent cube 30 seconds after the adapter log; the direct back-buffer run recorded
+59 draws, 30 presents, 119 passes, two pipelines, 16 Asyncify yield/resume pairs, and no WebGPU errors.
+No unresolved-import stop, page error, failed request, or HTTP error appeared; the only console 404 was
+`/favicon.ico`. The page remained in `Starting`, so later imports and orderly shutdown remain unverified.
+See the [current-branch report](target-data/tutorial03-current-source-chrome155-2026-10-13.json) and
+[visible canvas capture](images/tutorial03-current-source-chrome155-2026-10-13.png).
 On 2026-10-13, HLE-only Tutorial01 and Tutorial03 first-frame captures showed the colored triangle and
 textured cube in cooperative CPU mode, with no local MSVC/UCRT DLLs and no unresolved runtime MSVCP
 import before either frame. Both pages stayed active; the captures do not establish later imports or
