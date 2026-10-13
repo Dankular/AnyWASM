@@ -648,6 +648,45 @@ fn dispatch_exception(
     mut context: Context32,
     skip_ret_on_resume: bool,
 ) -> Result<u64, Stop> {
+    with_guest_exception_depth(p, |p| {
+        dispatch_exception_inner(
+            p,
+            code,
+            flags,
+            args,
+            exception_address,
+            &mut context,
+            skip_ret_on_resume,
+        )
+    })
+}
+
+fn dispatch_existing_exception(
+    p: &mut Process,
+    exception_record: u64,
+    context_record: u64,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    with_guest_exception_depth(p, |p| {
+        let code = p.rd32(exception_record)?;
+        let flags = p.rd32(exception_record + 4)?;
+        let esp = p.rd32(context_record + CONTEXT32_ESP)? as u64;
+        validate_stack(p, esp)?;
+        dispatch_exception_records(
+            p,
+            exception_record,
+            context_record,
+            code,
+            flags,
+            skip_ret_on_resume,
+        )
+    })
+}
+
+fn with_guest_exception_depth(
+    p: &mut Process,
+    dispatch: impl FnOnce(&mut Process) -> Result<u64, Stop>,
+) -> Result<u64, Stop> {
     let thread_id = p.current_thread_id;
     let depth = p.guest_exception_depths.entry(thread_id).or_default();
     if *depth >= 32 {
@@ -656,15 +695,7 @@ fn dispatch_exception(
         ));
     }
     *depth += 1;
-    let result = dispatch_exception_inner(
-        p,
-        code,
-        flags,
-        args,
-        exception_address,
-        &mut context,
-        skip_ret_on_resume,
-    );
+    let result = dispatch(p);
     let remove_depth = if let Some(depth) = p.guest_exception_depths.get_mut(&thread_id) {
         *depth = depth.saturating_sub(1);
         *depth == 0
@@ -689,9 +720,28 @@ fn dispatch_exception_inner(
     validate_stack(p, context.gpr[RSP] as u32 as u64)?;
     let exception_record = crate::hle::kernel32::alloc_block(p, EXCEPTION_RECORD32_SIZE, true);
     let context_record = crate::hle::kernel32::alloc_block(p, CONTEXT32_SIZE, true);
-    let dispatcher_context = crate::hle::kernel32::alloc_block(p, DISPATCHER_CONTEXT32_SIZE, true);
     write_exception_record(p, exception_record, code, flags, exception_address, args)?;
     write_context(p, context_record, context)?;
+
+    dispatch_exception_records(
+        p,
+        exception_record,
+        context_record,
+        code,
+        flags,
+        skip_ret_on_resume,
+    )
+}
+
+fn dispatch_exception_records(
+    p: &mut Process,
+    exception_record: u64,
+    context_record: u64,
+    code: u32,
+    flags: u32,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    let dispatcher_context = crate::hle::kernel32::alloc_block(p, DISPATCHER_CONTEXT32_SIZE, true);
 
     if dispatch_vectored_exception_handlers(p, exception_record, context_record)? {
         return resume_exception(p, exception_record, context_record, skip_ret_on_resume);
@@ -952,7 +1002,7 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
         index += 1;
         if target_unwind {
             p.wr32(unwind.exception_record + 4, unwind_flags)?;
-            return resume_rtl_unwind32(p, &unwind, &context);
+            return resume_rtl_unwind32(p, &unwind, context_record);
         }
     }
 
@@ -960,7 +1010,22 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
         // The x86 dispatcher uses EXCEPTION_CHAIN_END to request a full chain
         // unwind that resumes at the captured caller, without exit-unwind flags.
         p.wr32(unwind.exception_record + 4, unwind_flags)?;
-        return resume_rtl_unwind32(p, &unwind, &context);
+        return resume_rtl_unwind32(p, &unwind, context_record);
+    }
+
+    if unwind.target_frame == 0 {
+        // Windows raises the unwind record after the exit unwind has called all
+        // termination handlers, allowing vectored handlers and the top-level filter.
+        p.wr32(
+            unwind.exception_record + 4,
+            unwind_flags | EXCEPTION_EXIT_UNWIND,
+        )?;
+        return dispatch_existing_exception(
+            p,
+            unwind.exception_record,
+            context_record,
+            false,
+        );
     }
 
     Err(Stop::Crash(
@@ -971,8 +1036,9 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
 fn resume_rtl_unwind32(
     p: &mut Process,
     unwind: &GuestUnwind32,
-    context: &Context32,
+    context_record: u64,
 ) -> Result<u64, Stop> {
+    let context = read_context(p, context_record)?;
     p.cpu.gpr = context.gpr;
     p.cpu.rip = context.eip as u64;
     p.cpu.rflags = context.eflags as u64;

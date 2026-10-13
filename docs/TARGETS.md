@@ -703,10 +703,11 @@ unwind handlers, and transfers to the requested target IP with the supplied retu
 run loop consumes direct requests outside exception search. It now handles the x86
 `EXCEPTION_CHAIN_END` sentinel by unwinding the full chain without exit-unwind flags and resuming at
 the captured caller, following the Windows Research Kernel dispatcher. This sentinel path is
-compile-verified but has no runtime fixture yet. `TargetFrame = NULL` exit-unwind completion and calls
-from phase-two handlers remain unsupported. Redirects from the selected C++ catch frame, nested x64
-`RtlUnwindEx`, non-null unwind history tables, and redirects outside the pre-searched frames remain
-unsupported.
+compile-verified but has no runtime fixture yet. A null `TargetFrame` now runs all termination
+handlers and dispatches the preserved unwind record through vectored handlers and the top-level
+filter. This path has no runtime fixture yet. Calls from phase-two handlers remain unsupported.
+Redirects from the selected C++ catch frame, nested x64 `RtlUnwindEx`, non-null unwind history tables,
+and redirects outside the pre-searched frames remain unsupported.
 The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
