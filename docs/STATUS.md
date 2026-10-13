@@ -327,8 +327,9 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   capacity fallback point. It still recorded zero two-context batches and did not reach gameplay.
   See the paired runs in `docs/TARGETS.md`. In-place pool disposal now stops its workers and frees
   all remaining guest allocations with their recorded allocation sizes, including the separately
-  aligned worker stacks. This cleanup has syntax-check evidence; the design's browser dispose-during-
-  work verification remains outstanding.
+  aligned worker stacks. A regression now verifies that an in-flight request rejection does not
+  access its shared worker slot after disposal; all 14 shared-pool Node tests pass. Browser-level
+  dispose-during-work verification remains outstanding.
 - DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
   dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE
   callbacks run after DLL initialization and before the EXE entry point. Synthetic regressions cover

@@ -399,6 +399,29 @@ test('disposal rejects pending worker requests and terminates every worker', asy
   assert.throws(() => pool.requireInitialized(), /shared CPU worker pool is disposed/);
 });
 
+test('a rejected active request does not access shared memory after pool disposal', async () => {
+  const pool = makePool({ workerCount: 1, threadIds: [10] });
+  const memory = pool.memory;
+  let postDisposeMemoryReads = 0;
+  Object.defineProperty(pool, 'memory', {
+    configurable: true,
+    get() {
+      if (pool.disposed) {
+        postDisposeMemoryReads++;
+        throw new Error('shared memory accessed after disposal');
+      }
+      return memory;
+    },
+  });
+  pool.workers = [{ postMessage() {}, terminate() {} }];
+
+  const pending = pool.dispatchBatch([{ threadId: 10, instructionBudget: 8 }], 8);
+  pool.dispose();
+
+  await assert.rejects(pending);
+  assert.equal(postDisposeMemoryReads, 0, 'the rejected request must not mutate a released worker slot');
+});
+
 test('imports only worker-dirty pages, including both sides of a page boundary', () => {
   const pool = makePool();
   const sharedFrames = new Uint8Array(pool.memory.buffer, pool.layout.frames.offset, pool.layout.frames.length);

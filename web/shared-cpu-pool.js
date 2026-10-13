@@ -570,12 +570,14 @@ export class SharedCpuWorkerPool {
       reservedInstructions: budget,
     })).catch((error) => {
       this.activeThreads.delete(threadId);
-      const activeSlot = new Int32Array(
-        this.memory.buffer,
-        this.layout.base + slotOffset,
-        SLOT_BYTES / 4,
-      );
-      Atomics.store(activeSlot, 0, SLOT_DISABLED);
+      if (!this.disposed) {
+        const activeSlot = new Int32Array(
+          this.memory.buffer,
+          this.layout.base + slotOffset,
+          SLOT_BYTES / 4,
+        );
+        Atomics.store(activeSlot, 0, SLOT_DISABLED);
+      }
       this.busy[workerIndex] = true;
       throw error;
     });

@@ -97,7 +97,9 @@ retirements and reports the fallback reason. The harness creates temporary AWB f
 bundle needs to be prebuilt. `test/shared-cpu-pool.test.mjs` also checks that two
 contexts occupy separate worker slots and context offsets while sharing one process-wide
 instruction reservation. It verifies failed-worker cleanup, partial-startup cleanup, pool disposal,
-and rejection when cross-origin isolation is absent. The standalone no-std overlap probe directly
+and rejection when cross-origin isolation is absent. An in-flight rejection regression also confirms
+that asynchronous request cleanup does not touch a slot after pool disposal. Browser-level disposal
+during active work remains unverified. The standalone no-std overlap probe directly
 observed two workers active at once and checked atomic totals, context checksums, and stack guards. These
 synthetic results do not establish target performance or Diligent acceptance.
 
