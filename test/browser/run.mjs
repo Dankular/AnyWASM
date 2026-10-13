@@ -881,9 +881,9 @@ try {
   const resizeCanvasFirst = decodePng(await page.locator('#swapchain-resize-probe').screenshot());
   const resizeCanvasFirstAt = (x, y) => Array.from(resizeCanvasFirst.data.slice((y * resizeCanvasFirst.w + x) * 4, (y * resizeCanvasFirst.w + x) * 4 + 4));
   check('32x24 swapchain blit presents the expected clear pixels',
-    near(resizeCanvasFirstAt(0, 0), [51, 102, 204, 255], 1)
-      && near(resizeCanvasFirstAt(31, 23), [51, 102, 204, 255], 1),
-    JSON.stringify({ size: [resizeCanvasFirst.w, resizeCanvasFirst.h], pixels: [resizeCanvasFirstAt(0, 0), resizeCanvasFirstAt(31, 23)] }));
+    near(resizeCanvasFirstAt(1, 1), [51, 102, 204, 255], 1)
+      && near(resizeCanvasFirstAt(resizeCanvasFirst.w - 2, resizeCanvasFirst.h - 2), [51, 102, 204, 255], 1),
+    JSON.stringify({ size: [resizeCanvasFirst.w, resizeCanvasFirst.h], pixels: [resizeCanvasFirstAt(1, 1), resizeCanvasFirstAt(resizeCanvasFirst.w - 2, resizeCanvasFirst.h - 2)] }));
   const resizeProbeAfter = await page.evaluate(() => {
     const probe = window.__swapchainResizeProbe;
     const { gpu, canvas, command, words, colorPayload, execute } = probe;
@@ -903,9 +903,9 @@ try {
   const resizeCanvasSecond = decodePng(await page.locator('#swapchain-resize-probe').screenshot());
   const resizeCanvasSecondAt = (x, y) => Array.from(resizeCanvasSecond.data.slice((y * resizeCanvasSecond.w + x) * 4, (y * resizeCanvasSecond.w + x) * 4 + 4));
   check('96x64 swapchain blit replaces the old clear pixels across the resized canvas',
-    near(resizeCanvasSecondAt(0, 0), [0, 255, 0, 255], 1)
-      && near(resizeCanvasSecondAt(95, 63), [0, 255, 0, 255], 1),
-    JSON.stringify({ size: [resizeCanvasSecond.w, resizeCanvasSecond.h], pixels: [resizeCanvasSecondAt(0, 0), resizeCanvasSecondAt(95, 63)] }));
+    near(resizeCanvasSecondAt(1, 1), [0, 255, 0, 255], 1)
+      && near(resizeCanvasSecondAt(resizeCanvasSecond.w - 2, resizeCanvasSecond.h - 2), [0, 255, 0, 255], 1),
+    JSON.stringify({ size: [resizeCanvasSecond.w, resizeCanvasSecond.h], pixels: [resizeCanvasSecondAt(1, 1), resizeCanvasSecondAt(resizeCanvasSecond.w - 2, resizeCanvasSecond.h - 2)] }));
   await page.evaluate(() => { window.__swapchainResizeProbe?.gpu.device.destroy(); document.getElementById('swapchain-resize-probe')?.remove(); });
 
   // ── Direct3D 11 textured quads + depth buffer + indexed draws ──
