@@ -254,7 +254,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   cross-origin-isolated headless Chrome smoke started the CPU worker and ran `hello.exe` to exit 0.
   The two-thread `parallel_test.exe` browser fixture also requires shared-worker mode, a batch with
   two guest contexts, more than 500,000 worker-retired instructions, and exact prime counts, dynamic
-  TLS values, per-thread TEB last-error values, and a locked shared total. A second fixture verifies
+  TLS values, per-thread TEB last-error values, and a locked shared total. It now adds a guest atomic
+  rendezvous and a private stack sentinel per thread. The 2026-10-13 Chrome 155 run observed two
+  active worker slices, 11 two-context batches, 908,335 worker-retired instructions, and
+  `rendezvous=2 stack=2`; it exposed and fixed the missing 32-byte x64 thread-entry home area.
+  The regression is recorded in
+  [`target-data/shared-cpu-overlap-2026-10-13.json`](target-data/shared-cpu-overlap-2026-10-13.json).
+  A second fixture verifies
   a worker-reported breakpoint returns to the coordinator's vectored exception handler and resumes;
   a simulated worker-module HTTP 503 verifies that startup failure leaves the guest usable in
   cooperative mode. A worker stop now restores the original RIP for instructions that advance RIP
@@ -262,8 +268,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   production-pool handoff and guest results. The browser launcher now enables this path only when
   `sharedCpuWorkers` is explicitly present; an absent parameter stays cooperative as the design
   requires. `test/browser/cpu-mode-default.test.mjs` verifies the default, and the explicit shared
-  `parallel_test.exe` run still passes with two workers, 888,720 worker-retired instructions, and five
-  two-context batches. Before this correction, an absent parameter selected shared mode: the
+  `parallel_test.exe` run passed with two workers and a maximum of two active worker slices. Before
+  this correction, an absent parameter selected shared mode: the
   Tutorial03 first-frame capture recorded 4,174,472 Asyncify yields for 30 presents, while cooperative
   mode recorded 16 for the same frame count. The separate feasibility probe is the direct
   measurement of simultaneous worker execution. The coordinator's runnable-context query omits blocked,

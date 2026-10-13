@@ -1269,7 +1269,12 @@ impl Process {
             .try_alloc_virtual(0x10000, PROT_RW)
             .ok_or_else(|| Stop::Crash("guest allocation failed while allocating thread stack".into()))?;
         let stack_base = stack_limit + 0x10000;
-        let stack_pointer = stack_base - 8;
+        let stack_pointer = stack_base
+            - if self.cpu.mode == CpuMode::X86_64 {
+                0x28 // return address plus the 32-byte Windows x64 home area
+            } else {
+                8
+            };
         self.wrptr(stack_pointer, THREAD_RETURN_MAGIC)?;
         let mut cpu = Cpu::new();
         cpu.mode = self.cpu.mode;
@@ -5292,6 +5297,22 @@ mod scheduler_tests {
             "[import] kernel32!TlsGetValue args=[0x7] caller=0x140001234 module=fixture.dll+0x1234"
         ));
         assert_eq!(process.cpu.gpr[RAX], 0x777);
+    }
+
+    #[test]
+    fn x64_guest_thread_entry_reserves_windows_shadow_space() {
+        let mut process = process_with_teb();
+        let id = 0x1008;
+        process
+            .create_guest_thread(id, 0x2000, 0x77, false)
+            .unwrap();
+        let thread = process.guest_threads.get(&id).unwrap();
+
+        assert_eq!(thread.cpu.gpr[RSP], thread.stack_base - 0x28);
+        assert_eq!(thread.cpu.gpr[RSP] & 0xf, 8);
+        assert_eq!(process.rd64(thread.cpu.gpr[RSP]).unwrap(), THREAD_RETURN_MAGIC);
+        assert!(thread.cpu.gpr[RSP] + 0x28 <= thread.stack_base);
+        assert_eq!(thread.cpu.gpr[RCX], 0x77);
     }
 
     #[test]

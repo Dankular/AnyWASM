@@ -14,6 +14,7 @@ function makePool({ workerCount = 1, threadIds = [] } = {}) {
     totalBytes: 12 * PAGE_BYTES,
     slots: { offset: 128, length: workerCount * 64 },
     contexts: { offset: contextOffset, length: contextCount * 784 },
+    activity: { offset: 84, length: 8 },
     pageMap: { offset: 2048, length: 32 },
     dirtyMap: { offset: 2080, length: 1 },
     frames: { offset: PAGE_BYTES, length: 2 * PAGE_BYTES },
@@ -91,6 +92,46 @@ test('dispatches distinct contexts together within one process-wide budget', asy
   assert.equal(inFlight, 0);
   assert.deepEqual(pool.busy, [false, false]);
   assert.deepEqual([...pool.activeThreads], []);
+});
+
+test('reports the maximum concurrent worker slices for a completed batch', async () => {
+  const pool = makePool({ workerCount: 2, threadIds: [10, 20] });
+  const activity = new Int32Array(
+    pool.memory.buffer,
+    pool.layout.base + pool.layout.activity.offset,
+    2,
+  );
+  const requests = [];
+  pool.request = (workerIndex, expectedType, message) => new Promise((resolve) => {
+    assert.equal(expectedType, 'complete');
+    const active = Atomics.add(activity, 0, 1) + 1;
+    let maximum = Atomics.load(activity, 1);
+    while (active > maximum) {
+      const previous = Atomics.compareExchange(activity, 1, maximum, active);
+      if (previous === maximum) break;
+      maximum = previous;
+    }
+    requests.push(() => {
+      const slot = new Int32Array(pool.memory.buffer, message.slotOffset, 16);
+      Atomics.store(slot, 9, 8);
+      Atomics.store(slot, 10, 0);
+      Atomics.store(slot, 0, SharedCpuCompletion.QUANTUM);
+      Atomics.sub(activity, 0, 1);
+      resolve({ sequence: message.sequence });
+    });
+  });
+
+  Atomics.store(activity, 0, 5);
+  Atomics.store(activity, 1, 9);
+  const pending = pool.dispatchBatch([
+    { threadId: 10, instructionBudget: 80 },
+    { threadId: 20, instructionBudget: 80 },
+  ], 160);
+  requests.forEach((complete) => complete());
+  const completions = await pending;
+
+  assert.deepEqual(completions.map(({ maxConcurrentWorkerSlices }) => maxConcurrentWorkerSlices), [2, 2]);
+  assert.equal(Atomics.load(activity, 0), 0);
 });
 
 test('holds an early HLE completion until every sibling slice reaches a safe point', async () => {

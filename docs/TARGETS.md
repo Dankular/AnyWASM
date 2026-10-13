@@ -60,9 +60,16 @@ Asteroids has not been run; none of these fixtures is a full runtime acceptance 
 pool in cross-origin-isolated Chromium. It requires the shared-worker mode, more than 500,000
 worker-retired instructions, and a batch containing both guest contexts. The guest writes distinct
 prime counts for each thread, stores different dynamic TLS values and TEB last-error values across
-HLE boundaries, waits for both threads, and updates a shared total with a locked instruction. The
+HLE boundaries, rendezvouses through an atomic guest-memory counter, checks a private stack sentinel
+per thread, waits for both threads, and updates a shared total with a locked instruction. The
 harness checks `t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444
-mainTls=0x5555 mainLast=0x6666` and exit code 0. `MODE=fault` runs
+mainTls=0x5555 mainLast=0x6666 rendezvous=2 stack=2`, exit code 0, and an observed maximum of two
+active worker slices. The Chrome 155.0.8059.40 run retired 908,335 worker instructions across 11
+two-context batches. It also caught an x64 guest-thread entry stack bug: the runtime omitted the
+32-byte home area, so a compiled stack local landed beyond its allocated stack. Thread entry now
+starts at `stack_base - 0x28`, matching the main-thread ABI setup. See
+[`target-data/shared-cpu-overlap-2026-10-13.json`](target-data/shared-cpu-overlap-2026-10-13.json).
+`MODE=fault` runs
 `fixtures/shared_fault_test.exe`: a shared-worker breakpoint returns to the coordinator, the
 vectored exception handler resumes the guest, and the process exits 0. `MODE=fail-startup` serves
 HTTP 503 for the worker module; the same parallel fixture finishes cooperatively with zero worker

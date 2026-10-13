@@ -58,7 +58,7 @@ try {
   const output = await page.textContent('#term');
   const stat = await page.textContent('#stat');
   const mode = await page.evaluate(() => window.__executionMode);
-  console.log(`mode=${mode?.mode} workers=${mode?.workerCount} workerRetired=${mode?.workerRetired} parallelBatches=${mode?.parallelBatches} reason=${mode?.reason || '-'}\nstat: ${stat}`);
+  console.log(`mode=${mode?.mode} workers=${mode?.workerCount} workerRetired=${mode?.workerRetired} parallelBatches=${mode?.parallelBatches} maxActiveSlices=${mode?.maxConcurrentWorkerSlices || 0} chrome=${browser.version()} reason=${mode?.reason || '-'}\nstat: ${stat}`);
   const expectedMode = failStartup ? 'cooperative'
     : inPlace ? 'shared-cpu-workers-in-place' : 'shared-cpu-workers';
   assert.equal(mode?.mode, expectedMode, `unexpected execution mode: ${mode?.reason}\n${output}`);
@@ -71,6 +71,12 @@ try {
   } else if (!faultMode) {
     assert.ok(BigInt(mode.workerRetired) > 500_000n, `the fixture needs ~1.1M guest instructions; workers retired only ${mode.workerRetired} guest instructions`);
     assert.ok(mode.parallelBatches > 0, 'no batch dispatched two guest threads to separate workers together');
+    if (!inPlace) {
+      assert.ok(mode.maxConcurrentWorkerSlices >= 2,
+        `guest worker slices never overlapped: ${JSON.stringify(mode)}`);
+      assert.match(output, /rendezvous=2 stack=2/,
+        `guest threads did not rendezvous through shared memory with distinct stack state: ${output}`);
+    }
   }
   if (faultMode) {
     assert.ok(BigInt(mode.workerRetired) > 0n, 'the CPU worker did not retire guest instructions before the exception');

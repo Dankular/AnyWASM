@@ -36,6 +36,7 @@ const u32 = (value, name) => {
 };
 
 function layoutFor({ workerCount, contextCount, pageCount, base }) {
+  const activity = { offset: 84, length: 8 };
   let cursor = HEADER_BYTES;
   const slots = { offset: cursor, length: workerCount * SLOT_BYTES };
   cursor = align(cursor + slots.length, 64);
@@ -52,7 +53,7 @@ function layoutFor({ workerCount, contextCount, pageCount, base }) {
   if (cursor > 0xffff_ffff || base + cursor > MAX_WASM_PAGES * WASM_PAGE_BYTES) {
     throw new RangeError('shared CPU worker memory exceeds its 1 GiB maximum');
   }
-  return { base, totalBytes: cursor, slots, contexts, pageMap, dirtyMap, frames, stacks };
+  return { base, totalBytes: cursor, slots, contexts, pageMap, dirtyMap, frames, stacks, activity };
 }
 
 /**
@@ -505,6 +506,7 @@ export class SharedCpuWorkerPool {
       availableBytes: this.layout.totalBytes,
       slotIndex: workerIndex,
       slotOffset,
+      activityOffset: this.layout.base + this.layout.activity.offset,
       sequence,
       trapStart: firstTrap,
       trapEnd: endTrap,
@@ -557,6 +559,14 @@ export class SharedCpuWorkerPool {
       remaining -= budget;
     }
     if (dispatches.length === 0) return [];
+
+    const activity = new Int32Array(
+      this.memory.buffer,
+      this.layout.base + this.layout.activity.offset,
+      2,
+    );
+    Atomics.store(activity, 0, 0);
+    Atomics.store(activity, 1, 0);
 
     const workerIndices = this.busy
       .map((isBusy, index) => isBusy ? -1 : index)
@@ -619,7 +629,11 @@ export class SharedCpuWorkerPool {
         ...(synchronousFailure ? [synchronousFailure] : []),
       ], 'shared CPU batch failed');
     }
-    return outcomes.map((outcome) => outcome.value);
+    const maxConcurrentWorkerSlices = Atomics.load(activity, 1) >>> 0;
+    return outcomes.map((outcome) => ({
+      ...outcome.value,
+      maxConcurrentWorkerSlices,
+    }));
   }
 
   takeCompletion(workerIndex, threadId, sequence, message) {

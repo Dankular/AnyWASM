@@ -226,7 +226,7 @@ fn parallel_threads_preserve_dynamic_tls_and_last_error_across_hle() {
     );
     assert_eq!(
         out,
-        "t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444 mainTls=0x5555 mainLast=0x6666\r\n"
+        "t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444 mainTls=0x5555 mainLast=0x6666 rendezvous=2 stack=2\r\n"
     );
     assert!(err.is_empty());
 }

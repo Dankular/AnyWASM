@@ -90,11 +90,13 @@ remain open.
 - Consumes: existing shared CPU snapshot ABI, CPU worker entry point, completion states, coordinator turn and runnable-thread APIs.
 - Produces: concurrent bounded slices for up to the configured CPU-worker count of distinct runnable guest thread contexts, with completion import and process-wide effects serialized by the coordinator.
 
-- [ ] Add a failing two-context overlap fixture using an atomic rendezvous and shared-memory sentinel; prove both workers execute at once and preserve distinct register/stack state.
-- [ ] Add a failing coordinator test where one worker returns an HLE/fault/exit completion while another context is still running; assert no process-wide mutation occurs before the safe point.
-- [ ] Implement concurrent dispatch only for distinct runnable contexts and supported shared-memory instructions; retain serial fallback for one runnable context, unsupported atomics, or worker initialization failure.
-- [ ] Run shared worker CPU tests and browser overlap test; require exact retired-count accounting and no lost or duplicated context completions.
+- [x] Add a failing two-context overlap fixture using an atomic rendezvous and shared-memory sentinel; prove both workers execute at once and preserve distinct register/stack state.
+- [x] Add a failing coordinator test where one worker returns an HLE/fault/exit completion while another context is still running; assert no process-wide mutation occurs before the safe point.
+- [x] Implement concurrent dispatch only for distinct runnable contexts and supported shared-memory instructions; retain serial fallback for one runnable context, unsupported atomics, or worker initialization failure.
+- [x] Run shared worker CPU tests and browser overlap test; require exact retired-count accounting and no lost or duplicated context completions.
 - [ ] Run the GTA replay with workers enabled; record actual overlap, active worker count, loader time, and CPU throughput against the cooperative run.
+
+Progress: On 2026-10-13, the shared-worker Chromium fixture observed two active CPU slices while both guest threads completed an atomic rendezvous and preserved separate stack sentinels. This exposed a missing 32-byte Win64 home area in new-thread startup; x64 threads now begin at `stack_base - 0x28`, matching the main-thread ABI. The selected GLFW target still reports zero two-context batches, so GTA target overlap and throughput remain open.
 
 ### Task 5: GTA 10x acceptance benchmark
 

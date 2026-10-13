@@ -23,6 +23,10 @@ static volatile long long total;
 static volatile DWORD per_thread[2];
 static volatile DWORD tls_result[2];
 static volatile DWORD last_error_result[2];
+static volatile DWORD rendezvous_arrivals;
+static volatile DWORD rendezvous_result[2];
+static volatile DWORD stack_result[2];
+static volatile u64 stack_address[2];
 static DWORD tls_index;
 
 static void out(const char *s) {
@@ -56,11 +60,21 @@ static int is_prime(unsigned n) {
 static DWORD __stdcall count_range(void *arg) {
     unsigned index = (unsigned)(u64)arg;
     unsigned lo = index * 50000u, hi = lo + 50000u, count = 0;
+    volatile DWORD stack_sentinel = 0x71000000u + index;
     DWORD expected_tls = index ? 0x2222 : 0x1111;
     DWORD expected_last = index ? 0x4444 : 0x3333;
+    stack_address[index] = (u64)(void *)&stack_sentinel;
+    _InterlockedExchangeAdd((volatile long *)&rendezvous_arrivals, 1);
+    for (unsigned spin = 0; spin < 100000u; spin++) {
+        if (rendezvous_arrivals >= 2) {
+            rendezvous_result[index] = 1;
+            break;
+        }
+    }
     if (!TlsSetValue(tls_index, (void *)(u64)expected_tls)) return 10 + index;
     SetLastError(expected_last);
     for (unsigned n = lo; n < hi; n++) count += is_prime(n);
+    stack_result[index] = stack_sentinel == 0x71000000u + index;
     per_thread[index] = count;
     last_error_result[index] = GetLastError();
     tls_result[index] = (DWORD)(u64)TlsGetValue(tls_index);
@@ -79,6 +93,9 @@ void mainCRTStartup(void) {
     SetLastError(0x6666);
     DWORD main_last_error = GetLastError();
     DWORD main_tls = (DWORD)(u64)TlsGetValue(tls_index);
+    DWORD rendezvous_total = rendezvous_result[0] + rendezvous_result[1];
+    DWORD stack_total = stack_result[0] + stack_result[1];
+    if (stack_address[0] == stack_address[1]) stack_total = 0;
     out("t0="); out_u(per_thread[0]);
     out(" t1="); out_u(per_thread[1]);
     out(" total="); out_u((u64)total);
@@ -88,6 +105,8 @@ void mainCRTStartup(void) {
     out(" last1="); out_hex(last_error_result[1]);
     out(" mainTls="); out_hex(main_tls);
     out(" mainLast="); out_hex(main_last_error);
+    out(" rendezvous="); out_u(rendezvous_total);
+    out(" stack="); out_u(stack_total);
     out("\r\n");
     ExitProcess(total == 9592 &&
         tls_result[0] == 0x1111 && tls_result[1] == 0x2222 &&

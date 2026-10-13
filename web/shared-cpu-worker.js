@@ -2,6 +2,15 @@ let instance = null;
 let memory = null;
 let workerIndex = -1;
 
+function recordMaximum(view, index, candidate) {
+  let maximum = Atomics.load(view, index);
+  while (candidate > maximum) {
+    const previous = Atomics.compareExchange(view, index, maximum, candidate);
+    if (previous === maximum) return;
+    maximum = previous;
+  }
+}
+
 onmessage = async (event) => {
   const message = event.data;
   try {
@@ -33,15 +42,23 @@ onmessage = async (event) => {
 
     if (message.type === 'run') {
       if (!instance || !memory) throw new Error('shared CPU worker is not initialized');
-      const result = instance.exports.aw_cpu_worker_slice(
-        message.sharedBase >>> 0,
-        message.availableBytes >>> 0,
-        message.slotIndex >>> 0,
-        BigInt(message.trapStart),
-        BigInt(message.trapEnd),
-        BigInt(message.processExit || 0),
-        BigInt(message.threadExit || 0),
-      );
+      const activity = new Int32Array(memory.buffer, message.activityOffset >>> 0, 2);
+      const activeSlices = Atomics.add(activity, 0, 1) + 1;
+      recordMaximum(activity, 1, activeSlices);
+      let result;
+      try {
+        result = instance.exports.aw_cpu_worker_slice(
+          message.sharedBase >>> 0,
+          message.availableBytes >>> 0,
+          message.slotIndex >>> 0,
+          BigInt(message.trapStart),
+          BigInt(message.trapEnd),
+          BigInt(message.processExit || 0),
+          BigInt(message.threadExit || 0),
+        );
+      } finally {
+        Atomics.sub(activity, 0, 1);
+      }
       const slotOffset = (message.sharedBase + message.slotOffset) >>> 0;
       const slot = new Int32Array(memory.buffer, slotOffset, 16);
       postMessage({

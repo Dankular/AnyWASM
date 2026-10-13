@@ -137,6 +137,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
         reason: m.executionModeReason || '',
         workerRetired: m.sharedWorkerRetired || '0',
         parallelBatches: m.sharedParallelBatches || 0,
+        maxConcurrentWorkerSlices: m.maxConcurrentWorkerSlices || 0,
       };
       stat.textContent = `${label}: ${names[m.status]}${detail ? ' (' + detail + ')' : ''} · ${m.instructions.toLocaleString()} instructions · ${m.mips.toFixed(1)} M instr/s · ${executionMode}${executionReason}${m.frames ? ' · ' + m.frames + ' frames' : ''}`;
       if (m.status === 2) {

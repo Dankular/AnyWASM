@@ -23,6 +23,7 @@ let sharedExecutionReason = '';
 let sharedExecutionWorkerCount = 0;
 let sharedWorkerRetired = 0n;
 let sharedParallelBatches = 0;
+let sharedMaxConcurrentWorkerSlices = 0;
 let graphicsUnavailableReason = '';
 const dec = new TextDecoder();
 const inPlaceCpuEnabled = new URL(self.location.href).searchParams.has('inPlaceCpu');
@@ -46,6 +47,9 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
   sharedExecutionMode = 'cooperative';
   sharedExecutionReason = '';
   sharedExecutionWorkerCount = 0;
+  sharedWorkerRetired = 0n;
+  sharedParallelBatches = 0;
+  sharedMaxConcurrentWorkerSlices = 0;
   exec?.device?.destroy();
   exec = null;
   graphicsUnavailableReason = canvas ? '' : 'OffscreenCanvas worker transfer is unsupported';
@@ -390,6 +394,10 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
       );
       sharedWorkerRetired += workerRetired;
       if (contexts.length >= 2) sharedParallelBatches++;
+      sharedMaxConcurrentWorkerSlices = Math.max(
+        sharedMaxConcurrentWorkerSlices,
+        completions[0]?.maxConcurrentWorkerSlices || 0,
+      );
       if (workerRetired > workerBudget) {
         throw new Error('shared CPU workers exceeded their combined instruction reservation');
       }
@@ -433,6 +441,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
           executionModeReason: sharedExecutionReason,
           sharedWorkerRetired: String(sharedWorkerRetired),
           sharedParallelBatches,
+          maxConcurrentWorkerSlices: sharedMaxConcurrentWorkerSlices,
         } : {}),
         ...traceGuestThreads(),
       } : {
@@ -446,6 +455,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
           executionModeReason: sharedExecutionReason,
           sharedWorkerRetired: String(sharedWorkerRetired),
           sharedParallelBatches,
+          maxConcurrentWorkerSlices: sharedMaxConcurrentWorkerSlices,
         } : {}),
         ...traceGuestThreads(),
         crtFile: Array.from({ length: 8 }, (_, index) =>
@@ -547,7 +557,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
     close();
     return;
   }
-  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: callbackSuspended || status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: finalMessage, instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats, trace: finalTrace, executionMode: sharedExecutionMode, executionWorkerCount: sharedExecutionWorkerCount, executionModeReason: sharedExecutionReason, sharedWorkerRetired: String(sharedWorkerRetired), sharedParallelBatches });
+  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: callbackSuspended || status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: finalMessage, instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats, trace: finalTrace, executionMode: sharedExecutionMode, executionWorkerCount: sharedExecutionWorkerCount, executionModeReason: sharedExecutionReason, sharedWorkerRetired: String(sharedWorkerRetired), sharedParallelBatches, maxConcurrentWorkerSlices: sharedMaxConcurrentWorkerSlices });
 }
 
 onmessage = async (ev) => {
