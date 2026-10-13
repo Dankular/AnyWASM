@@ -705,15 +705,16 @@ filter-requested continuation, and `__finally` calls during unwind. The compiled
 fixture now verifies compiler-generated C `__try`/`__except`/`__finally`, including a nested exception
 that escapes a filter, re-enters the active handler frame, and reaches an outer catch. It also checks
 that an exception raised from a running termination handler replaces the in-flight exception without
-running that `__finally` twice. The current-source HLE CLI run returns 0. The browser fixture list
-includes `seh-x64.exe`, but the prior seven-package Chromium run predates that addition and does not
-verify this new binary. Synthetic tests also cover vectored-continue ordering and ignored callback
-returns, plus top-level filter replacement and resumption with a modified context. PE32 exception
-support is partial: synthetic tests cover `RaiseException` through an x86 registration handler and
-CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fixture verifies filter selection,
-continuation, and normal and unwind-time `__finally` execution. Native and HLE-only runs also verify a
-nested exception escaping a filter to an outer handler and an exception raised during `__finally`. A
-synthetic handler test covers disposition 2 setting `EXCEPTION_NESTED_CALL` before search continues.
+running that `__finally` twice. The current-source HLE CLI run returns 0. A rebuilt release WASM also
+passed the eight-package Chromium fixture run; every package reported its expected status and exit
+code, and the page reported no JavaScript errors. Synthetic tests also cover vectored-continue ordering
+and ignored callback returns, plus top-level filter replacement and resumption with a modified
+context. PE32 exception support is partial: synthetic tests cover `RaiseException` through an x86
+registration handler and CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fixture
+verifies filter selection, continuation, and normal and unwind-time `__finally` execution. Native and
+HLE-only runs also verify a nested exception escaping a filter to an outer handler and an exception
+raised during `__finally`. A synthetic handler test covers disposition 2 setting
+`EXCEPTION_NESTED_CALL` before search continues.
 PE32 search now tracks the x86 dispatcher registration pointer and clears the nested flag when it
 reaches that registration; the clear transition has no runtime fixture yet. A second-pass x64 test
 covers disposition 3 by

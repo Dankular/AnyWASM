@@ -90,7 +90,8 @@ node test/browser/exception-fixtures.mjs
 
 The test packs each executable by itself, uploads it through the page's `.awb` input, and requires a
 normal process exit with code 0. It needs the fixtures built by `build.ps1` and `playwright-core`
-installed from `test/browser/package.json`.
+installed from `test/browser/package.json`. `web/serve.mjs` honors `ANYWASM_WEB_ROOT` so a temporary
+web copy with a newly built runtime can be tested without replacing the checked-in WASM artifact.
 
 These fixtures cover the minimum compiler-generated records needed to start EH3/EH4 runtime work;
 they do not cover virtual bases, `/EHa`, `exception_ptr`, or unknown future EH4 encodings.
@@ -160,13 +161,19 @@ HLE CLI with a 2,000,000-step cap. It verifies that a nested exception escaping 
 continues search from the suspended x64 handler frame, reaches the outer handler, and transfers out
 of the abandoned HLE callback stack. It also raises a new exception from an active `__finally` during
 phase-two unwind and checks that the in-flight exception is replaced without invoking that termination
-handler twice. The earlier seven-package Chromium result predates `seh-x64.exe`; the browser fixture
-script now includes it, but that updated package set has not yet been replayed.
+handler twice.
 
 On 2026-10-13, the rebuilt release WASM and Asyncify module ran all seven existing fixture packages in
-`test/browser/exception-fixtures.mjs` under Chromium. Every package exited 0 and the page reported no
-JavaScript errors. The `seh-x86` package includes the filter-raised and `__finally` exception cases
-above.
+`test/browser/exception-fixtures.mjs` under Chromium. Every package reported its expected status and
+guest exit code, and the page reported no JavaScript errors. The two termination packages reported
+the expected crash status. The `seh-x86` package includes the filter-raised and `__finally` exception
+cases above.
+
+After adding `seh-x64.exe`, a rebuilt current-source release WASM ran all eight browser packages under
+Chromium. The temporary build and web root were placed under
+`C:\Users\sysadmin\AppData\Local\Temp` to avoid replacing the checked-in runtime binary. Every
+package reported its expected status and exit code, including `seh-x64` exit 0 and the two expected
+`std::terminate` crash statuses; Chromium reported no page errors.
 
 On 2026-10-13, the C++ fixture added exit code 60 for a cross-registration-frame transfer: a noinline
 callee owns a `DestructorProbe` and throws `Derived`, while its caller catches `Base` by reference and

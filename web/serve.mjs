@@ -2,10 +2,12 @@
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = fileURLToPath(new URL('.', import.meta.url));
+const root = resolve(
+  process.env.ANYWASM_WEB_ROOT || fileURLToPath(new URL('.', import.meta.url)),
+);
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.awb': 'application/octet-stream', '.css': 'text/css' };
 const port = Number(process.argv[2] || 8080);
 
