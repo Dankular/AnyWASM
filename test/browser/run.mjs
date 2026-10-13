@@ -1284,6 +1284,10 @@ try {
       command(24, words(0, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0x5)); // enable samples 0 and 2
       command(29, words(3, 0));
       command(47, words(28, 0, 26, 0, 28)); // ResolveSubresource(dst, 0, src, 0, RGBA8_UNORM)
+      command(4, words(60, 8, 8, 1, 1, 28, 0x20, 0, 1, 0)); // single-sample RGBA8 destination for rejected resolve
+      command(12, words(61, 0, 60, 28, 1, 0, 1, 0, 1));
+      command(27, words(61, 0, 0x3f800000, 0, 0x3f800000)); // preserve a green clear when the resolve is rejected
+      command(47, words(60, 0, 1, 0, 87)); // incompatible BGRA8 resolve format for the RGBA8 source
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -1311,6 +1315,8 @@ try {
       const alphaCoverageIndex = (4 * alphaCoveragePixels.width + 4) * 4;
       const sampleMaskPixels = await gpu.readBackTexture(28);
       const sampleMaskIndex = (4 * sampleMaskPixels.width + 4) * 4;
+      const incompatibleResolvePixels = await gpu.readBackTexture(60);
+      const incompatibleResolveIndex = (4 * incompatibleResolvePixels.width + 4) * 4;
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
@@ -1331,6 +1337,8 @@ try {
         coveragePixelsMatch: coveragePixels.data.every((value, i) => Math.abs(value - [128, 0, 0, 255][i % 4]) <= 1),
         alphaCoverageSamples: gpu.res.get(23)?.samples,
         alphaCoveragePixel: Array.from(alphaCoveragePixels.data.slice(alphaCoverageIndex, alphaCoverageIndex + 4)),
+        incompatibleResolvePixel: Array.from(incompatibleResolvePixels.data.slice(incompatibleResolveIndex, incompatibleResolveIndex + 4)),
+        incompatibleResolveLogged: logs.some((message) => message.includes('source 1 and destination 60 are incompatible')),
         sampleMaskSamples: gpu.res.get(26)?.samples,
         sampleMaskPixel: Array.from(sampleMaskPixels.data.slice(sampleMaskIndex, sampleMaskIndex + 4)),
         rgbaSrgbSamples: gpu.res.get(30)?.samples,
@@ -1387,6 +1395,10 @@ try {
       && msaaResolveResult.alphaCoveragePixel?.[0] > 0 && msaaResolveResult.alphaCoveragePixel[0] < 255
       && msaaResolveResult.alphaCoveragePixel?.[2] > 0 && msaaResolveResult.alphaCoveragePixel[2] < 255
       && msaaResolveResult.errors?.length === 0,
+    JSON.stringify(msaaResolveResult));
+  check('D3D11 incompatible ResolveSubresource preserves the destination clear pixels',
+    near(msaaResolveResult.incompatibleResolvePixel || [], [0, 255, 0, 255], 1)
+      && msaaResolveResult.incompatibleResolveLogged && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));
