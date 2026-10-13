@@ -288,6 +288,10 @@ register-stack subset):
       RG8_UNORM returns `[38, 114, 0, 255]` at that edge, verifying format-specific channel defaults.
       Texture3D R8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a
       3D edge footprint, verifying channel defaults and edge weighting.
+      Texture3D RG8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 58, 0, 255]`
+      at the same edge footprint, verifying both normalized channels and missing-channel defaults.
+      Texture3D R16_UNORM and R16_SNORM samples match `[115, 0, 0, 255]` at that edge within 4
+      channel values, verifying normalized 16-bit 3D texture backing and channel defaults.
       Texture1DArray R8_UNORM sampling returns `[128, 0, 0, 255]` from mip 1/layer 0 and
       `[64, 0, 0, 255]` from mip 2/layer 1; the dimension-query pixels match the RGBA8 array case.
       TextureCube SRV selects the expected
@@ -317,7 +321,8 @@ register-stack subset):
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
       view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
-      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8, R8_UNORM, and RG8_UNORM cases remain open.
+      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8, R8_UNORM, RG8_UNORM, R16_UNORM,
+      and R16_SNORM cases remain open.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
       sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; a Rust table test enumerates all ten
       advertised color/depth formats at 2x, 4x, and 8x and checks representative unsupported formats.

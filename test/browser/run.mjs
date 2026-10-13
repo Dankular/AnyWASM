@@ -6453,10 +6453,42 @@ try {
       uploadR8Slice(0, 0); uploadR8Slice(1, 128);
       command(19, words(1, 0, 1, 16)); command(29, words(3, 0)); gpu.execute(append());
       const r8Pixels = await gpu.readBackbuffer(1);
+      stream.length = 0;
+      command(46, words(17, 4, 4, 2, 1, 49, 0x8, 0, 0)); // RG8_UNORM volume texture
+      command(12, words(18, 2, 17, 49, 8, 0, 1, 0, 1)); // Texture3D SRV
+      const uploadRg8Slice = (z) => {
+        const texels = new Uint8Array(32);
+        for (let i = 0; i < 16; i++) texels.set([128, 64], i * 2);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(17, 0, z, 0, 0, 4, 4, 8, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      };
+      uploadRg8Slice(0); uploadRg8Slice(1);
+      command(19, words(1, 0, 1, 18)); command(29, words(3, 0)); gpu.execute(append());
+      const rg8Pixels = await gpu.readBackbuffer(1);
+      const uploadNormalizedVolume = async (resource, srv, format, word) => {
+        stream.length = 0;
+        command(46, words(resource, 4, 4, 2, 1, format, 0x8, 0, 0));
+        command(12, words(srv, 2, resource, format, 8, 0, 1, 0, 1));
+        for (let z = 0; z < 2; z++) {
+          const texels = new Uint8Array(32), view = new DataView(texels.buffer);
+          for (let i = 0; i < 16; i++) view.setUint16(i * 2, word, true);
+          const payload = new Uint8Array(36 + texels.length);
+          payload.set(words(resource, 0, z, 0, 0, 4, 4, 8, texels.length));
+          payload.set(texels, 36); command(5, payload);
+        }
+        command(19, words(1, 0, 1, srv)); command(29, words(3, 0)); gpu.execute(append());
+        return gpu.readBackbuffer(1);
+      };
+      const r16UnormPixels = await uploadNormalizedVolume(19, 20, 56, 0x8000);
+      const r16SnormPixels = await uploadNormalizedVolume(21, 22, 58, 0x4000);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
       const result = {
         outside: at(pixels, 10), straddle: at(pixels, 32),
         r8Outside: at(r8Pixels, 10), r8Straddle: at(r8Pixels, 32),
+        rg8Outside: at(rg8Pixels, 10), rg8Straddle: at(rg8Pixels, 32),
+        r16UnormOutside: at(r16UnormPixels, 10), r16UnormStraddle: at(r16UnormPixels, 32),
+        r16SnormOutside: at(r16SnormPixels, 10), r16SnormStraddle: at(r16SnormPixels, 32),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -6466,7 +6498,7 @@ try {
     }
   });
   check('D3D11 Texture3D CopyResource and BORDER sampling preserve slices and edge footprints',
-    texture3dResult.draws === 2 && texture3dResult.errors.length === 0
+    texture3dResult.draws === 5 && texture3dResult.errors.length === 0
       && near(texture3dResult.outside || [], [0, 0, 255, 255], 1)
       && near(texture3dResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(texture3dResult));
@@ -6474,6 +6506,24 @@ try {
     near(texture3dResult.r8Outside || [], [0, 0, 0, 255], 1)
       && near(texture3dResult.r8Straddle || [], [115, 0, 0, 255], 4),
     JSON.stringify({ outside: texture3dResult.r8Outside, straddle: texture3dResult.r8Straddle }));
+  check('D3D11 Texture3D RG8_UNORM BORDER sampling preserves both normalized channels and defaults at outside and edge footprints',
+    texture3dResult.draws === 5 && texture3dResult.errors.length === 0
+      && near(texture3dResult.rg8Outside || [], [0, 0, 0, 255], 1)
+      && near(texture3dResult.rg8Straddle || [], [115, 58, 0, 255], 4),
+    JSON.stringify({ outside: texture3dResult.rg8Outside, straddle: texture3dResult.rg8Straddle,
+      draws: texture3dResult.draws, errors: texture3dResult.errors }));
+  check('D3D11 Texture3D R16_UNORM sampling preserves normalized edge values and channel defaults',
+    texture3dResult.errors.length === 0
+      && near(texture3dResult.r16UnormOutside || [], [0, 0, 0, 255], 1)
+      && near(texture3dResult.r16UnormStraddle || [], [115, 0, 0, 255], 4),
+    JSON.stringify({ outside: texture3dResult.r16UnormOutside, straddle: texture3dResult.r16UnormStraddle,
+      errors: texture3dResult.errors }));
+  check('D3D11 Texture3D R16_SNORM sampling preserves normalized edge values and channel defaults',
+    texture3dResult.errors.length === 0
+      && near(texture3dResult.r16SnormOutside || [], [0, 0, 0, 255], 1)
+      && near(texture3dResult.r16SnormStraddle || [], [115, 0, 0, 255], 4),
+    JSON.stringify({ outside: texture3dResult.r16SnormOutside, straddle: texture3dResult.r16SnormStraddle,
+      errors: texture3dResult.errors }));
 
   const texture3dMipsResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
