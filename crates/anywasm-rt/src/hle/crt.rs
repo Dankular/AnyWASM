@@ -1813,6 +1813,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "__CxxFrameHandler4" => crate::msvc_eh::frame_handler4,
         "_CxxThrowException" => crate::msvc_eh::cxx_throw_exception,
         "__std_terminate" | "terminate" => crate::msvc_eh::std_terminate,
+        "__std_exception_copy" => msvc_std_exception_copy,
+        "__std_exception_destroy" => msvc_std_exception_destroy,
         "_register_thread_local_exe_atexit_callback" => |_| Ok(0),
         "__current_exception" => |p| crate::msvc_eh::current_cpp_exception_cell(p, false),
         "__current_exception_context" => |p| crate::msvc_eh::current_cpp_exception_cell(p, true),
@@ -2455,12 +2457,73 @@ fn ctype_table(p: &mut Process) -> u64 {
     p.extra.ctype_table
 }
 
-fn onexit_pointer_width(p: &Process) -> u64 {
+/// Copy the `std::exception` message fields used by MSVC's VCRUNTIME ABI.
+/// Owned messages are duplicated into guest heap memory; borrowed messages remain aliased.
+fn msvc_std_exception_copy(p: &mut Process) -> R {
+    let (source, destination) = (p.arg(0), p.arg(1));
+    let pointer_width = guest_pointer_width(p);
+    let source_what = p.rdptr(source)?;
+    let source_owns_what = p.rd8(
+        source
+            .checked_add(pointer_width)
+            .ok_or_else(|| Stop::Crash("std::exception source address overflow".into()))?,
+    )? != 0;
+
+    let (what, owns_what) = if source_owns_what && source_what != 0 {
+        let mut message = p.read_cstr_raw(source_what)?;
+        message.push(0);
+        let allocation = kernel32::alloc_block(p, message.len() as u64, false);
+        if allocation != 0 {
+            if let Err(stop) = p.write_bytes(allocation, &message) {
+                kernel32::free_block(p, allocation);
+                return Err(stop);
+            }
+        }
+        (allocation, true)
+    } else {
+        (source_what, false)
+    };
+
+    p.wrptr(destination, what)?;
+    p.wr8(
+        destination
+            .checked_add(pointer_width)
+            .ok_or_else(|| Stop::Crash("std::exception destination address overflow".into()))?,
+        u8::from(owns_what),
+    )?;
+    Ok(0)
+}
+
+fn msvc_std_exception_destroy(p: &mut Process) -> R {
+    let data = p.arg(0);
+    let pointer_width = guest_pointer_width(p);
+    let what = p.rdptr(data)?;
+    let owns_what = p.rd8(
+        data.checked_add(pointer_width)
+            .ok_or_else(|| Stop::Crash("std::exception data address overflow".into()))?,
+    )? != 0;
+    if owns_what && what != 0 {
+        kernel32::free_block(p, what);
+    }
+    p.wrptr(data, 0)?;
+    p.wr8(
+        data.checked_add(pointer_width)
+            .ok_or_else(|| Stop::Crash("std::exception data address overflow".into()))?,
+        0,
+    )?;
+    Ok(0)
+}
+
+fn guest_pointer_width(p: &Process) -> u64 {
     if p.cpu.mode == CpuMode::X86_32 {
         4
     } else {
         8
     }
+}
+
+fn onexit_pointer_width(p: &Process) -> u64 {
+    guest_pointer_width(p)
 }
 
 fn onexit_sentinel(p: &Process) -> u64 {
