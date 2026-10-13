@@ -110,6 +110,19 @@
   attempted for those fixtures at all); causes not yet investigated. Output correctness of the
   emitted path is therefore **not yet established** by this suite.
 
+## WebGPU executor profile (2026-10-13, synthetic proxy)
+`node test/browser/profile-gpu.mjs` (headless Chromium, software-or-virtual adapter of this sandbox)
+runs `fixtures/d3d11_texload` (136 textures incl. 8 mip-mapped 1024x1024, 4 uploads per frame,
+20 frames) with `?profileGpu`. This is a stand-in for a loading phase, not a real title, and it
+measures only JavaScript time spent issuing commands, not GPU execution time.
+- 524 ms of JS time over the run; `TEXTURE_WRITE` is 86% of it (216 writes, 456 MiB, 449 ms,
+  worst single write 40 ms), then `CREATE_SHADER` 11% (2 shaders, 56 ms, one-time).
+- Everything else (draws, presents, pipeline/state, buffer writes) totals under 3%.
+- The same run retired 17.0 M guest instructions at 4.2 M instr/s (about 4 s), so guest CPU
+  time, not command issue, dominated wall time here (4.4 s). Moving this data-copy work onto GPU
+  compute would not help: `TEXTURE_WRITE` is a memory-bandwidth copy (~1 GiB/s), not arithmetic.
+  Removing a copy on that path is the candidate; it has not been attempted.
+
 ## Known limits (not hidden)
 - x87 is modelled with f64, not 80-bit; transcendentals compared to 1e-9 relative tolerance.
 - `RCPPS`/`RSQRTPS` (and scalar `RCPSS`/`RSQRTSS`) use the interpreter's exact scalar
