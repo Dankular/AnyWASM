@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-10-13",
+  "sourceRevision": "1bf909b",
+  "build": {
+    "runtimeCommand": "cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release",
+    "asyncifyCommand": "node scripts/asyncify-wasm.mjs target/wasm32-unknown-unknown/release/anywasm_wasm.wasm web/anywasm_wasm.wasm",
+    "runtimePath": "web/anywasm_wasm.wasm",
+    "runtimeSha256": "f08482bdc3adb7fd29d0834ad1c97bf737ea99c6f6e8217ad7f817417c9396aa"
+  },
+  "target": "Diligent Tutorial03_Texturing",
+  "bundle": {
+    "path": "target/Tutorial03_Texturing-hle-only.awb",
+    "sha256": "fc6d43dbdae75e0457d78dfe2c6ea58a6aed7342ba682e4912f500a3d7590c25",
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11"
+  },
+  "browser": "Playwright Chromium revision 1234",
+  "result": {
+    "statusAtCapture": "Starting",
+    "unresolvedImportBeforeFrame": false,
+    "visualContent": "textured Diligent logo cube",
+    "draws": 59,
+    "dispatches": 0,
+    "presents": 30,
+    "passes": 119,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": [],
+    "backBuffer": {
+      "width": 1280,
+      "height": 1024,
+      "nonBlackPixels": 1310720,
+      "nonTransparentPixels": 1310720
+    },
+    "consoleErrors": [
+      "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    ]
+  },
+  "localCapturePaths": [
+    "target/Tutorial03_Texturing-hle-only-current.png",
+    "target/Tutorial03_Texturing-hle-only-current.canvas.png"
+  ],
+  "limitations": [
+    "The browser run captured the first rendered frame; it did not establish later imports or orderly shutdown.",
+    "The console reported a resource 404 without identifying its URL."
+  ]
+}

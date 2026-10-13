@@ -33,6 +33,14 @@ with four MSVCP140 imports still unresolved. This report is static binding cover
 establish that any remaining import is called or blocks the rendered path. See the
 [locale import recheck](target-imports/tutorial03-locale-import-recheck-2026-10-13.json).
 
+After adding the Wasm status mapping for the PE32 unwind transfer, the release browser runtime was rebuilt
+from current source and replayed with the same HLE-only Tutorial03 bundle. Chromium again rendered the
+textured cube: 59 draws, 30 presents, 119 passes, two pipelines, 16 Asyncify yields/resumes, and no
+WebGPU errors. The backbuffer contained 1,310,720 nonblack and nontransparent pixels; no unresolved
+MSVCP import appeared before the frame. The page remained in `Starting`, so later imports and orderly
+shutdown remain open. Runtime and bundle hashes are in the
+[current-HEAD replay record](target-data/tutorial03-hle-only-head-replay-2026-10-13.json).
+
 ### D3D9 fixed-function regression
 
 A separate synthetic Chromium command-stream regression (not a selected-target run) verifies two-stage
