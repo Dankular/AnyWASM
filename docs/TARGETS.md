@@ -94,6 +94,14 @@ range requests returned HTTP 206 and WebGPU reported no errors. This run did not
 measure a speedup. The pool capacity transition and replay details are in
 [`target-data/gta-shared-cpu-fallback-2026-10-13.json`](target-data/gta-shared-cpu-fallback-2026-10-13.json).
 
+A rerun after shared-pool capacity growth was pushed used the same harness with two workers. It
+remained in `shared-cpu-workers` through the previous fallback point and reached startup phase 8,
+1,004 presents, 192,968,377 guest instructions, and 2,858,162 worker-retired instructions without a
+fallback or WebGPU errors. AGP range requests again returned HTTP 206. The run recorded zero
+two-context batches and did not establish gameplay, terminal status, or a performance comparison; a
+generic browser 404 was not identified. See
+[`target-data/gta-shared-cpu-capacity-growth-2026-10-13.json`](target-data/gta-shared-cpu-capacity-growth-2026-10-13.json).
+
 ## Sources and build
 
 Built from DiligentEngine `efe5da2270c6edfc8b0d2e39e946b35acbeaa874`, with DiligentCore at

@@ -297,7 +297,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   found and fixed a scheduler fallback that stepped one instruction per turn after a worker quantum
   expired. Worker completions now distinguish process/thread return trampolines from ordinary HLE
   stops; the coordinator still owns the corresponding exit handling. The target trace
-  and limits are in `docs/TARGETS.md`.
+  and limits are in `docs/TARGETS.md`. After shared-pool capacity growth, a GTA replay remained in
+  shared-worker mode through 1,004 presents and 192,968,377 guest instructions, beyond the prior
+  capacity fallback point. It still recorded zero two-context batches and did not reach gameplay.
+  See the paired runs in `docs/TARGETS.md`.
 - DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
   dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE
   callbacks run after DLL initialization and before the EXE entry point. Synthetic regressions cover

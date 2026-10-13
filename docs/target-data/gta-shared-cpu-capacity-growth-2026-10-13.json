@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-10-13",
+  "target": "Grand Theft Auto: San Andreas",
+  "entry": "gta_sa.exe",
+  "harness": "target-gta-diag/gta-start-game.mjs",
+  "runtimeChange": "7c87cba",
+  "conditions": {
+    "sharedCpuRequested": true,
+    "requestedWorkerCount": 2,
+    "bootTimeoutSeconds": 45,
+    "afterEnterCaptureSeconds": 1
+  },
+  "result": {
+    "executionMode": "shared-cpu-workers",
+    "executionWorkerCount": 2,
+    "fallbackReason": null,
+    "workerRetiredInstructions": "2858162",
+    "priorFixedCapacityFallbackWorkerRetirements": "1658235",
+    "twoContextParallelBatches": 0,
+    "startupPhase": 8,
+    "guestInstructions": "192968377",
+    "draws": 2626,
+    "presents": 1004,
+    "terminalStatus": null,
+    "uiStatus": "Starting gta_sa.exe…",
+    "agpRangeResponses": "HTTP 206",
+    "webGpuErrors": [],
+    "browserConsoleErrors": ["one generic 404; resource not identified"],
+    "reachedGameplay": false,
+    "performanceComparison": null
+  },
+  "notes": [
+    "The pool remained in shared-worker mode beyond the previous fixed-capacity fallback point.",
+    "This confirms the observed fallback was avoided through the bounded New Game loading checkpoint; it does not establish two-context execution, gameplay, or a speedup."
+  ]
+}
