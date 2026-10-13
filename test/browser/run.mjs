@@ -1645,6 +1645,26 @@ try {
       };
 
       stream.length = 0;
+      if (gpu.device.features.has('texture-compression-bc')) {
+        const sourceBc = 60, destinationBc = 61;
+        const sourceBcBytes = Uint8Array.from({ length: 16 }, (_, i) => i + 1);
+        const destinationBcBytes = Uint8Array.from({ length: 16 }, (_, i) => 0xa0 + i);
+        gpu.createTexture(sourceBc, 8, 4, 1, 1, 71, 0, 0, 0, '2d'); // BC1 two-block source
+        gpu.createTexture(destinationBc, 8, 4, 1, 1, 71, 0, 0, 0, '2d'); // BC1 destination
+        gpu.textureWrite(sourceBc, 0, 0, 0, 0, 8, 4, 16, sourceBcBytes.length, sourceBcBytes);
+        gpu.textureWrite(destinationBc, 0, 0, 0, 0, 8, 4, 16, destinationBcBytes.length, destinationBcBytes);
+        command(40, words(destinationBc, 0, 0, 0, 0, sourceBc, 0, 4, 0, 0, 8, 4, 1, 1));
+        gpu.execute(append());
+        const copiedBcBytes = await gpu.readBackResource(destinationBc);
+        result.copyBc = {
+          copiedBlock: Array.from(copiedBcBytes.slice(0, 8)),
+          untouchedBlock: Array.from(copiedBcBytes.slice(8, 16)),
+          expectedCopiedBlock: Array.from(sourceBcBytes.slice(8, 16)),
+          expectedUntouchedBlock: Array.from(destinationBcBytes.slice(8, 16)),
+        };
+      } else result.copyBcSkipped = true;
+
+      stream.length = 0;
       const sourceBuffer = 50, destinationBuffer = 51;
       const sourceBytes = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
       const destinationBytes = new Uint8Array(32).fill(0xee);
@@ -1697,6 +1717,11 @@ try {
     copyRegionResult.copyRg8?.copied?.map((pixel) => pixel.join(',')).join(';') === '11,51;12,52;15,55;16,56'
       && copyRegionResult.copyRg8?.outside?.every((pixel) => pixel[0] === 0xe0 && pixel[1] === 0xd0),
     JSON.stringify(copyRegionResult.copyRg8));
+  check(`D3D11 CopySubresourceRegion ${copyRegionResult.copyBcSkipped ? 'BC1 capability skip' : 'copies one aligned BC1 block and preserves its neighbour'}`,
+    copyRegionResult.copyBcSkipped
+      || copyRegionResult.copyBc?.copiedBlock?.join(',') === copyRegionResult.copyBc?.expectedCopiedBlock?.join(',')
+        && copyRegionResult.copyBc?.untouchedBlock?.join(',') === copyRegionResult.copyBc?.expectedUntouchedBlock?.join(','),
+    JSON.stringify(copyRegionResult.copyBc || { skipped: copyRegionResult.copyBcSkipped }));
   const expectedBufferRegion = Array(32).fill(0xee);
   expectedBufferRegion.splice(5, 11, ...Array.from({ length: 11 }, (_, i) => i + 8));
   check('D3D11 CopySubresourceRegion copies unaligned buffer byte ranges and preserves both edges',

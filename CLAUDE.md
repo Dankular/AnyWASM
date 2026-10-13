@@ -267,8 +267,8 @@ register-stack subset):
       texture, vertex, index, structured, raw, typed, and constant-buffer `CopyResource`; Texture1D
       and Texture1DArray sampling lower to 2D backing textures, with a 3-mip/2-slice array pixel-tested
       at layer 0/mip 1 and layer 1/mip 2; texture and buffer `CopySubresourceRegion`, including a
-      partial RG8_UNORM box with untouched destination texels, plus `UpdateSubresource`; DXBC
-      clip/discard; 2D and 3D `GenerateMips`;
+      partial RG8_UNORM box and aligned BC1 block with untouched destination data, plus `UpdateSubresource`;
+      DXBC clip/discard; 2D and 3D `GenerateMips`;
       fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
       BORDER verifies configured color for point and linear taps in 2D RGBA8 Sample, SampleLevel,
       SampleGrad, and SampleBias paths, plus 2D-array and 3D RGBA8 SampleLevel paths. D32_FLOAT
