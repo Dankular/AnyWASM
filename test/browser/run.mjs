@@ -5537,8 +5537,9 @@ try {
         float4 main(float4 position : SV_Position) : SV_Target {
           if (position.y >= 32.0) {
             uint width, height, elements, levels;
-            source.GetDimensions(0, width, height, elements, levels);
-            return float4(float(width) / 4.0, float(height) / 4.0, float(elements) / 16.0, float(levels));
+            if (position.x < 32.0) source.GetDimensions(0, width, height, elements, levels);
+            else source.GetDimensions(1, width, height, elements, levels);
+            return float4(float(width) / 4.0, float(height) / 4.0, float(elements) / 16.0, float(levels) / 2.0);
           }
           float4 coordinate = position.x < 20.0 ? float4(1.0, 0.0, 0.0, 0.0)
             : position.x < 40.0 ? float4(1.0, 0.0, 0.0, 1.0)
@@ -5569,8 +5570,8 @@ try {
       };
       command(38, words(1, 0, 9, 64, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
-      command(4, words(3, 4, 4, 1, 18, 28, 0x8, 0, 1, 0x4));
-      command(12, words(5, 2, 3, 28, 10, 0, 1, 6, 2)); // first face 6, two cubes
+      command(4, words(3, 4, 4, 2, 18, 28, 0x8, 0, 1, 0x4));
+      command(12, words(5, 2, 3, 28, 10, 0, 2, 6, 2)); // two mips, first face 6, two cubes
       const cubeFaces = [
         [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255]],
         [[0, 255, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255]],
@@ -5583,6 +5584,11 @@ try {
         const payload = new Uint8Array(36 + texels.length);
         payload.set(words(3, 0, slice, 0, 0, 4, 4, 16, texels.length));
         payload.set(texels, 36); command(5, payload);
+        const mip1Texels = new Uint8Array(16);
+        for (let i = 0; i < 4; i++) mip1Texels.set(color, i * 4);
+        const mip1Payload = new Uint8Array(36 + mip1Texels.length);
+        mip1Payload.set(words(3, 1, slice, 0, 0, 2, 2, 8, mip1Texels.length));
+        mip1Payload.set(mip1Texels, 36); command(5, mip1Payload);
       }
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
@@ -5600,6 +5606,7 @@ try {
         selectedCube1: at(30),
         selectedCube0Edge: at(54),
         dimensions: at(10, 48),
+        mip1Dimensions: at(42, 48),
         viewDimension: gpu.views.get(5)?.cache?.dim,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
@@ -5616,7 +5623,8 @@ try {
       && near(cubeArrayResult.selectedCube0 || [], [0, 255, 0, 255], 1)
       && near(cubeArrayResult.selectedCube1 || [], [0, 0, 255, 255], 1)
       && near(cubeArrayResult.selectedCube0Edge || [], [0, 128, 128, 255], 2)
-      && near(cubeArrayResult.dimensions || [], [255, 255, 32, 255], 1),
+      && near(cubeArrayResult.dimensions || [], [255, 255, 32, 255], 1)
+      && near(cubeArrayResult.mip1Dimensions || [], [128, 128, 32, 255], 1),
     JSON.stringify(cubeArrayResult));
 
   const cubeArrayCompareResult = await page.evaluate(async () => {

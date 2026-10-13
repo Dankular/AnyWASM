@@ -14,6 +14,11 @@ one mip. The fixture reported one draw, zero WebGPU validation errors, and pixel
 `[0,255,0,255]`, `[0,0,255,255]`, `[0,127,127,255]`, and `[255,255,32,255]`. This is API fixture
 evidence, not a selected-target compatibility result.
 
+The cube-array query fixture was extended on 2026-10-13 in Chrome `155.0.8059.40` to use two mip
+levels. `GetDimensions(0)` returns 4x4 and `GetDimensions(1)` returns 2x2; both report two cubes
+and two levels. The captured normalized pixels were `[255,255,32,255]` and `[128,128,32,255]`.
+Cube samples, the +X/+Y seam, and mip queries completed with one draw and no WebGPU errors.
+
 Focused D32 cube-array comparison regression on 2026-10-13: Chrome `155.0.8059.40` on Windows x64.
 The synthetic D3D11 fixture covers `SampleCmpLevelZero` on a D32_FLOAT SRV starting at face 6.
 Separate DSVs clear the two selected cubes to 0.25 and 0.75; a LESS comparison against 0.5 returns

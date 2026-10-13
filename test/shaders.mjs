@@ -211,6 +211,23 @@ check('TextureCubeArray GetDimensions lowers size, cube count, and mip count',
     && /textureNumLayers\(t0_\)/.test(textureCubeArrayDimensionsPs?.wgsl || '')
     && /textureNumLevels\(t0_\)/.test(textureCubeArrayDimensionsPs?.wgsl || ''),
   textureCubeArrayDimensionsError || textureCubeArrayDimensionsPs?.wgsl || 'translation returned no WGSL');
+let textureCubeArrayMip1DimensionsPs, textureCubeArrayMip1DimensionsError = '';
+try {
+  textureCubeArrayMip1DimensionsPs = t.translate(t.compileHlsl(`
+    TextureCubeArray<float4> image : register(t0);
+    float4 main() : SV_Target {
+      uint width, height, elements, levels;
+      image.GetDimensions(1, width, height, elements, levels);
+      return float4(width, height, elements, levels);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { textureCubeArrayMip1DimensionsError = String(error); }
+check('TextureCubeArray GetDimensions queries a nonzero mip level',
+  /texture_cube_array<f32>/.test(textureCubeArrayMip1DimensionsPs?.wgsl || '')
+    && /textureDimensions\(t0_,\s*1i\)/.test(textureCubeArrayMip1DimensionsPs?.wgsl || '')
+    && /textureNumLayers\(t0_\)/.test(textureCubeArrayMip1DimensionsPs?.wgsl || '')
+    && /textureNumLevels\(t0_\)/.test(textureCubeArrayMip1DimensionsPs?.wgsl || ''),
+  textureCubeArrayMip1DimensionsError || textureCubeArrayMip1DimensionsPs?.wgsl || 'translation returned no WGSL');
 let textureCubeArrayComparePs, textureCubeArrayCompareError = '';
 try {
   textureCubeArrayComparePs = t.translate(t.compileHlsl(`
