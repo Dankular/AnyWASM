@@ -3100,67 +3100,45 @@ mod tests {
         let mut p = Process::new(Vfs::new());
         assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
         p.cpu.gpr[RCX] = 0;
-        p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM as u64;
-        p.cpu.gpr[R8] = 4;
         p.cpu.gpr[R9] = OUT;
 
         let query = method("ID3D11Device", "CheckMultisampleQualityLevels").unwrap();
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 1);
-
-        p.cpu.gpr[RDX] = DXGI_FORMAT_B8G8R8A8_UNORM as u64;
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 1);
-
-        p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB as u64;
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 1);
-
-        p.cpu.gpr[RDX] = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB as u64;
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 1);
-
-        p.cpu.gpr[RDX] = DXGI_FORMAT_R16G16B16A16_FLOAT as u64;
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 1);
-
-        for format in [24u32, 26] {
-            // R10G10B10A2_UNORM and R11G11B10_FLOAT have pixel-tested 4x WebGPU resolve paths.
-            p.cpu.gpr[RDX] = format as u64;
-            p.cpu.gpr[R8] = 4;
-            assert_eq!(query(&mut p).unwrap(), S_OK);
-            assert_eq!(
-                p.rd32(OUT).unwrap(),
-                1,
-                "color format {format} should support the verified 4x resolve path"
-            );
+        let supported = [
+            (DXGI_FORMAT_R8G8B8A8_UNORM, "RGBA8_UNORM"),
+            (DXGI_FORMAT_B8G8R8A8_UNORM, "BGRA8_UNORM"),
+            (DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "RGBA8_SRGB"),
+            (DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, "BGRA8_SRGB"),
+            (DXGI_FORMAT_R16G16B16A16_FLOAT, "RGBA16_FLOAT"),
+            (DXGI_FORMAT_R10G10B10A2_UNORM, "R10G10B10A2_UNORM"),
+            (DXGI_FORMAT_R11G11B10_FLOAT, "R11G11B10_FLOAT"),
+            (DXGI_FORMAT_D32_FLOAT, "D32_FLOAT"),
+            (DXGI_FORMAT_D24_UNORM_S8_UINT, "D24_UNORM_S8_UINT"),
+            (DXGI_FORMAT_D16_UNORM, "D16_UNORM"),
+        ];
+        for (format, name) in supported {
+            for samples in [2u32, 4, 8] {
+                p.cpu.gpr[RDX] = format as u64;
+                p.cpu.gpr[R8] = samples as u64;
+                assert_eq!(query(&mut p).unwrap(), S_OK);
+                assert_eq!(
+                    p.rd32(OUT).unwrap(),
+                    u32::from(samples == 4),
+                    "{name} at {samples}x should report support only for the 4x path"
+                );
+            }
         }
 
-        for format in [40u32, 45, 55] {
-            // D32_FLOAT, D24_UNORM_S8_UINT, D16_UNORM
-            p.cpu.gpr[RDX] = format as u64;
-            p.cpu.gpr[R8] = 4;
-            assert_eq!(query(&mut p).unwrap(), S_OK);
-            assert_eq!(
-                p.rd32(OUT).unwrap(),
-                1,
-                "depth format {format} should support 4x MSAA"
-            );
+        for (format, name) in [
+            (54u32, "R16_FLOAT"),
+            (DXGI_FORMAT_R8G8B8A8_UINT, "RGBA8_UINT"),
+        ] {
+            for samples in [2u32, 4, 8] {
+                p.cpu.gpr[RDX] = format as u64;
+                p.cpu.gpr[R8] = samples as u64;
+                assert_eq!(query(&mut p).unwrap(), S_OK);
+                assert_eq!(p.rd32(OUT).unwrap(), 0, "{name} at {samples}x is unsupported");
+            }
         }
-
-        p.cpu.gpr[RDX] = 54; // DXGI_FORMAT_R16_FLOAT has no typed 4x path.
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 0);
-
-        p.cpu.gpr[RDX] = 45;
-        p.cpu.gpr[R8] = 8;
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 0);
-
-        p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM as u64;
-        p.cpu.gpr[R8] = 2;
-        assert_eq!(query(&mut p).unwrap(), S_OK);
-        assert_eq!(p.rd32(OUT).unwrap(), 0);
     }
 
     #[test]

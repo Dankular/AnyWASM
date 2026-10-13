@@ -317,8 +317,9 @@ register-stack subset):
       view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
       `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8, R8_UNORM, and RG8_UNORM cases remain open.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
-      sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; Rust HLE tests cover the reports and
-      command fields, while Chromium verifies the resolve pixels. Chromium also tests near/far depth
+      sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; a Rust table test enumerates all ten
+      advertised color/depth formats at 2x, 4x, and 8x and checks representative unsupported formats.
+      Chromium verifies the resolve pixels. Chromium also tests near/far depth
       with 4x D32_FLOAT, D24S8, and D16_UNORM attachments and resolves the retained green draw to RGBA8.
       `Map(READ)` executes older
       commands already transferred to the host-visible GPU queue before its current HLE batch,
