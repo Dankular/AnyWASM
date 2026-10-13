@@ -585,11 +585,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `pe32_seh_second_pass_resumes_after_a_collided_registration` returns disposition 3, validates the
   live chain, confirms the redirected-to frame is skipped, and checks target EIP/ESP restoration.
   The compiler-generated MSVC fixture still does not return disposition 3, so target integration
-  remains unverified. `ntdll!RtlUnwind` now captures a PE32 caller context and, when called from a
-  phase-one handler, walks the live registration chain through its target, calls unwind handlers, and
-  restores the requested target IP and return value. This path has no runtime regression yet; direct
-  calls outside an active PE32 exception search, exit-unwind completion, and calls from a phase-two
-  handler remain unsupported. Redirects from the selected C++ catch frame, nested x64 `RtlUnwindEx`,
+  remains unverified. `ntdll!RtlUnwind` now captures a PE32 caller context and walks the live
+  registration chain through its target, calls unwind handlers, and restores the requested target IP
+  and return value. The main run loop also consumes direct PE32 requests outside exception search.
+  This path has no runtime regression yet; exit-unwind completion and calls from a phase-two handler
+  remain unsupported. Redirects from the selected C++ catch frame, nested x64 `RtlUnwindEx`,
   non-null unwind history tables, and redirects outside the pre-searched frames remain unsupported.
   Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
   compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32

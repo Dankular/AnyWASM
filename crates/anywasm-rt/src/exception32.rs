@@ -975,6 +975,13 @@ fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> 
     ))
 }
 
+pub(crate) fn complete_guest_unwind32(
+    p: &mut Process,
+    unwind: GuestUnwind32,
+) -> Result<(), Stop> {
+    unwind_to_rtl32(p, unwind).map(|_| ())
+}
+
 fn active_unwind_frames32(
     p: &Process,
     target_frame: u64,

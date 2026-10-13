@@ -140,7 +140,7 @@ pub enum Stop {
     GuestCatch32(GuestCatch32),
     /// Internal x86 C SEH transfer consumed by the PE32 exception dispatcher.
     GuestSehTransfer32(GuestSehTransfer32),
-    /// Internal x86 unwind transfer consumed by the PE32 exception dispatcher.
+    /// Internal x86 unwind transfer consumed by the PE32 dispatcher or run loop.
     GuestUnwind32(GuestUnwind32),
 }
 
@@ -4340,11 +4340,10 @@ impl Process {
                         "PE32 SEH transfer escaped its active guest exception dispatcher".into(),
                     )
                 }
-                Err(Stop::GuestUnwind32(_)) => {
-                    return Stop::Crash(
-                        "PE32 RtlUnwind transfer escaped its active guest exception dispatcher"
-                            .into(),
-                    )
+                Err(Stop::GuestUnwind32(unwind)) => {
+                    if let Err(stop) = crate::exception32::complete_guest_unwind32(self, unwind) {
+                        return stop;
+                    }
                 }
                 Err(stop) => return stop,
             }
