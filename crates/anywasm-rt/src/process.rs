@@ -5175,6 +5175,62 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn shared_cpu_runnable_contexts_exclude_blocked_suspended_and_exited_threads() {
+        let mut process = process_with_teb();
+        let ready = 0x1008;
+        let blocked = 0x100c;
+        let suspended = 0x1010;
+        let exited = 0x1014;
+        process
+            .create_guest_thread(ready, 0x2000, 0, false)
+            .unwrap();
+        process
+            .create_guest_thread(blocked, 0x2000, 0, false)
+            .unwrap();
+        process
+            .create_guest_thread(suspended, 0x2000, 0, true)
+            .unwrap();
+        process
+            .create_guest_thread(exited, 0x2000, 0, false)
+            .unwrap();
+        process.guest_threads.get_mut(&blocked).unwrap().state =
+            ThreadState::Blocked(ThreadWait::Sleep { deadline: 0 });
+        process.guest_threads.get_mut(&exited).unwrap().state = ThreadState::Exited(0);
+
+        assert_eq!(
+            process.shared_cpu_runnable_context_ids(),
+            vec![process.current_thread_id, ready],
+            "only the running context and ready guest context can be dispatched"
+        );
+
+        process.request_thread_yield();
+        assert_eq!(
+            process.shared_cpu_runnable_context_ids(),
+            vec![ready],
+            "a context awaiting coordinator scheduling must not be dispatched"
+        );
+    }
+
+    #[test]
+    fn pe32_shared_cpu_contexts_remain_serialized_to_the_active_thread() {
+        let mut process = process_with_teb();
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.fs_base = TEB_ADDR;
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process
+            .create_guest_thread(0x100c, 0x2000, 0, false)
+            .unwrap();
+
+        assert_eq!(
+            process.shared_cpu_runnable_context_ids(),
+            vec![process.current_thread_id],
+            "PE32 shared-worker execution must preserve the fixed TEB alias"
+        );
+    }
+
+    #[test]
     fn static_tls_vector_and_blocks_are_private_and_restored_on_switch() {
         let mut process = process_with_teb();
         let main_vector = process.alloc_virtual(0x1000, PROT_RW);

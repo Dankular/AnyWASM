@@ -256,8 +256,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   two guest contexts, more than 500,000 worker-retired instructions, and the exact per-thread
   prime counts plus locked shared total (`5133`, `4459`, `9592`). This verifies production-pool
   batch dispatch and guest results; the separate feasibility probe is the direct measurement of
-  simultaneous worker execution. Target-level acceptance remains open. The worker artifact uses
-  the unstable `+atomics` feature and LLD `--no-check-features`
+  simultaneous worker execution. The coordinator's runnable-context query omits blocked,
+  suspended, exited, and stale ready-queue entries; PE32 remains active-context-only while it uses
+  the fixed TEB alias. Target-level acceptance remains open. The worker artifact uses the unstable
+  `+atomics` feature and LLD `--no-check-features`
   because the installed sysroot core objects lack shared-memory feature metadata. A separate
   HLE-only Tutorial01 probe confirmed cross-origin isolation and rendered 719 draws and 360 presents
   in 30 seconds with no WebGPU errors; the process remained active, so target completion is not
