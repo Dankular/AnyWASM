@@ -269,7 +269,7 @@ register-stack subset):
       and Texture1DArray sampling lower to 2D backing textures, with a 3-mip/2-slice array pixel-tested
       at layer 0/mip 1 and layer 1/mip 2; texture and buffer `CopySubresourceRegion`, including a
       partial RG8_UNORM box, partial R16_UNORM/SNORM copies with copied and untouched words retained
-      through staging readback, and aligned BC1, BC3, and BC4 blocks with untouched neighbouring data,
+      through staging readback, and aligned BC1/BC2/BC3/BC4/BC5 blocks with untouched neighbouring data,
       plus `UpdateSubresource`;
       DXBC clip/discard; 2D and 3D `GenerateMips`;
       fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
