@@ -7,14 +7,15 @@ Enable useful WebAssembly block JIT execution and parallel guest CPU execution f
 ## Current evidence
 
 - The browser JIT default is `jitMinPrefix = 65`; x86 blocks contain at most 64 instructions, so default GTA execution compiles no blocks.
-- With `jitMinPrefix = 1`, a GTA run remained at 602 presents and reported 1,638,791 fallbacks, zero compilations, and zero JIT executions after 55,733,075 retired guest instructions. The run was stopped after the repeated no-frame-progress observation.
+- A 2026-10-13 `GTA_JIT_MIN_PREFIX=1` browser probe reported 268,068 compilations, 266,175 executions, 414,849 emitted guest instructions, 12,630 fallbacks, and `lastFailure: null` after 1,804,686 guest instructions. It did not create a visible game window within the harness's 60-second startup wait. This disproves the assumption that an emitted-module compile exception is the current GTA blocker; compiling tiny prefixes is also too costly for this startup path.
+- A normal-threshold replay reached 653 presents and startup phase 5. JIT counters stayed at zero; the shared mode started two workers but recorded zero parallel batches. The replay did not pass the harness's 990-present menu checkpoint, so it is not a loader or gameplay performance result.
 - The cooperative baseline ran 90 seconds after New Game, reached startup phase 8 and 1,080 presents, retired 439,169,995 guest instructions, and still displayed GTA loading artwork. It had no pending asset range and no WebGPU errors; JIT counters remained zero.
 - The shared CPU worker path exists, but existing target evidence establishes worker startup and serial context handoff, not overlapping GTA execution. At the measured loader checkpoint only one guest thread was runnable.
-- `docs/TARGETS.md` identifies statically linked `vsscanf` parsing as a repeated loader hot path. Package range concurrency cannot accelerate periods when the guest has no pending range request.
+- `docs/TARGETS.md` identifies statically linked `vsscanf` parsing as a repeated loader hot path. Disassembly of the installed scanner at `0x8290d4` includes the repeated `MOVZX EBX, byte ptr [ESI]` / `MOVZX EAX, BL` pair at `0x82919c`/`0x82919f`; package range concurrency cannot accelerate periods when the guest has no pending range request. The emitter now generates that pair, but it still lacks x86-32 runtime differential coverage.
 
 ## Requirements
 
-1. JIT compilation and execution are enabled for eligible hot GTA blocks by default after forced-emission failures are fixed. Unsupported instructions and invalidated code resume through the interpreter without changing guest behavior.
+1. JIT compilation and execution are enabled for eligible hot GTA blocks by default only after the targeted parser path has exact interpreter parity and measurements show compilation amortizes its cost. Unsupported instructions and invalidated code resume through the interpreter without changing guest behavior.
 2. JIT emitted execution matches the interpreter's complete CPU state, mapped guest memory, exceptions, and retired instruction count for targeted 32-bit instruction sequences and the GTA-observed parser path.
 3. Browser CPU workers execute multiple independently runnable guest threads at the same time against shared guest memory. The coordinator remains the sole owner of process-wide HLE, scheduler, module, exception, and GPU state. Guest synchronization and locked operations must preserve x86-visible behavior.
 4. GTA profiling reports execution mode, worker overlap, JIT compile/execute/fallback counts and causes, retired instructions, presents, range activity, elapsed time, and loader/gameplay phase.
@@ -22,7 +23,7 @@ Enable useful WebAssembly block JIT execution and parallel guest CPU execution f
 
 ## Design
 
-First make JIT failure causes observable and reproduce the forced-emission failure with a focused 32-bit fixture. Extend the emitted instruction set around decoded, repeatedly executed GTA code; keep exact interpreter fallbacks for unsupported instructions, memory faults, HLE boundaries, and code writes. Choose hotness and prefix thresholds from GTA and representative-fixture measurements so successful compilation amortizes its cost.
+Keep JIT failure causes observable, then extend the emitted instruction set around decoded, repeatedly executed GTA code. No GTA compile exception was observed in the current forced-emission probe. Keep exact interpreter fallbacks for unsupported instructions, memory faults, HLE boundaries, and code writes. Choose hotness and prefix thresholds from GTA and representative-fixture measurements so successful compilation amortizes its cost.
 
 Run the coordinator in the existing worker and dispatch independent runnable guest thread contexts to separate CPU workers only at safe boundaries. Keep shared guest frames and synchronization atomic, and serialize process-wide changes through the coordinator. Preserve the cooperative path for browser isolation failures and guest schedules with only one runnable thread. Do not count worker startup or a serial handoff as parallel execution.
 

@@ -4,7 +4,7 @@
 
 **Goal:** Enable useful JIT and concurrent guest CPU execution, then measure GTA against the 10x loading and CPU-throughput target.
 
-**Architecture:** Keep the process coordinator authoritative and move only bounded guest CPU slices to emitted WASM or isolated shared-memory CPU workers. First expose and fix the current x86-32 JIT failure; then optimize the profiled GTA parser path and prove concurrent guest-thread overlap. Finish with paired GTA browser measurements and retain any unachieved 10x criterion as open work.
+**Architecture:** Keep the process coordinator authoritative and move only bounded guest CPU slices to emitted WASM or isolated shared-memory CPU workers. Validate JIT failure diagnostics against the target, extend emission for the profiled GTA parser path, and prove concurrent guest-thread overlap. Finish with paired GTA browser measurements and retain any unachieved 10x criterion as open work.
 
 **Tech Stack:** Rust x86 decoder/emitter and runtime, Rust `no_std` shared CPU worker, JavaScript `WebAssembly` host/JIT imports, SharedArrayBuffer, Playwright Chromium, local GTA San Andreas package.
 
@@ -38,27 +38,25 @@
 - Consumes: `AnyWasm.jitStats` and the existing injected `WebAssembly.Module` compile-failure fixture.
 - Produces: `jitStats.lastFailure`, containing the latest emitted-module exception message or `null` before any failure.
 
-- [ ] Add an assertion to the existing forced compile-failure regression that `lastFailure` equals `forced emitted-module compile failure`.
-- [ ] Run `node test/wasm_smoke.mjs`; confirm the new assertion fails because `lastFailure` is absent.
-- [ ] Store bounded exception text in `jitStats.lastFailure` in the host JIT failure paths, including module compilation and generated-module traps.
-- [ ] Re-run `node test/wasm_smoke.mjs`; confirm the forced failure is reported while output, retired count, CPU state, and memory still match the interpreter.
-- [ ] Run the GTA harness with `GTA_JIT_MIN_PREFIX=1`; capture the actual compile failure reason and use it to select Task 2's regression.
+- [x] The forced module-compile and generated-module-trap regressions assert bounded `lastFailure` text and verify interpreter parity.
+- [x] The host records bounded exception text for module compilation and generated-code traps.
+- [x] Run `node test/wasm_smoke.mjs`; both forced-failure cases pass with output, retired count, CPU state, and memory matching the interpreter.
+- [x] Run the GTA harness with `GTA_JIT_MIN_PREFIX=1`. No compile exception occurred (`lastFailure` stayed null); after 1,804,686 guest instructions the probe had 268,068 compilations, 266,175 executions, 414,849 emitted instructions, 12,630 fallbacks, and no visible game window within 60 seconds. Task 2 should target unsupported parser instructions, not a compile error.
 
-### Task 2: Make GTA x86-32 hot blocks emit and execute correctly
+### Task 2: Extend emission for the GTA x86-32 parser path
 
 **Files:**
-- Modify: `crates/anywasm-cpu/src/jit.rs`, `crates/anywasm-cpu/src/exec.rs`
-- Test: `crates/anywasm-cpu` JIT unit tests and `test/wasm_smoke.mjs`
+- Modify: `crates/anywasm-cpu/src/jit.rs`
+- Test: `crates/anywasm-cpu` JIT unit tests, then a targeted WASM differential fixture
 
 **Interfaces:**
-- Consumes: Task 1's failure reason and the existing `emit_mov_block_mode` / differential fixture APIs.
-- Produces: Correct emitted blocks for the exact failing GTA-observed 32-bit instruction sequence, with complete CPU and mapped-memory equivalence.
+- Consumes: The decoded scanner pair at `gta_sa.exe+0x82919c` and the existing `emit_mov_block_mode` / differential fixture APIs.
+- Produces: Correct emitted blocks for target-observed 32-bit scanner instructions, with complete CPU and mapped-memory equivalence.
 
-- [ ] Add a failing differential fixture for the decoded instruction sequence identified by Task 1; assert interpreter, cached, and emitted execution have equal retired count, full CPU state, and mapped memory.
-- [ ] Run the focused test and confirm it fails on the current emitted path.
-- [ ] Fix only the failing emitter/host-trampoline behavior and retain fallback at any unsupported instruction or unsafe memory boundary.
-- [ ] Run the focused Rust and WASM differential checks; require a successful compile and execution counter with no failure for the target sequence.
-- [ ] Run the GTA harness forced-emission probe and verify nonzero successful compilation/execution counters and no repeated compile-failure count.
+- [x] Add a focused emitter regression for `MOVZX EBX, byte ptr [ESI]` followed by `MOVZX EAX, BL`; verify guarded byte-load and zero-extension code generation.
+- [x] Run the focused test red before the implementation and green after it; all 45 `anywasm-cpu` library tests pass.
+- [ ] Add a WASM differential fixture for the decoded instruction pair; assert interpreter, cached, and emitted execution have equal retired count, full CPU state, and mapped memory.
+- [ ] Run a forced-emission GTA replay with the new pair and confirm nonzero target execution counters without disrupting the normal loading path.
 
 ### Task 3: Accelerate the measured GTA parser path
 

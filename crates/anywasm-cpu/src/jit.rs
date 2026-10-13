@@ -243,6 +243,12 @@ enum JitInstruction {
         size: u8,
         len: u8,
     },
+    MovzxReg {
+        dst: u8,
+        source: u8,
+        size: u8,
+        len: u8,
+    },
     Store(StoreInstruction),
     Add {
         dst: u8,
@@ -462,6 +468,7 @@ pub fn emit_mov_block_mode(
         .iter()
         .position(|instruction| {
             matches!(instruction, JitInstruction::Mov(mov) if matches!(mov.source, MovSource::Register { .. }))
+                || matches!(instruction, JitInstruction::MovzxReg { .. })
         })
         .map(|index| index as u32);
     Some(EmittedBlock {
@@ -492,6 +499,22 @@ fn safe_x86_32_instruction(instruction: JitInstruction) -> bool {
             size: 4,
             ..
         } => dst < 8 && address.addr32 && inline_address_shape(address),
+        JitInstruction::Load {
+            dst,
+            address,
+            size: 1 | 2,
+            ..
+        } => dst < 8 && address.addr32 && inline_address_shape(address),
+        JitInstruction::MovzxReg {
+            dst, source, size, ..
+        } => {
+            dst < 8
+                && match size {
+                    1 => source < 4, // AH/BH/CH/DH need separate high-byte register semantics.
+                    2 => source < 8,
+                    _ => false,
+                }
+        }
         JitInstruction::Inc { dst, .. } => dst < 8,
         JitInstruction::Test { lhs, source, .. } if lhs < 8 => match source {
             AddSource::Immediate(_) => true,
@@ -590,6 +613,7 @@ fn translate_instruction(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
         _ => {}
     }
     translate_mov(inst, mode)
+        .or_else(|| translate_movzx(inst, mode))
         .or_else(|| translate_add(inst, mode))
         .or_else(|| translate_xor(inst))
         .or_else(|| translate_cmp(inst))
@@ -823,6 +847,34 @@ fn translate_mov(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
     }
 }
 
+fn translate_movzx(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
+    if inst.op != Op::Movzx
+        || mode != CpuMode::X86_32
+        || inst.osz != 4
+        || !matches!(inst.ssz, 1 | 2)
+    {
+        return None;
+    }
+    let Opnd::Gpr(dst) = inst.ops[0] else {
+        return None;
+    };
+    match inst.ops[1] {
+        Opnd::Gpr(source) => Some(JitInstruction::MovzxReg {
+            dst,
+            source,
+            size: inst.ssz,
+            len: inst.len,
+        }),
+        Opnd::Mem(address) if inline_address(address, mode) => Some(JitInstruction::Load {
+            dst,
+            address,
+            size: inst.ssz,
+            len: inst.len,
+        }),
+        _ => None,
+    }
+}
+
 fn inline_address(address: MemOp, mode: CpuMode) -> bool {
     address.addr32 == (mode == CpuMode::X86_32) && inline_address_shape(address)
 }
@@ -880,6 +932,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Ve
             JitInstruction::Nop { len } => *len,
             JitInstruction::Mov(mov) => mov.len,
             JitInstruction::Load { len, .. } => *len,
+            JitInstruction::MovzxReg { len, .. } => *len,
             JitInstruction::Store(store) => store.len,
             JitInstruction::Add { len, .. }
             | JitInstruction::Inc { len, .. }
@@ -913,17 +966,31 @@ fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Ve
                 emit_effective_address(*address, mode, &mut code);
                 emit_tlb_guard(false, *size, &mut code);
                 emit_frame_address(&mut code);
-                if *size == 4 {
-                    code.push(0x28); // i32.load
-                    uleb(2, &mut code);
-                    uleb(0, &mut code);
+                let (opcode, alignment) = match *size {
+                    1 => (0x2d, 0), // i32.load8_u
+                    2 => (0x2f, 1), // i32.load16_u
+                    4 => (0x28, 2), // i32.load
+                    8 => (0x29, 3), // i64.load
+                    _ => unreachable!("unsupported emitted load width"),
+                };
+                code.push(opcode);
+                uleb(alignment, &mut code);
+                uleb(0, &mut code);
+                if *size < 8 {
                     code.push(0xad); // i64.extend_i32_u
-                } else {
-                    code.push(0x29); // i64.load
-                    uleb(3, &mut code);
-                    uleb(0, &mut code);
                 }
                 code.push(0x21); // local.set destination GPR
+                uleb(gpr_local(*dst), &mut code);
+            }
+            JitInstruction::MovzxReg {
+                dst, source, size, ..
+            } => {
+                code.push(0x20); // source GPR
+                uleb(gpr_local(*source), &mut code);
+                code.push(0x42); // mask to the decoded source width
+                sleb(if *size == 1 { 0xff } else { 0xffff }, &mut code);
+                code.push(0x83); // i64.and: zero-extend the byte or word
+                code.push(0x21); // replace destination GPR with the 32-bit result
                 uleb(gpr_local(*dst), &mut code);
             }
             JitInstruction::Store(store) => {
@@ -2504,6 +2571,11 @@ fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
                 initialized |= 1 << mov.dst;
                 written |= 1 << mov.dst;
             }
+            JitInstruction::MovzxReg { dst, source, .. } => {
+                require_initial_register(*source, initialized, &mut initial_reads);
+                initialized |= 1 << *dst;
+                written |= 1 << *dst;
+            }
             JitInstruction::Add { dst, source, .. } => {
                 require_initial_register(*dst, initialized, &mut initial_reads);
                 if let AddSource::Register(index) = source {
@@ -2672,7 +2744,7 @@ extern "C" {
 mod tests {
     use super::*;
     use crate::cpu::CpuMode;
-    use crate::decode::decode;
+    use crate::decode::{decode, decode_mode};
 
     #[test]
     fn jit_state_round_trips_every_architectural_cpu_field() {
@@ -2750,6 +2822,51 @@ mod tests {
         assert_eq!(emitted.instruction_count(), 2);
         assert!(emitted.wasm.starts_with(b"\0asm\x01\0\0\0"));
         assert!(emitted.wasm.windows(7).any(|window| window == b"anywasm"));
+    }
+
+    #[test]
+    fn emits_x86_32_movzx_byte_load_used_by_the_gta_scanner() {
+        // GTA's statically linked format scanner uses `movzx ebx, byte ptr [esi]`.
+        let movzx = decode_mode(&[0x0f, 0xb6, 0x1e], 0x82919c, CpuMode::X86_32).unwrap();
+        assert_eq!(movzx.op, Op::Movzx);
+        assert_eq!(movzx.osz, 4);
+        assert_eq!(movzx.ssz, 1);
+        let movzx_reg = decode_mode(&[0x0f, 0xb6, 0xc3], 0x82919f, CpuMode::X86_32).unwrap();
+
+        let emitted =
+            emit_mov_block_mode(0x82919c, 0x82919c, &[movzx, movzx_reg], 1, CpuMode::X86_32)
+                .expect("the GTA scanner's MOVZX byte-load pair should be emitted in 32-bit mode");
+
+        assert_eq!(emitted.instruction_count(), 2);
+        assert!(
+            emitted
+                .wasm
+                .windows(4)
+                .any(|bytes| bytes == [0x2d, 0, 0, 0xad]),
+            "expected guarded i32.load8_u followed by unsigned extension to the GPR local"
+        );
+        assert!(emitted
+            .wasm
+            .windows(8)
+            .any(|bytes| bytes == [0x20, 12, 0x42, 0xff, 1, 0x83, 0x21, 9]));
+    }
+
+    #[test]
+    fn emits_x86_32_movzx_low_byte_register_used_by_the_gta_scanner() {
+        // GTA follows the byte load with `movzx eax, bl` before dispatching on the character.
+        let movzx = decode_mode(&[0x0f, 0xb6, 0xc3], 0x82919f, CpuMode::X86_32).unwrap();
+        assert_eq!(movzx.op, Op::Movzx);
+        assert_eq!(movzx.osz, 4);
+        assert_eq!(movzx.ssz, 1);
+
+        let emitted = emit_mov_block_mode(0x82919f, 0x82919f, &[movzx], 1, CpuMode::X86_32)
+            .expect("MOVZX r32, r8 should be emitted in 32-bit mode");
+
+        assert_eq!(emitted.instruction_count(), 1);
+        assert!(emitted
+            .wasm
+            .windows(8)
+            .any(|bytes| bytes == [0x20, 12, 0x42, 0xff, 1, 0x83, 0x21, 9]));
     }
 
     #[test]
