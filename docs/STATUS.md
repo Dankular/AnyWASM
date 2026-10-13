@@ -265,6 +265,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   concurrency evidence, not target performance. See the
   [`in-place replay`](target-data/shared-cpu-inplace-overlap-2026-10-13.json) and
   [`publish-order fix`](target-data/shared-cpu-publish-order-2026-10-13.json) evidence.
+  After the in-place allocation-size fix, a fresh Chrome 155 replay exited 0 with two workers,
+  84 parallel batches, 861,861 worker-retired instructions, and two overlapping worker slices.
+  The worker posts its final status after pool disposal, so this exercises teardown with the
+  in-place pool's allocations still outstanding. It does not force or instrument replacement of
+  mapping/dirty blocks; see the
+  [`in-place disposal replay`](target-data/shared-cpu-inplace-dispose-2026-10-13.json).
   A coordinator/CPU-worker split is documented in
   [`sharedarraybuffer-guest-threads-design.md`](superpowers/specs/2026-10-12-sharedarraybuffer-guest-threads-design.md);
   `anywasm-cpu-state` contains the `no_std` fixed-layout CPU context, decoder, generic instruction
