@@ -434,9 +434,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   dispositions, and wider PE32 API compatibility remain unsupported. The analyzer now accepts
   supported I386/PE32 and AMD64/PE32+ pairs. UCRT `_initialize_onexit_table`,
   `_register_onexit_function`, and `_execute_onexit_table` now use guest-memory tables with
-  pointer-width-aware growth and reverse-order callback execution; this path is compile-checked but
-  has no runtime lifecycle fixture yet. See the
-  [UCRT on-exit table contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/execute-onexit-table-initialize-onexit-table-register-onexit-function?view=msvc-170).
+  pointer-width-aware growth and reverse-order callback execution. Runtime HLE tests now execute
+  the table lifecycle in PE32 and PE32+ CPU modes, including reverse callback order, one-shot table
+  invalidation/reinitialization, 32-to-64-entry growth, and heap reclamation. They call the CRT HLE
+  lookup directly; the focused `cargo test -p anywasm-rt onexit_table_lifecycle -- --nocapture`
+  run passed both cases. Normal PE import binding and DLL process-exit integration remain
+  unverified. See the [UCRT on-exit table contract](https://learn.microsoft.com/en-us/cpp/c-runtime-library/execute-onexit-table-initialize-onexit-table-register-onexit-function?view=msvc-170).
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   Historical `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` runs with `--mode d3d11` reached
   virtual D3D11 device discovery/creation before stopping at the unresolved `MSVCP140.dll`

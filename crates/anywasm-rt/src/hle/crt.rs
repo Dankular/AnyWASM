@@ -2646,11 +2646,7 @@ fn onexit_table_fields(p: &Process, table: u64) -> Result<[u64; 3], Stop> {
     ])
 }
 
-fn write_onexit_table_fields(
-    p: &mut Process,
-    table: u64,
-    fields: [u64; 3],
-) -> Result<(), Stop> {
+fn write_onexit_table_fields(p: &mut Process, table: u64, fields: [u64; 3]) -> Result<(), Stop> {
     let width = onexit_pointer_width(p);
     for (index, value) in fields.into_iter().enumerate() {
         let address = table
@@ -3500,5 +3496,143 @@ mod initterm_tests {
         assert_eq!(initterm(&mut p, false), Ok(0));
         assert_eq!(p.rd32(FIRST_MARKER).unwrap(), 0x1357_2468);
         assert_eq!(p.rd32(SECOND_MARKER).unwrap(), 0x89ab_cdef);
+    }
+}
+
+#[cfg(test)]
+mod onexit_tests {
+    use super::{lookup, onexit_table_fields};
+    use crate::process::{HleFn, Process, Stop};
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, RCX, RDX, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
+
+    const CODE_BASE: u64 = 0x40000;
+    const TABLE: u64 = CODE_BASE + 0x100;
+    const ORDER: u64 = CODE_BASE + 0x200;
+    const COUNT: u64 = CODE_BASE + 0x204;
+    const FIRST_CALLBACK: u64 = CODE_BASE + 0x300;
+    const SECOND_CALLBACK: u64 = CODE_BASE + 0x340;
+    const COUNT_CALLBACK: u64 = CODE_BASE + 0x380;
+    const STACK_BASE: u64 = 0x80000;
+    const STACK: u64 = STACK_BASE + 0x800;
+
+    fn append_order_callback(mode: CpuMode, target: u64, digit: u8) -> Vec<u8> {
+        let mut code = if mode == CpuMode::X86_32 {
+            vec![0xa1]
+        } else {
+            vec![0x48, 0xb8]
+        };
+        if mode == CpuMode::X86_32 {
+            code.extend_from_slice(&(target as u32).to_le_bytes());
+            code.extend_from_slice(&[0x6b, 0xc0, 10, 0x83, 0xc0, digit, 0xa3]);
+            code.extend_from_slice(&(target as u32).to_le_bytes());
+        } else {
+            code.extend_from_slice(&target.to_le_bytes());
+            code.extend_from_slice(&[0x8b, 0x08, 0x6b, 0xc9, 10, 0x83, 0xc1, digit, 0x89, 0x08]);
+        }
+        code.extend_from_slice(&[0x31, 0xc0, 0xc3]); // xor eax,eax; ret
+        code
+    }
+
+    fn append_count_callback(mode: CpuMode, target: u64) -> Vec<u8> {
+        let mut code = if mode == CpuMode::X86_32 {
+            vec![0xa1]
+        } else {
+            vec![0x48, 0xb8]
+        };
+        if mode == CpuMode::X86_32 {
+            code.extend_from_slice(&(target as u32).to_le_bytes());
+            code.extend_from_slice(&[0x40, 0xa3]); // inc eax; mov [absolute],eax
+            code.extend_from_slice(&(target as u32).to_le_bytes());
+        } else {
+            code.extend_from_slice(&target.to_le_bytes());
+            code.extend_from_slice(&[0x8b, 0x08, 0xff, 0xc1, 0x89, 0x08]); // inc ecx; store
+        }
+        code.extend_from_slice(&[0x31, 0xc0, 0xc3]);
+        code
+    }
+
+    fn make_process(mode: CpuMode) -> Process {
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(CODE_BASE, PAGE_SIZE, PROT_RWX));
+        assert!(p.mem.map(STACK_BASE, PAGE_SIZE, PROT_RW));
+        p.cpu.mode = mode;
+        p.cpu.gpr[RSP] = STACK;
+        p.write_bytes(FIRST_CALLBACK, &append_order_callback(mode, ORDER, 1))
+            .unwrap();
+        p.write_bytes(SECOND_CALLBACK, &append_order_callback(mode, ORDER, 2))
+            .unwrap();
+        p.write_bytes(COUNT_CALLBACK, &append_count_callback(mode, COUNT))
+            .unwrap();
+        p
+    }
+
+    fn call_hle(p: &mut Process, function: HleFn, args: &[u64]) -> Result<u64, Stop> {
+        if p.cpu.mode == CpuMode::X86_32 {
+            p.cpu.gpr[RSP] = STACK;
+            p.wr32(STACK, 0)?;
+            for (index, argument) in args.iter().enumerate() {
+                p.wr32(STACK + 4 + index as u64 * 4, *argument as u32)?;
+            }
+        } else {
+            p.cpu.gpr[RCX] = args.first().copied().unwrap_or(0);
+            p.cpu.gpr[RDX] = args.get(1).copied().unwrap_or(0);
+        }
+        function(p)
+    }
+
+    fn onexit_table_lifecycle_uses_guest_width_and_reverse_callback_order(mode: CpuMode) {
+        let mut p = make_process(mode);
+        let initialize = lookup("_initialize_onexit_table").unwrap();
+        let register = lookup("_register_onexit_function").unwrap();
+        let execute = lookup("_execute_onexit_table").unwrap();
+        let width = if mode == CpuMode::X86_32 { 4 } else { 8 };
+        let table_sentinel = if width == 4 {
+            u32::MAX as u64
+        } else {
+            u64::MAX
+        };
+
+        assert_eq!(call_hle(&mut p, initialize, &[TABLE]), Ok(0));
+        assert_eq!(call_hle(&mut p, register, &[TABLE, FIRST_CALLBACK]), Ok(0));
+        assert_eq!(call_hle(&mut p, register, &[TABLE, SECOND_CALLBACK]), Ok(0));
+        assert_eq!(call_hle(&mut p, execute, &[TABLE]), Ok(0));
+        assert_eq!(p.rd32(ORDER).unwrap(), 21);
+        assert_eq!(onexit_table_fields(&p, TABLE).unwrap(), [table_sentinel; 3]);
+        assert_eq!(call_hle(&mut p, execute, &[TABLE]), Ok(u64::MAX));
+        assert_eq!(
+            call_hle(&mut p, register, &[TABLE, FIRST_CALLBACK]),
+            Ok(u64::MAX)
+        );
+
+        assert_eq!(call_hle(&mut p, initialize, &[TABLE]), Ok(0));
+        p.wr32(COUNT, 0).unwrap();
+        for _ in 0..40 {
+            assert_eq!(call_hle(&mut p, register, &[TABLE, COUNT_CALLBACK]), Ok(0));
+        }
+        let [first, last, end] = onexit_table_fields(&p, TABLE).unwrap();
+        assert_eq!(last - first, 40 * width);
+        assert_eq!(
+            end - first,
+            64 * width,
+            "the 33rd registration must grow the table"
+        );
+        assert_eq!(call_hle(&mut p, execute, &[TABLE]), Ok(0));
+        assert_eq!(p.rd32(COUNT).unwrap(), 40);
+        assert_eq!(
+            p.heap.bytes_in_use, 0,
+            "execution releases the grown callback table"
+        );
+    }
+
+    #[test]
+    fn pe32_onexit_table_lifecycle_handles_callbacks_and_growth() {
+        onexit_table_lifecycle_uses_guest_width_and_reverse_callback_order(CpuMode::X86_32);
+    }
+
+    #[test]
+    fn pe64_onexit_table_lifecycle_handles_callbacks_and_growth() {
+        onexit_table_lifecycle_uses_guest_width_and_reverse_callback_order(CpuMode::X86_64);
     }
 }
