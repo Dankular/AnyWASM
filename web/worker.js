@@ -20,6 +20,8 @@ let sharedHandoffPendingFinish = false;
 let sharedExecutionMode = 'cooperative';
 let sharedExecutionReason = '';
 let sharedExecutionWorkerCount = 0;
+let sharedWorkerRetired = 0n;
+let sharedParallelBatches = 0;
 let graphicsUnavailableReason = '';
 const dec = new TextDecoder();
 const sharedCpuWorkersEnabled = new URL(self.location.href).searchParams.has('sharedCpuWorkers');
@@ -371,6 +373,8 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
         (total, completion) => total + completion.retiredInstructions,
         0n,
       );
+      sharedWorkerRetired += workerRetired;
+      if (contexts.length >= 2) sharedParallelBatches++;
       if (workerRetired > workerBudget) {
         throw new Error('shared CPU workers exceeded their combined instruction reservation');
       }
@@ -509,7 +513,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
     close();
     return;
   }
-  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: callbackSuspended || status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: finalMessage, instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats, trace: finalTrace, executionMode: sharedExecutionMode, executionWorkerCount: sharedExecutionWorkerCount, executionModeReason: sharedExecutionReason });
+  postMessage({ type: 'status', status: stopped ? Status.RUNNING : status, exitCode: callbackSuspended || status === Status.CRASHED && terminalMessage ? -1 : w.exitCode(), message: finalMessage, instructions: n, mips: n / dt / 1e6, frames, jitStats: w.jitStats, trace: finalTrace, executionMode: sharedExecutionMode, executionWorkerCount: sharedExecutionWorkerCount, executionModeReason: sharedExecutionReason, sharedWorkerRetired: String(sharedWorkerRetired), sharedParallelBatches });
 }
 
 onmessage = async (ev) => {

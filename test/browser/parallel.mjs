@@ -1,7 +1,5 @@
-// Runs the two-thread prime-counting fixture in headless Chromium, once with the cooperative
-// scheduler and once with `?sharedCpuWorkers`, and reports which mode actually ran, the result and
-// the wall time. Correctness (identical output and exit code) is asserted in both modes; the
-// speedup is only reported, because it depends on the machine's core count.
+// Runs the two-thread prime-counting fixture on the shared CPU workers in headless Chromium and
+// checks the result. Fails if the page fell back to cooperative execution.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
@@ -14,32 +12,23 @@ const dir = '/opt/pw-browsers';
 const versioned = readdirSync(dir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
 const executablePath = process.env.CHROMIUM || (versioned ? `${dir}/${versioned}/chrome-linux/chrome` : undefined);
 const browser = await chromium.launch({ executablePath, args: ['--no-sandbox'] });
-const results = {};
 try {
-  for (const [name, query] of [['cooperative', ''], ['shared', '&sharedCpuWorkers']]) {
-    const page = await browser.newPage();
-    const logs = [];
-    page.on('console', (m) => logs.push(m.text()));
-    page.on('pageerror', (e) => logs.push('PAGEERROR ' + e.message));
-    const started = Date.now();
-    await page.goto(`http://localhost:8131/index.html?run=parallel_test${query}`);
-    await page.waitForFunction(() => document.getElementById('stat')?.dataset.status !== undefined, null, { timeout: 120000 });
-    const elapsed = Date.now() - started;
-    const output = await page.textContent('#term');
-    const stat = await page.textContent('#stat');
-    const mode = await page.evaluate(() => window.__executionMode);
-    console.log(`${name}: ${elapsed} ms · mode=${mode?.mode} workers=${mode?.workerCount} reason=${mode?.reason || '-'}\n  stat: ${stat}`);
-    results[name] = { elapsed, mode, output, stat, logs };
-    assert.match(output, /t0=5133 t1=4459 total=9592/, `${name}: wrong thread results: ${output}`);
-    assert.match(stat, /exit code 0/, `${name}: ${stat}`);
-    await page.close();
-  }
-  if (results.shared.mode?.mode !== 'shared-cpu-workers') {
-    console.log(`NOTE: shared CPU workers were not used (${results.shared.mode?.reason || 'no reason reported'}); the run fell back to cooperative execution.`);
-    process.exitCode = process.env.REQUIRE_SHARED ? 1 : 0;
-  } else {
-    console.log(`shared/cooperative wall time ratio: ${(results.shared.elapsed / results.cooperative.elapsed).toFixed(2)}`);
-  }
+  const page = await browser.newPage();
+  const logs = [];
+  page.on('console', (m) => logs.push(m.text()));
+  page.on('pageerror', (e) => logs.push('PAGEERROR ' + e.message));
+  await page.goto('http://localhost:8131/index.html?run=parallel_test&sharedCpuWorkers');
+  await page.waitForFunction(() => document.getElementById('stat')?.dataset.status !== undefined, null, { timeout: 120000 });
+  const output = await page.textContent('#term');
+  const stat = await page.textContent('#stat');
+  const mode = await page.evaluate(() => window.__executionMode);
+  console.log(`mode=${mode?.mode} workers=${mode?.workerCount} workerRetired=${mode?.workerRetired} parallelBatches=${mode?.parallelBatches} reason=${mode?.reason || '-'}\nstat: ${stat}`);
+  assert.equal(mode?.mode, 'shared-cpu-workers', `fell back to cooperative: ${mode?.reason}\n${output}`);
+  assert.ok(BigInt(mode.workerRetired) > 1_000_000n, `workers retired only ${mode.workerRetired} guest instructions`);
+  assert.ok(mode.parallelBatches > 0, 'no batch dispatched two guest threads to separate workers together');
+  assert.match(output, /t0=5133 t1=4459 total=9592/, `wrong thread results: ${output}`);
+  assert.match(stat, /exit code 0/, stat);
+  console.log('parallel guest threads: ok');
 } finally {
   await browser.close();
   server.kill();

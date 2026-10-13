@@ -6,7 +6,7 @@ npm ci
 cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
 node scripts/asyncify-wasm.mjs
 cargo build -p anywasm-cli
-rustflags='["-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals","-Clink-arg=--import-memory","-Clink-arg=--shared-memory","-Clink-arg=--no-check-features","-Clink-arg=--initial-memory=33554432","-Clink-arg=--max-memory=1073741824","-Clink-arg=--export=__stack_pointer"]'
+rustflags='["-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals","-Clink-arg=--import-memory","-Clink-arg=--shared-memory","-Clink-arg=--no-check-features","-Clink-arg=--initial-memory=33554432","-Clink-arg=--max-memory=1073741824","-Clink-arg=--export=__stack_pointer","-Clink-arg=--export=__heap_base"]'
 cargo build -p anywasm-cpu-worker --target wasm32-unknown-unknown --release --config "build.rustflags=$rustflags"
 cp target/wasm32-unknown-unknown/release/anywasm_wasm.asyncified.wasm web/anywasm_wasm.wasm
 cp target/wasm32-unknown-unknown/release/anywasm_cpu_worker.wasm web/anywasm_cpu_worker.wasm
