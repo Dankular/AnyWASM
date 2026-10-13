@@ -49,6 +49,7 @@ pub struct Extra {
     pub exit_hooks: Vec<u64>,
     pub onexit_table: Vec<u64>,
     pub cpp_exception_cells: HashMap<u32, (u64, u64)>,
+    pub purecall_handler: u64,
     pub tmp_a: u64,
     pub win: user32::WinState,
     pub gpu: gpu::GpuStream,

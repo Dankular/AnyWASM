@@ -1685,7 +1685,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             )
         },
         // ── startup / process ──
-        "__set_app_type" | "_set_app_type" | "_set_fmode" | "_setmode" | "_set_new_mode" | "_set_invalid_parameter_handler" | "_set_abort_behavior" | "_set_error_mode" | "__setusermatherr" | "_fpreset" | "_configthreadlocale" | "_set_purecall_handler"
+        "__set_app_type" | "_set_app_type" | "_set_fmode" | "_setmode" | "_set_new_mode" | "_set_invalid_parameter_handler" | "_set_abort_behavior" | "_set_error_mode" | "__setusermatherr" | "_fpreset" | "_configthreadlocale"
         | "_crt_at_quick_exit" | "_initialize_narrow_environment" | "_initialize_wide_environment" | "__security_init_cookie" | "_seh_filter_exe" | "_controlfp_s" | "_clearfp" | "_statusfp" | "__lconv_init" | "_get_osfhandle"
         | "_set_thread_local_invalid_parameter_handler" | "_CrtSetReportMode" | "_CrtSetReportFile" | "_invalid_parameter_noinfo" | "_invalid_parameter_noinfo_noreturn" => |_| Ok(0),
         "_controlfp" => |_| Ok(0x9001f),
@@ -1815,6 +1815,13 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "__std_terminate" | "terminate" => crate::msvc_eh::std_terminate,
         "__std_exception_copy" => msvc_std_exception_copy,
         "__std_exception_destroy" => msvc_std_exception_destroy,
+        "_purecall" => msvc_purecall,
+        "_get_purecall_handler" => |p| Ok(p.extra.purecall_handler),
+        "_set_purecall_handler" => |p| {
+            let previous = p.extra.purecall_handler;
+            p.extra.purecall_handler = p.arg(0);
+            Ok(previous)
+        },
         "_register_thread_local_exe_atexit_callback" => |_| Ok(0),
         "__current_exception" => |p| crate::msvc_eh::current_cpp_exception_cell(p, false),
         "__current_exception_context" => |p| crate::msvc_eh::current_cpp_exception_cell(p, true),
@@ -2512,6 +2519,15 @@ fn msvc_std_exception_destroy(p: &mut Process) -> R {
         0,
     )?;
     Ok(0)
+}
+
+fn msvc_purecall(p: &mut Process) -> R {
+    if p.extra.purecall_handler != 0 {
+        p.call_guest(p.extra.purecall_handler, &[])?;
+    }
+    Err(Stop::Crash(
+        "pure virtual function call terminated the guest".into(),
+    ))
 }
 
 fn guest_pointer_width(p: &Process) -> u64 {
