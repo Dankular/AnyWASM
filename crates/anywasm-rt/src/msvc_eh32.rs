@@ -591,6 +591,17 @@ pub(crate) fn frame_handler3(p: &mut Process) -> Result<u64, Stop> {
                     "x86 catch continuation {continuation:#x} is not executable in image {image_base:#x}"
                 )));
             }
+            if let Some(unwind_function) = exception.throw_info.unwind_function {
+                p.call_guest(unwind_function, &[exception.object_address])
+                    .map_err(|stop| match stop {
+                        Stop::GuestUnwind(_)
+                        | Stop::GuestCatch32(_)
+                        | Stop::GuestSehTransfer32(_) => Stop::Crash(
+                            "guest exception escaped an x86 thrown-object destructor".into(),
+                        ),
+                        other => other,
+                    })?;
+            }
             p.wr32(context_record + CONTEXT32_EBP, frame_base as u32)?;
             p.wr32(context_record + CONTEXT32_EIP, continuation as u32)?;
             p.wr32(context_record + CONTEXT32_EAX, 0)?;

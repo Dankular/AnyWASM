@@ -31,6 +31,10 @@ The C++ fixtures return 0 only when all paths pass. Their return codes identify 
 | 85 | Caller stack pointer changed after local destruction during unwind |
 | 86 | Caller stack pointer changed after catching across a registration frame |
 | 87 | Caller stack pointer changed after nontrivial catch-by-value |
+| 91 | Thrown object did not match the selected handler |
+| 92 | Thrown-object destructor ran before the catch body completed |
+| 93 | Catch-all handler selected instead of the typed handler |
+| 94 | Thrown-object destructor did not run exactly once after the catch |
 
 `seh-x86.exe` returns 0 only when filter selection, exception continuation, and both normal and
 unwind-time termination handlers pass:
@@ -117,3 +121,9 @@ checks the inner destructor ran exactly once. The native `eh3-x86-direct.exe`, H
 that direct-entry image with a 2,000,000-step cap, and HLE-only emulation of the normal-startup
 `eh3-x86-dynamic.exe` all returned 0. This verifies this direct caller/callee catch path; it does not
 cover arbitrary frame layouts, nested/collided unwind dispositions, or custom catch-copy closures.
+
+The `ThrowLifetimeProbe` case catches the exception by reference, checks that its destructor has not
+run inside the catch body, then requires exactly one destructor call after the handler exits. The
+native x86 direct/startup and x64 EH3/EH4 fixture binaries all return 0. HLE-only x86 direct/startup
+and x64 EH3/EH4 fixture runs also return 0. The x86 handler calls the executable unwind function
+recorded in `ThrowInfo` after the catch funclet returns and before it installs the catch continuation.

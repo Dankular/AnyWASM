@@ -98,8 +98,10 @@ silently selecting a handler.
   concrete handler thunk and metadata ABI.
 - One direct cross-registration-frame catch transfer and inner-frame destructor are fixture-verified.
   Other frame layouts remain untested. X86 catch-copy functions use the guest `__thiscall` ABI with
-  checked destination and source ranges; the post-catch thrown-object destructor remains
-  unimplemented. Nested/collided SEH unwind dispositions remain unsupported.
+  checked destination and source ranges. On a selected catch, the PE32 handler now calls the
+  executable ThrowInfo unwind function exactly once after catch-object setup and before restoring
+  the catch continuation; the fixture verifies the thrown object stays alive through a by-reference
+  catch and is destroyed after the body. Nested/collided SEH unwind dispositions remain unsupported.
 - Unwind funclets execute as guest code and lower their registration state before running. Nested
   exception behavior during cleanup has not been verified.
 - An unmatched C++ exception continues through outer registration frames, then follows the existing

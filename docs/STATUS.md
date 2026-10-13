@@ -362,7 +362,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   returns the post-catch continuation in EAX. A new cross-frame fixture case throws from a noinline
   callee with an active destructor and catches by base reference in its caller; native x86 and HLE-only
   direct-entry and normal-startup runs all returned 0 under the 2,000,000-step cap. This verifies
-  caller/callee registration transfer and inner-frame cleanup for this case. PE32 CRT initializer
+  caller/callee registration transfer and inner-frame cleanup for this case. A `ThrowLifetimeProbe`
+  case now verifies the exception object survives through its by-reference catch and its ThrowInfo
+  unwind function runs exactly once afterward; native x86 startup/direct and x64 EH3/EH4 fixtures,
+  plus their HLE-only variants, all return 0. PE32 CRT initializer
   arrays now use four-byte entries, and `InitializeSListHead` clears the 8-byte x86 or 16-byte x64
   header. A normal `/MD` PE32 startup
   now reaches `crt!exit` and returns 0; the startup trace exposed and fixed its missing stdcall cleanup

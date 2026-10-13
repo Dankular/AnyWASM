@@ -1,11 +1,12 @@
 // Minimal /MD fixture for exercising native MSVC EH3 and EH4 metadata.
-// Keep the caught type small and trivially copyable so the runtime work is about
-// exception dispatch, type matching, and unwind actions rather than STL behavior.
+// Keep the fixture independent of STL behavior; focused copy and lifetime probes exercise the
+// runtime's compiler-generated object callbacks directly.
 
 static const int kBaseTag = 0x1357;
 static const int kDerivedTag = 0x2468;
 static volatile int g_destructorRuns = 0;
 static volatile int g_copyRuns = 0;
+static volatile int g_thrownObjectDestructorRuns = 0;
 
 struct Prefix {
     unsigned long long words[2];
@@ -33,6 +34,13 @@ struct CopyProbe {
 
     explicit CopyProbe(int value) : tag(value) {}
     CopyProbe(const CopyProbe& other) : tag(other.tag) { ++g_copyRuns; }
+};
+
+struct ThrowLifetimeProbe {
+    int tag;
+
+    explicit ThrowLifetimeProbe(int value) : tag(value) {}
+    ~ThrowLifetimeProbe() { ++g_thrownObjectDestructorRuns; }
 };
 
 __declspec(noinline) static int catch_derived_by_value() {
@@ -118,6 +126,21 @@ __declspec(noinline) static int catch_nontrivial_by_value() {
     }
 }
 
+__declspec(noinline) static int catch_thrown_object_lifetime() {
+    g_thrownObjectDestructorRuns = 0;
+    int catchResult = 0;
+    try {
+        throw ThrowLifetimeProbe(kDerivedTag);
+    } catch (const ThrowLifetimeProbe& value) {
+        if (value.tag != kDerivedTag) catchResult = 1;
+        if (g_thrownObjectDestructorRuns != 0) catchResult = 2;
+    } catch (...) {
+        return 3;
+    }
+    if (catchResult != 0) return catchResult;
+    return g_thrownObjectDestructorRuns == 1 ? 0 : 4;
+}
+
 #if defined(_M_IX86)
 __declspec(noinline) static unsigned caller_stack_pointer() {
     unsigned value;
@@ -168,5 +191,7 @@ int main() {
     CHECK_MAIN_STACK(87);
 #undef CHECK_MAIN_STACK
 #endif
+    const int thrownObjectResult = catch_thrown_object_lifetime();
+    if (thrownObjectResult != 0) return 90 + thrownObjectResult;
     return 0;
 }
