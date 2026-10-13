@@ -334,7 +334,8 @@ register-stack subset):
       RGBA32_FLOAT four-channel rows and RGBA32_UINT/SINT packed channel words with 32-byte rows,
       R16 and RG16 UNORM/SNORM/UINT/SINT words, RG16_FLOAT rows, and RGBA16_UNORM/SNORM/UINT/SINT
       words; R16_UNORM/SNORM preserve adjacent guest words through upload, full-resource copy, and
-      staging readback despite the sampled half-float backing. The suite also checks packed
+      staging readback. Their sampling uses R32_FLOAT backing when `float32-filterable` is available,
+      with half-float fallback otherwise. The suite also checks packed
       RGBA16_FLOAT and R16_FLOAT values,
       raw BGRA8_UNORM bytes; R10G10B10A2_UNORM/UINT and R11G11B10_FLOAT packed words,
       encoded RGBA8_SRGB and BGRA8_SRGB bytes; RGBA8_UNORM and R8/RG8/RGBA8 SNORM/UINT/SINT plus
