@@ -60,7 +60,9 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
   showLoading('Loading WebAssembly runtime…');
   let wasm;
   try {
-    const response = await fetch(new URL('./anywasm_wasm.wasm', import.meta.url));
+    // ?inPlaceCpu selects the runtime linked against an imported shared memory (zero-copy workers).
+    const runtimeFile = new URLSearchParams(location.search).has('inPlaceCpu') ? './anywasm_wasm_shared.wasm' : './anywasm_wasm.wasm';
+    const response = await fetch(new URL(runtimeFile, import.meta.url));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     wasm = await response.arrayBuffer();
   } catch (e) {
@@ -71,6 +73,9 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
     const workerUrl = new URL('./worker.js', import.meta.url);
     if (new URLSearchParams(location.search).has('sharedCpuWorkers')) {
       workerUrl.searchParams.set('sharedCpuWorkers', '');
+    }
+    if (new URLSearchParams(location.search).has('inPlaceCpu')) {
+      workerUrl.searchParams.set('inPlaceCpu', '');
     }
     worker = new Worker(workerUrl, { type: 'module' });
     window.__worker = worker; // exposed for automated tests
@@ -120,7 +125,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
       clearLoading();
       const names = { 0: 'stopped', 1: 'exited', 2: 'stopped at an unimplemented import', 3: 'crashed' };
       const detail = m.status === 1 ? `exit code ${m.exitCode}` : m.status === 2 ? '' : m.message;
-      const executionMode = m.executionMode === 'shared-cpu-workers'
+      const executionMode = m.executionMode?.startsWith('shared-cpu-workers')
         ? `${m.executionWorkerCount} shared CPU workers`
         : 'cooperative CPU';
       const executionReason = m.executionModeReason ? ` (${m.executionModeReason})` : '';

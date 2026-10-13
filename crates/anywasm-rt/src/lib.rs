@@ -14,6 +14,7 @@ mod msvc_eh32;
 pub mod process;
 pub mod vfs;
 
+pub use anywasm_cpu::SharedSnapshotError;
 pub use bundle::Bundle;
 pub use process::{Process, RunResult, Stop};
 pub use vfs::Vfs;

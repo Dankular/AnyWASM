@@ -7,3 +7,5 @@ web/anywasm_wasm.wasm
 web/demo/
 test/browser/node_modules/
 test/browser/package-lock.json
+web/anywasm_wasm_shared.wasm
+web/anywasm_cpu_worker_inplace.wasm

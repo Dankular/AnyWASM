@@ -17,6 +17,55 @@ function bytesEqual(a, b) {
   return true;
 }
 
+
+const uleb128 = (value) => {
+  const out = [];
+  do {
+    let byte = value & 0x7f;
+    value >>>= 7;
+    if (value !== 0) byte |= 0x80;
+    out.push(byte);
+  } while (value !== 0);
+  return out;
+};
+
+/**
+ * Emitted modules import `anywasm.memory` as an unshared one-page minimum memory. When the runtime
+ * lives in a shared memory the import must be declared shared with a maximum, so rewrite that one
+ * import description (flags 0x00 -> 0x03, plus a 65,536-page maximum) and re-encode the import
+ * section length. Anything that is not the expected single-memory-import layout is rejected.
+ */
+function withSharedMemoryImport(bytes) {
+  const source = Uint8Array.from(bytes);
+  let position = 8;
+  while (position < source.length) {
+    const id = source[position];
+    let size = 0, shift = 0, cursor = position + 1;
+    for (;;) {
+      const byte = source[cursor++];
+      size |= (byte & 0x7f) << shift;
+      shift += 7;
+      if ((byte & 0x80) === 0) break;
+    }
+    const end = cursor + size;
+    if (id !== 2) { position = end; continue; }
+    const payload = source.subarray(cursor, end);
+    const tail = [0x02, 0x00, 0x01]; // kind=memory, flags=none, minimum=1 page
+    const at = payload.length - tail.length;
+    const memoryName = [0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79]; // "memory"
+    if (payload[0] !== 1 || at < memoryName.length ||
+        !tail.every((byte, index) => payload[at + index] === byte) ||
+        !memoryName.every((byte, index) => payload[at - memoryName.length + index] === byte)) {
+      throw new Error('unexpected import section in an emitted module');
+    }
+    const patched = [...payload.subarray(0, at), 0x02, 0x03, 0x01, ...uleb128(65536)];
+    return Uint8Array.from([
+      ...source.subarray(0, position), 2, ...uleb128(patched.length), ...patched, ...source.subarray(end),
+    ]);
+  }
+  throw new Error('emitted module has no import section');
+}
+
 function buildChainModule(entries) {
   entries = [...entries].sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : 0);
   const uleb = (value) => {
@@ -216,7 +265,7 @@ export class AnyWasm {
    * Set `{ jit: false }` to run emitted candidates through the interpreter fallback. Use
    * `{ jitMinPrefix: 1 }` to opt in to dynamic emission; the default (65) disables it.
    */
-  static async create(source, { jit = true, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX } = {}) {
+  static async create(source, { jit = true, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, memory: importedMemory } = {}) {
     if (!Number.isInteger(jitMinPrefix) || jitMinPrefix < 1 || jitMinPrefix > 0xffff_ffff) {
       throw new RangeError('jitMinPrefix must be an integer from 1 to 4294967295');
     }
@@ -224,6 +273,7 @@ export class AnyWasm {
     if (typeof source === 'string') bytes = await (await fetch(source)).arrayBuffer();
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
     let instance;
+    const sharedMemory = importedMemory?.buffer instanceof SharedArrayBuffer;
     let asyncifyData = 0;
     const asyncifyControl = { resumeSliceSteps: 0n, yields: 0, resumes: 0 };
     const hostIo = {
@@ -247,7 +297,8 @@ export class AnyWasm {
     const getChainRunner = (memory) => {
       if (chainRunner?.version === registryVersion) return chainRunner;
       const entries = Array.from(modulesByStart.values());
-      const module = new WebAssembly.Module(buildChainModule(entries));
+      const chainBytes = buildChainModule(entries);
+      const module = new WebAssembly.Module(sharedMemory ? withSharedMemoryImport(chainBytes) : chainBytes);
       const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
       chainRunner = { version: registryVersion, run: emitted.exports.run };
       jitStats.chainCompilations++;
@@ -318,7 +369,7 @@ export class AnyWasm {
                 chainRunner = undefined;
               }
               const moduleBytes = moduleView.slice();
-              const module = new WebAssembly.Module(moduleBytes);
+              const module = new WebAssembly.Module(sharedMemory ? withSharedMemoryImport(moduleBytes) : moduleBytes);
               const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
               cached = {
                 bytes: moduleBytes,
@@ -379,8 +430,9 @@ export class AnyWasm {
               return -1;
             }
             return executed;
-          } catch {
+          } catch (error) {
             // The Rust side passed a copied CPU state, so the interpreter can retry safely.
+            if (globalThis.ANYWASM_DEBUG_JIT) console.error('[jit] fallback:', error?.message || error);
             jitStats.fallbacks++;
             return -1;
           }
@@ -431,7 +483,11 @@ export class AnyWasm {
         },
       },
     };
+    // A runtime built for shared memory imports its linear memory (env.memory) instead of exporting
+    // one. Present it as `exports.memory` so every caller works unchanged.
+    if (importedMemory) imports.env = { memory: importedMemory };
     ({ instance } = await WebAssembly.instantiate(bytes, imports));
+    if (importedMemory) instance = { exports: Object.assign(Object.create(null), instance.exports, { memory: importedMemory }) };
     const x = instance.exports;
     if (typeof x.asyncify_start_unwind === 'function' && typeof x.asyncify_stop_unwind === 'function' &&
         typeof x.asyncify_start_rewind === 'function' && typeof x.asyncify_stop_rewind === 'function' &&
@@ -554,6 +610,51 @@ export class AnyWasm {
       };
     } finally {
       this.x.aw_free(ptr, Math.max(totalBytes, 8));
+    }
+  }
+
+  /**
+   * Describe the guest frame store of a runtime linked against an imported shared memory:
+   * `{ address, used, capacity, mappingGeneration }` in bytes of that memory. The address changes
+   * only when the store grows and moves, which also changes the mapping generation.
+   */
+  sharedFramesInfo() {
+    if (typeof this.x.aw_shared_frames_info !== 'function') {
+      throw new Error('WASM runtime is missing the in-place shared-memory ABI; rebuild the runtime');
+    }
+    const ptr = this.x.aw_alloc(16) >>> 0;
+    try {
+      const rc = this.x.aw_shared_frames_info(ptr);
+      if (rc !== 0) throw new Error(this.message() || `frame store query failed (${rc})`);
+      const [address, used, capacity, mappingGeneration] = new Uint32Array(this.x.memory.buffer.slice(ptr, ptr + 16));
+      return { address, used, capacity, mappingGeneration };
+    } finally {
+      this.x.aw_free(ptr, 16);
+    }
+  }
+
+  /**
+   * Write the sorted guest page table, pointing at the live frames, into `byteOffset` of the shared
+   * memory (8-byte aligned, `byteLength` bytes). Frame offsets are relative to `headerBase`, the
+   * address of the worker ABI header. Returns the number of 16-byte records written.
+   */
+  exportSharedMappingsInPlace(byteOffset, byteLength, headerBase) {
+    const count = this.x.aw_shared_export_mappings_in_place(byteOffset >>> 0, byteLength >>> 0, headerBase >>> 0);
+    if (count < 0n && typeof count === 'bigint') throw new Error(this.message() || `in-place mapping export failed (${count})`);
+    return Number(count);
+  }
+
+  /** Report frames that CPU workers wrote in place; returns how many back executable pages. */
+  noteSharedWorkerWrites(frames) {
+    if (!(frames instanceof Uint32Array)) throw new TypeError('frames must be a Uint32Array');
+    if (frames.length === 0) return 0;
+    const bytes = frames.length * 4;
+    const ptr = this.x.aw_alloc(bytes) >>> 0;
+    try {
+      new Uint32Array(this.x.memory.buffer, ptr, frames.length).set(frames);
+      return this.x.aw_shared_note_worker_writes(ptr, frames.length);
+    } finally {
+      this.x.aw_free(ptr, bytes);
     }
   }
 
@@ -921,7 +1022,7 @@ export class AnyWasm {
   takeStderr() { return this._take(this.x.aw_stderr_ptr, this.x.aw_stderr_len, this.x.aw_stderr_clear); }
   message() {
     const len = this.x.aw_message_len();
-    return len ? this.dec.decode(new Uint8Array(this.x.memory.buffer, this.x.aw_message_ptr() >>> 0, len)) : '';
+    return len ? this.dec.decode(new Uint8Array(this.x.memory.buffer, this.x.aw_message_ptr() >>> 0, len).slice()) : '';
   }
   exitCode() { return this.x.aw_exit_code(); }
   instructions() { return Number(this.x.aw_icount()); }

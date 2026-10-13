@@ -5,6 +5,7 @@
 //! live in one growing `Vec<u8>`. A one-entry software TLB per access kind keeps the hot path to a
 //! compare and an index.
 
+use crate::frame_store::FrameStore;
 use anywasm_cpu_state::memory::GuestMemory;
 use anywasm_cpu_state::shared::{MappingEntry, GUEST_PAGE_SIZE};
 use std::cell::Cell;
@@ -74,7 +75,9 @@ struct Mid(Vec<Option<Leaf>>);
 
 pub struct Memory {
     top: Vec<Option<Mid>>,
-    frames: Vec<u8>,
+    frames: FrameStore,
+    /// Guest page number currently backed by each frame (`u64::MAX` when the frame is free).
+    frame_pages: Vec<u64>,
     /// One byte per allocated frame for coordinator-to-worker incremental publication.
     dirty_frames: Vec<u8>,
     /// Fixed-capacity list populated when a frame first becomes dirty after publication.
@@ -120,7 +123,8 @@ impl Memory {
         top.resize_with(L_SIZE, || None);
         Memory {
             top,
-            frames: Vec::new(),
+            frames: FrameStore::new(),
+            frame_pages: Vec::new(),
             dirty_frames: Vec::new(),
             dirty_frame_indices: Vec::new(),
             dirty_frame_count: 0,
@@ -561,8 +565,14 @@ impl Memory {
             return f;
         }
         let f = (self.frames.len() / PAGE_SIZE as usize) as u32;
+        let moves = self.frames.moves();
         self.frames
             .resize(self.frames.len() + PAGE_SIZE as usize, 0);
+        if self.frames.moves() != moves {
+            // Workers that address frames in place hold absolute offsets; relocation invalidates them.
+            self.bump_shared_mapping_generation();
+        }
+        self.frame_pages.push(u64::MAX);
         self.dirty_frames.push(1);
         self.dirty_frame_indices.push(0);
         f
@@ -579,6 +589,7 @@ impl Memory {
         for p in start..end {
             self.unmap_page(p);
             let f = self.alloc_frame();
+            self.frame_pages[f as usize] = p;
             let s = self.slot_mut(p, true).unwrap();
             *s = PRESENT | ((prot as u64 & 7) << 1) | ((f as u64) << 32);
             self.pages_mapped += 1;
@@ -600,6 +611,7 @@ impl Memory {
             _ => return,
         };
         self.free_frames.push((old >> 32) as u32);
+        self.frame_pages[(old >> 32) as usize] = u64::MAX;
         self.pages_mapped -= 1;
         if (old >> 1) & PROT_X as u64 != 0 {
             self.exec_page_count -= 1;
@@ -747,6 +759,88 @@ impl Memory {
         }
         debug_assert_eq!(snapshot.len(), self.pages_mapped as usize * RECORD_SIZE);
         snapshot
+    }
+
+    /// Location of the guest frame store: `(base address, bytes in use, bytes allocated)`.
+    /// With a runtime built over an imported shared `WebAssembly.Memory` the address is a byte
+    /// offset every worker can use directly; it changes only when the store grows and moves,
+    /// which also bumps [`Self::shared_mapping_generation`].
+    pub fn frame_store_region(&self) -> (usize, usize, usize) {
+        (self.frames.as_ptr() as usize, self.frames.len(), self.frames.capacity())
+    }
+
+    /// Write one sorted [`MappingEntry`] per mapped page whose `frame_offset` points straight at
+    /// the page's frame in the live frame store, so workers need no copy. `region_base` is the
+    /// address of the store's first byte in the workers' address space (the store's own pointer
+    /// on wasm32; a caller-chosen base in native tests). Returns the number of entries written.
+    pub fn export_shared_mappings_in_place(
+        &self,
+        region_base: u32,
+        mappings: &mut [MappingEntry],
+    ) -> Result<usize, SharedSnapshotError> {
+        let page_count =
+            usize::try_from(self.pages_mapped).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+        if mappings.len() < page_count {
+            return Err(SharedSnapshotError::BufferTooSmall);
+        }
+        if region_base % GUEST_PAGE_SIZE != 0 {
+            return Err(SharedSnapshotError::AddressOverflow);
+        }
+        let mut output_index = 0usize;
+        for (top_index, mid) in self.top.iter().enumerate() {
+            let Some(mid) = mid else { continue };
+            for (mid_index, leaf) in mid.0.iter().enumerate() {
+                let Some(leaf) = leaf else { continue };
+                for (leaf_index, slot) in leaf.0.iter().copied().enumerate() {
+                    if slot & PRESENT == 0 {
+                        continue;
+                    }
+                    let frame = u32::try_from(slot >> 32).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+                    let frame_offset = frame
+                        .checked_mul(GUEST_PAGE_SIZE)
+                        .and_then(|bytes| region_base.checked_add(bytes))
+                        .ok_or(SharedSnapshotError::AddressOverflow)?;
+                    mappings[output_index] = MappingEntry {
+                        guest_page: ((top_index as u64) << (2 * L_BITS))
+                            | ((mid_index as u64) << L_BITS)
+                            | leaf_index as u64,
+                        frame_offset,
+                        protection: ((slot >> 1) & 7) as u8,
+                        reserved: [0; 3],
+                    };
+                    output_index += 1;
+                }
+            }
+        }
+        if output_index != page_count {
+            return Err(SharedSnapshotError::MappingMismatch);
+        }
+        Ok(output_index)
+    }
+
+    #[cfg(test)]
+    fn frame_store_bytes(&self) -> &[u8] {
+        &self.frames
+    }
+
+    /// Record frames that CPU workers wrote in place. The bytes are already visible to the
+    /// interpreter; this only invalidates translations when a written frame backs an executable
+    /// page. Returns how many of the frames were executable.
+    pub fn note_shared_worker_writes(&mut self, frames: &[u32]) -> usize {
+        let mut executable = 0;
+        for &frame in frames {
+            let Some(&page) = self.frame_pages.get(frame as usize) else { continue };
+            if page == u64::MAX {
+                continue;
+            }
+            if self.slot(page).is_some_and(|s| (s >> 1) & PROT_X as u64 != 0) {
+                executable += 1;
+            }
+        }
+        if executable != 0 {
+            self.code_epoch += 1;
+        }
+        executable
     }
 
     /// Pointers needed by emitted modules. The caller must keep this `Memory` borrowed for the
@@ -991,6 +1085,60 @@ impl GuestMemory for Memory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn in_place_mappings_point_at_live_frames_and_worker_writes_invalidate_code() {
+        let mut m = Memory::new();
+        assert!(m.map(0x30000, 0x2000, PROT_RW)); // two data pages
+        assert!(m.map(0x10000, 0x1000, PROT_R | PROT_X)); // one code page, lower guest address
+        m.write_force(0x30000, &[0x5a; 16]).unwrap();
+        let (region, used, capacity) = m.frame_store_region();
+        assert_eq!(region % 4096, 0, "frame store base is page aligned");
+        assert_eq!(used, 3 * 4096);
+        assert!(capacity >= used);
+
+        let mut mappings = [MappingEntry::default(); 3];
+        assert_eq!(m.export_shared_mappings_in_place(0x4_0000, &mut mappings), Ok(3));
+        let pages: Vec<u64> = mappings.iter().map(|e| e.guest_page).collect();
+        assert_eq!(pages, vec![0x10, 0x30, 0x31], "sorted by guest page");
+        // The data page frame was allocated first (frame 0), the code page third (frame 2).
+        assert_eq!(mappings[1].frame_offset, 0x4_0000);
+        assert_eq!(mappings[2].frame_offset, 0x4_0000 + 4096);
+        assert_eq!(mappings[0].frame_offset, 0x4_0000 + 2 * 4096);
+        assert_eq!(mappings[0].protection, PROT_R | PROT_X);
+        // The frame really holds the bytes written through the paged interface.
+        assert_eq!(m.frame_store_bytes()[..16], [0x5a; 16]);
+
+        let mut short = [MappingEntry::default(); 2];
+        assert_eq!(m.export_shared_mappings_in_place(0x4_0000, &mut short), Err(SharedSnapshotError::BufferTooSmall));
+        assert_eq!(m.export_shared_mappings_in_place(0x4_0001, &mut mappings), Err(SharedSnapshotError::AddressOverflow));
+
+        let epoch = m.code_epoch;
+        assert_eq!(m.note_shared_worker_writes(&[0, 1]), 0, "data-only writes keep translations");
+        assert_eq!(m.code_epoch, epoch);
+        assert_eq!(m.note_shared_worker_writes(&[2]), 1, "frame 2 backs the code page");
+        assert_eq!(m.code_epoch, epoch + 1);
+        assert_eq!(m.note_shared_worker_writes(&[99]), 0, "unknown frames are ignored");
+    }
+
+    #[test]
+    fn growing_the_frame_store_bumps_the_mapping_generation_only_when_it_moves() {
+        let mut m = Memory::new();
+        let mut last = m.shared_mapping_generation();
+        let mut last_region = m.frame_store_region().0;
+        let mut relocated = 0;
+        for page in 0..2000u64 {
+            assert!(m.map(0x1_0000_0000 + page * 4096, 4096, PROT_RW));
+            let region = m.frame_store_region().0;
+            if region != last_region {
+                relocated += 1;
+                last_region = region;
+            }
+            last = m.shared_mapping_generation();
+        }
+        assert!(relocated >= 1, "2000 pages must outgrow the initial capacity");
+        assert!(last != 0);
+    }
+
     use super::*;
 
     #[test]

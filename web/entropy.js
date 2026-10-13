@@ -13,7 +13,10 @@ export function fillCryptoRandom(memory, pointer, length, provider) {
     if (start > buffer.byteLength || size > buffer.byteLength - start) return 0;
     for (let offset = 0; offset < size; offset += CRYPTO_CHUNK_BYTES) {
       const count = Math.min(CRYPTO_CHUNK_BYTES, size - offset);
-      cryptoProvider.getRandomValues(new Uint8Array(buffer, start + offset, count));
+      // getRandomValues rejects views over a SharedArrayBuffer, so fill a private copy first.
+      const chunk = new Uint8Array(count);
+      cryptoProvider.getRandomValues(chunk);
+      new Uint8Array(buffer, start + offset, count).set(chunk);
     }
     return 1;
   } catch {

@@ -11,6 +11,7 @@ import { ShaderTool } from './shaders.js';
 import { GpuExecutor } from './gpu.js';
 import { waitForPresentInterval } from './frame-pacing.js';
 import { SharedCpuCompletion, SharedCpuWorkerPool } from './shared-cpu-pool.js';
+import { InPlaceSharedCpuPool } from './shared-cpu-inplace-pool.js';
 
 let w = null, exec = null, stopped = false, disposeRequested = false, wake = null, testMode = false, sharedCpuPool = null, sharedCpuRequested = false;
 let sharedNeedsCoordinatorTurn = false;
@@ -24,7 +25,8 @@ let sharedWorkerRetired = 0n;
 let sharedParallelBatches = 0;
 let graphicsUnavailableReason = '';
 const dec = new TextDecoder();
-const sharedCpuWorkersEnabled = new URL(self.location.href).searchParams.has('sharedCpuWorkers');
+const inPlaceCpuEnabled = new URL(self.location.href).searchParams.has('inPlaceCpu');
+const sharedCpuWorkersEnabled = inPlaceCpuEnabled || new URL(self.location.href).searchParams.has('sharedCpuWorkers');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitForInput = () => new Promise((r) => { wake = r; });
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
@@ -48,6 +50,10 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
   exec = null;
   graphicsUnavailableReason = canvas ? '' : 'OffscreenCanvas worker transfer is unsupported';
   const options = jitMinPrefix === undefined ? {} : { jitMinPrefix };
+  if (inPlaceCpuEnabled) {
+    // The runtime imports its linear memory so CPU workers can share guest frames in place.
+    options.memory = new WebAssembly.Memory({ initial: 4096, maximum: 32768, shared: true });
+  }
   w = await AnyWasm.create(wasm, options);
   try { w.load(bundle); } catch (e) {
     postMessage({ type: 'status', status: Status.CRASHED, exitCode: -1, message: e.message, instructions: 0, mips: 0 });
@@ -68,21 +74,30 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
   if (sharedCpuRequested) {
     postMessage({ type: 'load-progress', message: 'Starting shared CPU worker…' });
     try {
-      const response = await fetch(new URL('./anywasm_cpu_worker.wasm', import.meta.url));
+      const response = await fetch(new URL(inPlaceCpuEnabled ? './anywasm_cpu_worker_inplace.wasm' : './anywasm_cpu_worker.wasm', import.meta.url));
       if (!response.ok) throw new Error(`worker module fetch returned HTTP ${response.status}`);
       const workerModule = await WebAssembly.compile(await response.arrayBuffer());
       const threadIds = w.sharedCpuContextThreadIds();
       if (!threadIds.length) throw new Error('the loaded process has no CPU contexts');
-      const pageCount = Number(w.sharedSnapshotPageCount());
-      sharedCpuPool = await SharedCpuWorkerPool.create({
-        workerWasm: workerModule,
-        workerCount: 2,
-        contextCount: Math.max(threadIds.length, 64),
-        pageCount,
-        pageCapacity: pageCount + Math.max(4096, Math.ceil(pageCount / 4)),
-      });
+      if (inPlaceCpuEnabled) {
+        sharedCpuPool = await InPlaceSharedCpuPool.create({
+          workerWasm: workerModule,
+          workerCount: 2,
+          contextCount: Math.max(threadIds.length, 64),
+          anyWasm: w,
+        });
+      } else {
+        const pageCount = Number(w.sharedSnapshotPageCount());
+        sharedCpuPool = await SharedCpuWorkerPool.create({
+          workerWasm: workerModule,
+          workerCount: 2,
+          contextCount: Math.max(threadIds.length, 64),
+          pageCount,
+          pageCapacity: pageCount + Math.max(4096, Math.ceil(pageCount / 4)),
+        });
+      }
       sharedCpuPool.publishFrom(w);
-      sharedExecutionMode = 'shared-cpu-workers';
+      sharedExecutionMode = inPlaceCpuEnabled ? 'shared-cpu-workers-in-place' : 'shared-cpu-workers';
       sharedExecutionWorkerCount = sharedCpuPool.workerCount;
       postMessage({ type: 'out', stream: 'stderr', text: '[runtime] shared CPU worker mode enabled\n' });
     } catch (error) {

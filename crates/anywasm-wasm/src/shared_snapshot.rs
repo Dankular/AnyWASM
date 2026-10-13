@@ -334,3 +334,91 @@ pub unsafe extern "C" fn aw_shared_snapshot_import_dirty(
         }
     }
 }
+
+// ── in-place (zero-copy) publication ─────────────────────────────────────────────────────────
+//
+// When the runtime is linked against an imported shared `WebAssembly.Memory`, its guest frame
+// store already lives in memory every CPU worker can address. These exports describe that store
+// and write the page table that points straight at it; no frame bytes are copied.
+
+/// Write `[frame store address, bytes in use, bytes allocated, mapping generation]` as four
+/// little-endian u32 values. Returns 0, or 1 without a loaded state.
+///
+/// # Safety
+/// `out` must point to four writable, 4-byte-aligned u32 slots.
+#[no_mangle]
+pub unsafe extern "C" fn aw_shared_frames_info(out: *mut u32) -> i32 {
+    let Some(s) = super::state() else { return 1 };
+    let (address, used, capacity) = s.p.mem.frame_store_region();
+    let (Ok(address), Ok(used), Ok(capacity)) =
+        (u32::try_from(address), u32::try_from(used), u32::try_from(capacity))
+    else {
+        s.message = b"frame store does not fit a 32-bit address space".to_vec();
+        return 3;
+    };
+    *out = address;
+    *out.add(1) = used;
+    *out.add(2) = capacity;
+    *out.add(3) = s.p.mem.shared_mapping_generation();
+    0
+}
+
+/// Write the sorted page table with `frame_offset` pointing at the live frames (see
+/// [`aw_shared_frames_info`]), expressed relative to `header_base`, the address of the ABI header
+/// (workers resolve every offset against it). `mapping_capacity_bytes` must hold one 16-byte
+/// record per mapped page. Returns the number of records written, or a negative error: -1 without a loaded state,
+/// -2 for insufficient capacity, -3 for invalid pointers or addresses.
+///
+/// # Safety
+/// `mappings_ptr` must be 8-byte aligned and writable for `mapping_capacity_bytes`.
+#[no_mangle]
+pub unsafe extern "C" fn aw_shared_export_mappings_in_place(
+    mappings_ptr: *mut u8,
+    mapping_capacity_bytes: usize,
+    header_base: u32,
+) -> i64 {
+    let Some(s) = super::state() else { return -1 };
+    if mappings_ptr.is_null() || mappings_ptr as usize % MAPPING_ENTRY_ALIGN != 0 {
+        s.message = b"invalid in-place mapping output buffer".to_vec();
+        return -3;
+    }
+    let (address, _, _) = s.p.mem.frame_store_region();
+    let Some(region_base) = u32::try_from(address)
+        .ok()
+        .and_then(|address| address.checked_sub(header_base))
+    else {
+        s.message = b"frame store must lie above the shared ABI header".to_vec();
+        return -3;
+    };
+    let capacity = mapping_capacity_bytes / MAPPING_ENTRY_BYTES;
+    let mappings = std::slice::from_raw_parts_mut(mappings_ptr.cast::<MappingEntry>(), capacity);
+    match s.p.mem.export_shared_mappings_in_place(region_base, mappings) {
+        Ok(count) => {
+            s.message.clear();
+            count as i64
+        }
+        Err(anywasm_rt::SharedSnapshotError::BufferTooSmall) => {
+            s.message = b"in-place mapping output buffer is too small".to_vec();
+            -2
+        }
+        Err(error) => {
+            s.message = format!("in-place mapping export failed: {error:?}").into_bytes();
+            -3
+        }
+    }
+}
+
+/// Tell the runtime which frames CPU workers wrote in place so translations of executable pages
+/// are invalidated. Returns how many of them back executable pages (0 keeps all translations).
+///
+/// # Safety
+/// `frames` must point to `count` readable, 4-byte-aligned u32 frame indices.
+#[no_mangle]
+pub unsafe extern "C" fn aw_shared_note_worker_writes(frames: *const u32, count: usize) -> u32 {
+    let Some(s) = super::state() else { return 0 };
+    if frames.is_null() || count == 0 {
+        return 0;
+    }
+    s.p.mem
+        .note_shared_worker_writes(std::slice::from_raw_parts(frames, count)) as u32
+}

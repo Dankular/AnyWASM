@@ -5,6 +5,7 @@ pub mod exec;
 pub(crate) mod memory {
     pub use anywasm_cpu_state::memory::*;
 }
+pub mod frame_store;
 pub mod jit;
 pub mod mem;
 pub mod sse;

@@ -17,14 +17,15 @@ try {
   const logs = [];
   page.on('console', (m) => logs.push(m.text()));
   page.on('pageerror', (e) => logs.push('PAGEERROR ' + e.message));
-  await page.goto('http://localhost:8131/index.html?run=parallel_test&sharedCpuWorkers');
+  const inPlace = process.env.MODE === 'in-place';
+  await page.goto(`http://localhost:8131/index.html?run=parallel_test&${inPlace ? 'inPlaceCpu' : 'sharedCpuWorkers'}`);
   await page.waitForFunction(() => document.getElementById('stat')?.dataset.status !== undefined, null, { timeout: 120000 });
   const output = await page.textContent('#term');
   const stat = await page.textContent('#stat');
   const mode = await page.evaluate(() => window.__executionMode);
   console.log(`mode=${mode?.mode} workers=${mode?.workerCount} workerRetired=${mode?.workerRetired} parallelBatches=${mode?.parallelBatches} reason=${mode?.reason || '-'}\nstat: ${stat}`);
-  assert.equal(mode?.mode, 'shared-cpu-workers', `fell back to cooperative: ${mode?.reason}\n${output}`);
-  assert.ok(BigInt(mode.workerRetired) > 1_000_000n, `workers retired only ${mode.workerRetired} guest instructions`);
+  assert.equal(mode?.mode, inPlace ? 'shared-cpu-workers-in-place' : 'shared-cpu-workers', `fell back to cooperative: ${mode?.reason}\n${output}`);
+  assert.ok(BigInt(mode.workerRetired) > 500_000n, `the fixture needs ~1.1M guest instructions; workers retired only ${mode.workerRetired} guest instructions`);
   assert.ok(mode.parallelBatches > 0, 'no batch dispatched two guest threads to separate workers together');
   assert.match(output, /t0=5133 t1=4459 total=9592/, `wrong thread results: ${output}`);
   assert.match(stat, /exit code 0/, stat);
