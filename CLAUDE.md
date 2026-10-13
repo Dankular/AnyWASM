@@ -301,9 +301,12 @@ register-stack subset):
       the pinned Naga bridge with `CUBE_ARRAY_TEXTURES` enabled. Chromium samples indices 0 and 1 from
       a two-cube view beginning at face 6, verifies the +X/+Y linear seam, and reads the expected
       width, height, cube count, and mip count with no WebGPU validation errors. A selected RGBA16_FLOAT
-      cube-array view returns its two expected half-float colors with no WebGPU validation errors. The bundled vkd3d
-      compiler rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad`
-      untestable. `Texture1DArray` and `Texture2DArray` `GetDimensions` now pass through Naga's image
+      cube-array view returns its two expected half-float colors; an R8_UNORM view beginning at face 6
+      returns `[128, 0, 0, 255]` and `[64, 0, 0, 255]` for cube indices 0 and 1 and reports its view
+      dimensions, with no WebGPU validation errors. The bundled vkd3d compiler reports E5005 for
+      `SampleCmpBias`/`SampleCmpGrad` under `ps_5_0` and E5033 (unknown target profile) for `ps_6_0`
+      and `ps_6_8`, leaving those methods untestable with this compiler. `Texture1DArray` and
+      `Texture2DArray` `GetDimensions` now pass through Naga's image
       size and layer queries; shader tests and Chromium pixels verify mip 0/1 widths, two elements,
       and three levels. D32_FLOAT, D16_UNORM, D24_UNORM_S8, and D32_FLOAT_S8X24
       `TextureCubeArray.SampleCmp` and `SampleCmpLevelZero` with LESS compare two-cube views beginning
