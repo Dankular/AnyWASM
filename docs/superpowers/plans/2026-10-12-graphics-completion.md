@@ -169,6 +169,10 @@
 - [x] Verify visible swapchain blit pixels and backing/CSS dimensions at 32x24, then after ResizeBuffers at 96x64, with two presents and zero WebGPU validation errors.
 - [x] Verify DPR 2 worker-rendered presentation: the guest backing store remains 640x480, the canvas screenshot scales to 1280 physical pixels wide, clear and triangle pixels match, and three presents report zero validation or page errors.
 - [x] Verify present interval semantics and virtual-clock accounting under JIT and worker scheduling. The Chromium worker regression runs the D3D11 textured fixture with emitted blocks enabled, checks three Present(1) waits each wait one vblank, confirms elapsed 100 ns values map to ten-times virtual clock ticks (also covered by the Rust `host_frame_elapsed_time_100ns_is_converted_to_virtual_10ns_ticks` unit test), and verifies three clean presents plus clear/blend/texture backbuffer pixels.
-- [ ] Repeat selected-target rendering/input/gameplay checks and update every graphics status/checklist from the resulting evidence.
+- [x] Recheck seed-1 WASD movement, cursor aim, and flashlight response; fix the SDF row-to-screen Y mapping and record two matching clear-ray runs.
+- [x] Recheck random Release Tab map regeneration and record changed-pixel, dispatch, present, and validation-error counts.
+- [x] Make stored-route playback dispatch its recorded repeated keydown pulses; verify input events and balanced Asyncify yields/resumes.
+- [ ] Finish the stored seed-1 route under the current runtime and reach a terminal process status; the current replay stalls before the teleport and remains Starting.
+- [ ] Rerun random-layout flashlight ray checks with the corrected SDF row mapping, then update every graphics status/checklist from the resulting evidence.
 
 **Gate:** The graphics source-of-truth checklists contain no unverified completion claims, every remaining limitation has a concrete reason and reproduction, and all intended commits are pushed with remote SHA verification.

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples GLFW Demo random Release map",
+  "browser": "Playwright Chromium revision 1234",
+  "captureSize": { "width": 1024, "height": 768 },
+  "changedPixels": 152943,
+  "totalPixels": 786432,
+  "changedFraction": 0.1944770813,
+  "computeDispatchesBefore": 1,
+  "computeDispatchesAfter": 2,
+  "presents": 60,
+  "webGpuErrors": 0,
+  "processStatus": "Starting"
+}

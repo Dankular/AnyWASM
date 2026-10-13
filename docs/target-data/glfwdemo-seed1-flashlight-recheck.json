@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples GLFW Demo maze",
+  "browser": "Playwright Chromium revision 1234",
+  "bundleSha256": "34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36",
+  "captureSize": { "width": 1024, "height": 768 },
+  "mapping": {
+    "sdfSize": { "width": 128, "height": 128 },
+    "screenYInverted": true,
+    "texelCenterOffset": 0.5
+  },
+  "runs": [
+    {
+      "direction": "up-right",
+      "sdfOrigin": { "x": 63, "y": 64 },
+      "clearTexels": 16,
+      "wallDistanceTexels": 24.0416305603,
+      "minimumClearance": 0.5,
+      "brightPixelDelta": 4034,
+      "meanLuminanceDelta": 0.4296465037,
+      "rayResponse": {
+        "sampleCount": 14,
+        "minimumLuminanceDelta": 8,
+        "illuminatedSampleCount": 14,
+        "longestIlluminatedRun": 14,
+        "maxLuminanceDelta": 80.3333333333
+      },
+      "presents": 30,
+      "computeDispatches": 1,
+      "webGpuErrors": 0,
+      "processStatus": "Starting"
+    },
+    {
+      "direction": "up-right",
+      "sdfOrigin": { "x": 63, "y": 64 },
+      "clearTexels": 16,
+      "wallDistanceTexels": 24.0416305603,
+      "minimumClearance": 0.5,
+      "brightPixelDelta": 4050,
+      "meanLuminanceDelta": 0.4313751516,
+      "rayResponse": {
+        "sampleCount": 14,
+        "minimumLuminanceDelta": 8,
+        "illuminatedSampleCount": 14,
+        "longestIlluminatedRun": 14,
+        "maxLuminanceDelta": 80.3333333333
+      }
+    }
+  ]
+}

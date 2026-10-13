@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples GLFW Demo maze",
+  "browser": "Playwright Chromium revision 1234",
+  "record": "glfwdemo-seed1-playthrough.json",
+  "bundleSha256": "34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36",
+  "pulseMs": 10,
+  "keyPulses": 1834,
+  "routeSteps": 35,
+  "expectedTeleport": true,
+  "result": {
+    "teleported": false,
+    "initialMarker": { "x": 511.5, "y": 383.5 },
+    "finalMarker": { "x": 781.5, "y": 158.5 },
+    "actualTravelPixels": 253.9700673786,
+    "alignmentTravelPixels": 174.6496151346,
+    "finalSegmentTravelPixels": 0,
+    "finalDistanceFromStart": 351.4612354158,
+    "inputEvents": { "keyDowns": 3103, "repeatedKeyDowns": 2919, "keyUps": 184 },
+    "asyncify": { "yields": 5048808, "resumes": 5048808 },
+    "processStatus": "Starting",
+    "webGpuErrors": 0
+  }
+}

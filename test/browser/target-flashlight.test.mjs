@@ -76,18 +76,18 @@ test('maps the captured player marker into SDF texel coordinates', () => {
     'the flashlight check needs to map the current player position into the SDF');
   assert.deepEqual(
     flashlightHelpers.mapFlashlightOrigin({ x: 512, y: 360 }, 1024, 768, 128, 128),
-    { originX: 64, originY: 60 },
+    { originX: 64, originY: 68 },
   );
 });
 
 test('maps screen markers through the centered square game viewport', () => {
   assert.deepEqual(
     flashlightHelpers.mapFlashlightOrigin({ x: 128, y: 0 }, 1024, 768, 128, 128),
-    { originX: 0, originY: 0 },
+    { originX: 0, originY: 127 },
   );
   assert.deepEqual(
     flashlightHelpers.mapFlashlightOrigin({ x: 896, y: 768 }, 1024, 768, 128, 128),
-    { originX: 127, originY: 127 },
+    { originX: 127, originY: 0 },
   );
 });
 
@@ -101,7 +101,7 @@ test('measures lighting along the selected clear flashlight ray', () => {
   for (let i = 3; i < after.length; i += 4) before[i] = after[i] = 255;
   const pixel = (x, y) => (y * width + x) * 4;
   for (const centerX of [48, 51, 54]) {
-    for (let y = 31; y <= 33; y++) for (let x = centerX - 1; x <= centerX + 1; x++) {
+    for (let y = 28; y <= 30; y++) for (let x = centerX - 1; x <= centerX + 1; x++) {
       after.set([255, 255, 255, 255], pixel(x, y));
     }
   }
@@ -121,7 +121,7 @@ test('one bright patch cannot satisfy the consecutive-ray-light threshold', () =
   const before = new Uint8ClampedArray(width * height * 4);
   const after = new Uint8ClampedArray(width * height * 4);
   for (let i = 3; i < after.length; i += 4) before[i] = after[i] = 255;
-  for (let y = 31; y <= 33; y++) for (let x = 47; x <= 49; x++) {
+  for (let y = 28; y <= 30; y++) for (let x = 47; x <= 49; x++) {
     const i = (y * width + x) * 4;
     after.set([255, 255, 255, 255], i);
   }
@@ -132,6 +132,18 @@ test('one bright patch cannot satisfy the consecutive-ray-light threshold', () =
     { dx: 1, dy: 0, clearTexels: 5 },
   );
   assert.equal(response.longestIlluminatedRun, 1, JSON.stringify(response));
+});
+
+test('maps increasing SDF rows upward on the screen when measuring a vertical ray', () => {
+  const { measureFlashlightRayResponse } = flashlightHelpers;
+  const width = 64, height = 64;
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  const response = measureFlashlightRayResponse(
+    pixels, pixels, width, height, 16, 16,
+    { originX: 8, originY: 8 },
+    { dx: 0, dy: 1, clearTexels: 4 },
+  );
+  assert.deepEqual(response.samples.map((sample) => sample.y), [22, 18], JSON.stringify(response.samples));
 });
 
 test('does not count lighting changes outside the selected flashlight ray', () => {

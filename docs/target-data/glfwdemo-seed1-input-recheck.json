@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "target": "DiligentSamples GLFW Demo maze",
+  "browser": "Playwright Chromium revision 1234",
+  "bundleSha256": "34EA9EAB56BDE17338D749736CAF1C697001F3C3438A7BCD0CF82599135B5D36",
+  "captureSize": { "width": 1024, "height": 768 },
+  "movement": {
+    "directions": [
+      { "key": "W", "dx": 0, "dy": -3.5, "projectedPixels": 3.5 },
+      { "key": "S", "dx": 0, "dy": 4.2222222222, "projectedPixels": 4.2222222222 },
+      { "key": "A", "dx": -5, "dy": 0, "projectedPixels": 5 },
+      { "key": "D", "dx": 5.7777777778, "dy": -0.1111111111, "projectedPixels": 5.7777777778 }
+    ],
+    "presents": 180,
+    "computeDispatches": 1,
+    "webGpuErrors": 0,
+    "processStatus": "Starting"
+  },
+  "cursorAim": {
+    "directions": [
+      { "direction": "up", "projectedPixels": 8.6176470588 },
+      { "direction": "down", "projectedPixels": 9.2287581699 },
+      { "direction": "left", "projectedPixels": 9.5555555556 },
+      { "direction": "right", "projectedPixels": 8.4883040936 }
+    ],
+    "canvasContentBox": { "x": 177, "y": 192.5, "width": 638, "height": 478 },
+    "presents": 30,
+    "computeDispatches": 1,
+    "webGpuErrors": 0,
+    "processStatus": "Starting"
+  }
+}

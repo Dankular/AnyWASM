@@ -221,6 +221,16 @@ try {
     : null;
   if (playthroughPlan) {
     await page.locator('#screen').focus();
+    await page.evaluate(() => {
+      window.__playthroughKeyEvents = [];
+      const screen = document.querySelector('#screen');
+      screen.addEventListener('keydown', (event) => {
+        window.__playthroughKeyEvents.push({ type: event.type, key: event.key, repeat: event.repeat });
+      });
+      screen.addEventListener('keyup', (event) => {
+        window.__playthroughKeyEvents.push({ type: event.type, key: event.key, repeat: event.repeat });
+      });
+    });
     const progress = [];
     let before = result.greenMarker;
     for (const [index, step] of playthroughPlan.steps.entries()) {
@@ -243,7 +253,11 @@ try {
       }
       const segmentBefore = before;
       for (const key of step.keys) await page.keyboard.down(key);
-      await page.waitForTimeout(step.durationMs);
+      for (let pulse = 1; pulse < step.pulseCount; pulse++) {
+        await page.waitForTimeout(playthroughPlan.pulseMs);
+        for (const key of step.keys) await page.keyboard.down(key);
+      }
+      await page.waitForTimeout(playthroughPlan.pulseMs);
       for (const key of [...step.keys].reverse()) await page.keyboard.up(key);
       await page.waitForTimeout(100);
 
@@ -274,6 +288,11 @@ try {
       status: document.querySelector('#stat')?.textContent,
       gpuStats: window.__gpuStats,
     }));
+    const inputEventDiagnostics = await page.evaluate(() => ({
+      keyDowns: window.__playthroughKeyEvents.filter((event) => event.type === 'keydown').length,
+      repeatedKeyDowns: window.__playthroughKeyEvents.filter((event) => event.type === 'keydown' && event.repeat).length,
+      keyUps: window.__playthroughKeyEvents.filter((event) => event.type === 'keyup').length,
+    }));
     playthroughReplay = {
       record: playthroughArgument.slice('--playthrough='.length),
       pulseMs: playthroughPlan.pulseMs,
@@ -284,6 +303,7 @@ try {
       recordedCaptureSize: playthroughRecord.captureSize,
       replayCaptureSize: { width: result.width, height: result.height },
       callbackSuspensions: inputDiagnostics.gpuStats?.asyncify,
+      inputEventDiagnostics,
       initialMarker: result.greenMarker,
       finalMarker: before,
       finalDistanceFromStart,
@@ -302,6 +322,10 @@ try {
     writeFileSync(outputPath.replace(/\.png$/i, '.playthrough.json'), `${JSON.stringify(playthroughReplay, null, 2)}\n`);
     if (process.env.REQUIRE_TARGET_PLAYTHROUGH === '1') {
       assert.ok(playthroughPlan.teleported, 'the stored route should describe a teleporting run');
+      assert.ok(inputEventDiagnostics.keyDowns >= playthroughPlan.keyPulses,
+        `the route should dispatch every recorded key pulse: ${JSON.stringify(inputEventDiagnostics)}`);
+      assert.ok(inputEventDiagnostics.repeatedKeyDowns > 0,
+        `held keys should dispatch repeat keydown events for the recorded pulses: ${JSON.stringify(inputEventDiagnostics)}`);
       assert.ok(playthroughReplay.actualTravelPixels > 100,
         `the stored route should move the player through the maze: ${JSON.stringify(playthroughReplay)}`);
       assert.ok(playthroughReplay.finalSegmentTravelPixels > 100,
@@ -456,9 +480,23 @@ try {
   }
   let flashlight;
   if (checkFlashlight) {
-    await page.locator('#screen').focus();
-    const bounds = await page.locator('#screen').boundingBox();
+    const screen = page.locator('#screen');
+    await screen.scrollIntoViewIfNeeded();
+    await screen.focus();
+    const bounds = await screen.evaluate((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: rect.x + canvas.clientLeft,
+        y: rect.y + canvas.clientTop,
+        width: canvas.clientWidth,
+        height: canvas.clientHeight,
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight,
+      };
+    });
     assert.ok(bounds, 'the target canvas should be visible for flashlight input');
+    assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= bounds.viewportHeight,
+      `the target canvas should fit in the browser viewport before flashlight input: ${JSON.stringify(bounds)}`);
     const liveGpuStats = await page.evaluate(() => window.__gpuStats);
     const sdfViewId = liveGpuStats?.lastComputeUavs?.[0];
     assert.ok(sdfViewId, 'the latest compute dispatch should report the SDF UAV');
@@ -486,8 +524,10 @@ try {
       maxDistanceTexels,
     });
     const offset = Math.min(bounds.width, bounds.height) * 0.2;
-    const x = bounds.x + marker.x * bounds.width / result.width + direction.dx * offset;
-    const y = bounds.y + marker.y * bounds.height / result.height + direction.dy * offset;
+    const playerX = bounds.x + marker.x * bounds.width / result.width;
+    const playerY = bounds.y + marker.y * bounds.height / result.height;
+    const x = playerX + direction.dx * offset;
+    const y = playerY - direction.dy * offset;
     await page.mouse.move(x, y);
     await page.waitForTimeout(100);
     const dark = await capturePixels(true);

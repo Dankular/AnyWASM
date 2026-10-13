@@ -843,6 +843,26 @@ The executable and packed-bundle hashes plus ray measurements are in
 [`target-data/glfwdemo-random-run-flashlight-ray-check.json`](target-data/glfwdemo-random-run-flashlight-ray-check.json).
 This verifies the flashlight response in two random layouts, not general gameplay acceptance.
 
+A corrected seed-1 recheck found that SDF rows increase upward on screen while captured image rows
+increase downward. The flashlight probe now inverts the SDF-to-screen Y mapping and includes the
+half-texel center offset. Two Chromium runs of the same seed-1 bundle selected the same clear ray;
+each brightened all 14 sampled 3x3 patches by at least 8 luminance, with a longest lit run of 14 and
+a maximum local increase of 80.33. The first run reported 30 presents, one compute dispatch, and no
+WebGPU errors. The earlier random-layout ray measurements above used the old Y mapping and need to
+be rerun before they count as clear-ray checks. Full corrected metrics are in
+[the seed-1 flashlight recheck data](target-data/glfwdemo-seed1-flashlight-recheck.json).
+
+The 2026-10-13 seed-1 input recheck measured W/S/A/D movement of 3.5, 4.2, 5.0, and 5.8 backing
+pixels and cursor-aimed Space movement of 8.6, 9.2, 9.6, and 8.5 pixels. The aim probe scrolled the
+canvas into view and used its content box. Both checks reported no WebGPU errors; their process
+status remained Starting. Measurements are in
+[the seed-1 input recheck data](target-data/glfwdemo-seed1-input-recheck.json).
+
+The random Release map-reset recheck changed 152,943 of 786,432 pixels (19.4477%), advanced compute
+dispatches from one to two, and reached 60 presents with no WebGPU errors. The process remained
+Starting. Measurements are in
+[the random map-reset recheck data](target-data/glfwdemo-release-mapreset-recheck.json).
+
 ![GLFW Demo after W moves the player](images/glfwdemo-first-frame.after-w.png)
 
 ![GLFW Demo after Tab regenerates the maze](images/glfwdemo-first-frame.after-tab.png)
@@ -905,7 +925,7 @@ the PNGs are local ignored artifacts under `target/`.
 
 This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
 directions, a flashlight response for one seed/aim direction, and map regeneration in the selected
-target. A controlled replay of the deterministic seed-1 bundle, recorded before the 2026-10-12
+target. A historical controlled replay of the deterministic seed-1 bundle, recorded before the 2026-10-12
 frame-time unit correction, also traversed the maze to its teleport, regenerated the map (compute
 dispatches 1 → 2), and returned the player marker to the center with no WebGPU errors. It covered
 45.01 map units in 1,834 key pulses over 34 measured route segments; the complete measurements and
@@ -916,7 +936,12 @@ gameplay acceptance: the random Release map, other gameplay states, graphics sta
 readback paths remain unverified. The default 250,000-instruction worker slice now resumes the
 synchronous guest callback through Asyncify, as verified in
 [`target-data/glfwdemo-normal-slice-callbacks.json`](target-data/glfwdemo-normal-slice-callbacks.json).
-The recorded route did not finish and the process had no terminal status at capture.
+The historical route finished before the frame-time correction; the current production-slice replay
+dispatched all 1,834 recorded key pulses, including 2,919 repeated keydown events, but stalled at
+marker (781.5, 158.5) before the final route segment and did not reach the teleport. Asyncify yields
+and resumes both reached 5,048,808; the process remained Starting with no WebGPU errors. The recheck
+summary is in
+[the seed-1 playthrough recheck data](target-data/glfwdemo-seed1-playthrough-recheck.json).
 
 ## GTA San Andreas first-game POC
 
@@ -974,9 +999,11 @@ protection. Mod overlays remain unverified.
 
 ## Next evidence needed
 
-- A controlled seed-1 maze traversal is now recorded, but it does not establish general gameplay
-  acceptance. Flashlight behavior across more maps and aim positions, other gameplay states, other
-  UAV formats, and general staging readback remain untested.
+- The historical seed-1 route reached its teleport before the frame-time correction; the current
+  pulsed replay did not. Flashlight behavior across more maps and aim positions, other gameplay
+  states, other UAV formats, and general staging readback remain untested.
+- Repeat the random-layout flashlight ray checks after correcting the SDF row-to-screen Y mapping;
+  the earlier random-run patch measurements are not valid clear-ray evidence.
 - Complete a bounded selected-target browser run that reaches a terminal process status and finishes
   the stored seed-1 route. The normal-slice callback continuation itself is now verified, but the
   current replay remained in `Starting` and the route did not finish.
@@ -999,6 +1026,7 @@ protection. Mod overlays remain unverified.
   have regressions. The latest 1,000,000,000-step trace was interrupted after it reached guest
   compute dispatch, draw, and repeated present calls. The browser target replay now verifies host
   rendering, all four movement directions, cursor-aimed Space movement in all four directions, a
-  seeded flashlight response, Tab map regeneration, and one full seed-1 maze traversal. Native
-  comparison and independent UAV readback remain bounded to the recorded cases, and broad gameplay
-  acceptance remains open.
+  seed-1 flashlight response along the corrected SDF ray, and Tab map regeneration. The current
+  stored-route replay stalled before the teleport, so maze traversal is still open. Native comparison
+  and independent UAV readback remain bounded to the recorded cases, and broad gameplay acceptance
+  remains open.

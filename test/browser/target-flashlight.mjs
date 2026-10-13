@@ -32,8 +32,9 @@ export function mapFlashlightOrigin(marker, screenWidth, screenHeight, sdfWidth,
   }
   const viewport = mapViewport(screenWidth, screenHeight, mapAspect);
   return {
-    originX: Math.max(0, Math.min(sdfWidth - 1, Math.round((marker.x - viewport.x) * sdfWidth / viewport.width))),
-    originY: Math.max(0, Math.min(sdfHeight - 1, Math.round((marker.y - viewport.y) * sdfHeight / viewport.height))),
+    originX: Math.max(0, Math.min(sdfWidth - 1, Math.round((marker.x - viewport.x) * sdfWidth / viewport.width - 0.5))),
+    originY: Math.max(0, Math.min(sdfHeight - 1,
+      Math.round((1 - (marker.y - viewport.y) / viewport.height) * sdfHeight - 0.5))),
   };
 }
 
@@ -127,7 +128,7 @@ export function measureFlashlightRayResponse(before, after, width, height, sdfWi
     const sdfX = origin.originX + direction.dx * step;
     const sdfY = origin.originY + direction.dy * step;
     const x = Math.round(viewport.x + (sdfX + 0.5) * viewport.width / sdfWidth);
-    const y = Math.round(viewport.y + (sdfY + 0.5) * viewport.height / sdfHeight);
+    const y = Math.round(viewport.y + (sdfHeight - sdfY - 0.5) * viewport.height / sdfHeight);
     const beforeLuminance = sampleLuminance(before, x, y);
     const afterLuminance = sampleLuminance(after, x, y);
     samples.push({ step, x, y, beforeLuminance, afterLuminance, luminanceDelta: afterLuminance - beforeLuminance });
