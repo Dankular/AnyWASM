@@ -6114,6 +6114,7 @@ try {
         TextureCubeArray<float> r16UnormSource : register(t5);
         TextureCubeArray<float> r16SnormSource : register(t6);
         TextureCubeArray<float4> srgbSource : register(t7);
+        TextureCubeArray<float4> packedSource : register(t8);
         SamplerState sourceSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
           if (position.y >= 56.0) {
@@ -6124,14 +6125,18 @@ try {
             else if (position.x < 32.0) rg8Source.GetDimensions(0, width, height, elements, levels);
             else if (position.x < 40.0) r16Source.GetDimensions(0, width, height, elements, levels);
             else if (position.x < 48.0) r16UnormSource.GetDimensions(0, width, height, elements, levels);
-            else r16SnormSource.GetDimensions(0, width, height, elements, levels);
+            else if (position.x < 56.0) r16SnormSource.GetDimensions(0, width, height, elements, levels);
+            else packedSource.GetDimensions(0, width, height, elements, levels);
             return float4(float(width) / 4.0, float(height) / 4.0, float(elements) / 16.0, float(levels) / 2.0);
           }
           if (position.y < 16.0) {
             float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
             if (position.y < 8.0) {
               if (position.y < 4.0) {
-                return halfSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
+                if (position.x < 16.0) return halfSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, 0.0), 0.0);
+                if (position.x < 32.0) return packedSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, 0.0), 0.0);
+                if (position.x < 48.0) return halfSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, 1.0), 0.0);
+                return packedSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, 1.0), 0.0);
               }
               return srgbSource.SampleLevel(sourceSampler, float4(1.0, 0.0, 0.0, cubeIndex), 0.0);
             }
@@ -6206,6 +6211,8 @@ try {
       command(12, words(24, 2, 23, 58, 10, 0, 1, 6, 2)); // two R16_SNORM cubes starting at face 6
       command(4, words(25, 4, 4, 1, 18, 29, 0x8, 0, 1, 0x4)); // RGBA8_SRGB cube array
       command(12, words(26, 2, 25, 29, 10, 0, 1, 6, 2)); // two sRGB cubes starting at face 6
+      command(4, words(27, 4, 4, 1, 18, 24, 0x8, 0, 1, 0x4)); // R10G10B10A2_UNORM cube array
+      command(12, words(28, 2, 27, 24, 10, 0, 1, 6, 2)); // two packed cubes starting at face 6
       const cubeFaces = [
         [[255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255], [255, 0, 0, 255]],
         [[0, 255, 0, 255], [255, 0, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255], [255, 0, 255, 255], [0, 255, 255, 255]],
@@ -6276,6 +6283,16 @@ try {
         payload.set(words(25, 0, slice, 0, 0, 4, 4, 16, texels.length));
         payload.set(texels, 36); command(5, payload);
       }
+      for (let slice = 0; slice < 18; slice++) {
+        const [red, green, blue, alpha] = slice < 6 ? [0, 0, 0, 3]
+          : slice < 12 ? [256, 512, 768, 3] : [768, 256, 512, 3];
+        const packedWord = red | (green << 10) | (blue << 20) | (alpha << 30);
+        const texels = new Uint8Array(64), texelView = new DataView(texels.buffer);
+        for (let i = 0; i < 16; i++) texelView.setUint32(i * 4, packedWord, true);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(27, 0, slice, 0, 0, 4, 4, 16, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      }
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 6, true); samplerView.setUint32(4, 0x15, true);
       samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
@@ -6283,7 +6300,7 @@ try {
       shader(7, 0, vertex); shader(8, 1, pixel);
       command(17, words(0, 7)); command(17, words(1, 8));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
-      command(21, words(1, 2, 0)); command(19, words(1, 0, 8, 5, 12, 16, 18, 20, 22, 24, 26)); command(20, words(1, 0, 1, 6));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 9, 5, 12, 16, 18, 20, 22, 24, 26, 28)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
       const at = (x, y = 32) => Array.from(pixels.data.slice((y * pixels.width + x) * 4, (y * pixels.width + x) * 4 + 4));
@@ -6292,7 +6309,9 @@ try {
         selectedCube1: at(30),
         selectedCube0Edge: at(54),
         selectedHalfCube0: at(10, 2),
-        selectedHalfCube1: at(50, 2),
+        selectedR10Cube0: at(24, 2),
+        selectedHalfCube1: at(40, 2),
+        selectedR10Cube1: at(56, 2),
         selectedSrgbCube0: at(10, 6),
         selectedSrgbCube1: at(50, 6),
         selectedR8Cube0: at(10, 12),
@@ -6312,12 +6331,14 @@ try {
         r16Dimensions: at(36, 60),
         r16UnormDimensions: at(44, 60),
         r16SnormDimensions: at(52, 60),
+        r10Dimensions: at(60, 60),
         viewDimension: gpu.views.get(5)?.cache?.dim,
         halfViewDimension: gpu.views.get(12)?.cache?.dim,
         rg8ViewDimension: gpu.views.get(18)?.cache?.dim,
         r16ViewDimension: gpu.views.get(20)?.cache?.dim,
         r16UnormViewDimension: gpu.views.get(22)?.cache?.dim,
         r16SnormViewDimension: gpu.views.get(24)?.cache?.dim,
+        r10ViewDimension: gpu.views.get(28)?.cache?.dim,
         srgbViewDimension: gpu.views.get(26)?.cache?.dim,
         draws: gpu.stats.draws,
         errors: gpu.stats.errors,
@@ -6340,6 +6361,13 @@ try {
       && near(cubeArrayResult.dimensions || [], [255, 255, 32, 255], 1)
       && near(cubeArrayResult.mip1Dimensions || [], [128, 128, 32, 255], 1),
     JSON.stringify(cubeArrayResult));
+  check('D3D11 TextureCubeArray R10G10B10A2_UNORM samples packed color and reports dimensions',
+    cubeArrayResult.errors?.length === 0 && cubeArrayResult.r10ViewDimension === 'cube-array'
+      && near(cubeArrayResult.selectedR10Cube0 || [], [64, 128, 192, 255], 1)
+      && near(cubeArrayResult.selectedR10Cube1 || [], [192, 64, 128, 255], 1)
+      && near(cubeArrayResult.r10Dimensions || [], [255, 255, 32, 128], 1),
+    JSON.stringify({ cube0: cubeArrayResult.selectedR10Cube0, cube1: cubeArrayResult.selectedR10Cube1,
+      dimensions: cubeArrayResult.r10Dimensions, view: cubeArrayResult.r10ViewDimension, errors: cubeArrayResult.errors }));
   check('D3D11 TextureCubeArray R8_UNORM selects cube ranges and reports view dimensions',
     near(cubeArrayResult.selectedR8Cube0 || [], [128, 0, 0, 255], 1)
       && near(cubeArrayResult.selectedR8Cube1 || [], [64, 0, 0, 255], 1)
