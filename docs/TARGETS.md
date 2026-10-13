@@ -819,6 +819,12 @@ cover hidden-helper input selection, idle-event signaling, and event-query compl
 are saved at [after W](images/glfwdemo-first-frame.after-w.png) and
 [after Tab](images/glfwdemo-first-frame.after-tab.png).
 
+A 2026-10-13 Chromium rerun corrected the cursor probe to scroll the canvas into view and map through
+its inner content box. On the 1024x768 seed-1 frame, cursor aim moved the marker up/down/left/right
+by 8.6, 9.2, 9.6, and 8.5 pixels respectively over the probe's 500 ms actions. The run reported 30
+presents, one dispatch, and zero WebGPU errors. This confirms all four aim directions; the earlier
+stored 22–24 pixel measurements remain the separate movement-magnitude record.
+
 The general `Release` bundle command above uses a map binary whose `GenerateMap` seeds `std::mt19937`
 from `std::random_device`; each process launch can therefore produce a different maze. On 2026-10-11,
 the whole-frame 100-bright-pixel assertion failed on one map with only 36 additional bright pixels,

@@ -62,10 +62,8 @@ try {
   await page.route('**/worker.js', async (route) => {
     const response = await route.fetch();
     const original = await response.text();
-    const inputBranch = "else if (m.type === 'input' && w) { w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }";
     const source = (normalWorkerSlices ? original : original.replace('w.run(250_000)', 'w.run(1_000_000_000)'))
-      .replace('frames % 30 === 0', 'frames % 1 === 0')
-      .replace(inputBranch, "else if (m.type === 'input' && w) { console.log('[target-probe] input ' + m.kind + ':' + m.a + ':' + m.b); w.input(m.kind, m.a, m.b, m.c); wake?.(); wake = null; }");
+      .replace('frames % 30 === 0', 'frames % 1 === 0');
     assert.notEqual(source, original, 'diagnostic worker overrides should match the current worker');
     if (normalWorkerSlices) assert.match(source, /w\.run\(250_000\)/, 'normal-slice runs must keep the production worker quota');
     await route.fulfill({ response, body: source, contentType: 'text/javascript' });
@@ -409,9 +407,23 @@ try {
   }
   let aim;
   if (checkAim) {
-    await page.locator('#screen').focus();
-    const bounds = await page.locator('#screen').boundingBox();
+    const screen = page.locator('#screen');
+    await screen.scrollIntoViewIfNeeded();
+    await screen.focus();
+    const bounds = await screen.evaluate((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: rect.x + canvas.clientLeft,
+        y: rect.y + canvas.clientTop,
+        width: canvas.clientWidth,
+        height: canvas.clientHeight,
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight,
+      };
+    });
     assert.ok(bounds, 'the target canvas should be visible for mouse aiming');
+    assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= bounds.viewportHeight,
+      `the target canvas should fit in the browser viewport before mouse aiming: ${JSON.stringify(bounds)}`);
     let before = (await capturePixels()).greenMarker;
     aim = { before, directions: [] };
     for (const direction of [
@@ -422,7 +434,11 @@ try {
     ]) {
       const playerX = bounds.x + before.x * bounds.width / result.width;
       const playerY = bounds.y + before.y * bounds.height / result.height;
-      await page.mouse.move(playerX + direction.dx * bounds.width * 0.2, playerY + direction.dy * bounds.height * 0.2);
+      const mouse = {
+        x: playerX + direction.dx * bounds.width * 0.2,
+        y: playerY + direction.dy * bounds.height * 0.2,
+      };
+      await page.mouse.move(mouse.x, mouse.y);
       await page.waitForTimeout(100);
       await page.keyboard.down('Space');
       await page.waitForTimeout(500);
@@ -432,7 +448,7 @@ try {
       const dx = after && before ? after.x - before.x : 0;
       const dy = after && before ? after.y - before.y : 0;
       const projected = dx * direction.dx + dy * direction.dy;
-      aim.directions.push({ direction: direction.name, before, after, dx, dy, projected });
+      aim.directions.push({ direction: direction.name, before, after, mouse, bounds, dx, dy, projected });
       assert.ok(projected > 1, `mouse aim ${direction.name} should move the player in that direction: ${JSON.stringify({ aim, workerDiagnostics })}`);
       before = after;
     }
