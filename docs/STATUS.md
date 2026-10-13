@@ -561,7 +561,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   callback-managed entry participates in target validation and phase-two unwind. Exception dispatch
   through a growable table now has a synthetic regression: it registers an empty table, grows it to
   include an EHANDLER entry, and verifies exception search invokes that handler before the top-level
-  filter resumes the guest. Phase-two unwind through a grown table remains unverified; the optional
+  filter resumes the guest. A second regression grows a table containing `__C_specific_handler`,
+  verifies both search and unwind calls, and transfers through its catch landing pad. The optional
   out-of-process debugger callback DLL is not used.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;

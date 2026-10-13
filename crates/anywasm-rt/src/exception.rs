@@ -3195,6 +3195,88 @@ mod tests {
     }
 
     #[test]
+    fn grown_function_table_participates_in_phase_two_unwind() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const TABLE: u64 = IMAGE_BASE + 0x900;
+        const ADD_OUTPUT: u64 = INFO + 0x280;
+        const CALLER: u64 = IMAGE_BASE + 0x110;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x160;
+        const EXCEPTION_HANDLER: u64 = IMAGE_BASE + 0x600;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const HANDLER_COUNT: u64 = INFO + 0x304;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions.clear();
+        process.modules.push(module);
+
+        let add = crate::hle::lookup("ntdll", "RtlAddGrowableFunctionTable").unwrap();
+        let grow = crate::hle::lookup("ntdll", "RtlGrowFunctionTable").unwrap();
+        process.cpu.gpr[RSP] = STACK + 0x500;
+        process.cpu.gpr[RCX] = ADD_OUTPUT;
+        process.cpu.gpr[RDX] = TABLE;
+        process.cpu.gpr[R8] = 0;
+        process.cpu.gpr[R9] = 4;
+        process.wr64(STACK + 0x528, IMAGE_BASE).unwrap();
+        process.wr64(STACK + 0x530, IMAGE_BASE + 0x2000).unwrap();
+        assert_eq!(add(&mut process), Ok(0));
+        let table_handle = process.rd64(ADD_OUTPUT).unwrap();
+        assert_ne!(table_handle, 0);
+
+        process.wr32(TABLE, 0x100).unwrap();
+        process.wr32(TABLE + 4, 0x180).unwrap();
+        process.wr32(TABLE + 8, 0x300).unwrap();
+        process.cpu.gpr[RCX] = table_handle;
+        process.cpu.gpr[RDX] = 1;
+        assert_eq!(grow(&mut process), Ok(0));
+
+        process.wr8(IMAGE_BASE + 0x300, 0x19).unwrap(); // version 1, EHANDLER | UHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process
+            .wr32(IMAGE_BASE + 0x304, (EXCEPTION_HANDLER - IMAGE_BASE) as u32)
+            .unwrap();
+        let scope_table = IMAGE_BASE + 0x308;
+        process.wr32(scope_table, 1).unwrap();
+        process.wr32(scope_table + 4, 0x100).unwrap();
+        process.wr32(scope_table + 8, 0x180).unwrap();
+        process.wr32(scope_table + 12, 1).unwrap(); // Catch-all filter.
+        process.wr32(scope_table + 16, 0x160).unwrap();
+
+        let c_handler = process
+            .thunk_for("crt", "__C_specific_handler", true)
+            .unwrap();
+        let mut exception_handler = vec![0x48, 0xb8]; // mov rax, HANDLER_COUNT
+        exception_handler.extend_from_slice(&HANDLER_COUNT.to_le_bytes());
+        exception_handler.extend_from_slice(&[
+            0x83, 0x00, 0x01, // add dword ptr [rax], 1
+            0x48, 0xb8,
+        ]);
+        exception_handler.extend_from_slice(&c_handler.to_le_bytes());
+        exception_handler.extend_from_slice(&[0xff, 0xe0]); // jmp to __C_specific_handler
+        process
+            .write_bytes(EXCEPTION_HANDLER, &exception_handler)
+            .unwrap();
+
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+        process.wr64(RAISE_RSP + 8, IMAGE_BASE + 0x120).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], CODE as u64);
+        assert!(process.skip_ret);
+        assert_eq!(process.rd32(HANDLER_COUNT).unwrap(), 2);
+    }
+
+    #[test]
     fn dispatcher_context_uses_the_x64_field_offsets_observed_in_the_target() {
         let mut process = process_with_memory();
         write_dispatcher_context(
