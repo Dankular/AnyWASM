@@ -5650,15 +5650,17 @@ try {
         }
       `, 'main', 'vs_5_0');
       const pixel = tool.compileHlsl(`
-        TextureCubeArray<float> depthImage : register(t0);
+        TextureCubeArray<float> depthImage32 : register(t0);
+        TextureCubeArray<float> depthImage16 : register(t1);
         SamplerComparisonState lessSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
           float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
-          float levelZero = depthImage.SampleCmpLevelZero(lessSampler,
-            float4(1.0, 0.0, 0.0, cubeIndex), 0.5);
-          float implicitLevel = depthImage.SampleCmp(lessSampler,
-            float4(1.0, 0.0, 0.0, cubeIndex), 0.5);
-          return float4(levelZero, implicitLevel, 0.0, 1.0);
+          float4 coordinate = float4(1.0, 0.0, 0.0, cubeIndex);
+          float levelZero32 = depthImage32.SampleCmpLevelZero(lessSampler, coordinate, 0.5);
+          float implicitLevel32 = depthImage32.SampleCmp(lessSampler, coordinate, 0.5);
+          float levelZero16 = depthImage16.SampleCmpLevelZero(lessSampler, coordinate, 0.5);
+          float implicitLevel16 = depthImage16.SampleCmp(lessSampler, coordinate, 0.5);
+          return float4(levelZero32, implicitLevel32, levelZero16, implicitLevel16);
         }
       `, 'main', 'ps_5_0');
       const stream = [];
@@ -5680,13 +5682,18 @@ try {
       command(38, words(1, 0, 9, 64, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
       command(4, words(3, 4, 4, 1, 18, 40, 0x48, 0, 1, 0x4)); // D32_FLOAT cube array
+      command(4, words(4, 4, 4, 1, 18, 55, 0x48, 0, 1, 0x4)); // D16_UNORM cube array
       for (let face = 0; face < 18; face++) {
         const dsv = 20 + face;
+        const dsv16 = 50 + face;
         const depth = face < 6 ? 0x3f000000 : face < 12 ? 0x3e800000 : 0x3f400000;
         command(12, words(dsv, 1, 3, 40, 4, 0, 1, face, 1));
         command(28, words(dsv, 1, depth, 0));
+        command(12, words(dsv16, 1, 4, 55, 4, 0, 1, face, 1));
+        command(28, words(dsv16, 1, depth, 0));
       }
       command(12, words(5, 2, 3, 40, 10, 0, 1, 6, 2)); // two cubes starting at face 6
+      command(12, words(8, 2, 4, 55, 10, 0, 1, 6, 2)); // D16 view of the same two cubes
       const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
       samplerView.setUint32(0, 30, true); samplerView.setUint32(4, 0x80, true);
       samplerView.setUint32(8, 3, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
@@ -5695,7 +5702,7 @@ try {
       shader(6, 0, vertex); shader(7, 1, pixel);
       command(17, words(0, 6)); command(17, words(1, 7));
       command(7, words(10, 0)); command(15, words(10)); command(16, words(4));
-      command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 30));
+      command(21, words(1, 2, 0)); command(19, words(1, 0, 2, 5, 8)); command(20, words(1, 0, 1, 30));
       command(29, words(3, 0));
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let offset = 0; for (const part of stream) { commands.set(part, offset); offset += part.length; }
@@ -5705,6 +5712,7 @@ try {
       const result = {
         cube0: at(16), cube1: at(48),
         viewDimension: gpu.views.get(5)?.cache?.dim,
+        view16Dimension: gpu.views.get(8)?.cache?.dim,
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -5713,11 +5721,12 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 TextureCubeArray SampleCmp and SampleCmpLevelZero compare selected depth cubes',
+  check('D3D11 D32/D16 TextureCubeArray SampleCmp and SampleCmpLevelZero compare selected depth cubes',
     cubeArrayCompareResult.draws === 1 && cubeArrayCompareResult.errors?.length === 0
       && cubeArrayCompareResult.viewDimension === 'cube-array'
-      && near(cubeArrayCompareResult.cube0 || [], [0, 0, 0, 255], 1)
-      && near(cubeArrayCompareResult.cube1 || [], [255, 255, 0, 255], 1),
+      && cubeArrayCompareResult.view16Dimension === 'cube-array'
+      && near(cubeArrayCompareResult.cube0 || [], [0, 0, 0, 0], 1)
+      && near(cubeArrayCompareResult.cube1 || [], [255, 255, 255, 255], 1),
     JSON.stringify(cubeArrayCompareResult));
 
   const constantRangeResult = await page.evaluate(async () => {
