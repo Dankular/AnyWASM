@@ -4251,8 +4251,8 @@ try {
       };
       command(38, words(1, 0, 9, 64, 64, 28));
       command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
-      command(2, words(11, 12, 0, 0x40, 0, 0, 0));
-      command(2, words(12, 12, 0, 0x40, 0, 0, 0));
+      command(2, words(11, 12, 0x2, 0, 0, 0)); // D3D11_BIND_INDEX_BUFFER source
+      command(2, words(12, 12, 0x2, 0, 0, 0)); // D3D11_BIND_INDEX_BUFFER destination
       const indices = new Uint8Array(12), indexData = new DataView(indices.buffer);
       [0, 1, 2].forEach((value, i) => indexData.setUint32(i * 4, value, true));
       const indexWrite = new Uint8Array(12 + indices.length);

@@ -52,9 +52,21 @@
 
 **Files:** `test/browser/run.mjs`, `web/gpu.js`, relevant D3D11 HLE files, `CLAUDE.md`
 
-- [ ] Enumerate the untested format/resolve combinations, copy classes, sampler/render-state combinations, and staging layouts from section 3.
+#### Remaining verification inventory (2026-10-13)
+
+| Area | Existing evidence | Still open |
+|---|---|---|
+| Sample dimensions and formats | `test/browser/run.mjs`: Texture1DArray, Texture2DArray, Texture3D, TextureCube, and TextureCubeArray paths; cube-array color samples use RGBA8 and RGBA16_FLOAT; depth comparison cube arrays use D32_FLOAT, D16_UNORM, D24_UNORM_S8, and D32_FLOAT_S8X24. | More array/3D sampled formats, other cube-array formats/dimensions, and cube-array `SampleCmpBias`/`SampleCmpGrad` (vkd3d rejects `ps_6_8` with E5033). |
+| Sampler footprints | Point/linear address modes, 2D/array/3D BORDER edges, gather taps, comparison taps, and 8x anisotropic 2D/array/comparison footprints have pixel checks. | Other anisotropic footprints and sampled format combinations remain open. |
+| Copies and mip generation | `CopyResource` covers texture, vertex/index, constant, structured, raw, and typed buffers; `CopySubresourceRegion` covers 2D boxes, a 3D box across two slices with untouched voxels, unaligned 11-byte buffer ranges, and overlapping same-buffer ranges; `UpdateSubresource`, 2D/3D `GenerateMips`, and the listed MSAA resolves have regressions. | The tests are representative boundaries, not a full format × mip × array × region matrix; remaining combinations need named edge-preservation checks. |
+| Resolve and multisample creation | Chromium checks 4x resolve pixels for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, R10G10B10A2_UNORM, and R11G11B10_FLOAT. HLE tests verify 4x quality reporting and sample-count forwarding for the last two formats, plus selected depth formats. | Other format/sample-count/resolve combinations remain untested. |
+| Render state | Pixel checks cover blend factors/operations, independent targets, masks, alpha-to-coverage, sample mask, all depth comparisons, selected depth-write behavior, all stencil comparisons/operations, culling, front-face, scissor, wireframe, and depth bias. | The full cross-product of render states and attachment/sample configurations is not covered. |
+| Staging layouts | `test/browser/run.mjs` covers typed, normalized, packed, sRGB, depth/stencil, BC, odd-width rows, selected mip/array slices, and 3D row/depth pitches. | Other formats and subresource layouts remain open. In the current shared-worker worktree, R10G10B10A2_UNORM and R8G8_UNORM `Map(READ)` return E_FAIL; both pass when the D3D11 triangle fixture disables shared CPU workers. The cause is not yet confirmed. |
+
+- [x] Enumerate the untested format/resolve combinations, copy classes, sampler/render-state combinations, and staging layouts from section 3.
 - [ ] Add boundary-focused pixel/readback cases for each open behavior, including preservation outside copied/cleared regions.
 - [ ] Implement only the failing HLE/executor behavior and rerun the affected browser checks plus the full Chromium suite.
+- [x] Advertise and forward 4x multisample creation for R10G10B10A2_UNORM and R11G11B10_FLOAT; HLE quality/creation tests pass and the Chromium resolve fixture verifies both formats' pixels.
 - [x] Forward D3D11 alpha-to-coverage into multisampled WebGPU pipelines; the 4x RGBA8 resolve regression verifies partial red/blue sample coverage from a half-alpha draw in Chromium.
 - [x] Forward the `OMSetBlendState` sample mask into WebGPU multisample state and its pipeline cache key; the 4x RGBA8 resolve regression verifies that mask `0x5` preserves two of four samples.
 - [x] Pixel-check 4x resolve output for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, R10G10B10A2_UNORM, and R11G11B10_FLOAT render targets; the packed normalized and unsigned-float resolve channels match the fractional shader output, and alpha-to-coverage and sample-mask resolves preserve the untouched blue background.

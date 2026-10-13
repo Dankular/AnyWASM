@@ -70,6 +70,8 @@ const DXGI_FORMAT_R8G8B8A8_SINT: u32 = 32;
 const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
 const DXGI_FORMAT_R16G16B16A16_UINT: u32 = 12;
 const DXGI_FORMAT_R16G16B16A16_SINT: u32 = 14;
+const DXGI_FORMAT_R10G10B10A2_UNORM: u32 = 24;
+const DXGI_FORMAT_R11G11B10_FLOAT: u32 = 26;
 const DXGI_FORMAT_R32G32B32A32_FLOAT: u32 = 2;
 const DXGI_FORMAT_R32G32B32A32_UINT: u32 = 3;
 const DXGI_FORMAT_R32G32B32A32_SINT: u32 = 4;
@@ -96,6 +98,8 @@ fn supports_4x_multisample_render_target(format: u32) -> bool {
             | DXGI_FORMAT_B8G8R8A8_UNORM
             | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
             | DXGI_FORMAT_R16G16B16A16_FLOAT
+            | DXGI_FORMAT_R10G10B10A2_UNORM
+            | DXGI_FORMAT_R11G11B10_FLOAT
     )
 }
 
@@ -3096,6 +3100,18 @@ mod tests {
         assert_eq!(query(&mut p).unwrap(), S_OK);
         assert_eq!(p.rd32(OUT).unwrap(), 1);
 
+        for format in [24u32, 26] {
+            // R10G10B10A2_UNORM and R11G11B10_FLOAT have pixel-tested 4x WebGPU resolve paths.
+            p.cpu.gpr[RDX] = format as u64;
+            p.cpu.gpr[R8] = 4;
+            assert_eq!(query(&mut p).unwrap(), S_OK);
+            assert_eq!(
+                p.rd32(OUT).unwrap(),
+                1,
+                "color format {format} should support the verified 4x resolve path"
+            );
+        }
+
         for format in [40u32, 45, 55] {
             // D32_FLOAT, D24_UNORM_S8_UINT, D16_UNORM
             p.cpu.gpr[RDX] = format as u64;
@@ -3209,6 +3225,22 @@ mod tests {
             assert_ne!(p.rd64(out).unwrap(), 0);
         }
 
+        for (index, format) in [
+            DXGI_FORMAT_R10G10B10A2_UNORM,
+            DXGI_FORMAT_R11G11B10_FLOAT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut packed_desc = float16_desc.clone();
+            packed_desc[16..20].copy_from_slice(&format.to_le_bytes());
+            p.write_bytes(DESC, &packed_desc).unwrap();
+            let out = OUT + 40 + index as u64 * 8;
+            p.cpu.gpr[R9] = out;
+            assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
+            assert_ne!(p.rd64(out).unwrap(), 0);
+        }
+
         let stream = &p.extra.gpu.buf;
         assert_eq!(
             u32::from_le_bytes(stream[0..4].try_into().unwrap()),
@@ -3225,6 +3257,16 @@ mod tests {
             DXGI_FORMAT_R16G16B16A16_FLOAT
         );
         assert_eq!(u32::from_le_bytes(stream[136..140].try_into().unwrap()), 4);
+        assert_eq!(
+            u32::from_le_bytes(stream[268..272].try_into().unwrap()),
+            DXGI_FORMAT_R10G10B10A2_UNORM
+        );
+        assert_eq!(u32::from_le_bytes(stream[280..284].try_into().unwrap()), 4);
+        assert_eq!(
+            u32::from_le_bytes(stream[316..320].try_into().unwrap()),
+            DXGI_FORMAT_R11G11B10_FLOAT
+        );
+        assert_eq!(u32::from_le_bytes(stream[328..332].try_into().unwrap()), 4);
     }
 
     #[test]

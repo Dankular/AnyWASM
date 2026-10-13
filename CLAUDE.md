@@ -307,8 +307,11 @@ register-stack subset):
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
       view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
       `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 samples remain open.
-      Other staging formats and subresource layouts, format/resolve combinations, and render-state
-      combinations remain open. Staging `Map(READ)`
+      D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
+      sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; Rust HLE tests cover the reports and
+      command fields, while Chromium verifies the resolve pixels. Other staging formats and
+      subresource layouts, format/resolve combinations, and render-state combinations remain open.
+      Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
       R32_UINT/SINT words,
       R32G32_FLOAT two-channel texels with row pitches, R32G32_UINT/SINT packed channel words,
