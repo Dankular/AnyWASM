@@ -6818,7 +6818,7 @@ try {
       uploadRg8Slice(0); uploadRg8Slice(1);
       command(19, words(1, 0, 1, 18)); command(29, words(3, 0)); gpu.execute(append());
       const rg8Pixels = await gpu.readBackbuffer(1);
-      const uploadNormalizedVolume = async (resource, srv, format, word) => {
+      const uploadR16Volume = async (resource, srv, format, word) => {
         stream.length = 0;
         command(46, words(resource, 4, 4, 2, 1, format, 0x8, 0, 0));
         command(12, words(srv, 2, resource, format, 8, 0, 1, 0, 1));
@@ -6832,8 +6832,9 @@ try {
         command(19, words(1, 0, 1, srv)); command(29, words(3, 0)); gpu.execute(append());
         return gpu.readBackbuffer(1);
       };
-      const r16UnormPixels = await uploadNormalizedVolume(19, 20, 56, 0x8000);
-      const r16SnormPixels = await uploadNormalizedVolume(21, 22, 58, 0x4000);
+      const r16UnormPixels = await uploadR16Volume(19, 20, 56, 0x8000);
+      const r16SnormPixels = await uploadR16Volume(21, 22, 58, 0x4000);
+      const r16FloatPixels = await uploadR16Volume(23, 24, 54, 0x3800);
       const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
       const result = {
         outside: at(pixels, 10), straddle: at(pixels, 32),
@@ -6841,6 +6842,7 @@ try {
         rg8Outside: at(rg8Pixels, 10), rg8Straddle: at(rg8Pixels, 32),
         r16UnormOutside: at(r16UnormPixels, 10), r16UnormStraddle: at(r16UnormPixels, 32),
         r16SnormOutside: at(r16SnormPixels, 10), r16SnormStraddle: at(r16SnormPixels, 32),
+        r16FloatOutside: at(r16FloatPixels, 10), r16FloatStraddle: at(r16FloatPixels, 32),
         draws: gpu.stats.draws, errors: gpu.stats.errors,
       };
       gpu.device.destroy();
@@ -6850,7 +6852,7 @@ try {
     }
   });
   check('D3D11 Texture3D CopyResource and BORDER sampling preserve slices and edge footprints',
-    texture3dResult.draws === 5 && texture3dResult.errors.length === 0
+    texture3dResult.draws === 6 && texture3dResult.errors.length === 0
       && near(texture3dResult.outside || [], [0, 0, 255, 255], 1)
       && near(texture3dResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(texture3dResult));
@@ -6859,7 +6861,7 @@ try {
       && near(texture3dResult.r8Straddle || [], [115, 0, 0, 255], 4),
     JSON.stringify({ outside: texture3dResult.r8Outside, straddle: texture3dResult.r8Straddle }));
   check('D3D11 Texture3D RG8_UNORM BORDER sampling preserves both normalized channels and defaults at outside and edge footprints',
-    texture3dResult.draws === 5 && texture3dResult.errors.length === 0
+    texture3dResult.draws === 6 && texture3dResult.errors.length === 0
       && near(texture3dResult.rg8Outside || [], [0, 0, 0, 255], 1)
       && near(texture3dResult.rg8Straddle || [], [115, 58, 0, 255], 4),
     JSON.stringify({ outside: texture3dResult.rg8Outside, straddle: texture3dResult.rg8Straddle,
@@ -6875,6 +6877,12 @@ try {
       && near(texture3dResult.r16SnormOutside || [], [0, 0, 0, 255], 1)
       && near(texture3dResult.r16SnormStraddle || [], [115, 0, 0, 255], 4),
     JSON.stringify({ outside: texture3dResult.r16SnormOutside, straddle: texture3dResult.r16SnormStraddle,
+      errors: texture3dResult.errors }));
+  check('D3D11 Texture3D R16_FLOAT BORDER sampling decodes half-float edge values',
+    texture3dResult.errors.length === 0
+      && near(texture3dResult.r16FloatOutside || [], [0, 0, 0, 255], 1)
+      && near(texture3dResult.r16FloatStraddle || [], [115, 0, 0, 255], 4),
+    JSON.stringify({ outside: texture3dResult.r16FloatOutside, straddle: texture3dResult.r16FloatStraddle,
       errors: texture3dResult.errors }));
 
   const texture3dMipsResult = await page.evaluate(async () => {

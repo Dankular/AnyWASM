@@ -295,6 +295,8 @@ register-stack subset):
       at the same edge footprint, verifying both normalized channels and missing-channel defaults.
       Texture3D R16_UNORM and R16_SNORM samples match `[115, 0, 0, 255]` at that edge within 4
       channel values, verifying normalized 16-bit 3D texture backing and channel defaults.
+      Texture3D R16_FLOAT samples decode half-float 0.5 and return `[0, 0, 0, 255]` outside and
+      `[115, 0, 0, 255]` at the edge within 4 channel values.
       Texture1DArray R8_UNORM sampling returns `[128, 0, 0, 255]` from mip 1/layer 0 and
       `[64, 0, 0, 255]` from mip 2/layer 1; the dimension-query pixels match the RGBA8 array case.
       TextureCube SRV selects the expected
@@ -330,7 +332,8 @@ register-stack subset):
       methods, with no WebGPU validation errors. Combined depth/stencil SRVs use the aspect-specific
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
-      view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_UNORM, and R16_SNORM;
+      view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_FLOAT, R16_UNORM, and
+      R16_SNORM;
       the sRGB and R10G10B10A2_UNORM/R11G11B10_FLOAT cube-array samples are also verified. Other sampled dimensions/
       formats, anisotropic footprints, cube-array SampleCmpBias/SampleCmpGrad, and array/3D format cases
       remain open. An 8x anisotropic BC4_UNORM Texture2D BORDER test covers Sample, SampleBias, and
