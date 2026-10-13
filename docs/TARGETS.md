@@ -670,8 +670,14 @@ redirecting to another searched frame, checking the resumed handler's unwind, ta
 flags, and preserving restored register state. X64 first-pass search also has a synthetic retry test:
 the handler changes the dispatcher control PC within the loaded function; the resumed call sees the
 per-frame CONTEXT pointer and collided flag.
-Second-pass redirects outside the pre-searched frames, nested `RtlUnwindEx` during phase two, non-null
-unwind history tables, and PE32 collided dispositions remain unsupported. The rebuilt release WASM and
+PE32 second-pass code now passes the x86 one-pointer dispatcher context and implements a bounded
+collided-registration redirect within the pre-searched path, validating the live registration chain
+before changing `NT_TIB.ExceptionList`. This path is compile-checked but has no runtime fixture yet.
+The dispatcher layout and redirect rule follow the x86 unwind path in the
+[Windows Research Kernel source](https://github.com/mic101/windows/blob/master/WRK-v1.2/base/ntos/rtl/i386/exdsptch.c).
+Redirects from the selected C++ catch frame, nested PE32 `RtlUnwind`, nested x64 `RtlUnwindEx`,
+non-null unwind history tables, and redirects outside the pre-searched frames remain unsupported.
+The rebuilt release WASM and
 Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
 EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and

@@ -29,6 +29,7 @@ const MAX_EH4_SCOPE_LEVELS: u32 = 65_536;
 const CONTEXT32_SIZE: u64 = 0x2cc;
 const EXCEPTION_RECORD32_SIZE: u64 = 80;
 const EXCEPTION_POINTERS32_SIZE: u64 = 8;
+const DISPATCHER_CONTEXT32_SIZE: u64 = 4;
 const CONTEXT32_FLAGS: u32 = 0x0001_0007; // CONTEXT_i386 | CONTROL | INTEGER | SEGMENTS
 const CONTEXT32_EDI: u64 = 0x9c;
 const CONTEXT32_ESI: u64 = 0xa0;
@@ -612,6 +613,7 @@ fn dispatch_exception_inner(
     validate_stack(p, context.gpr[RSP] as u32 as u64)?;
     let exception_record = crate::hle::kernel32::alloc_block(p, EXCEPTION_RECORD32_SIZE, true);
     let context_record = crate::hle::kernel32::alloc_block(p, CONTEXT32_SIZE, true);
+    let dispatcher_context = crate::hle::kernel32::alloc_block(p, DISPATCHER_CONTEXT32_SIZE, true);
     write_exception_record(p, exception_record, code, flags, exception_address, args)?;
     write_context(p, context_record, context)?;
 
@@ -662,14 +664,12 @@ fn dispatch_exception_inner(
             next,
             handler,
         });
+        // The x86 dispatcher context is a single registration pointer. It is not the
+        // x64 UNWIND_HISTORY_TABLE passed in the analogous argument position.
+        p.wr32(dispatcher_context, registration)?;
         let disposition = match p.call_guest(
             handler as u64,
-            &[
-                exception_record,
-                frame,
-                context_record,
-                0, // The x86 dispatcher does not expose the x64 UNWIND_HISTORY_TABLE context.
-            ],
+            &[exception_record, frame, context_record, dispatcher_context],
         ) {
             Ok(disposition) => disposition as u32,
             Err(Stop::GuestCatch32(catch)) => {
@@ -679,6 +679,7 @@ fn dispatch_exception_inner(
                     &searched_frames,
                     exception_record,
                     context_record,
+                    dispatcher_context,
                     flags,
                     skip_ret_on_resume,
                 );
@@ -690,6 +691,7 @@ fn dispatch_exception_inner(
                     &searched_frames,
                     exception_record,
                     context_record,
+                    dispatcher_context,
                     flags,
                     skip_ret_on_resume,
                 );
@@ -723,10 +725,9 @@ fn dispatch_exception_inner(
                 registration = next;
             }
             EXCEPTION_COLLIDED_UNWIND => {
-                return Err(Stop::Unimplemented {
-                    dll: "ntdll".into(),
-                    name: format!("PE32 exception disposition {disposition}"),
-                });
+                return Err(Stop::Crash(format!(
+                    "PE32 exception handler {handler:#x} returned collided-unwind disposition during search"
+                )));
             }
             value => {
                 return Err(Stop::Crash(format!(
@@ -750,6 +751,7 @@ fn unwind_to_catch32(
     searched_frames: &[SearchFrame32],
     exception_record: u64,
     context_record: u64,
+    dispatcher_context: u64,
     original_flags: u32,
     skip_ret_on_resume: bool,
 ) -> Result<u64, Stop> {
@@ -779,7 +781,10 @@ fn unwind_to_catch32(
         p.wr32(transfer + offset as u64 * 4, value)?;
     }
 
-    for (index, frame) in searched_frames[..=target_index].iter().enumerate() {
+    let mut index = 0;
+    let mut collided_count = 0;
+    while index <= target_index {
+        let frame = searched_frames[index];
         let target_unwind = index == target_index;
         p.wr32(
             exception_record + 4,
@@ -799,13 +804,14 @@ fn unwind_to_catch32(
         }
         let previous_ebp = p.cpu.gpr[RBP];
         p.cpu.gpr[RBP] = frame_address + 12;
+        p.wr32(dispatcher_context, frame.registration)?;
         let result = p.call_guest(
             frame.handler as u64,
             &[
                 exception_record,
                 frame_address,
                 context_record,
-                0, // The x86 dispatcher does not expose an UNWIND_HISTORY_TABLE.
+                dispatcher_context,
             ],
         );
         p.cpu.gpr[RBP] = previous_ebp;
@@ -819,11 +825,32 @@ fn unwind_to_catch32(
                 .as_bytes(),
             );
         }
+        if disposition == EXCEPTION_COLLIDED_UNWIND {
+            if target_unwind {
+                return Err(Stop::Crash(
+                    "PE32 collided unwind redirected from the selected catch frame".into(),
+                ));
+            }
+            collided_count += 1;
+            if collided_count > MAX_SEH_FRAMES {
+                return Err(Stop::Crash(format!(
+                    "PE32 catch unwind exceeded {MAX_SEH_FRAMES} collided redirects"
+                )));
+            }
+            index = resume_collided_unwind32(
+                p,
+                dispatcher_context,
+                searched_frames,
+                index,
+                target_index,
+            )?;
+            continue;
+        }
         if disposition != EXCEPTION_CONTINUE_SEARCH {
-            return Err(Stop::Unimplemented {
-                dll: "ntdll".into(),
-                name: format!("PE32 unwind disposition {disposition}"),
-            });
+            return Err(Stop::Crash(format!(
+                "PE32 unwind handler {:#x} returned invalid disposition {disposition}",
+                frame.handler
+            )));
         }
         let expected_head = frame.registration;
         if p.rd32(TEB_ADDR)? != expected_head {
@@ -834,6 +861,7 @@ fn unwind_to_catch32(
         if !target_unwind {
             p.wr32(TEB_ADDR, frame.next)?;
         }
+        index += 1;
     }
 
     if p.rd32(TEB_ADDR)? != target.registration {
@@ -856,6 +884,7 @@ fn unwind_to_seh_transfer32(
     searched_frames: &[SearchFrame32],
     exception_record: u64,
     context_record: u64,
+    dispatcher_context: u64,
     original_flags: u32,
     skip_ret_on_resume: bool,
 ) -> Result<u64, Stop> {
@@ -873,7 +902,10 @@ fn unwind_to_seh_transfer32(
     // RtlUnwind removes registrations above the target without calling the
     // target's language handler. EH4's local unwind then handles nested scopes
     // in that target frame before control enters the selected __except block.
-    for frame in &searched_frames[..target_index] {
+    let mut index = 0;
+    let mut collided_count = 0;
+    while index < target_index {
+        let frame = searched_frames[index];
         p.wr32(exception_record + 4, original_flags | EXCEPTION_UNWINDING)?;
         let frame_address = frame.registration as u64;
         if p.rd32(frame_address)? != frame.next || p.rd32(frame_address + 4)? != frame.handler {
@@ -883,13 +915,14 @@ fn unwind_to_seh_transfer32(
         }
         let previous_ebp = p.cpu.gpr[RBP];
         p.cpu.gpr[RBP] = frame_address + 12;
+        p.wr32(dispatcher_context, frame.registration)?;
         let result = p.call_guest(
             frame.handler as u64,
             &[
                 exception_record,
                 frame_address,
                 context_record,
-                0, // The x86 dispatcher does not expose an UNWIND_HISTORY_TABLE.
+                dispatcher_context,
             ],
         );
         p.cpu.gpr[RBP] = previous_ebp;
@@ -903,11 +936,27 @@ fn unwind_to_seh_transfer32(
                 .as_bytes(),
             );
         }
+        if disposition == EXCEPTION_COLLIDED_UNWIND {
+            collided_count += 1;
+            if collided_count > MAX_SEH_FRAMES {
+                return Err(Stop::Crash(format!(
+                    "PE32 SEH unwind exceeded {MAX_SEH_FRAMES} collided redirects"
+                )));
+            }
+            index = resume_collided_unwind32(
+                p,
+                dispatcher_context,
+                searched_frames,
+                index,
+                target_index,
+            )?;
+            continue;
+        }
         if disposition != EXCEPTION_CONTINUE_SEARCH {
-            return Err(Stop::Unimplemented {
-                dll: "ntdll".into(),
-                name: format!("PE32 unwind disposition {disposition}"),
-            });
+            return Err(Stop::Crash(format!(
+                "PE32 unwind handler {:#x} returned invalid disposition {disposition}",
+                frame.handler
+            )));
         }
         if p.rd32(TEB_ADDR)? != frame.registration {
             return Err(Stop::Crash(format!(
@@ -915,6 +964,7 @@ fn unwind_to_seh_transfer32(
             )));
         }
         p.wr32(TEB_ADDR, frame.next)?;
+        index += 1;
     }
 
     if p.rd32(TEB_ADDR)? != target.registration {
@@ -989,6 +1039,71 @@ fn unwind_to_seh_transfer32(
         );
     }
     resume_exception(p, exception_record, context_record, skip_ret_on_resume)
+}
+
+fn resume_collided_unwind32(
+    p: &mut Process,
+    dispatcher_context: u64,
+    searched_frames: &[SearchFrame32],
+    current_index: usize,
+    target_index: usize,
+) -> Result<usize, Stop> {
+    let redirect = p.rd32(dispatcher_context)?;
+    let redirect_index = searched_frames
+        .iter()
+        .position(|frame| frame.registration == redirect)
+        .filter(|index| *index >= current_index && *index < target_index)
+        .ok_or_else(|| {
+            Stop::Crash(format!(
+                "PE32 collided unwind registration {redirect:#x} is outside the remaining unwind path"
+            ))
+        })?;
+
+    let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
+    let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
+    let mut head = p.rd32(TEB_ADDR)?;
+    let head_index = searched_frames
+        .iter()
+        .position(|frame| frame.registration == head)
+        .filter(|index| *index >= current_index && *index <= redirect_index)
+        .ok_or_else(|| {
+            Stop::Crash(format!(
+                "PE32 collided unwind active registration {head:#x} is outside the remaining unwind path"
+            ))
+        })?;
+
+    // The x86 dispatcher resumes after the registration pointer saved by the
+    // interrupted unwind. Walk and validate any frames that the nested unwind
+    // already removed before publishing that next registration as ExceptionList.
+    for frame in &searched_frames[head_index..=redirect_index] {
+        let address = frame.registration as u64;
+        if address < stack_limit
+            || address.checked_add(8).is_none_or(|end| end > stack_base)
+            || p.rd32(address)? != frame.next
+            || p.rd32(address + 4)? != frame.handler
+        {
+            return Err(Stop::Crash(format!(
+                "PE32 collided unwind frame {address:#x} changed or is outside TEB stack bounds"
+            )));
+        }
+        if head != frame.registration {
+            return Err(Stop::Crash(format!(
+                "PE32 collided unwind chain expected {:#x}, found {head:#x}",
+                frame.registration
+            )));
+        }
+        head = frame.next;
+    }
+
+    let next_index = redirect_index + 1;
+    let next_registration = searched_frames[next_index].registration;
+    if head != next_registration {
+        return Err(Stop::Crash(format!(
+            "PE32 collided unwind next registration {head:#x} does not match searched frame {next_registration:#x}"
+        )));
+    }
+    p.wr32(TEB_ADDR, head)?;
+    Ok(next_index)
 }
 
 fn unhandled_exception(

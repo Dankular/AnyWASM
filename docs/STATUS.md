@@ -530,8 +530,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   exception raised during `__finally` are covered end to end; a synthetic PE32 test covers the basic
   nested-disposition flag/search transition. X64 first-pass search now restores and retries a validated
   collided dispatcher frame; its second-pass redirect remains limited to already-searched frames.
-  Nested `RtlUnwindEx` during phase two, non-null unwind history tables, and PE32 collided dispositions
-  remain unsupported. Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
+  PE32 second-pass code now passes the x86 one-pointer dispatcher context and implements a bounded
+  collided-registration redirect within the pre-searched path, validating the live registration
+  chain before changing `NT_TIB.ExceptionList`. This path is compile-checked but has no runtime
+  fixture yet. Redirects from the selected C++ catch frame, nested PE32 `RtlUnwind`, nested x64
+  `RtlUnwindEx`, non-null unwind history tables, and redirects outside the pre-searched frames remain
+  unsupported. Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
   compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
   subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
   and privileged instructions, and software breakpoints. A browser
