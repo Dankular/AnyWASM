@@ -3435,7 +3435,28 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             words,
-            [0x144, 64, 64, 4, 2, 1, 2, 2, 1, texture_factor, 1, 1]
+            [
+                0x144,
+                64,
+                64,
+                4,
+                2,
+                1,
+                2,
+                2,
+                1,
+                texture_factor,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                2,
+                1,
+            ]
         );
     }
 
@@ -3638,7 +3659,28 @@ mod tests {
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
                 .collect::<Vec<_>>(),
-            vec![0x44, 640, 480, 4, 2, 1, 2, 2, 1, u32::MAX, 1, 1]
+            vec![
+                0x44,
+                640,
+                480,
+                4,
+                2,
+                1,
+                2,
+                2,
+                1,
+                u32::MAX,
+                1,
+                1,
+                1,
+                1,
+                2,
+                1,
+                1,
+                1,
+                2,
+                1,
+            ]
         );
         let buffer_id = u32::from_le_bytes(commands[1].1[0..4].try_into().unwrap());
         assert_eq!(
