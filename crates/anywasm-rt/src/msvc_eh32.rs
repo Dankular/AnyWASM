@@ -6,7 +6,7 @@ use crate::msvc_eh::{
     IptoStateMapEntry3, Pmd, ThrowInfo, TryBlockMapEntry3, TypeDescriptor, UnwindMapEntry3,
 };
 use crate::process::{GuestCatch32, Process, Stop, TEB_ADDR};
-use anywasm_cpu::cpu::{CpuMode, RAX, RBP, RSP};
+use anywasm_cpu::cpu::{CpuMode, RAX, RBP, RCX, RSP};
 use anywasm_cpu::mem::{PROT_R, PROT_X};
 
 const MSVC_CPP_EXCEPTION: u32 = 0xe06d_7363;
@@ -688,7 +688,9 @@ fn build_catch_object32(
     exception: &CppException,
     matched: &CatchMatch,
 ) -> Result<u64, Stop> {
-    if matched.is_catch_all {
+    if matched.is_catch_all || matched.catch_object_displacement == 0 {
+        // EH3 uses a zero displacement for typed catches without a materialized
+        // catch object. Writing a reference here would overwrite the saved EBP.
         return Ok(0);
     }
     let source_size = matched.object_size;
@@ -740,10 +742,13 @@ fn build_catch_object32(
     if matched.by_reference {
         p.wr32(destination, matched.adjusted_object_address as u32)?;
     } else if let Some(copy_function) = matched.copy_function {
-        p.call_guest(
-            copy_function,
-            &[destination, matched.adjusted_object_address],
-        )?;
+        // MSVC's PE32 CatchableType copy function points to a __thiscall constructor:
+        // destination is `this` in ECX and the source object is the sole stack argument.
+        let saved_cpu = p.cpu.clone();
+        p.cpu.gpr[RCX] = destination as u32 as u64;
+        let result = p.call_guest(copy_function, &[matched.adjusted_object_address]);
+        p.cpu = saved_cpu;
+        result?;
     } else {
         let bytes = p.read_bytes(matched.adjusted_object_address, source_size as usize)?;
         p.write_bytes(destination, &bytes)?;

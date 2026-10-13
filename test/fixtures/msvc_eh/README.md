@@ -22,6 +22,15 @@ The C++ fixtures return 0 only when all paths pass. Their return codes identify 
 | 40 | Catch through nested try blocks |
 | 50 | Run the local destructor during exception unwind |
 | 60 | Catch across a registration frame and run the inner-frame destructor |
+| 71 | Nontrivial catch-by-value object has the wrong copied value |
+| 72 | Nontrivial catch-by-value copy constructor did not run |
+| 81 | Caller stack pointer changed after catching a derived object by value |
+| 82 | Caller stack pointer changed after catching through a base reference |
+| 83 | Caller stack pointer changed after catching with `catch (...)` |
+| 84 | Caller stack pointer changed after nested catches |
+| 85 | Caller stack pointer changed after local destruction during unwind |
+| 86 | Caller stack pointer changed after catching across a registration frame |
+| 87 | Caller stack pointer changed after nontrivial catch-by-value |
 
 `seh-x86.exe` returns 0 only when filter selection, exception continuation, and both normal and
 unwind-time termination handlers pass:
