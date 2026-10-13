@@ -965,6 +965,7 @@ fn complete_guest_unwind(
         && p.mem
             .prot_of(unwind.target_ip)
             .is_some_and(|protection| protection & PROT_X != 0);
+    let mut cpp_funclet_transfer = is_cpp_catch_funclet;
     if target_frame.image_base != target_image_base
         || target_frame.function_entry != target_function_entry && !is_cpp_catch_funclet
     {
@@ -1182,6 +1183,7 @@ fn complete_guest_unwind(
                 transfer_context = nested_target.context.clone();
                 p.cpu.gpr[RSP] = unwind.call_rsp;
                 p.wr32(unwind.exception_record + 4, EXCEPTION_UNWINDING)?;
+                cpp_funclet_transfer = nested_cpp_funclet;
                 redirected_scope_index = None;
                 collided = false;
                 index += 1;
@@ -1340,8 +1342,15 @@ fn complete_guest_unwind(
             "exception target continuation {transfer_ip:#x} is outside loaded guest images"
         )));
     };
-    if transfer_image_base != target_frame.image_base
-        || transfer_function_entry != target_frame.function_entry
+    let transfer_target_frame = &active_frames[target_index];
+    let transfer_is_cpp_funclet = cpp_funclet_transfer
+        && transfer_image_base == transfer_target_frame.image_base
+        && p.mem
+            .prot_of(transfer_ip)
+            .is_some_and(|protection| protection & PROT_X != 0);
+    if transfer_image_base != transfer_target_frame.image_base
+        || transfer_function_entry != transfer_target_frame.function_entry
+            && !transfer_is_cpp_funclet
     {
         return Err(Stop::Crash(format!(
             "exception target continuation {transfer_ip:#x} does not belong to target frame {:#x}",
@@ -3827,8 +3836,8 @@ mod tests {
             },
         ];
         let unwind = GuestUnwind {
-            target_frame: ORIGINAL_RSP + 8,
-            target_ip: target_pc,
+            target_frame: ORIGINAL_RSP,
+            target_ip: first_pc,
             call_rsp: UNWIND_CALL_RSP,
             exception_record: EXCEPTION_RECORD,
             return_value: 0x55,
@@ -3844,6 +3853,206 @@ mod tests {
         assert_eq!(process.cpu.rip, target_pc);
         assert_eq!(process.cpu.gpr[RSP], ORIGINAL_RSP + 8);
         assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], 0x77);
+    }
+
+    #[test]
+    fn selected_cpp_catch_funclet_can_redirect_the_phase_two_unwind() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const GUEST_STACK: u64 = 0x80000;
+        const STACK_LIMIT: u64 = GUEST_STACK;
+        const STACK_BASE: u64 = GUEST_STACK + 0x10000;
+        const FRAME_RSP: u64 = GUEST_STACK + 0x4000;
+        const EXCEPTION_RECORD: u64 = GUEST_STACK + 0x2f00;
+        const CONTEXT_RECORD: u64 = INFO + 0x200;
+        const DISPATCHER_CONTEXT: u64 = INFO + 0x100;
+        const CXX_HANDLER_RVA: u32 = 0x800;
+        const CATCH_FUNCLET_RVA: u64 = 0x900;
+        const CONTINUATION_RVA: u64 = 0x980;
+        const FUNC_INFO_RVA: u64 = 0xa00;
+        const MARKER: u64 = INFO + 0x180;
+        const THROW_INFO_RVA: u64 = 0xc00;
+        const OBJECT_RVA: u64 = 0xc80;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(GUEST_STACK, 0x10000, PROT_RW));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK_BASE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK_LIMIT).unwrap();
+
+        let mut module = test_module();
+        module.runtime_functions = vec![anywasm_pe::RuntimeFunction {
+            begin_address: 0x100,
+            end_address: 0x200,
+            unwind_info_address: 0x300,
+        }];
+        process.modules.push(module);
+        process.wr32(IMAGE_BASE + 0x500, 0x100).unwrap();
+        process.wr32(IMAGE_BASE + 0x504, 0x200).unwrap();
+        process.wr32(IMAGE_BASE + 0x508, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 0x19).unwrap(); // version 1, EHANDLER | UHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0x304, CXX_HANDLER_RVA).unwrap();
+        process
+            .wr32(IMAGE_BASE + 0x308, FUNC_INFO_RVA as u32)
+            .unwrap();
+
+        let cxx_frame_handler = process
+            .thunk_for("crt", "__CxxFrameHandler3", true)
+            .unwrap();
+        process
+            .write_bytes(
+                IMAGE_BASE + CXX_HANDLER_RVA as u64,
+                &[0x48, 0xb8]
+                    .into_iter()
+                    .chain(cxx_frame_handler.to_le_bytes())
+                    .chain([0xff, 0xe0]) // mov rax, thunk; jmp rax
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+        // EH3 FuncInfo: one active try, a typed catch, and no destructor actions.
+        process
+            .wr32(IMAGE_BASE + FUNC_INFO_RVA, 0x1993_0522)
+            .unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 4, 1).unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 8, 0xb00).unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 12, 1).unwrap();
+        process
+            .wr32(IMAGE_BASE + FUNC_INFO_RVA + 16, 0xb10)
+            .unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 20, 1).unwrap();
+        process
+            .wr32(IMAGE_BASE + FUNC_INFO_RVA + 24, 0xb30)
+            .unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 28, 0).unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 32, 0).unwrap();
+        process.wr32(IMAGE_BASE + FUNC_INFO_RVA + 36, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0xb00, u32::MAX).unwrap(); // unwind to state -1
+        process.wr32(IMAGE_BASE + 0xb04, 0).unwrap();
+        for (offset, value) in [(0, 0), (4, 0), (8, 0), (12, 1), (16, 0xb40)] {
+            process.wr32(IMAGE_BASE + 0xb10 + offset, value).unwrap();
+        }
+        for (offset, value) in [
+            (0, 0),
+            (4, 0xb60),
+            (8, u32::MAX - 7), // catch object at establisher - 8
+            (12, CATCH_FUNCLET_RVA as u32),
+            (16, 0),
+        ] {
+            process.wr32(IMAGE_BASE + 0xb40 + offset, value).unwrap();
+        }
+        process.wr64(IMAGE_BASE + 0xb60, 0).unwrap();
+        process
+            .write_bytes(IMAGE_BASE + 0xb70, b".?AUDerived@@\0")
+            .unwrap();
+        process.wr32(IMAGE_BASE + 0xb30, 0x100).unwrap();
+        process.wr32(IMAGE_BASE + 0xb34, 0).unwrap();
+
+        // ThrowInfo and its single CatchableType match the EH3 handler above.
+        process.wr32(IMAGE_BASE + THROW_INFO_RVA, 0).unwrap();
+        process.wr32(IMAGE_BASE + THROW_INFO_RVA + 4, 0).unwrap();
+        process.wr32(IMAGE_BASE + THROW_INFO_RVA + 8, 0).unwrap();
+        process
+            .wr32(IMAGE_BASE + THROW_INFO_RVA + 12, 0xc20)
+            .unwrap();
+        process.wr32(IMAGE_BASE + 0xc20, 1).unwrap();
+        process.wr32(IMAGE_BASE + 0xc24, 0xc40).unwrap();
+        process.wr32(IMAGE_BASE + 0xc40, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0xc44, 0xc60).unwrap();
+        process.wr32(IMAGE_BASE + 0xc48, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0xc4c, u32::MAX).unwrap();
+        process.wr32(IMAGE_BASE + 0xc50, 0).unwrap();
+        process.wr32(IMAGE_BASE + 0xc54, 16).unwrap();
+        process.wr32(IMAGE_BASE + 0xc58, 0).unwrap();
+        process.wr64(IMAGE_BASE + 0xc60, 0).unwrap();
+        process
+            .write_bytes(IMAGE_BASE + 0xc70, b".?AUDerived@@\0")
+            .unwrap();
+        process
+            .write_bytes(IMAGE_BASE + OBJECT_RVA, &[0x69; 16])
+            .unwrap();
+
+        let rtl_unwind_ex = process.thunk_for("ntdll", "RtlUnwindEx", false).unwrap();
+        let mut catch_funclet = vec![0x48, 0xb8]; // mov rax, MARKER
+        catch_funclet.extend_from_slice(&MARKER.to_le_bytes());
+        catch_funclet.extend_from_slice(&[
+            0xc7, 0x00, 0x01, 0x00, 0x00, 0x00, // mov dword ptr [rax], 1
+            0x48, 0x83, 0xec, 0x38, // sub rsp, 0x38
+            0x48, 0xb8, // mov rax, CONTEXT_RECORD
+        ]);
+        catch_funclet.extend_from_slice(&CONTEXT_RECORD.to_le_bytes());
+        catch_funclet.extend_from_slice(&[
+            0x48, 0x89, 0x44, 0x24, 0x20, // mov [rsp+0x20], rax (arg 5)
+            0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0, // arg 6 = null
+            0x48, 0xb9, // mov rcx, current frame
+        ]);
+        catch_funclet.extend_from_slice(&FRAME_RSP.to_le_bytes());
+        catch_funclet.extend_from_slice(&[0x48, 0xba]); // mov rdx, catch continuation
+        catch_funclet.extend_from_slice(&(IMAGE_BASE + CONTINUATION_RVA).to_le_bytes());
+        catch_funclet.extend_from_slice(&[0x49, 0xb8]); // mov r8, exception record
+        catch_funclet.extend_from_slice(&EXCEPTION_RECORD.to_le_bytes());
+        catch_funclet.extend_from_slice(&[0x49, 0xb9]); // mov r9, return value
+        catch_funclet.extend_from_slice(&0x99u64.to_le_bytes());
+        catch_funclet.extend_from_slice(&[0x48, 0xb8]); // mov rax, RtlUnwindEx
+        catch_funclet.extend_from_slice(&rtl_unwind_ex.to_le_bytes());
+        catch_funclet.extend_from_slice(&[0xff, 0xd0, 0xc3]); // call rax; unreachable ret
+        process
+            .write_bytes(IMAGE_BASE + CATCH_FUNCLET_RVA, &catch_funclet)
+            .unwrap();
+
+        let first_pc = IMAGE_BASE + 0x110;
+        let catch_funclet_ip = IMAGE_BASE + CATCH_FUNCLET_RVA;
+        let continuation = IMAGE_BASE + CONTINUATION_RVA;
+        let mut frame_context = context();
+        frame_context.rip = first_pc;
+        frame_context.gpr[RSP] = FRAME_RSP;
+        process.wr64(FRAME_RSP, IMAGE_BASE + 0x700).unwrap();
+        write_context(&mut process, CONTEXT_RECORD, &frame_context).unwrap();
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            MSVC_CPP_EXCEPTION,
+            EXCEPTION_NONCONTINUABLE,
+            first_pc,
+            &[
+                MSVC_CPP_MAGIC,
+                IMAGE_BASE + OBJECT_RVA,
+                IMAGE_BASE + THROW_INFO_RVA,
+                IMAGE_BASE,
+            ],
+        )
+        .unwrap();
+        process
+            .wr32(DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX, 1)
+            .unwrap();
+
+        let frames = [ExceptionFrame {
+            control_pc: first_pc,
+            image_base: IMAGE_BASE,
+            function_entry: IMAGE_BASE + 0x500,
+            establisher: FRAME_RSP,
+            context: frame_context,
+        }];
+        let unwind = GuestUnwind {
+            target_frame: FRAME_RSP,
+            target_ip: catch_funclet_ip,
+            call_rsp: GUEST_STACK + 0x2000,
+            exception_record: EXCEPTION_RECORD,
+            return_value: 0,
+            context_record: CONTEXT_RECORD,
+            history_table: 0,
+        };
+
+        complete_guest_unwind(&mut process, &frames, DISPATCHER_CONTEXT, unwind).unwrap();
+
+        assert_eq!(process.rd32(MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, continuation);
+        assert_eq!(process.cpu.gpr[RSP], FRAME_RSP);
+        assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], 0x99);
+        assert_eq!(process.read_bytes(FRAME_RSP - 8, 16).unwrap(), [0x69; 16]);
     }
 
     #[test]

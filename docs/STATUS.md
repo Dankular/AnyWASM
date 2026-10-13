@@ -599,9 +599,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   remains unverified. `ntdll!RtlUnwind` now captures a PE32 caller context and walks the live
   registration chain through its target, calls unwind handlers, and restores the requested target IP
   and return value. The main run loop also consumes direct PE32 requests outside exception search.
-  This path has no runtime regression yet; exit-unwind completion and calls from a phase-two handler
-  remain unsupported. Redirects from the selected C++ catch frame, nested x64 `RtlUnwindEx`,
-  non-null unwind history tables, and redirects outside the pre-searched frames remain unsupported.
+  The synthetic regression `pe32_nested_rtl_unwind_takes_over_a_phase_two_callback` covers a nested
+  request during phase two; a compiled target fixture is still missing. Exit-unwind completion
+  remains unsupported. X64 nested `RtlUnwindEx` now takes over the active phase-two walk, including
+  redirects from a selected C++ catch funclet. Synthetic regressions cover a changed outer target
+  and a catch-funclet continuation in the selected frame. Nested targets behind the active frame,
+  different context records, non-null unwind history tables, and targets outside the pre-searched
+  frames remain unsupported.
   Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
   compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
   subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
