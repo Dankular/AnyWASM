@@ -621,6 +621,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             eprintln!("\nanywasm: internal PE32 C++ catch transfer escaped its exception dispatcher");
             Ok(ExitCode::from(1))
         }
+        Stop::GuestSehTransfer32(_) => {
+            eprintln!("\nanywasm: internal PE32 SEH transfer escaped its exception dispatcher");
+            Ok(ExitCode::from(1))
+        }
     }
 }
 

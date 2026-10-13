@@ -1816,6 +1816,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "raise" => |p| Err(Stop::Crash(format!("raise({})", p.arg(0)))),
         "_XcptFilter" => |_| Ok(0),
         "__C_specific_handler" => crate::exception::c_specific_handler,
+        "_except_handler4_common" => crate::exception32::except_handler4_common,
         "__CxxFrameHandler3" => crate::msvc_eh::frame_handler3,
         "__CxxFrameHandler4" => crate::msvc_eh::frame_handler4,
         "_CxxThrowException" => crate::msvc_eh::cxx_throw_exception,

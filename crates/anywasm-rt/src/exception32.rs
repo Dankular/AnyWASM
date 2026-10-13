@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
-use crate::process::{Process, Stop, TEB_ADDR};
+use crate::process::{GuestSehTransfer32, Process, Stop, TEB_ADDR};
 use anywasm_cpu::cpu::{Cpu, CpuMode, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP};
-use anywasm_cpu::mem::Access;
+use anywasm_cpu::mem::{Access, PROT_X};
 use anywasm_cpu::{DecodeError, Exit};
 
 const EXCEPTION_CONTINUE_EXECUTION: u32 = 0;
@@ -15,8 +15,16 @@ const EXCEPTION_CONTINUE_EXECUTION_FILTER: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH_FILTER: i32 = 0;
 const EXCEPTION_NONCONTINUABLE: u32 = 1;
 const EXCEPTION_UNWINDING: u32 = 0x2;
+const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
+const EXCEPTION_COLLIDED_UNWIND_FLAG: u32 = 0x40;
 const EXCEPTION_CHAIN_END: u32 = u32::MAX;
+const EH4_TOPMOST_TRY_LEVEL: u32 = u32::MAX - 1;
+const EH4_NO_GS_COOKIE: u32 = u32::MAX - 1;
+const EH4_REGISTRATION_NODE_SIZE: u64 = 24;
+const EH4_SCOPE_TABLE_HEADER_SIZE: u64 = 16;
+const EH4_SCOPE_RECORD_SIZE: u64 = 12;
+const MAX_EH4_SCOPE_LEVELS: u32 = 65_536;
 const CONTEXT32_SIZE: u64 = 0x2cc;
 const EXCEPTION_RECORD32_SIZE: u64 = 80;
 const EXCEPTION_POINTERS32_SIZE: u64 = 8;
@@ -50,6 +58,393 @@ struct SearchFrame32 {
     registration: u32,
     next: u32,
     handler: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Eh4ScopeRecord32 {
+    enclosing_level: u32,
+    filter: u32,
+    handler: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Eh4Registration32 {
+    node: u64,
+    frame_pointer: u64,
+    saved_esp: u64,
+    scope_table: u64,
+    try_level: u32,
+}
+
+/// MSVC's x86 EH4 helper used by the image-local `_except_handler4` thunk.
+pub(crate) fn except_handler4_common(p: &mut Process) -> Result<u64, Stop> {
+    if p.cpu.mode != CpuMode::X86_32 {
+        return Err(Stop::Unimplemented {
+            dll: "vcruntime".into(),
+            name: "_except_handler4_common for non-PE32 process".into(),
+        });
+    }
+
+    let cookie_pointer = p.arg(0) as u32 as u64;
+    let cookie_check = p.arg(1) as u32 as u64;
+    let exception_record = p.arg(2) as u32 as u64;
+    let establisher_frame = p.arg(3) as u32 as u64;
+    let context_record = p.arg(4) as u32 as u64;
+    if cookie_pointer == 0
+        || cookie_check == 0
+        || exception_record == 0
+        || establisher_frame == 0
+        || context_record == 0
+    {
+        return Err(Stop::Crash(
+            "_except_handler4_common received a null required argument".into(),
+        ));
+    }
+
+    let (image_base, image_end) = eh4_image_bounds(p, cookie_pointer, "security cookie")?;
+    eh4_check_image_range(image_base, image_end, cookie_pointer, 4, "security cookie")?;
+    eh4_check_executable(p, image_base, image_end, cookie_check, "cookie check")?;
+
+    let registration = eh4_registration32(p, cookie_pointer, establisher_frame)?;
+    eh4_check_image_range(
+        image_base,
+        image_end,
+        registration.scope_table,
+        EH4_SCOPE_TABLE_HEADER_SIZE,
+        "scope table header",
+    )?;
+    validate_eh4_cookies(
+        p,
+        cookie_pointer,
+        cookie_check,
+        registration.scope_table,
+        registration.frame_pointer,
+    )?;
+
+    let exception_flags = p.rd32(exception_record + 4)?;
+    let is_dispatching = exception_flags
+        & (EXCEPTION_UNWINDING
+            | EXCEPTION_EXIT_UNWIND
+            | EXCEPTION_TARGET_UNWIND
+            | EXCEPTION_COLLIDED_UNWIND_FLAG)
+        == 0;
+    if !is_dispatching {
+        eh4_local_unwind_to(
+            p,
+            cookie_pointer,
+            cookie_check,
+            registration,
+            EH4_TOPMOST_TRY_LEVEL,
+            true,
+        )?;
+        validate_eh4_cookies(
+            p,
+            cookie_pointer,
+            cookie_check,
+            registration.scope_table,
+            registration.frame_pointer,
+        )?;
+        return Ok(EXCEPTION_CONTINUE_SEARCH as u64);
+    }
+
+    let pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS32_SIZE, true);
+    p.wr32(pointers, exception_record as u32)?;
+    p.wr32(pointers + 4, context_record as u32)?;
+    p.wr32(registration.node + 4, pointers as u32)?;
+
+    let mut level = registration.try_level;
+    let mut visited = HashSet::new();
+    while level != EH4_TOPMOST_TRY_LEVEL {
+        if !visited.insert(level) {
+            return Err(Stop::Crash(format!(
+                "EH4 scope table contains an enclosing-level cycle at {level}"
+            )));
+        }
+        let scope = eh4_scope_record(p, image_base, image_end, registration.scope_table, level)?;
+        if scope.filter != 0 {
+            eh4_check_executable(p, image_base, image_end, scope.filter as u64, "filter")?;
+            let previous_ebp = p.cpu.gpr[RBP];
+            p.cpu.gpr[RBP] = registration.frame_pointer;
+            let filter_result = p.call_guest(scope.filter as u64, &[]);
+            p.cpu.gpr[RBP] = previous_ebp;
+            let filter_result = filter_result? as u32 as i32;
+            validate_eh4_cookies(
+                p,
+                cookie_pointer,
+                cookie_check,
+                registration.scope_table,
+                registration.frame_pointer,
+            )?;
+            if filter_result < 0 {
+                if exception_flags & EXCEPTION_NONCONTINUABLE != 0 {
+                    return Err(Stop::Crash(format!(
+                        "noncontinuable exception {:#x} filter requested continuation",
+                        p.rd32(exception_record)?
+                    )));
+                }
+                return Ok(EXCEPTION_CONTINUE_EXECUTION as u64);
+            }
+            if filter_result > 0 {
+                if scope.handler == 0 {
+                    return Err(Stop::Crash(format!(
+                        "EH4 scope {level} accepted an exception but has no handler"
+                    )));
+                }
+                eh4_check_executable(
+                    p,
+                    image_base,
+                    image_end,
+                    scope.handler as u64,
+                    "exception handler",
+                )?;
+                if p.trace_imports {
+                    p.stderr.extend_from_slice(
+                        format!(
+                            "[seh32] EH4 accepted exception={:#x} frame={establisher_frame:#010x} scope={level} handler={:#010x}\n",
+                            p.rd32(exception_record)?, scope.handler
+                        )
+                        .as_bytes(),
+                    );
+                }
+                return Err(Stop::GuestSehTransfer32(GuestSehTransfer32 {
+                    target_frame: establisher_frame,
+                    target_ip: scope.handler as u64,
+                    scope_table: registration.scope_table,
+                    cookie_pointer,
+                    cookie_check,
+                    frame_pointer: registration.frame_pointer,
+                    saved_esp: registration.saved_esp,
+                    selected_level: level,
+                    enclosing_level: scope.enclosing_level,
+                }));
+            }
+        }
+        level = scope.enclosing_level;
+    }
+
+    Ok(EXCEPTION_CONTINUE_SEARCH as u64)
+}
+
+fn eh4_image_bounds(p: &Process, address: u64, what: &str) -> Result<(u64, u64), Stop> {
+    p.modules
+        .iter()
+        .find(|module| {
+            module.hle_group.is_none()
+                && address >= module.base
+                && address < module.base.saturating_add(module.size)
+        })
+        .map(|module| (module.base, module.base.saturating_add(module.size)))
+        .ok_or_else(|| {
+            Stop::Crash(format!(
+                "EH4 {what} address {address:#x} is outside loaded guest images"
+            ))
+        })
+}
+
+fn eh4_check_image_range(
+    image_base: u64,
+    image_end: u64,
+    address: u64,
+    size: u64,
+    what: &str,
+) -> Result<(), Stop> {
+    let end = address
+        .checked_add(size)
+        .ok_or_else(|| Stop::Crash(format!("EH4 {what} range overflows")))?;
+    if address < image_base || end > image_end {
+        return Err(Stop::Crash(format!(
+            "EH4 {what} {address:#x}..{end:#x} is outside image {image_base:#x}..{image_end:#x}"
+        )));
+    }
+    Ok(())
+}
+
+fn eh4_check_executable(
+    p: &Process,
+    image_base: u64,
+    image_end: u64,
+    address: u64,
+    what: &str,
+) -> Result<(), Stop> {
+    if address < image_base
+        || address >= image_end
+        || p.mem
+            .prot_of(address)
+            .is_none_or(|protection| protection & PROT_X == 0)
+    {
+        return Err(Stop::Crash(format!(
+            "EH4 {what} {address:#x} is not executable in image {image_base:#x}..{image_end:#x}"
+        )));
+    }
+    Ok(())
+}
+
+fn eh4_registration32(
+    p: &Process,
+    cookie_pointer: u64,
+    establisher_frame: u64,
+) -> Result<Eh4Registration32, Stop> {
+    let node = establisher_frame.checked_sub(8).ok_or_else(|| {
+        Stop::Crash("EH4 establisher frame precedes its registration node".into())
+    })?;
+    let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
+    let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
+    let node_end = node
+        .checked_add(EH4_REGISTRATION_NODE_SIZE)
+        .ok_or_else(|| Stop::Crash("EH4 registration node range overflows".into()))?;
+    if node < stack_limit || node_end > stack_base {
+        return Err(Stop::Crash(format!(
+            "EH4 registration node {node:#x}..{node_end:#x} is outside TEB stack bounds {stack_limit:#x}..{stack_base:#x}"
+        )));
+    }
+    let cookie = p.rd32(cookie_pointer)?;
+    let encoded_scope_table = p.rd32(node + 16)?;
+    let scope_table = (encoded_scope_table ^ cookie) as u64;
+    let frame_pointer = node + EH4_REGISTRATION_NODE_SIZE;
+    let saved_esp = p.rd32(node)? as u64;
+    if saved_esp < stack_limit || saved_esp > stack_base {
+        return Err(Stop::Crash(format!(
+            "EH4 saved ESP {saved_esp:#x} is outside TEB stack bounds {stack_limit:#x}..{stack_base:#x}"
+        )));
+    }
+    Ok(Eh4Registration32 {
+        node,
+        frame_pointer,
+        saved_esp,
+        scope_table,
+        try_level: p.rd32(node + 20)?,
+    })
+}
+
+fn eh4_scope_record(
+    p: &Process,
+    image_base: u64,
+    image_end: u64,
+    scope_table: u64,
+    level: u32,
+) -> Result<Eh4ScopeRecord32, Stop> {
+    if level >= MAX_EH4_SCOPE_LEVELS {
+        return Err(Stop::Crash(format!(
+            "EH4 scope level {level} exceeds the supported bound"
+        )));
+    }
+    let table_records = scope_table
+        .checked_add(EH4_SCOPE_TABLE_HEADER_SIZE)
+        .ok_or_else(|| Stop::Crash("EH4 scope table header overflows".into()))?;
+    let record = table_records
+        .checked_add(level as u64 * EH4_SCOPE_RECORD_SIZE)
+        .ok_or_else(|| Stop::Crash("EH4 scope record address overflows".into()))?;
+    eh4_check_image_range(
+        image_base,
+        image_end,
+        record,
+        EH4_SCOPE_RECORD_SIZE,
+        "scope record",
+    )?;
+    let enclosing_level = p.rd32(record)?;
+    if enclosing_level != EH4_TOPMOST_TRY_LEVEL && enclosing_level >= MAX_EH4_SCOPE_LEVELS {
+        return Err(Stop::Crash(format!(
+            "EH4 scope {level} has invalid enclosing level {enclosing_level}"
+        )));
+    }
+    Ok(Eh4ScopeRecord32 {
+        enclosing_level,
+        filter: p.rd32(record + 4)?,
+        handler: p.rd32(record + 8)?,
+    })
+}
+
+fn eh4_cookie_slot(frame_pointer: u64, offset: u32) -> u64 {
+    (frame_pointer as u32).wrapping_add(offset) as u64
+}
+
+fn validate_eh4_cookies(
+    p: &mut Process,
+    cookie_pointer: u64,
+    cookie_check: u64,
+    scope_table: u64,
+    frame_pointer: u64,
+) -> Result<(), Stop> {
+    let global_cookie = p.rd32(cookie_pointer)?;
+    let gs_offset = p.rd32(scope_table)?;
+    let gs_xor_offset = p.rd32(scope_table + 4)?;
+    if gs_offset != EH4_NO_GS_COOKIE {
+        let stored = p.rd32(eh4_cookie_slot(frame_pointer, gs_offset))?;
+        let expected = stored ^ eh4_cookie_slot(frame_pointer, gs_xor_offset) as u32;
+        if expected != global_cookie {
+            return Err(Stop::Crash(
+                "EH4 local GS cookie validation failed during exception dispatch".into(),
+            ));
+        }
+        call_eh4_cookie_check(p, cookie_check, expected as u64)?;
+    }
+    let eh_offset = p.rd32(scope_table + 8)?;
+    let eh_xor_offset = p.rd32(scope_table + 12)?;
+    let stored = p.rd32(eh4_cookie_slot(frame_pointer, eh_offset))?;
+    let expected = stored ^ eh4_cookie_slot(frame_pointer, eh_xor_offset) as u32;
+    if expected != global_cookie {
+        return Err(Stop::Crash(
+            "EH4 local exception cookie validation failed during exception dispatch".into(),
+        ));
+    }
+    call_eh4_cookie_check(p, cookie_check, expected as u64)?;
+    Ok(())
+}
+
+fn call_eh4_cookie_check(p: &mut Process, cookie_check: u64, value: u64) -> Result<(), Stop> {
+    let previous_ecx = p.cpu.gpr[RCX];
+    p.cpu.gpr[RCX] = value;
+    let result = p.call_guest(cookie_check, &[]);
+    p.cpu.gpr[RCX] = previous_ecx;
+    result.map(|_| ())
+}
+
+fn eh4_local_unwind_to(
+    p: &mut Process,
+    cookie_pointer: u64,
+    cookie_check: u64,
+    registration: Eh4Registration32,
+    target_level: u32,
+    abnormal_termination: bool,
+) -> Result<(), Stop> {
+    let (image_base, image_end) = eh4_image_bounds(p, registration.scope_table, "scope table")?;
+    let mut level = p.rd32(registration.node + 20)?;
+    let mut visited = HashSet::new();
+    while level != target_level {
+        if level == EH4_TOPMOST_TRY_LEVEL || !visited.insert(level) {
+            return Err(Stop::Crash(format!(
+                "EH4 local unwind cannot reach target level {target_level} from {level}"
+            )));
+        }
+        let scope = eh4_scope_record(p, image_base, image_end, registration.scope_table, level)?;
+        p.wr32(registration.node + 20, scope.enclosing_level)?;
+        if scope.filter == 0 {
+            eh4_check_executable(
+                p,
+                image_base,
+                image_end,
+                scope.handler as u64,
+                "termination handler",
+            )?;
+            let previous_ebp = p.cpu.gpr[RBP];
+            let previous_ecx = p.cpu.gpr[RCX];
+            p.cpu.gpr[RBP] = registration.frame_pointer;
+            p.cpu.gpr[RCX] = abnormal_termination as u64;
+            let result = p.call_guest(scope.handler as u64, &[]);
+            p.cpu.gpr[RBP] = previous_ebp;
+            p.cpu.gpr[RCX] = previous_ecx;
+            result?;
+            validate_eh4_cookies(
+                p,
+                cookie_pointer,
+                cookie_check,
+                registration.scope_table,
+                registration.frame_pointer,
+            )?;
+        }
+        level = scope.enclosing_level;
+    }
+    Ok(())
 }
 
 pub(crate) fn dispatch_raised_exception(
@@ -287,6 +682,17 @@ fn dispatch_exception_inner(
                     skip_ret_on_resume,
                 );
             }
+            Err(Stop::GuestSehTransfer32(transfer)) => {
+                return unwind_to_seh_transfer32(
+                    p,
+                    transfer,
+                    &searched_frames,
+                    exception_record,
+                    context_record,
+                    flags,
+                    skip_ret_on_resume,
+                );
+            }
             Err(stop) => return Err(stop),
         };
         if p.trace_imports {
@@ -433,6 +839,147 @@ fn unwind_to_catch32(
     }
     p.wr32(exception_record + 4, original_flags)?;
     crate::exception32::resume_cxx_catch(p, exception_record, context_record, skip_ret_on_resume)
+}
+
+fn unwind_to_seh_transfer32(
+    p: &mut Process,
+    transfer: GuestSehTransfer32,
+    searched_frames: &[SearchFrame32],
+    exception_record: u64,
+    context_record: u64,
+    original_flags: u32,
+    skip_ret_on_resume: bool,
+) -> Result<u64, Stop> {
+    let target_index = searched_frames
+        .iter()
+        .position(|frame| frame.registration as u64 == transfer.target_frame)
+        .ok_or_else(|| {
+            Stop::Crash(format!(
+                "PE32 SEH handler selected registration {:#x} outside the searched chain",
+                transfer.target_frame
+            ))
+        })?;
+    let target = searched_frames[target_index];
+
+    // RtlUnwind removes registrations above the target without calling the
+    // target's language handler. EH4's local unwind then handles nested scopes
+    // in that target frame before control enters the selected __except block.
+    for frame in &searched_frames[..target_index] {
+        p.wr32(exception_record + 4, original_flags | EXCEPTION_UNWINDING)?;
+        let frame_address = frame.registration as u64;
+        if p.rd32(frame_address)? != frame.next || p.rd32(frame_address + 4)? != frame.handler {
+            return Err(Stop::Crash(format!(
+                "PE32 registration frame {frame_address:#x} changed during SEH unwind"
+            )));
+        }
+        let previous_ebp = p.cpu.gpr[RBP];
+        p.cpu.gpr[RBP] = frame_address + 12;
+        let result = p.call_guest(
+            frame.handler as u64,
+            &[
+                exception_record,
+                frame_address,
+                context_record,
+                0, // The x86 dispatcher does not expose an UNWIND_HISTORY_TABLE.
+            ],
+        );
+        p.cpu.gpr[RBP] = previous_ebp;
+        let disposition = result? as u32;
+        if p.trace_imports {
+            p.stderr.extend_from_slice(
+                format!(
+                    "[seh32] unwind frame={frame_address:#010x} handler={:#010x} target=false disposition={disposition}\n",
+                    frame.handler
+                )
+                .as_bytes(),
+            );
+        }
+        if disposition != EXCEPTION_CONTINUE_SEARCH {
+            return Err(Stop::Unimplemented {
+                dll: "ntdll".into(),
+                name: format!("PE32 unwind disposition {disposition}"),
+            });
+        }
+        if p.rd32(TEB_ADDR)? != frame.registration {
+            return Err(Stop::Crash(format!(
+                "PE32 ExceptionList changed while unwinding frame {frame_address:#x}"
+            )));
+        }
+        p.wr32(TEB_ADDR, frame.next)?;
+    }
+
+    if p.rd32(TEB_ADDR)? != target.registration {
+        return Err(Stop::Crash(format!(
+            "PE32 SEH target {:#x} is not the active registration after unwind",
+            target.registration
+        )));
+    }
+    if p.rd32(target.registration as u64)? != target.next
+        || p.rd32(target.registration as u64 + 4)? != target.handler
+    {
+        return Err(Stop::Crash(format!(
+            "PE32 SEH target frame {:#x} changed during unwind",
+            target.registration
+        )));
+    }
+    let target_node = transfer.target_frame.checked_sub(8).ok_or_else(|| {
+        Stop::Crash("PE32 EH4 target frame precedes its registration node".into())
+    })?;
+    let registration = Eh4Registration32 {
+        node: target_node,
+        frame_pointer: transfer.frame_pointer,
+        saved_esp: transfer.saved_esp,
+        scope_table: transfer.scope_table,
+        try_level: p.rd32(target_node + 20)?,
+    };
+    p.wr32(
+        exception_record + 4,
+        original_flags | EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND,
+    )?;
+    validate_eh4_cookies(
+        p,
+        transfer.cookie_pointer,
+        transfer.cookie_check,
+        transfer.scope_table,
+        transfer.frame_pointer,
+    )?;
+    eh4_local_unwind_to(
+        p,
+        transfer.cookie_pointer,
+        transfer.cookie_check,
+        registration,
+        transfer.selected_level,
+        true,
+    )?;
+    p.wr32(registration.node + 20, transfer.enclosing_level)?;
+    validate_eh4_cookies(
+        p,
+        transfer.cookie_pointer,
+        transfer.cookie_check,
+        transfer.scope_table,
+        transfer.frame_pointer,
+    )?;
+
+    let mut context = read_context(p, context_record)?;
+    context.gpr[RSP] = transfer.saved_esp;
+    context.gpr[RBP] = transfer.frame_pointer;
+    context.eip = transfer.target_ip as u32;
+    write_context(p, context_record, &context)?;
+    p.wr32(exception_record + 4, original_flags)?;
+    if p.trace_imports {
+        p.stderr.extend_from_slice(
+            format!(
+                "[seh32] transfer frame={:#010x} ip={:#010x} esp={:#010x} scope_level={} enclosing={}\n",
+                transfer.target_frame,
+                transfer.target_ip,
+                transfer.saved_esp,
+                transfer.selected_level,
+                transfer.enclosing_level
+            )
+            .as_bytes(),
+        );
+    }
+    resume_exception(p, exception_record, context_record, skip_ret_on_resume)
 }
 
 fn unhandled_exception(

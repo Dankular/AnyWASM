@@ -94,6 +94,19 @@ pub struct GuestCatch32 {
     pub(crate) handler_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuestSehTransfer32 {
+    pub(crate) target_frame: u64,
+    pub(crate) target_ip: u64,
+    pub(crate) scope_table: u64,
+    pub(crate) cookie_pointer: u64,
+    pub(crate) cookie_check: u64,
+    pub(crate) frame_pointer: u64,
+    pub(crate) saved_esp: u64,
+    pub(crate) selected_level: u32,
+    pub(crate) enclosing_level: u32,
+}
+
 /// Why `Process::run` returned.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
@@ -115,6 +128,8 @@ pub enum Stop {
     GuestUnwind(GuestUnwind),
     /// Internal x86 C++ catch transfer consumed by the PE32 exception dispatcher.
     GuestCatch32(GuestCatch32),
+    /// Internal x86 C SEH transfer consumed by the PE32 exception dispatcher.
+    GuestSehTransfer32(GuestSehTransfer32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4283,6 +4298,11 @@ impl Process {
                 Err(Stop::GuestCatch32(_)) => {
                     return Stop::Crash(
                         "PE32 C++ catch transfer escaped its active guest exception dispatcher".into(),
+                    )
+                }
+                Err(Stop::GuestSehTransfer32(_)) => {
+                    return Stop::Crash(
+                        "PE32 SEH transfer escaped its active guest exception dispatcher".into(),
                     )
                 }
                 Err(stop) => return stop,

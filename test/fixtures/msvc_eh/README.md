@@ -1,6 +1,6 @@
 # MSVC C++ exception fixtures
 
-`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes four fixtures under
+`build.ps1` uses the latest installed Visual Studio C++ toolchain and writes five fixtures under
 the ignored `target/msvc-cpp-eh/` directory. The EH4 compile prints `cl /Bv`, including the
 compiler and linker versions, so a run can be tied to the toolchain that emitted the metadata.
 
@@ -9,9 +9,10 @@ compiler and linker versions, so a run can be tied to the toolchain that emitted
 - `eh3-x86-dynamic.exe` is a PE32 build with the normal MSVC CRT startup and legacy FH3 metadata.
 - `eh3-x86-direct.exe` is a PE32 build using legacy FH3. It enters `main` directly to isolate the
   C++ EH path from the CRT startup's EH4 wrapper.
+- `seh-x86.exe` exercises PE32 C `__try`/`__except`/`__finally` with the normal MSVC CRT startup.
 - The binaries dynamically import the MSVC/UCRT runtime; the script does not copy runtime DLLs.
 
-The executable returns 0 only when all paths pass. Return codes identify the failed case:
+The C++ fixtures return 0 only when all paths pass. Their return codes identify the failed case:
 
 | Exit code | Case |
 |---:|---|
@@ -21,6 +22,18 @@ The executable returns 0 only when all paths pass. Return codes identify the fai
 | 40 | Catch through nested try blocks |
 | 50 | Run the local destructor during exception unwind |
 
+`seh-x86.exe` returns 0 only when filter selection, exception continuation, and both normal and
+unwind-time termination handlers pass:
+
+| Exit code | Case |
+|---:|---|
+| 1 | Catch the exception code or run the normal `__finally` block |
+| 2 | A `CONTINUE_SEARCH` filter incorrectly enters its handler |
+| 3 | The outer handler fails to catch after the inner filter continues search |
+| 4 | A `CONTINUE_EXECUTION` filter incorrectly enters its handler |
+| 5 | Execution does not resume after `RaiseException` |
+| 6 | The outer handler fails to catch or the unwind-time `__finally` does not run once |
+
 Build and inspect the imported exception entry points from the repository root:
 
 ```powershell
@@ -29,8 +42,10 @@ Build and inspect the imported exception entry points from the repository root:
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-dynamic.exe
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-x86-dynamic.exe
 .\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\eh3-x86-direct.exe
+.\target\debug\anywasm.exe analyze .\target\msvc-cpp-eh\seh-x86.exe
 .\target\debug\anywasm.exe run .\target\msvc-cpp-eh\eh3-x86-dynamic.exe --max-steps 2000000
 .\target\debug\anywasm.exe run .\target\msvc-cpp-eh\eh3-x86-direct.exe --max-steps 2000000
+.\target\debug\anywasm.exe run .\target\msvc-cpp-eh\seh-x86.exe --max-steps 2000000
 ```
 
 These fixtures cover the minimum compiler-generated records needed to start EH3/EH4 runtime work;
@@ -75,10 +90,13 @@ exception path with the installed UCRT present. API-set contracts without a phys
 continue to use HLE. These local DLLs are probe inputs, not product dependencies or a redistribution
 decision. The exact trace captures are ignored files under `target-trace/msvc-eh-runtime-vfs-*`.
 
-On 2026-10-13, both PE32 fixtures built with the installed x86 MSVC toolchain and returned 0 under
-the same HLE-only run cap. The normal-startup fixture reached `crt!exit`; the direct-entry fixture
-exercised by-value and adjusted-reference catches, catch-all, nested try/catch, and destructor
-execution during unwind. The x86 catch funclets returned their post-catch continuation addresses
-through EAX; the runtime calls the funclet with its parent frame and resumes at that continuation.
-The normal-startup image imports `_except_handler4_common`, which remains unimplemented when an
-exception actually enters that EH4 handler.
+On 2026-10-13, the two PE32 C++ fixtures and `seh-x86.exe` built with the installed x86 MSVC toolchain
+and returned 0 under a 2,000,000-step HLE-only run cap. The direct-entry C++ fixture exercised
+by-value and adjusted-reference catches, catch-all, nested try/catch, and destructor execution during
+unwind. The x86 catch funclets returned their post-catch continuation addresses through EAX; the
+runtime calls the funclet with its parent frame and resumes at that continuation. The C SEH fixture
+verified `EXCEPTION_CONTINUE_SEARCH`, `EXCEPTION_CONTINUE_EXECUTION`, exception-code access in an
+`__except` block, normal `__finally`, and `__finally` during frame unwind. The runtime decodes the
+EH4 registration record and cookie-encoded scope table, validates local cookies with the image's
+`__security_check_cookie`, and transfers to the selected handler through the PE32 dispatcher. This
+does not yet cover nested/collided unwind dispositions or every compiler-specific EH4 layout.

@@ -212,9 +212,12 @@
   now writes x86 EXCEPTION_RECORD and CONTEXT layouts, invokes vectored handlers and linked
   NT_TIB.ExceptionList handlers, resumes edited contexts, and honors RaiseException's four-argument
   stdcall frame. Guest execution covers selected x86 illegal, privileged, divide, and breakpoint
-  exceptions, while a scheduler regression checks per-thread ExceptionList state. PE32 nested and
-  collided unwind plus broader compiler-specific C/C++ runtime behavior remain open. A direct-entry
-  PE32 EH3 fixture now verifies by-value/reference catches, catch-all, nested catches, and destructor
+  exceptions, while a scheduler regression checks per-thread ExceptionList state. PE32 now also
+  handles the MSVC EH4 C SEH path: the image-local handler's cookie-encoded scope table, filter
+  continue-search/continue-execution/execute-handler results, and normal plus unwind-time
+  `__finally` behavior are covered by a built x86 fixture. PE32 nested and collided unwind plus
+  broader compiler-specific C/C++ runtime behavior remain open. A direct-entry PE32 EH3 fixture now
+  verifies by-value/reference catches, catch-all, nested catches, and destructor
   unwind. General Win32/PE32 compatibility remains incomplete. Other CPU exits, audio, DirectInput/
   XInput, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
   fixed-function subset covers the checked FVF layouts, stage-0 SELECTARG1/SELECTARG2,
@@ -325,10 +328,13 @@
   returns the post-catch continuation in EAX. PE32 CRT initializer arrays now use four-byte entries,
   and `InitializeSListHead` clears the 8-byte x86 or 16-byte x64 header. A normal `/MD` PE32 startup
   now reaches `crt!exit` and returns 0; the startup trace exposed and fixed its missing stdcall cleanup
-  for `InitializeSListHead`. The startup image imports `_except_handler4_common`, which remains
-  unimplemented if an exception enters that EH4 handler. The analyzer now accepts supported I386/PE32
-  and AMD64/PE32+ pairs. X86 EH4, broader PE32 API compatibility, and nested/collided SEH unwind
-  dispositions remain unsupported.
+  for `InitializeSListHead`. `_except_handler4_common` now decodes the PE32 registration and scope
+  records, checks image-local security cookies, runs filters and `__finally` handlers, and transfers
+  to the selected `__except` block. A normal-startup x86 fixture returns 0 after checking continue
+  search, continue execution, exception-code access, and finally execution during unwind. This is a
+  compiler-targeted EH4 subset; broader compiler-specific layouts, nested/collided SEH unwind
+  dispositions, and wider PE32 API compatibility remain unsupported. The analyzer now accepts
+  supported I386/PE32 and AMD64/PE32+ pairs.
 - Three Diligent Win64 samples and the selected Diligent GLFW Demo maze have been built and analyzed.
   Historical `Tutorial01_HelloTriangle` and `Tutorial03_Texturing` runs with `--mode d3d11` reached
   virtual D3D11 device discovery/creation before stopping at the unresolved `MSVCP140.dll`

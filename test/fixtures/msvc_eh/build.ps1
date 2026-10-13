@@ -60,6 +60,11 @@ $commands += 'cl.exe /nologo /MD /EHsc /std:c++17 /Od /Ob0 /GS- /W4 /d2FH4- ' +
     '/Fe:"' + $x86Output + '" "' + $source + '" ' +
     '/link /ENTRY:main /DEFAULTLIB:vcruntime.lib /DEFAULTLIB:ucrt.lib'
 $commands += 'if errorlevel 1 exit /b %errorlevel%'
+$x86SehOutput = Join-Path $outputDirectory 'seh-x86.exe'
+$x86SehSource = Join-Path $PSScriptRoot 'seh_fixture.c'
+$x86SehObject = Join-Path $outputDirectory 'seh_fixture.obj'
+$commands += 'cl.exe /nologo /MD /Od /W4 /Fo:"' + $x86SehObject + '" /Fe:"' + $x86SehOutput + '" "' + $x86SehSource + '"'
+$commands += 'if errorlevel 1 exit /b %errorlevel%'
 
 $batchPath = Join-Path $outputDirectory 'build-fixtures.cmd'
 [System.IO.File]::WriteAllLines($batchPath, $commands, [System.Text.Encoding]::ASCII)

@@ -670,7 +670,7 @@ fn unwind_state_map(
             p.cpu.gpr[RBP] = previous_ebp;
             if let Err(stop) = result {
                 return Err(match stop {
-                    Stop::GuestUnwind(_) | Stop::GuestCatch32(_) => {
+                    Stop::GuestUnwind(_) | Stop::GuestCatch32(_) | Stop::GuestSehTransfer32(_) => {
                         unsupported("a guest exception was raised from an x86 C++ unwind funclet")
                     }
                     other => other,
