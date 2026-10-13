@@ -70,8 +70,11 @@ const jitPressure = await runJitCachePressure(AnyWasm);
 check('JIT cache evicts old modules after 256 entries and recompiles evicted code',
   jitPressure.firstStatus === 0 && jitPressure.probeStatus === 0 &&
     jitPressure.afterPressure.compilations === 344 && jitPressure.afterPressure.executions === 344 &&
-    jitPressure.afterPressure.fallbacks === 0 && jitPressure.afterProbe.compilations === 345 &&
-    jitPressure.afterProbe.executions === 390 && jitPressure.afterProbe.fallbacks === 0,
+    jitPressure.afterPressure.emittedGuestInstructions === 344 &&
+    jitPressure.afterPressure.fallbacks === 0 && jitPressure.afterPressure.chainCompilations <= 32 &&
+    jitPressure.afterProbe.compilations === 345 && jitPressure.afterProbe.executions === 390 &&
+    jitPressure.afterProbe.emittedGuestInstructions === 390 &&
+    jitPressure.afterProbe.fallbacks === 0 && jitPressure.afterProbe.chainCompilations <= 32,
   JSON.stringify(jitPressure));
 
 function pack(exe, extra = []) {
@@ -80,42 +83,56 @@ function pack(exe, extra = []) {
   return readFileSync(out);
 }
 
+function captureRuntimeState(w) {
+  if (typeof w.x.aw_test_cpu_snapshot !== 'function' || typeof w.x.aw_test_memory_snapshot !== 'function') {
+    throw new Error('WASM smoke build is missing the jit-test-api snapshot exports');
+  }
+  const cpuSize = 776;
+  const cpuPtr = w.x.aw_alloc(cpuSize);
+  let cpuSnapshot;
+  try {
+    const written = w.x.aw_test_cpu_snapshot(cpuPtr, cpuSize);
+    if (written !== cpuSize) throw new Error(`CPU snapshot wrote ${written} bytes, expected ${cpuSize}`);
+    cpuSnapshot = new Uint8Array(w.x.memory.buffer, cpuPtr, cpuSize).slice();
+  } finally {
+    w.x.aw_free(cpuPtr, cpuSize);
+  }
+  const memorySize = w.x.aw_test_memory_snapshot(0, 0);
+  const memoryPtr = w.x.aw_alloc(memorySize);
+  let memorySnapshot;
+  try {
+    const written = w.x.aw_test_memory_snapshot(memoryPtr, memorySize);
+    if (written !== memorySize) throw new Error(`Memory snapshot wrote ${written} bytes, expected ${memorySize}`);
+    memorySnapshot = new Uint8Array(w.x.memory.buffer, memoryPtr, memorySize).slice();
+  } finally {
+    w.x.aw_free(memoryPtr, memorySize);
+  }
+  return { cpuSnapshot, memorySnapshot };
+}
+
 async function runBundle(bundle, runtimeOptions = {}, captureState = false) {
   const w = await AnyWasm.create(wasm, runtimeOptions);
   w.load(bundle);
   let out = '', err = '';
   const r = w.runToEnd({ onOutput: (s, t) => (s === 'stdout' ? (out += t) : (err += t)) });
-  let cpuSnapshot = null, memorySnapshot = null;
-  if (captureState) {
-    if (typeof w.x.aw_test_cpu_snapshot !== 'function' || typeof w.x.aw_test_memory_snapshot !== 'function') {
-      throw new Error('WASM smoke build is missing the jit-test-api snapshot exports');
-    }
-    const cpuSize = 776;
-    const cpuPtr = w.x.aw_alloc(cpuSize);
-    try {
-      const written = w.x.aw_test_cpu_snapshot(cpuPtr, cpuSize);
-      if (written !== cpuSize) throw new Error(`CPU snapshot wrote ${written} bytes, expected ${cpuSize}`);
-      cpuSnapshot = new Uint8Array(w.x.memory.buffer, cpuPtr, cpuSize).slice();
-    } finally {
-      w.x.aw_free(cpuPtr, cpuSize);
-    }
-    const memorySize = w.x.aw_test_memory_snapshot(0, 0);
-    const memoryPtr = w.x.aw_alloc(memorySize);
-    try {
-      const written = w.x.aw_test_memory_snapshot(memoryPtr, memorySize);
-      if (written !== memorySize) throw new Error(`Memory snapshot wrote ${written} bytes, expected ${memorySize}`);
-      memorySnapshot = new Uint8Array(w.x.memory.buffer, memoryPtr, memorySize).slice();
-    } finally {
-      w.x.aw_free(memoryPtr, memorySize);
-    }
-  }
+  const snapshots = captureState ? captureRuntimeState(w) : { cpuSnapshot: null, memorySnapshot: null };
   return { ...r, out, err, instr: w.instructions(), retiredInstr: w.retiredInstructions?.(), jitStats: w.jitStats,
-    cpuSnapshot, memorySnapshot };
+    ...snapshots };
 }
 
 const sameCpuSnapshot = (a, b) => a.cpuSnapshot instanceof Uint8Array && b.cpuSnapshot instanceof Uint8Array &&
   a.cpuSnapshot.byteLength === 776 && b.cpuSnapshot.byteLength === 776 &&
   a.cpuSnapshot.every((value, index) => value === b.cpuSnapshot[index]);
+const cpuSnapshotDiffs = (a, b) => {
+  if (!(a.cpuSnapshot instanceof Uint8Array) || !(b.cpuSnapshot instanceof Uint8Array)) return [];
+  const differences = [];
+  for (let index = 0; index < Math.min(a.cpuSnapshot.length, b.cpuSnapshot.length); index++) {
+    if (a.cpuSnapshot[index] !== b.cpuSnapshot[index]) {
+      differences.push({ offset: index, emitted: a.cpuSnapshot[index], expected: b.cpuSnapshot[index] });
+    }
+  }
+  return differences.slice(0, 32);
+};
 const sameMemorySnapshot = (a, b) => a.memorySnapshot instanceof Uint8Array && b.memorySnapshot instanceof Uint8Array &&
   a.memorySnapshot.byteLength === b.memorySnapshot.byteLength &&
   a.memorySnapshot.every((value, index) => value === b.memorySnapshot[index]);
@@ -150,11 +167,31 @@ check('compute.exe matches generated execution with interpreter fallback',
   JSON.stringify({ generated: { status: r.status, exitCode: r.exitCode, out: r.out, err: r.err, instr: r.instr }, interpreter: { status: interpreted.status, exitCode: interpreted.exitCode, out: interpreted.out, err: interpreted.err, instr: interpreted.instr } }));
 check('compute CPU snapshot matches cached-only and interpreter execution',
   sameCpuSnapshot(r, cachedOnly) && sameCpuSnapshot(r, interpreted),
-  JSON.stringify({ emitted: r.cpuSnapshot?.length, cached: cachedOnly.cpuSnapshot?.length, interpreted: interpreted.cpuSnapshot?.length }));
+  JSON.stringify({ emitted: r.cpuSnapshot?.length, cached: cachedOnly.cpuSnapshot?.length, interpreted: interpreted.cpuSnapshot?.length,
+    diffCached: cpuSnapshotDiffs(r, cachedOnly), diffInterpreter: cpuSnapshotDiffs(r, interpreted) }));
 check('compute mapped guest memory matches cached-only and interpreter execution',
   sameMemorySnapshot(r, cachedOnly) && sameMemorySnapshot(r, interpreted),
   JSON.stringify({ emitted: r.memorySnapshot?.length, cached: cachedOnly.memorySnapshot?.length,
     interpreted: interpreted.memorySnapshot?.length }));
+
+const callHeavyBundle = pack('fixtures/bench_call.exe');
+const emittedCallHeavy = await runBundle(callHeavyBundle, { jitMinPrefix: 1 }, true);
+const interpretedCallHeavy = await runBundle(callHeavyBundle, { jit: false, jitMinPrefix: 1 }, true);
+check('call-heavy JIT emits call/return blocks and falls back for unsupported arithmetic',
+  emittedCallHeavy.status === Status.EXITED && emittedCallHeavy.exitCode === 0 &&
+    emittedCallHeavy.jitStats.emittedGuestInstructions > 1_000_000 && emittedCallHeavy.jitStats.fallbacks > 0,
+  JSON.stringify({ status: emittedCallHeavy.status, exitCode: emittedCallHeavy.exitCode,
+    retired: emittedCallHeavy.instr, jitStats: emittedCallHeavy.jitStats }));
+check('call-heavy emitted execution matches complete interpreter state',
+  emittedCallHeavy.status === interpretedCallHeavy.status && emittedCallHeavy.exitCode === interpretedCallHeavy.exitCode &&
+    emittedCallHeavy.out === interpretedCallHeavy.out && emittedCallHeavy.err === interpretedCallHeavy.err &&
+    emittedCallHeavy.instr === interpretedCallHeavy.instr &&
+    sameCpuSnapshot(emittedCallHeavy, interpretedCallHeavy) &&
+    sameMemorySnapshot(emittedCallHeavy, interpretedCallHeavy),
+  JSON.stringify({ emitted: { status: emittedCallHeavy.status, exitCode: emittedCallHeavy.exitCode,
+    instructions: emittedCallHeavy.instr, emittedGuestInstructions: emittedCallHeavy.jitStats.emittedGuestInstructions },
+    interpreted: { status: interpretedCallHeavy.status, exitCode: interpretedCallHeavy.exitCode,
+      instructions: interpretedCallHeavy.instr } }));
 check('JIT opt-out uses interpreter fallback without compiling modules',
   interpreted.jitStats.executions === 0 && interpreted.jitStats.compilations === 0 && interpreted.jitStats.fallbacks > 0,
   JSON.stringify(interpreted.jitStats));
@@ -243,10 +280,10 @@ const indirectBundle = pack('fixtures/jit_indirect.exe');
 const emittedIndirect = await runBundle(indirectBundle, { jitMinPrefix: 1 }, true);
 const cachedIndirect = await runBundle(indirectBundle, {}, true);
 const interpretedIndirect = await runBundle(indirectBundle, { jit: false, jitMinPrefix: 1 }, true);
-check('register-indirect JMP chains to an already registered emitted block',
+check('register-indirect JMP falls back for its cold target, then chains to a registered block',
   emittedIndirect.status === Status.EXITED && emittedIndirect.exitCode === 0 &&
     emittedIndirect.jitStats.executions > 0 && emittedIndirect.jitStats.chainTransitions > 0 &&
-    emittedIndirect.jitStats.fallbacks === 0,
+    emittedIndirect.jitStats.fallbacks === 1,
   JSON.stringify({ status: emittedIndirect.status, exitCode: emittedIndirect.exitCode, jitStats: emittedIndirect.jitStats }));
 check('register-indirect target state matches cached-only and interpreter execution',
   emittedIndirect.status === cachedIndirect.status && emittedIndirect.status === interpretedIndirect.status &&
@@ -360,6 +397,7 @@ const compileFailureWasm = await AnyWasm.create(wasm, { jitMinPrefix: 1 });
 compileFailureWasm.load(computeBundle);
 const NativeModule = WebAssembly.Module;
 let forcedCompileFailures = 0;
+check('JIT failure diagnostics begin empty', compileFailureWasm.jitStats.lastFailure === null);
 WebAssembly.Module = function (bytes) {
   if (forcedCompileFailures === 0) {
     forcedCompileFailures++;
@@ -373,12 +411,70 @@ try {
 } finally {
   WebAssembly.Module = NativeModule;
 }
+const compileFailureSnapshots = captureRuntimeState(compileFailureWasm);
+const compileFailureResult = {
+  ...compileFailureRun,
+  out: compileFailureOut,
+  err: compileFailureErr,
+  instr: compileFailureWasm.instructions(),
+  ...compileFailureSnapshots,
+};
 check('compile failure and cold-page TLB miss fall back safely before emitted execution resumes',
-  forcedCompileFailures === 1 && compileFailureWasm.jitStats.fallbacks === r.jitStats.fallbacks + 1 && compileFailureWasm.jitStats.executions > 0 &&
+  forcedCompileFailures === 1 &&
+    compileFailureWasm.jitStats.lastFailure === 'forced emitted-module compile failure' &&
+    compileFailureWasm.jitStats.lastError === compileFailureWasm.jitStats.lastFailure &&
+    compileFailureWasm.jitStats.fallbacks === r.jitStats.fallbacks + 1 && compileFailureWasm.jitStats.executions > 0 &&
     compileFailureRun.status === r.status && compileFailureRun.exitCode === r.exitCode &&
-    compileFailureOut === r.out && compileFailureErr === r.err && compileFailureWasm.instructions() === r.instr,
+    compileFailureOut === r.out && compileFailureErr === r.err && compileFailureWasm.instructions() === r.instr &&
+    sameCpuSnapshot(compileFailureResult, r) && sameMemorySnapshot(compileFailureResult, r),
   JSON.stringify({ forcedCompileFailures, jitStats: compileFailureWasm.jitStats, status: compileFailureRun.status,
     exitCode: compileFailureRun.exitCode, instr: compileFailureWasm.instructions() }));
+
+const generatedTrapWasm = await AnyWasm.create(wasm, { jitMinPrefix: 1 });
+generatedTrapWasm.load(computeBundle);
+const NativeInstance = WebAssembly.Instance;
+const generatedTrapMessage = `forced generated-module trap ${'x'.repeat(700)}`;
+let forcedGeneratedModuleTraps = 0, generatedTrapOut = '', generatedTrapErr = '', generatedTrapRun;
+WebAssembly.Instance = function (module, imports) {
+  const instance = new NativeInstance(module, imports);
+  const exports = { ...instance.exports };
+  if (typeof exports.run === 'function') {
+    const run = exports.run;
+    exports.run = (...args) => {
+      if (forcedGeneratedModuleTraps === 0) {
+        forcedGeneratedModuleTraps++;
+        throw new Error(generatedTrapMessage);
+      }
+      return run(...args);
+    };
+  }
+  return { exports };
+};
+try {
+  generatedTrapRun = generatedTrapWasm.runToEnd({
+    onOutput: (s, t) => (s === 'stdout' ? (generatedTrapOut += t) : (generatedTrapErr += t)),
+  });
+} finally {
+  WebAssembly.Instance = NativeInstance;
+}
+const generatedTrapState = captureRuntimeState(generatedTrapWasm);
+const generatedTrapResult = {
+  ...generatedTrapRun,
+  out: generatedTrapOut,
+  err: generatedTrapErr,
+  instr: generatedTrapWasm.instructions(),
+  ...generatedTrapState,
+};
+check('generated-module traps expose bounded latest failure text and roll back state safely',
+  forcedGeneratedModuleTraps === 1 &&
+    generatedTrapWasm.jitStats.lastFailure === generatedTrapMessage.slice(0, 512) &&
+    generatedTrapWasm.jitStats.lastError === generatedTrapWasm.jitStats.lastFailure &&
+    generatedTrapRun.status === r.status && generatedTrapRun.exitCode === r.exitCode &&
+    generatedTrapOut === r.out && generatedTrapErr === r.err && generatedTrapWasm.instructions() === r.instr &&
+    sameCpuSnapshot(generatedTrapResult, r) && sameMemorySnapshot(generatedTrapResult, r),
+  JSON.stringify({ forcedGeneratedModuleTraps, jitStats: generatedTrapWasm.jitStats,
+    status: generatedTrapRun.status, exitCode: generatedTrapRun.exitCode,
+    instructions: generatedTrapWasm.instructions() }));
 
 const budgetWasm = await AnyWasm.create(wasm, { jitMinPrefix: 1 });
 budgetWasm.load(computeBundle);

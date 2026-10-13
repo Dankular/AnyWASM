@@ -6,6 +6,9 @@ import { AssetRangeCache, fetchAssetIndex, sha256Hex } from './assets.js';
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
 const MAX_JIT_MODULES = 256;
+const MAX_JIT_FAILURE_TEXT = 512;
+const CHAIN_EAGER_MODULE_LIMIT = 16;
+const CHAIN_REBUILD_MODULE_INTERVAL = 64;
 const DEFAULT_JIT_MIN_PREFIX = 65; // decoded blocks are capped at 64 instructions
 const ASYNCIFY_STACK_BYTES = 1024 * 1024;
 const SHARED_CPU_CONTEXT_BYTES = 784;
@@ -247,7 +250,7 @@ function emitDispatchTree(entries, first, end, depth, body, wasm) {
 
 export class AnyWasm {
   /** @param {WebAssembly.Instance} instance */
-  constructor(instance, jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }, hostIo = {}) {
+  constructor(instance, jitStats = { compilations: 0, executions: 0, emittedGuestInstructions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0, lastFailure: null, lastError: null }, jitMinPrefix = DEFAULT_JIT_MIN_PREFIX, asyncifyData = 0, asyncifyControl = { resumeSliceSteps: 0n }, hostIo = {}) {
     this.x = instance.exports;
     this.dec = new TextDecoder();
     /** Counts calls routed through the dynamic WebAssembly trampoline. */
@@ -282,25 +285,33 @@ export class AnyWasm {
     const modules = new Map();
     const modulesByStart = new Map();
     let activeCodeEpoch;
-    let registryVersion = 0;
     let chainRunner;
-    const jitStats = { compilations: 0, executions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0 };
+    let chainModulesSinceBuild = 0;
+    const jitStats = { compilations: 0, executions: 0, emittedGuestInstructions: 0, fallbacks: 0, registerRegisterHits: 0, chainTransitions: 0, chainCompilations: 0, lastFailure: null, lastError: null };
+    const recordJitFailure = (error) => {
+      const message = typeof error?.message === 'string' ? error.message : String(error);
+      const bounded = message.slice(0, MAX_JIT_FAILURE_TEXT);
+      jitStats.lastFailure = bounded;
+      jitStats.lastError = bounded;
+    };
     const forgetModule = (id) => {
       const old = modules.get(id);
       if (old && modulesByStart.get(old.start) === old) {
         modulesByStart.delete(old.start);
-        registryVersion++;
-        chainRunner = undefined;
       }
       modules.delete(id);
     };
     const getChainRunner = (memory) => {
-      if (chainRunner?.version === registryVersion) return chainRunner;
+      if (chainRunner) return chainRunner;
       const entries = Array.from(modulesByStart.values());
       const chainBytes = buildChainModule(entries);
       const module = new WebAssembly.Module(sharedMemory ? withSharedMemoryImport(chainBytes) : chainBytes);
       const emitted = new WebAssembly.Instance(module, { anywasm: { memory } });
-      chainRunner = { version: registryVersion, run: emitted.exports.run };
+      chainRunner = {
+        run: emitted.exports.run,
+        entries: new Map(entries.map((entry) => [entry.start, entry])),
+      };
+      chainModulesSinceBuild = 0;
       jitStats.chainCompilations++;
       return chainRunner;
     };
@@ -356,8 +367,8 @@ export class AnyWasm {
             if (activeCodeEpoch !== codeEpoch) {
               modulesByStart.clear();
               activeCodeEpoch = codeEpoch;
-              registryVersion++;
               chainRunner = undefined;
+              chainModulesSinceBuild = 0;
             }
             const memory = instance.exports.memory;
             const moduleView = new Uint8Array(memory.buffer, modulePtr >>> 0, moduleLen >>> 0);
@@ -365,8 +376,6 @@ export class AnyWasm {
             if (!cached || !bytesEqual(cached.bytes, moduleView)) {
               if (cached && modulesByStart.get(cached.start) === cached) {
                 modulesByStart.delete(cached.start);
-                registryVersion++;
-                chainRunner = undefined;
               }
               const moduleBytes = moduleView.slice();
               const module = new WebAssembly.Module(sharedMemory ? withSharedMemoryImport(moduleBytes) : moduleBytes);
@@ -387,19 +396,21 @@ export class AnyWasm {
             cached.start = start;
             if (modulesByStart.get(start) !== cached) {
               modulesByStart.set(start, cached);
-              registryVersion++;
-              chainRunner = undefined;
+              chainModulesSinceBuild++;
+              if (modulesByStart.size <= CHAIN_EAGER_MODULE_LIMIT ||
+                chainModulesSinceBuild >= CHAIN_REBUILD_MODULE_INTERVAL) chainRunner = undefined;
             }
 
             const remainingBudget = budget >>> 0;
-            if (modulesByStart.size === 1) {
+            const executeDirect = () => {
               const cpuState = new Uint8Array(memory.buffer, statePtr >>> 0, 160);
               const rollback = cpuState.slice();
               let executed = -1;
               try {
                 executed = cached.run(statePtr, remainingBudget);
-              } catch {
+              } catch (error) {
                 // Rust retries the block through the interpreter on a module trap.
+                recordJitFailure(error);
               }
               const expected = Math.min(remainingBudget, cached.instructions);
               if (executed !== expected) {
@@ -408,13 +419,19 @@ export class AnyWasm {
                 return -1;
               }
               jitStats.executions++;
+              jitStats.emittedGuestInstructions += executed;
               if (cached.firstRegisterRegister !== 0xffff_ffff && executed > cached.firstRegisterRegister) {
                 jitStats.registerRegisterHits++;
               }
               return executed;
+            };
+            if (modulesByStart.size === 1 ||
+              (chainRunner && chainRunner.entries.get(start) !== cached)) {
+              return executeDirect();
             }
 
             const runner = getChainRunner(memory);
+            if (runner.entries.get(start) !== cached) return executeDirect();
             const scratch = ((statePtr >>> 0) + 192) >>> 0;
             const executed = runner.run(statePtr, remainingBudget, scratch);
             const state = new DataView(memory.buffer, statePtr >>> 0, 352);
@@ -425,6 +442,7 @@ export class AnyWasm {
             jitStats.chainTransitions += transitions;
             jitStats.registerRegisterHits += registerHits;
             jitStats.executions += Math.max(0, transitions + 1 - fallbacks);
+            if (executed > 0) jitStats.emittedGuestInstructions += executed;
             if (executed <= 0) {
               if (fallbacks === 0) jitStats.fallbacks++;
               return -1;
@@ -433,6 +451,7 @@ export class AnyWasm {
           } catch (error) {
             // The Rust side passed a copied CPU state, so the interpreter can retry safely.
             if (globalThis.ANYWASM_DEBUG_JIT) console.error('[jit] fallback:', error?.message || error);
+            recordJitFailure(error);
             jitStats.fallbacks++;
             return -1;
           }

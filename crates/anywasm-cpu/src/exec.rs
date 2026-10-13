@@ -76,6 +76,8 @@ pub struct BlockCache {
 const MAX_CACHED_BLOCKS: usize = 1024;
 #[cfg(target_arch = "wasm32")]
 const DEFAULT_JIT_MIN_PREFIX: usize = MAX_BLOCK_INSTRUCTIONS + 1;
+#[cfg(target_arch = "wasm32")]
+const HOT_BLOCK_EXECUTIONS: u8 = 1;
 
 struct CachedBlock {
     decoded: DecodedBlock,
@@ -139,7 +141,6 @@ impl BlockCache {
 
     #[cfg(target_arch = "wasm32")]
     fn maybe_emit_hot_block(&mut self, start: u64, mode: CpuMode) {
-        const HOT_BLOCK_EXECUTIONS: u8 = 2;
         let min_prefix = self.min_jit_prefix;
         let Some((block_start, instructions)) = (|| {
             let block = self.blocks.get_mut(&start)?;

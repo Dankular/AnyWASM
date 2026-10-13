@@ -71,7 +71,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
   }
   if (!reuseWorker) {
     const workerUrl = new URL('./worker.js', import.meta.url);
-    if (new URLSearchParams(location.search).has('sharedCpuWorkers')) {
+    if (new URLSearchParams(location.search).get('sharedCpuWorkers') !== '0') {
       workerUrl.searchParams.set('sharedCpuWorkers', '');
     }
     if (new URLSearchParams(location.search).has('profileGpu')) workerUrl.searchParams.set('profileGpu', '');
@@ -164,7 +164,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
   const jitMinPrefixValue = new URLSearchParams(location.search).get('jitMinPrefix');
   showLoading('Starting guest program…');
   const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, assetPackage, testMode, traceGtaEventvol, diagProgress };
-  if (jitMinPrefixValue !== null) message.jitMinPrefix = Number(jitMinPrefixValue);
+  message.jitMinPrefix = jitMinPrefixValue === null ? 65 : Number(jitMinPrefixValue);
   const transfer = [wasm, bundleBytes.buffer];
   if (off) {
     message.canvas = off;

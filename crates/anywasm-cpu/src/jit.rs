@@ -24,7 +24,7 @@ const CHAIN_REGREG_HITS_OFFSET: u32 = 184;
 const DIRTY_FRAMES_PTR_OFFSET: u32 = 188;
 const DIRTY_FRAME_INDICES_PTR_OFFSET: u32 = 976;
 const DIRTY_FRAME_COUNT_PTR_OFFSET: u32 = 980;
-const DIRTY_FRAME_INDEX_LOCAL: u32 = 78;
+const DIRTY_FRAME_INDEX_LOCAL: u32 = 68;
 const CHAIN_SCRATCH_OFFSET: u32 = 192;
 const ADD_LHS_LOCAL: u32 = 5;
 const ADD_RHS_LOCAL: u32 = 6;
@@ -314,6 +314,21 @@ enum JitInstruction {
         target: u64,
         len: u8,
     },
+    Call {
+        target: u64,
+        stack_size: u8,
+        len: u8,
+    },
+    CallRegister {
+        register: u8,
+        stack_size: u8,
+        len: u8,
+    },
+    Return {
+        stack_size: u8,
+        stack_pop: u16,
+        len: u8,
+    },
 }
 
 /// A generated straight-line prefix and its process-local cache key.
@@ -420,12 +435,17 @@ pub fn emit_mov_block_mode(
             JitInstruction::Store(_)
                 | JitInstruction::XmmStore { .. }
                 | JitInstruction::MemoryAdd { .. }
+                | JitInstruction::Call { .. }
+                | JitInstruction::CallRegister { .. }
         );
         let is_exit = matches!(
             instruction,
             JitInstruction::Jump { .. }
                 | JitInstruction::JumpRegister { .. }
                 | JitInstruction::Branch { .. }
+                | JitInstruction::Call { .. }
+                | JitInstruction::CallRegister { .. }
+                | JitInstruction::Return { .. }
         );
         emitted.push(instruction);
         // A direct store is observable before Rust commits the copied CPU state. Keep it last so
@@ -459,6 +479,9 @@ fn safe_x86_32_instruction(instruction: JitInstruction) -> bool {
         JitInstruction::Nop { .. }
         | JitInstruction::Jump { .. }
         | JitInstruction::Branch { .. } => true,
+        JitInstruction::Call { stack_size: 4, .. }
+        | JitInstruction::Return { stack_size: 4, .. } => true,
+        JitInstruction::CallRegister { register, stack_size: 4, .. } => register < 8,
         JitInstruction::Mov(mov) if mov.dst < 8 => match mov.source {
             MovSource::Immediate(_) => true,
             MovSource::Register { index, zero_extend } => index < 8 && zero_extend,
@@ -514,6 +537,38 @@ fn translate_instruction(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
             register,
             len: inst.len,
         });
+    }
+    let stack_size = if mode == CpuMode::X86_32 { 4 } else { 8 };
+    match inst.op {
+        Op::Call => {
+            return Some(JitInstruction::Call {
+                target: inst.imm as u64,
+                stack_size,
+                len: inst.len,
+            });
+        }
+        Op::CallInd => {
+            let Opnd::Gpr(register) = inst.ops[0] else {
+                return None;
+            };
+            return Some(JitInstruction::CallRegister {
+                register,
+                stack_size,
+                len: inst.len,
+            });
+        }
+        Op::Ret | Op::RetImm => {
+            return Some(JitInstruction::Return {
+                stack_size,
+                stack_pop: if inst.op == Op::RetImm {
+                    inst.imm as u16
+                } else {
+                    0
+                },
+                len: inst.len,
+            });
+        }
+        _ => {}
     }
     if inst.op == Op::X87 {
         return translate_x87_stack(inst);
@@ -839,7 +894,10 @@ fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Ve
             JitInstruction::X87Stack { len, .. }
             | JitInstruction::Jump { len, .. }
             | JitInstruction::JumpRegister { len, .. }
-            | JitInstruction::Branch { len, .. } => *len,
+            | JitInstruction::Branch { len, .. }
+            | JitInstruction::Call { len, .. }
+            | JitInstruction::CallRegister { len, .. }
+            | JitInstruction::Return { len, .. } => *len,
         };
         rip = wrap_ip(mode, rip.wrapping_add(len as u64));
         let mut rip_after = rip;
@@ -993,12 +1051,48 @@ fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Ve
                 code.push(0x21); // local.set RIP
                 uleb(RIP_LOCAL, &mut code);
             }
+            JitInstruction::Call {
+                target,
+                stack_size,
+                ..
+            } => {
+                emit_call_stack_store(rip, *stack_size, mode, &mut code);
+                rip_after = wrap_ip(mode, *target);
+            }
+            JitInstruction::CallRegister {
+                register,
+                stack_size,
+                ..
+            } => {
+                code.push(0x20);
+                uleb(gpr_local(*register), &mut code);
+                if mode == CpuMode::X86_32 {
+                    code.push(0x42);
+                    sleb(u32::MAX as i64, &mut code);
+                    code.push(0x83); // i64.and: 32-bit indirect target
+                }
+                code.push(0x21);
+                uleb(ALU64_RESULT_LOCAL, &mut code);
+                emit_call_stack_store(rip, *stack_size, mode, &mut code);
+                code.push(0x20);
+                uleb(ALU64_RESULT_LOCAL, &mut code);
+                code.push(0x21);
+                uleb(RIP_LOCAL, &mut code);
+            }
+            JitInstruction::Return {
+                stack_size,
+                stack_pop,
+                ..
+            } => emit_return_stack(*stack_size, *stack_pop, mode, &mut code),
         }
 
         // RIP and counters stay in locals for the entire emitted block.
         if !matches!(
             instruction,
-            JitInstruction::Branch { .. } | JitInstruction::JumpRegister { .. }
+            JitInstruction::Branch { .. }
+                | JitInstruction::JumpRegister { .. }
+                | JitInstruction::CallRegister { .. }
+                | JitInstruction::Return { .. }
         ) {
             code.push(0x42);
             sleb(rip_after as i64, &mut code);
@@ -1632,7 +1726,7 @@ fn emit_inc32(dst: u8, code: &mut Vec<u8>) {
     code.push(0x21);
     uleb(ALU64_RESULT_LOCAL, code);
     emit_add32(dst, AddSource::Immediate(1), code);
-    code.push(0x20); // store address: the state pointer
+    code.push(0x20); // keep the state pointer for the final RFLAGS store
     uleb(0, code);
     code.push(0x20);
     uleb(0, code);
@@ -1849,7 +1943,8 @@ fn emit_cmp32_gpr(lhs: u8, source: AddSource, code: &mut Vec<u8>) {
         code.push(0x41);
         sleb(0x10, code);
         code.push(0x71);
-        code.push(0x45);
+        code.push(0x45); // AF is clear when bit 4 is zero
+        code.push(0x45); // invert: AF is set when the compare borrows from bit 4
     });
     emit_parity_flag32(ADD_RESULT_LOCAL, code);
     emit_commit_arithmetic_flags(code);
@@ -2159,11 +2254,6 @@ fn emit_dirty_frame_mark(code: &mut Vec<u8>) {
     // The TLB guard left the checked frame-relative byte offset in local 4. Record a frame only
     // when its dirty byte changes from zero so each host publication scans dirty frames only.
     code.push(0x20);
-    uleb(0, code);
-    code.push(0x28); // i32.load pointer to host dirty-frame bitmap
-    uleb(2, code);
-    uleb(DIRTY_FRAMES_PTR_OFFSET, code);
-    code.push(0x20);
     uleb(4, code);
     code.push(0x41);
     sleb(12, code);
@@ -2311,6 +2401,75 @@ fn emit_increment_local(local: u32, code: &mut Vec<u8>) {
     uleb(local, code);
 }
 
+fn emit_stack_pointer_adjust(mode: CpuMode, adjustment: i64, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(gpr_local(4), code);
+    code.push(0x42);
+    sleb(adjustment, code);
+    code.push(0x7c); // i64.add
+    if mode == CpuMode::X86_32 {
+        code.push(0x42);
+        sleb(u32::MAX as i64, code);
+        code.push(0x83); // i64.and: 32-bit stack-pointer wrap
+    }
+    code.push(0x21);
+    uleb(gpr_local(4), code);
+}
+
+fn emit_call_stack_store(return_address: u64, stack_size: u8, mode: CpuMode, code: &mut Vec<u8>) {
+    emit_stack_pointer_adjust(mode, -(stack_size as i64), code);
+    code.push(0x20);
+    uleb(gpr_local(4), code);
+    code.push(0x21);
+    uleb(3, code); // effective address is the new stack pointer
+    emit_tlb_guard(true, stack_size, code);
+    emit_dirty_frame_mark(code);
+    emit_frame_address(code);
+    if stack_size == 4 {
+        code.push(0x41); // i32.const return address
+        sleb(return_address as u32 as i32 as i64, code);
+        code.push(0x36); // i32.store
+        uleb(2, code);
+    } else {
+        code.push(0x42); // i64.const return address
+        sleb(return_address as i64, code);
+        code.push(0x37); // i64.store
+        uleb(3, code);
+    }
+    uleb(0, code);
+}
+
+fn emit_return_stack(stack_size: u8, stack_pop: u16, mode: CpuMode, code: &mut Vec<u8>) {
+    code.push(0x20);
+    uleb(gpr_local(4), code);
+    code.push(0x21);
+    uleb(3, code); // effective address is the current stack pointer
+    emit_tlb_guard(false, stack_size, code);
+    emit_frame_address(code);
+    if stack_size == 4 {
+        code.push(0x28); // i32.load return address
+        uleb(2, code);
+        uleb(0, code);
+        code.push(0xad); // i64.extend_i32_u
+    } else {
+        code.push(0x29); // i64.load return address
+        uleb(3, code);
+        uleb(0, code);
+    }
+    code.push(0x21);
+    uleb(ALU64_RESULT_LOCAL, code);
+    emit_stack_pointer_adjust(mode, stack_size as i64 + stack_pop as i64, code);
+    code.push(0x20);
+    uleb(ALU64_RESULT_LOCAL, code);
+    if mode == CpuMode::X86_32 {
+        code.push(0x42);
+        sleb(u32::MAX as i64, code);
+        code.push(0x83); // i64.and: wrap the return address to 32 bits
+    }
+    code.push(0x21);
+    uleb(RIP_LOCAL, code);
+}
+
 fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
     let mut initialized = 0u16;
     let mut initial_reads = 0u16;
@@ -2323,6 +2482,17 @@ fn register_masks(instructions: &[JitInstruction]) -> (u16, u16, u16, u16) {
             JitInstruction::Nop { .. }
             | JitInstruction::Jump { .. }
             | JitInstruction::Branch { .. } => {}
+            JitInstruction::Call { .. } | JitInstruction::Return { .. } => {
+                require_initial_register(4, initialized, &mut initial_reads);
+                initialized |= 1 << 4;
+                written |= 1 << 4;
+            }
+            JitInstruction::CallRegister { register, .. } => {
+                require_initial_register(*register, initialized, &mut initial_reads);
+                require_initial_register(4, initialized, &mut initial_reads);
+                initialized |= 1 << 4;
+                written |= 1 << 4;
+            }
             JitInstruction::JumpRegister { register, .. } => {
                 require_initial_register(*register, initialized, &mut initial_reads);
             }

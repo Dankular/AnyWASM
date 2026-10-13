@@ -49,9 +49,10 @@ function emittedModule() {
 function runBody(ids, moduleLength) {
   const body = [0]; // no locals
   for (const id of ids) {
+    body.push(0x41, ...sleb(2176), 0x42, ...sleb(id), 0x37, 0x03, 0x00); // state.rip = start
     for (const value of [id, 1024, moduleLength, 2048, 1, 1]) body.push(0x41, ...sleb(value));
     body.push(0x41, 0x7f); // firstRegisterRegister = u32::MAX
-    body.push(0x42, 0, 0x42, 0); // guest block start and code epoch
+    body.push(0x42, ...sleb(id), 0x42, 0); // unique guest block start and code epoch
     body.push(0x10, 0, 0x1a); // call import 0, drop result
   }
   body.push(0x41, 0, 0x0b); // return 0
