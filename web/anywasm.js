@@ -1002,6 +1002,27 @@ export class AnyWasm {
     clearFn();
     return out;
   }
+  /**
+   * Run `fn` on the pending GPU command stream as a view of WASM memory (no copy), then clear it.
+   * `fn` must be synchronous and must not keep the view: it is invalid once the runtime runs
+   * again. Falls back to a copy when the memory is shared (some Web APIs reject such views).
+   * Returns false when there was nothing to run.
+   */
+  consumeGpu(fn) {
+    if (this.callbackSuspended) return false;
+    const len = this.x.aw_gpu_len();
+    if (!len) return false;
+    const buffer = this.x.memory.buffer;
+    const view = new Uint8Array(buffer, this.x.aw_gpu_ptr() >>> 0, len);
+    try {
+      fn(typeof SharedArrayBuffer !== 'undefined' && buffer instanceof SharedArrayBuffer ? view.slice() : view);
+    } finally {
+      this.x.aw_gpu_clear();
+    }
+    return true;
+  }
+  /** Bytes of GPU command stream waiting to be taken. */
+  gpuPendingBytes() { return this.callbackSuspended ? 0 : this.x.aw_gpu_len(); }
   /** Window/GPU command stream produced since the last call (copied out of WASM memory). */
   takeGpu() { return this._take(this.x.aw_gpu_ptr, this.x.aw_gpu_len, this.x.aw_gpu_clear); }
   /** Deliver an input event: see crates/anywasm-rt/src/hle/user32.rs `input_event`. */

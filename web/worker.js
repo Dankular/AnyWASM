@@ -403,10 +403,10 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
       );
       if (pendingSharedCompletions.length) sharedNeedsCoordinatorTurn = true;
     }
-    const g = w.takeGpu();
-    if (g.length) {
-      if (exec) exec.execute(g);
+    if (w.gpuPendingBytes()) {
+      if (exec) w.consumeGpu((commands) => exec.execute(commands)); // executed in place: no copy
       else {
+        w.takeGpu();
         status = Status.CRASHED;
         terminalMessage = `Graphics unavailable: ${graphicsUnavailableReason || 'no renderer is available'}`;
       }

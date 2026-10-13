@@ -99,6 +99,33 @@ impl GpuStream {
         self.next_id
     }
 
+    /// Emit a command whose payload is `head` followed by `len` bytes read straight from guest
+    /// memory into the stream, so bulk data (texture uploads) is copied once instead of three
+    /// times. Returns the range of those bytes inside [`Self::buf`]. On a guest read fault the
+    /// stream is left unchanged.
+    pub fn emit_guest_payload(
+        &mut self,
+        opcode: u32,
+        head: Pk,
+        mem: &anywasm_cpu::Memory,
+        address: u64,
+        len: usize,
+    ) -> Result<std::ops::Range<usize>, String> {
+        let head = head.0;
+        let padded = (head.len() + len + 3) & !3;
+        let rollback = self.buf.len();
+        self.buf.extend(opcode.to_le_bytes());
+        self.buf.extend((padded as u32).to_le_bytes());
+        self.buf.extend(&head);
+        let start = self.buf.len();
+        self.buf.resize(rollback + 8 + padded, 0);
+        if let Err(error) = mem.read_into(address, &mut self.buf[start..start + len], anywasm_cpu::Access::Read) {
+            self.buf.truncate(rollback);
+            return Err(format!("read fault {address:#x}+{len}: {error:?}"));
+        }
+        Ok(start..start + len)
+    }
+
     pub fn emit(&mut self, opcode: u32, payload: Pk) {
         let mut p = payload.0;
         while p.len() % 4 != 0 {

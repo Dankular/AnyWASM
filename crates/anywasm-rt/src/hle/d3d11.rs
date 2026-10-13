@@ -1070,9 +1070,12 @@ fn create_texture1d(p: &mut Process) -> R {
                 } else {
                     pitch
                 };
-                let bytes = p.read_bytes(data, pitch as usize)?;
-                p.extra.gpu.emit(
-                    op::TEXTURE_WRITE,
+                let len = pitch as usize;
+                let range = p
+                    .extra
+                    .gpu
+                    .emit_guest_payload(
+                        op::TEXTURE_WRITE,
                     Pk::new()
                         .u32(id)
                         .u32(mip)
@@ -1082,9 +1085,13 @@ fn create_texture1d(p: &mut Process) -> R {
                         .u32(mw)
                         .u32(1)
                         .u32(pitch)
-                        .u32(bytes.len() as u32)
-                        .bytes(&bytes),
-                );
+                            .u32(len as u32),
+                        &p.mem,
+                        data,
+                        len,
+                    )
+                    .map_err(Stop::Crash)?;
+                let bytes = &p.extra.gpu.buf[range];
                 if keep_shadow && sub == 0 {
                     if let Some(r) = p.extra.com.res.get_mut(&id) {
                         let n = r.shadow.len().min(bytes.len());
@@ -1197,9 +1204,12 @@ fn create_texture2d(p: &mut Process) -> R {
                     pitch
                 };
                 let nrows = rows(format, mh);
-                let bytes = p.read_bytes(data, (pitch * nrows) as usize)?;
-                p.extra.gpu.emit(
-                    op::TEXTURE_WRITE,
+                let len = (pitch * nrows) as usize;
+                let range = p
+                    .extra
+                    .gpu
+                    .emit_guest_payload(
+                        op::TEXTURE_WRITE,
                     Pk::new()
                         .u32(id)
                         .u32(mip)
@@ -1209,9 +1219,13 @@ fn create_texture2d(p: &mut Process) -> R {
                         .u32(mw)
                         .u32(mh)
                         .u32(pitch)
-                        .u32(bytes.len() as u32)
-                        .bytes(&bytes),
-                );
+                            .u32(len as u32),
+                        &p.mem,
+                        data,
+                        len,
+                    )
+                    .map_err(Stop::Crash)?;
+                let bytes = &p.extra.gpu.buf[range];
                 if keep_shadow && sub == 0 {
                     if let Some(r) = p.extra.com.res.get_mut(&id) {
                         let n = r.shadow.len().min(bytes.len());
@@ -1810,9 +1824,12 @@ fn update_subresource(p: &mut Process) -> R {
                 row_pitch
             };
             let nrows = rows(info.format, h);
-            let bytes = p.read_bytes(src, (pitch * nrows) as usize)?;
-            p.extra.gpu.emit(
-                op::TEXTURE_WRITE,
+            let len = (pitch * nrows) as usize;
+            let range = p
+                .extra
+                .gpu
+                .emit_guest_payload(
+                    op::TEXTURE_WRITE,
                 Pk::new()
                     .u32(id)
                     .u32(mip)
@@ -1822,9 +1839,13 @@ fn update_subresource(p: &mut Process) -> R {
                     .u32(w)
                     .u32(h)
                     .u32(pitch)
-                    .u32(bytes.len() as u32)
-                    .bytes(&bytes),
-            );
+                        .u32(len as u32),
+                    &p.mem,
+                    src,
+                    len,
+                )
+                .map_err(Stop::Crash)?;
+            let bytes = &p.extra.gpu.buf[range];
         }
         Kind::Texture3D { id } => {
             let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();

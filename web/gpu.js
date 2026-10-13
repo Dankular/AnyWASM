@@ -6,6 +6,8 @@
 // draw sees exactly the data that was uploaded before it. Render passes are kept open across
 // consecutive draws and closed whenever a copy, clear or attachment change needs the encoder.
 
+// Uploads at least this large skip the staging ring (see textureWrite).
+const DIRECT_TEXTURE_UPLOAD_BYTES = 64 * 1024;
 const OP_NAMES = new Map();
 const OP = {
   WINDOW: 1, CREATE_BUFFER: 2, BUFFER_WRITE: 3, CREATE_TEXTURE2D: 4, TEXTURE_WRITE: 5, CREATE_SHADER: 6,
@@ -1260,6 +1262,22 @@ export class GpuExecutor {
     const blk = BLOCK(r.format) || [1, 1, BYTES(r.format)];
     const rows = Math.ceil(h / blk[1]);
     const rowBytes = Math.ceil(w / blk[0]) * blk[2];
+    // Large uploads go straight through queue.writeTexture, which accepts any row pitch: no
+    // 256-byte repack and no staging-ring copy. The queue timeline runs it immediately, so any
+    // recorded-but-unsubmitted work is submitted first to keep ordering. Small uploads stay on the
+    // ring so frequent tiny updates do not each force a submit.
+    const directBytes = (rows - 1) * uploadRowPitch + rowBytes;
+    if ((uploadData.byteLength >= DIRECT_TEXTURE_UPLOAD_BYTES || !this.enc) && uploadRowPitch >= rowBytes && uploadData.byteLength >= directBytes) {
+      this.flush();
+      const cwDirect = Math.ceil(w / blk[0]) * blk[0], chDirect = Math.ceil(h / blk[1]) * blk[1];
+      this.device.queue.writeTexture(
+        { texture: r.gpu, mipLevel: mip, origin: { x, y, z: slice } },
+        uploadData,
+        { offset: 0, bytesPerRow: uploadRowPitch, rowsPerImage: rows },
+        { width: cwDirect, height: chDirect, depthOrArrayLayers: 1 },
+      );
+      return;
+    }
     const bpr = (rowBytes + 255) & ~255;
     const packed = new Uint8Array(bpr * rows);
     for (let row = 0; row < rows; row++) packed.set(uploadData.subarray(row * uploadRowPitch, row * uploadRowPitch + rowBytes), row * bpr);
