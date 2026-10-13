@@ -1292,6 +1292,17 @@ try {
       command(12, words(63, 0, 62, 28, 1, 0, 1, 0, 1));
       command(27, words(63, 0x3f800000, 0x3f800000, 0, 0x3f800000)); // preserve a yellow clear on extent mismatch
       command(47, words(62, 0, 1, 0, 28)); // same-format resolve with mismatched 4x4/8x8 extents
+      command(4, words(70, 8, 8, 1, 2, 28, 0x20, 0, 4, 0)); // 4x RGBA8 two-layer render target
+      command(4, words(71, 8, 8, 1, 2, 28, 0x20, 0, 1, 0)); // two-layer single-sample resolve target
+      command(12, words(72, 0, 70, 28, 7, 0, 1, 0, 1)); // MSAA array layer 0 RTV
+      command(12, words(73, 0, 70, 28, 7, 0, 1, 1, 1)); // MSAA array layer 1 RTV
+      command(12, words(74, 0, 71, 28, 5, 0, 1, 0, 1)); // resolve array layer 0 RTV
+      command(12, words(75, 0, 71, 28, 5, 0, 1, 1, 1)); // resolve array layer 1 RTV
+      command(27, words(72, 0x3f800000, 0, 0, 0x3f800000)); // red clear in source layer 0
+      command(27, words(73, 0, 0x3f800000, 0, 0x3f800000)); // green clear in source layer 1
+      command(27, words(74, 0, 0, 0x3f800000, 0x3f800000)); // blue clear in destination layer 0
+      command(27, words(75, 0x3f800000, 0x3f800000, 0, 0x3f800000)); // yellow clear in destination layer 1
+      command(47, words(71, 1, 70, 1, 28)); // resolve only the second array layer
       const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
       let at = 0; for (const part of stream) { commands.set(part, at); at += part.length; }
       gpu.execute(commands);
@@ -1323,6 +1334,9 @@ try {
       const incompatibleResolveIndex = (4 * incompatibleResolvePixels.width + 4) * 4;
       const mismatchedExtentPixels = await gpu.readBackTexture(62);
       const mismatchedExtentIndex = (2 * mismatchedExtentPixels.width + 2) * 4;
+      const msaaArrayLayer0 = await gpu.readBackTexture(74);
+      const msaaArrayLayer1 = await gpu.readBackTexture(75);
+      const msaaArrayCenterIndex = (4 * msaaArrayLayer0.width + 4) * 4;
       const result = {
         samples: gpu.res.get(1)?.samples,
         bgraSamples: gpu.res.get(4)?.samples,
@@ -1347,6 +1361,10 @@ try {
         incompatibleResolveLogged: logs.some((message) => message.includes('source 1 and destination 60 are incompatible')),
         mismatchedExtentResolvePixel: Array.from(mismatchedExtentPixels.data.slice(mismatchedExtentIndex, mismatchedExtentIndex + 4)),
         mismatchedExtentResolveLogged: logs.some((message) => message.includes('source 1 and destination 62 extents differ')),
+        msaaArraySamples: gpu.res.get(70)?.samples,
+        msaaArrayLayers: gpu.res.get(70)?.array,
+        msaaArrayLayer0Pixel: Array.from(msaaArrayLayer0.data.slice(msaaArrayCenterIndex, msaaArrayCenterIndex + 4)),
+        msaaArrayLayer1Pixel: Array.from(msaaArrayLayer1.data.slice(msaaArrayCenterIndex, msaaArrayCenterIndex + 4)),
         sampleMaskSamples: gpu.res.get(26)?.samples,
         sampleMaskPixel: Array.from(sampleMaskPixels.data.slice(sampleMaskIndex, sampleMaskIndex + 4)),
         rgbaSrgbSamples: gpu.res.get(30)?.samples,
@@ -1411,6 +1429,12 @@ try {
   check('D3D11 mismatched ResolveSubresource extents preserve the destination clear pixels',
     near(msaaResolveResult.mismatchedExtentResolvePixel || [], [255, 255, 0, 255], 1)
       && msaaResolveResult.mismatchedExtentResolveLogged && msaaResolveResult.errors?.length === 0,
+    JSON.stringify(msaaResolveResult));
+  check('D3D11 4x multisampled texture arrays resolve only the selected layer',
+    msaaResolveResult.msaaArraySamples === 4 && msaaResolveResult.msaaArrayLayers === 2
+      && near(msaaResolveResult.msaaArrayLayer0Pixel || [], [0, 0, 255, 255], 1)
+      && near(msaaResolveResult.msaaArrayLayer1Pixel || [], [0, 255, 0, 255], 1)
+      && msaaResolveResult.errors?.length === 0,
     JSON.stringify(msaaResolveResult));
   check('Diligent DrawMap vertex and pixel shaders validate as a WebGPU render pipeline',
     msaaResolveResult.drawMapPipelineValidated, msaaResolveResult.drawMapPipelineError || JSON.stringify(msaaResolveResult));

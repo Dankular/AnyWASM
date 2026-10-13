@@ -1187,7 +1187,12 @@ export class GpuExecutor {
 
   release(id) {
     const r = this.res.get(id);
-    if (r) { this.flush(); r.gpu.destroy?.(); this.res.delete(id); }
+    if (r) {
+      this.flush();
+      r.gpu.destroy?.();
+      for (const layer of r.multisampledLayers || []) if (layer !== r.gpu) layer.destroy?.();
+      this.res.delete(id);
+    }
     this.views.delete(id); this.shaders.delete(id); this.layouts.delete(id); this.samplers.delete(id);
     this.blends.delete(id); this.rasters.delete(id); this.depths.delete(id);
   }
@@ -1207,10 +1212,19 @@ export class GpuExecutor {
     const cube = dimension === '2d' && (misc & 0x4) !== 0;
     const backingDimension = dimension === '1d' ? '2d' : dimension;
     const backingHeight = dimension === '1d' ? 1 : h;
-    const gpu = this.device.createTexture({ size: [w, backingHeight, Math.max(1, array)], dimension: backingDimension, mipLevelCount: Math.max(1, mips), sampleCount, format, usage: u, viewFormats });
+    const multisampledLayers = multisampled && backingDimension === '2d' && array > 1
+      ? Array.from({ length: array }, () => this.device.createTexture({
+        size: [w, backingHeight], dimension: '2d', mipLevelCount: 1, sampleCount, format, usage: u, viewFormats,
+      }))
+      : null;
+    const gpu = multisampledLayers?.[0] || this.device.createTexture({
+      size: [w, backingHeight, Math.max(1, array)], dimension: backingDimension,
+      mipLevelCount: Math.max(1, mips), sampleCount, format, usage: u, viewFormats,
+    });
     this.res.set(id, {
       kind: 'texture', gpu, width: w, height: backingHeight, depth: dimension === '3d' ? Math.max(1, array) : 1,
       mips: Math.max(1, mips), array: dimension === '3d' ? 1 : Math.max(1, array), samples: sampleCount, format, dxgi, bind, cube, dimension,
+      multisampledLayers,
       normalized16Raw: null,
     });
   }
@@ -1238,7 +1252,9 @@ export class GpuExecutor {
     this.invalidateNormalized16Raw(dst);
     this.device.pushErrorScope('validation');
     try {
-      const srcView = src.gpu.createView({ dimension: '2d', baseMipLevel: srcMip, mipLevelCount: 1, baseArrayLayer: srcSlice, arrayLayerCount: 1 });
+      const srcTexture = src.multisampledLayers?.[srcSlice] || src.gpu;
+      const srcLayer = src.multisampledLayers ? 0 : srcSlice;
+      const srcView = srcTexture.createView({ dimension: '2d', baseMipLevel: srcMip, mipLevelCount: 1, baseArrayLayer: srcLayer, arrayLayerCount: 1 });
       const dstView = dst.gpu.createView({ dimension: '2d', baseMipLevel: dstMip, mipLevelCount: 1, baseArrayLayer: dstSlice, arrayLayerCount: 1 });
       const pass = this.encoder().beginRenderPass({ colorAttachments: [{
         view: srcView, resolveTarget: dstView, loadOp: 'load', storeOp: 'discard',
@@ -1685,6 +1701,10 @@ export class GpuExecutor {
       return v.cache;
     }
     if (tex.kind !== 'texture') return null;
+    const layerTexture = tex.multisampledLayers
+      ? tex.multisampledLayers[v.slice]
+      : tex.gpu;
+    if (!layerTexture) return null;
     const sourceFormat = this.viewFormat(v.format, tex);
     const depthOnly = hasStencil(sourceFormat) && v.kind === 2;
     const format = depthOnly ? depthAspectFormat(sourceFormat) : sourceFormat;
@@ -1693,8 +1713,9 @@ export class GpuExecutor {
     if (v.kind === 0 || v.kind === 1) { // render attachments: one mip, one layer, '2d'
       d.dimension = '2d'; d.baseMipLevel = v.mip; d.mipLevelCount = 1;
       const oneDArray = tex.dimension === '1d' && (v.kind === 1 ? v.dim === 2 : v.dim === 3);
-      const arrayAttachment = v.dim === 5 || v.dim === 4 && (v.slice !== 0 || v.slices > 1);
-      d.baseArrayLayer = oneDArray || arrayAttachment ? v.slice : 0;
+      const arrayAttachment = v.dim === 5 || v.dim === 6 || v.dim === 7
+        || v.dim === 4 && (v.slice !== 0 || v.slices > 1);
+      d.baseArrayLayer = tex.multisampledLayers ? 0 : oneDArray || arrayAttachment ? v.slice : 0;
       d.arrayLayerCount = 1;
     } else {
       d.baseMipLevel = v.mip; d.mipLevelCount = Math.min(v.mips || tex.mips, tex.mips - v.mip);
@@ -1713,7 +1734,7 @@ export class GpuExecutor {
       else if (v.dim === 5) { d.dimension = '2d-array'; d.baseArrayLayer = v.slice; d.arrayLayerCount = Math.min(v.slices, tex.array - v.slice); }
       else { d.dimension = '2d'; d.baseArrayLayer = 0; d.arrayLayerCount = 1; }
     }
-    v.cache = { view: tex.gpu.createView(d), format, dxgi: v.format || tex.dxgi, tex, dim: d.dimension };
+    v.cache = { view: layerTexture.createView(d), format, dxgi: v.format || tex.dxgi, tex, dim: d.dimension };
     return v.cache;
   }
 

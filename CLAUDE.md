@@ -333,6 +333,8 @@ register-stack subset):
       advertised color/depth formats at 2x, 4x, and 8x and checks representative unsupported formats.
       Chromium verifies the resolve pixels. Chromium also tests near/far depth
       with 4x D32_FLOAT, D24S8, and D16_UNORM attachments and resolves the retained green draw to RGBA8.
+      A two-layer 4x RGBA8 render target resolves only layer 1 and preserves layer 0; the WebGPU
+      executor backs each D3D11 MSAA array layer with a separate 2D multisampled texture.
       A combined 4x D24S8/alpha-to-coverage draw resolves near red and farther green samples without
       the clear blue channel. `Map(READ)` executes older
       commands already transferred to the host-visible GPU queue before its current HLE batch,

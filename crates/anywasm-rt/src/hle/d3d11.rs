@@ -1161,7 +1161,6 @@ fn create_texture2d(p: &mut Process) -> R {
             || sample_quality != 0
             || !supported_multisample
             || mips != 1
-            || array != 1
             || init != 0
             || usage != 0
             || cpu != 0
@@ -3369,6 +3368,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn create_texture2d_accepts_multisampled_render_target_arrays() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let mut desc = Vec::new();
+        for value in [
+            8u32,
+            8,
+            1,
+            2,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            4,
+            0,
+            0,
+            0x20,
+            0,
+            0,
+        ] {
+            desc.extend(value.to_le_bytes());
+        }
+        p.write_bytes(DESC, &desc).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = OUT;
+
+        assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
+        assert_ne!(p.rd64(OUT).unwrap(), 0);
+        let stream = &p.extra.gpu.buf;
+        assert_eq!(
+            u32::from_le_bytes(stream[24..28].try_into().unwrap()),
+            2,
+            "array layers"
+        );
+        assert_eq!(
+            u32::from_le_bytes(stream[40..44].try_into().unwrap()),
+            4,
+            "sample count"
+        );
     }
 
     #[test]
