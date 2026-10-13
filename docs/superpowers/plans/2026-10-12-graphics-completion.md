@@ -174,7 +174,7 @@
 - [x] Recheck seed-1 WASD movement, cursor aim, and flashlight response; fix the SDF row-to-screen Y mapping and record two matching clear-ray runs.
 - [x] Recheck random Release Tab map regeneration and record changed-pixel, dispatch, present, and validation-error counts.
 - [x] Make stored-route playback dispatch its recorded repeated keydown pulses; verify input events and balanced Asyncify yields/resumes.
-- [ ] Finish the stored seed-1 route under the current runtime and reach a terminal process status; the current replay stalls before the teleport and remains Starting.
-- [ ] Rerun random-layout flashlight ray checks with the corrected SDF row mapping, then update every graphics status/checklist from the resulting evidence.
+- [x] Finish the stored seed-1 route under the current runtime and reach a terminal process status. The corrected centered-square route completed all 35 segments at the production slice, reached the teleport, and reported status 0 after the harness stop.
+- [x] Rerun random-layout flashlight ray checks with the corrected SDF row mapping, then update every graphics status/checklist from the resulting evidence. Two fresh random layouts lit all 15 and 17 sampled patches with no WebGPU errors.
 
 **Gate:** The graphics source-of-truth checklists contain no unverified completion claims, every remaining limitation has a concrete reason and reproduction, and all intended commits are pushed with remote SHA verification.

@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
-import { buildPlaythroughPlan } from './target-playthrough.mjs';
+import { buildPlaythroughPlan, recalibratePulseScale, splitPulseCount } from './target-playthrough.mjs';
 import {
   mapFlashlightOrigin,
   measureFlashlightRayResponse,
@@ -29,6 +29,20 @@ const diagProgress = options.includes('--diag-progress') || sharedCpuWorkers;
 const playthroughArgument = options.find((argument) => argument.startsWith('--playthrough='));
 const pulseMsArgument = options.find((argument) => argument.startsWith('--pulse-ms='));
 const pulseMs = pulseMsArgument ? Number(pulseMsArgument.slice('--pulse-ms='.length)) : 10;
+const alignmentAttemptsArgument = options.find((argument) => argument.startsWith('--alignment-attempts='));
+const alignmentMaxMsArgument = options.find((argument) => argument.startsWith('--alignment-max-ms='));
+const alignmentAttempts = alignmentAttemptsArgument
+  ? Number(alignmentAttemptsArgument.slice('--alignment-attempts='.length))
+  : 2;
+const alignmentMaxMs = alignmentMaxMsArgument
+  ? Number(alignmentMaxMsArgument.slice('--alignment-max-ms='.length))
+  : 100;
+const adaptivePulses = options.includes('--adaptive-pulses');
+const stopAfterPlaythrough = options.includes('--stop-after-playthrough');
+if (!Number.isInteger(alignmentAttempts) || alignmentAttempts < 1 || alignmentAttempts > 32 ||
+    !Number.isFinite(alignmentMaxMs) || alignmentMaxMs < 16 || alignmentMaxMs > 2000) {
+  throw new Error('alignment attempts must be 1–32 and alignment max ms must be 16–2000');
+}
 const playthroughRecord = playthroughArgument
   ? JSON.parse(readFileSync(playthroughArgument.slice('--playthrough='.length), 'utf8'))
   : null;
@@ -232,15 +246,17 @@ try {
       });
     });
     const progress = [];
+    const pulseScales = new Map();
+    let sharedPulseScale = 1;
     let before = result.greenMarker;
     for (const [index, step] of playthroughPlan.steps.entries()) {
       const alignment = [];
       for (const axis of ['x', 'y']) {
-        for (let attempt = 0; attempt < 2; attempt++) {
+        for (let attempt = 0; attempt < alignmentAttempts; attempt++) {
           const error = step.expectedBefore[axis] - before[axis];
           if (Math.abs(error) <= 1.25) break;
           const key = axis === 'x' ? (error > 0 ? 'd' : 'a') : (error > 0 ? 's' : 'w');
-          const durationMs = Math.min(100, Math.max(16, Math.round(Math.abs(error) * 21.8)));
+          const durationMs = Math.min(alignmentMaxMs, Math.max(16, Math.round(Math.abs(error) * 21.8)));
           await page.keyboard.down(key);
           await page.waitForTimeout(durationMs);
           await page.keyboard.up(key);
@@ -252,40 +268,108 @@ try {
         }
       }
       const segmentBefore = before;
-      for (const key of step.keys) await page.keyboard.down(key);
-      for (let pulse = 1; pulse < step.pulseCount; pulse++) {
-        await page.waitForTimeout(playthroughPlan.pulseMs);
-        for (const key of step.keys) await page.keyboard.down(key);
-      }
-      await page.waitForTimeout(playthroughPlan.pulseMs);
-      for (const key of [...step.keys].reverse()) await page.keyboard.up(key);
-      await page.waitForTimeout(100);
-
-      const after = (await capturePixels()).greenMarker;
-      assert.ok(after, `playthrough step ${index} should retain the green player marker`);
-      const dx = after.x - segmentBefore.x;
-      const dy = after.y - segmentBefore.y;
+      const pulseScaleKey = step.keys.join('+');
+      const pulseScale = adaptivePulses ? (pulseScales.get(pulseScaleKey) ?? sharedPulseScale) : 1;
+      const pulseCount = Math.max(1, Math.round(step.pulseCount * pulseScale));
       const expectedDx = step.expectedAfter.x - step.expectedBefore.x;
       const expectedDy = step.expectedAfter.y - step.expectedBefore.y;
       const expectedLength = Math.hypot(expectedDx, expectedDy) || 1;
+      const batches = adaptivePulses ? splitPulseCount(pulseCount, 8) : [pulseCount];
+      const pathAlignment = [];
+      let pulseProjectedPixels = 0;
+      let pulsesCompleted = 0;
+      for (const batchSize of batches) {
+        const batchBefore = before;
+        for (const key of step.keys) await page.keyboard.down(key);
+        for (let pulse = 1; pulse < batchSize; pulse++) {
+          await page.waitForTimeout(playthroughPlan.pulseMs);
+          for (const key of step.keys) await page.keyboard.down(key);
+        }
+        await page.waitForTimeout(playthroughPlan.pulseMs);
+        for (const key of [...step.keys].reverse()) await page.keyboard.up(key);
+        await page.waitForTimeout(100);
+
+        const pulseAfter = (await capturePixels()).greenMarker;
+        assert.ok(pulseAfter, `playthrough step ${index} should retain the green player marker`);
+        const pulseDx = pulseAfter.x - batchBefore.x;
+        const pulseDy = pulseAfter.y - batchBefore.y;
+        pulseProjectedPixels += (pulseDx * expectedDx + pulseDy * expectedDy) / expectedLength;
+        pulsesCompleted += batchSize;
+        before = pulseAfter;
+
+        if (adaptivePulses && index < playthroughPlan.steps.length - 1) {
+          const fraction = pulsesCompleted / pulseCount;
+          const waypoint = {
+            x: step.expectedBefore.x + expectedDx * fraction,
+            y: step.expectedBefore.y + expectedDy * fraction,
+          };
+          for (const axis of ['x', 'y']) {
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const error = waypoint[axis] - before[axis];
+              if (Math.abs(error) <= 1.25) break;
+              const key = axis === 'x' ? (error > 0 ? 'd' : 'a') : (error > 0 ? 's' : 'w');
+              const durationMs = Math.min(alignmentMaxMs, Math.max(16, Math.round(Math.abs(error) * 21.8)));
+              await page.keyboard.down(key);
+              await page.waitForTimeout(durationMs);
+              await page.keyboard.up(key);
+              await page.waitForTimeout(100);
+              const afterCorrection = (await capturePixels()).greenMarker;
+              assert.ok(afterCorrection, `playthrough path alignment ${index}:${axis} should retain the green player marker`);
+              pathAlignment.push({ axis, key, fraction, requestedError: error, durationMs, before, after: afterCorrection });
+              before = afterCorrection;
+            }
+          }
+        }
+      }
+
+      const after = before;
+      const dx = after.x - segmentBefore.x;
+      const dy = after.y - segmentBefore.y;
+      const projectedPixels = (dx * expectedDx + dy * expectedDy) / expectedLength;
+      const calibrate = adaptivePulses && expectedLength >= 4;
+      const calibratedScale = calibrate
+        ? recalibratePulseScale(pulseScale, expectedLength, pulseProjectedPixels)
+        : pulseScale;
+      if (calibrate) {
+        pulseScales.set(pulseScaleKey, calibratedScale);
+        sharedPulseScale = calibratedScale;
+      }
       progress.push({
         index,
         keys: step.keys,
-        pulses: step.pulseCount,
-        durationMs: step.durationMs,
+        recordedPulses: step.pulseCount,
+        pulses: pulseCount,
+        pulseScale,
+        calibratedPulseScale: calibratedScale,
+        durationMs: pulseCount * playthroughPlan.pulseMs,
         alignment,
+        pathAlignment,
         before: segmentBefore,
         after,
+        expectedBefore: step.expectedBefore,
+        expectedAfter: step.expectedAfter,
         delta: { x: dx, y: dy },
-        projectedPixels: (dx * expectedDx + dy * expectedDy) / expectedLength,
+        projectedPixels,
+        pulseProjectedPixels,
         distanceFromRecordedEnd: Math.hypot(after.x - step.expectedAfter.x, after.y - step.expectedAfter.y),
       });
       before = after;
     }
 
     const finalDistanceFromStart = Math.hypot(before.x - result.greenMarker.x, before.y - result.greenMarker.y);
+    if (stopAfterPlaythrough) {
+      await page.locator('#stop').click();
+      await page.waitForFunction(
+        () => document.querySelector('#stat')?.dataset.status !== undefined,
+        null,
+        { timeout: 30_000 },
+      );
+    }
     inputDiagnostics = await page.evaluate(() => ({
       status: document.querySelector('#stat')?.textContent,
+      processStatus: document.querySelector('#stat')?.dataset.status,
+      exitCode: document.querySelector('#stat')?.dataset.exit,
+      terminalOutput: document.querySelector('#term')?.textContent,
       gpuStats: window.__gpuStats,
     }));
     const inputEventDiagnostics = await page.evaluate(() => ({
@@ -296,19 +380,26 @@ try {
     playthroughReplay = {
       record: playthroughArgument.slice('--playthrough='.length),
       pulseMs: playthroughPlan.pulseMs,
-      keyPulses: playthroughPlan.keyPulses,
+      adaptivePulses,
+      alignmentAttempts,
+      alignmentMaxMs,
+      recordedKeyPulses: playthroughPlan.keyPulses,
+      keyPulses: progress.reduce((sum, step) => sum + step.pulses, 0),
       steps: progress.length,
       totalInputMs: playthroughPlan.steps.reduce((sum, step) => sum + step.durationMs, 0),
       expectedTeleport: playthroughPlan.teleported,
       recordedCaptureSize: playthroughRecord.captureSize,
       replayCaptureSize: { width: result.width, height: result.height },
+      stoppedAfterPlaythrough: stopAfterPlaythrough,
+      processStatus: inputDiagnostics.processStatus,
+      exitCode: inputDiagnostics.exitCode,
       callbackSuspensions: inputDiagnostics.gpuStats?.asyncify,
       inputEventDiagnostics,
       initialMarker: result.greenMarker,
       finalMarker: before,
       finalDistanceFromStart,
       actualTravelPixels: progress.reduce((sum, step) => sum + Math.hypot(step.delta.x, step.delta.y), 0),
-      alignmentTravelPixels: progress.flatMap((step) => step.alignment).reduce((sum, correction) => sum + Math.hypot(correction.after.x - correction.before.x, correction.after.y - correction.before.y), 0),
+      alignmentTravelPixels: progress.flatMap((step) => [...step.alignment, ...step.pathAlignment]).reduce((sum, correction) => sum + Math.hypot(correction.after.x - correction.before.x, correction.after.y - correction.before.y), 0),
       finalSegmentTravelPixels: Math.hypot(progress.at(-1).delta.x, progress.at(-1).delta.y),
       progress,
     };
@@ -322,7 +413,7 @@ try {
     writeFileSync(outputPath.replace(/\.png$/i, '.playthrough.json'), `${JSON.stringify(playthroughReplay, null, 2)}\n`);
     if (process.env.REQUIRE_TARGET_PLAYTHROUGH === '1') {
       assert.ok(playthroughPlan.teleported, 'the stored route should describe a teleporting run');
-      assert.ok(inputEventDiagnostics.keyDowns >= playthroughPlan.keyPulses,
+      assert.ok(inputEventDiagnostics.keyDowns >= playthroughReplay.keyPulses,
         `the route should dispatch every recorded key pulse: ${JSON.stringify(inputEventDiagnostics)}`);
       assert.ok(inputEventDiagnostics.repeatedKeyDowns > 0,
         `held keys should dispatch repeat keydown events for the recorded pulses: ${JSON.stringify(inputEventDiagnostics)}`);
@@ -332,6 +423,11 @@ try {
         `the stored route's final step should cross the teleporter: ${JSON.stringify(playthroughReplay)}`);
       assert.ok(finalDistanceFromStart <= 8,
         `the stored route should reach the teleport and return the player to its start: ${JSON.stringify(playthroughReplay)}`);
+    }
+    if (process.env.REQUIRE_TARGET_TERMINAL_STATUS === '1') {
+      assert.ok(Number.isInteger(Number(inputDiagnostics.processStatus)) &&
+        Number(inputDiagnostics.processStatus) >= 0 && Number(inputDiagnostics.processStatus) <= 3,
+      `the target should report a terminal process status: ${JSON.stringify(inputDiagnostics)}`);
     }
     if (process.env.REQUIRE_TARGET_CALLBACK_SUSPENSIONS === '1') {
       assert.ok(inputDiagnostics.gpuStats?.asyncify?.yields > 0,

@@ -1,0 +1,1725 @@
+{
+  "record": "docs/target-data/glfwdemo-seed1-playthrough.json",
+  "pulseMs": 10,
+  "adaptivePulses": true,
+  "alignmentAttempts": 8,
+  "alignmentMaxMs": 300,
+  "recordedKeyPulses": 1834,
+  "keyPulses": 1045,
+  "steps": 35,
+  "totalInputMs": 18340,
+  "expectedTeleport": true,
+  "recordedCaptureSize": {
+    "width": 1040,
+    "height": 807
+  },
+  "replayCaptureSize": {
+    "width": 1024,
+    "height": 768
+  },
+  "stoppedAfterPlaythrough": true,
+  "processStatus": "0",
+  "exitCode": "0",
+  "callbackSuspensions": {
+    "yields": 16,
+    "resumes": 16
+  },
+  "inputEventDiagnostics": {
+    "keyDowns": 1695,
+    "repeatedKeyDowns": 1444,
+    "keyUps": 251
+  },
+  "initialMarker": {
+    "x": 511.5,
+    "y": 383.5,
+    "pixels": 16
+  },
+  "finalMarker": {
+    "x": 511.8421052631579,
+    "y": 383.1578947368421,
+    "pixels": 19
+  },
+  "finalDistanceFromStart": 0.4838099029171453,
+  "actualTravelPixels": 988.2491525155722,
+  "alignmentTravelPixels": 25.456801306421994,
+  "finalSegmentTravelPixels": 463.0668707119429,
+  "progress": [
+    {
+      "index": 0,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 25,
+      "pulses": 25,
+      "pulseScale": 1,
+      "calibratedPulseScale": 0.571784310387318,
+      "durationMs": 250,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 0.32,
+          "requestedError": -1.6277088632361938,
+          "durationMs": 35,
+          "before": {
+            "x": 515.5,
+            "y": 383.5,
+            "pixels": 16
+          },
+          "after": {
+            "x": 514.2222222222222,
+            "y": 383.5,
+            "pixels": 18
+          }
+        },
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 0.64,
+          "requestedError": -2.2795812952456345,
+          "durationMs": 50,
+          "before": {
+            "x": 518.5,
+            "y": 383.5,
+            "pixels": 16
+          },
+          "after": {
+            "x": 516.2222222222222,
+            "y": 383.5,
+            "pixels": 18
+          }
+        },
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 0.96,
+          "requestedError": -1.9314537272549614,
+          "durationMs": 42,
+          "before": {
+            "x": 520.5,
+            "y": 383.5,
+            "pixels": 16
+          },
+          "after": {
+            "x": 518.5,
+            "y": 383.5,
+            "pixels": 16
+          }
+        }
+      ],
+      "before": {
+        "x": 511.5,
+        "y": 383.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 518.7777777777778,
+        "y": 383.5,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 511.5241635687732,
+        "y": 383.5241635687732
+      },
+      "expectedAfter": {
+        "x": 518.8620622187439,
+        "y": 383.5241635687732
+      },
+      "delta": {
+        "x": 7.277777777777828,
+        "y": 0
+      },
+      "projectedPixels": 7.277777777777828,
+      "pulseProjectedPixels": 12.833333333333485,
+      "distanceFromRecordedEnd": 0.08767978697974184
+    },
+    {
+      "index": 1,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 193,
+      "pulses": 110,
+      "pulseScale": 0.571784310387318,
+      "calibratedPulseScale": 0.5368226852432972,
+      "durationMs": 1100,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 0.509090909090909,
+          "requestedError": -1.3701784030878343,
+          "durationMs": 30,
+          "before": {
+            "x": 540.8421052631579,
+            "y": 361.8421052631579,
+            "pixels": 19
+          },
+          "after": {
+            "x": 539.5882352941177,
+            "y": 361.88235294117646,
+            "pixels": 17
+          }
+        },
+        {
+          "axis": "y",
+          "key": "s",
+          "fraction": 0.5818181818181818,
+          "requestedError": 1.353464008110791,
+          "durationMs": 30,
+          "before": {
+            "x": 543,
+            "y": 358.5,
+            "pixels": 16
+          },
+          "after": {
+            "x": 543,
+            "y": 359.6470588235294,
+            "pixels": 17
+          }
+        },
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 0.8,
+          "requestedError": -1.251007630600725,
+          "durationMs": 27,
+          "before": {
+            "x": 552.5,
+            "y": 350.5,
+            "pixels": 16
+          },
+          "after": {
+            "x": 551.1176470588235,
+            "y": 350.4117647058824,
+            "pixels": 17
+          }
+        }
+      ],
+      "before": {
+        "x": 518.7777777777778,
+        "y": 383.5,
+        "pixels": 18
+      },
+      "after": {
+        "x": 560,
+        "y": 342,
+        "pixels": 21
+      },
+      "expectedBefore": {
+        "x": 518.8620622187439,
+        "y": 383.5241635687732
+      },
+      "expectedAfter": {
+        "x": 559.3457249070632,
+        "y": 342.8401486988847
+      },
+      "delta": {
+        "x": 41.22222222222217,
+        "y": -41.5
+      },
+      "projectedPixels": 58.493750925449774,
+      "pulseProjectedPixels": 61.1323117368961,
+      "distanceFromRecordedEnd": 1.064859490015073
+    },
+    {
+      "index": 2,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 10,
+      "pulses": 6,
+      "pulseScale": 0.571784310387318,
+      "calibratedPulseScale": 0.571784310387318,
+      "durationMs": 60,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 560,
+        "y": 342,
+        "pixels": 21
+      },
+      "after": {
+        "x": 563.2777777777778,
+        "y": 342.1111111111111,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 559.3457249070632,
+        "y": 342.8401486988847
+      },
+      "expectedAfter": {
+        "x": 562.2007434944238,
+        "y": 342.8401486988847
+      },
+      "delta": {
+        "x": 3.2777777777778283,
+        "y": 0.11111111111108585
+      },
+      "projectedPixels": 3.2777777777778283,
+      "pulseProjectedPixels": 3.2777777777778283,
+      "distanceFromRecordedEnd": 1.300576276850644
+    },
+    {
+      "index": 3,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 5,
+      "pulses": 3,
+      "pulseScale": 0.571784310387318,
+      "calibratedPulseScale": 0.571784310387318,
+      "durationMs": 30,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 1,
+          "requestedError": -1.3717472118959222,
+          "durationMs": 30,
+          "before": {
+            "x": 565,
+            "y": 342,
+            "pixels": 21
+          },
+          "after": {
+            "x": 563.7222222222222,
+            "y": 342.1111111111111,
+            "pixels": 18
+          }
+        }
+      ],
+      "before": {
+        "x": 563.2777777777778,
+        "y": 342.1111111111111,
+        "pixels": 18
+      },
+      "after": {
+        "x": 563.7222222222222,
+        "y": 342.1111111111111,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 562.2007434944238,
+        "y": 342.8401486988847
+      },
+      "expectedAfter": {
+        "x": 563.6282527881041,
+        "y": 342.8401486988847
+      },
+      "delta": {
+        "x": 0.4444444444443434,
+        "y": 0
+      },
+      "projectedPixels": 0.4444444444443434,
+      "pulseProjectedPixels": 1.7222222222221717,
+      "distanceFromRecordedEnd": 0.7350687443601935
+    },
+    {
+      "index": 4,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.5368226852432972,
+      "calibratedPulseScale": 0.5368226852432972,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 563.7222222222222,
+        "y": 342.1111111111111,
+        "pixels": 18
+      },
+      "after": {
+        "x": 565.5,
+        "y": 340.5,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 563.6282527881041,
+        "y": 342.8401486988847
+      },
+      "expectedAfter": {
+        "x": 565.2460966542751,
+        "y": 341.55539033457245
+      },
+      "delta": {
+        "x": 1.7777777777778283,
+        "y": -1.6111111111110858
+      },
+      "projectedPixels": 2.394118293577322,
+      "pulseProjectedPixels": 2.394118293577322,
+      "distanceFromRecordedEnd": 1.0855024952892758
+    },
+    {
+      "index": 5,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 30,
+      "pulses": 17,
+      "pulseScale": 0.571784310387318,
+      "calibratedPulseScale": 0.5795429516672121,
+      "durationMs": 170,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "s",
+          "fraction": 1,
+          "requestedError": 1.2976164443472271,
+          "durationMs": 28,
+          "before": {
+            "x": 574,
+            "y": 340.3529411764706,
+            "pixels": 17
+          },
+          "after": {
+            "x": 574,
+            "y": 342,
+            "pixels": 21
+          }
+        }
+      ],
+      "before": {
+        "x": 565.5,
+        "y": 340.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 574,
+        "y": 342,
+        "pixels": 21
+      },
+      "expectedBefore": {
+        "x": 565.2460966542751,
+        "y": 341.55539033457245
+      },
+      "expectedAfter": {
+        "x": 573.8587360594795,
+        "y": 341.65055762081784
+      },
+      "delta": {
+        "x": 8.5,
+        "y": 1.5
+      },
+      "projectedPixels": 8.51605471171316,
+      "pulseProjectedPixels": 8.497856277649467,
+      "distanceFromRecordedEnd": 0.3769157429185889
+    },
+    {
+      "index": 6,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 107,
+      "pulses": 57,
+      "pulseScale": 0.5368226852432972,
+      "calibratedPulseScale": 0.5461865117617691,
+      "durationMs": 570,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 0.8421052631578947,
+          "requestedError": -1.2703810696651772,
+          "durationMs": 28,
+          "before": {
+            "x": 593,
+            "y": 323.6470588235294,
+            "pixels": 17
+          },
+          "after": {
+            "x": 593,
+            "y": 322.5,
+            "pixels": 16
+          }
+        }
+      ],
+      "before": {
+        "x": 574,
+        "y": 342,
+        "pixels": 21
+      },
+      "after": {
+        "x": 596.7647058823529,
+        "y": 318.7647058823529,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 573.8587360594795,
+        "y": 341.65055762081784
+      },
+      "expectedAfter": {
+        "x": 596.6037174721189,
+        "y": 318.7628252788104
+      },
+      "delta": {
+        "x": 22.764705882352928,
+        "y": -23.235294117647072
+      },
+      "projectedPixels": 32.52779372367876,
+      "pulseProjectedPixels": 31.7141673233245,
+      "distanceFromRecordedEnd": 0.1609993940962754
+    },
+    {
+      "index": 7,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 10,
+      "pulses": 6,
+      "pulseScale": 0.5795429516672121,
+      "calibratedPulseScale": 0.5795429516672121,
+      "durationMs": 60,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 596.7647058823529,
+        "y": 318.7647058823529,
+        "pixels": 17
+      },
+      "after": {
+        "x": 599.5882352941177,
+        "y": 318.88235294117646,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 596.6037174721189,
+        "y": 318.7628252788104
+      },
+      "expectedAfter": {
+        "x": 599.5539033457248,
+        "y": 318.81040892193306
+      },
+      "delta": {
+        "x": 2.8235294117647527,
+        "y": 0.1176470588235361
+      },
+      "projectedPixels": 2.825059505351723,
+      "pulseProjectedPixels": 2.825059505351723,
+      "distanceFromRecordedEnd": 0.07971589920049414
+    },
+    {
+      "index": 8,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.5461865117617691,
+      "calibratedPulseScale": 0.5461865117617691,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 599.5882352941177,
+        "y": 318.88235294117646,
+        "pixels": 17
+      },
+      "after": {
+        "x": 601.5,
+        "y": 317.22222222222223,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 599.5539033457248,
+        "y": 318.81040892193306
+      },
+      "expectedAfter": {
+        "x": 600.7434944237918,
+        "y": 317.14498141263937
+      },
+      "delta": {
+        "x": 1.9117647058823195,
+        "y": -1.6601307189542354
+      },
+      "projectedPixels": 2.4620945970545383,
+      "pulseProjectedPixels": 2.4620945970545383,
+      "distanceFromRecordedEnd": 0.7604385770718429
+    },
+    {
+      "index": 9,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 35,
+      "pulses": 20,
+      "pulseScale": 0.5795429516672121,
+      "calibratedPulseScale": 0.5776212400607339,
+      "durationMs": 200,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 601.5,
+        "y": 317.22222222222223,
+        "pixels": 18
+      },
+      "after": {
+        "x": 611.7647058823529,
+        "y": 317.2352941176471,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 600.7434944237918,
+        "y": 317.14498141263937
+      },
+      "expectedAfter": {
+        "x": 610.9739776951673,
+        "y": 317.1074153785952
+      },
+      "delta": {
+        "x": 10.264705882352928,
+        "y": 0.01307189542484366
+      },
+      "projectedPixels": 10.26458868235554,
+      "pulseProjectedPixels": 10.26458868235554,
+      "distanceFromRecordedEnd": 0.8010018963219908
+    },
+    {
+      "index": 10,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 329,
+      "pulses": 180,
+      "pulseScale": 0.5461865117617691,
+      "calibratedPulseScale": 0.5568955092182672,
+      "durationMs": 1800,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 0.6666666666666666,
+          "requestedError": -1.3408987151894394,
+          "durationMs": 29,
+          "before": {
+            "x": 657.5,
+            "y": 272,
+            "pixels": 16
+          },
+          "after": {
+            "x": 657.5,
+            "y": 271,
+            "pixels": 16
+          }
+        }
+      ],
+      "before": {
+        "x": 611.7647058823529,
+        "y": 317.2352941176471,
+        "pixels": 17
+      },
+      "after": {
+        "x": 680.5,
+        "y": 248.5,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 610.9739776951673,
+        "y": 317.1074153785952
+      },
+      "expectedAfter": {
+        "x": 680.446096654275,
+        "y": 247.43494423791822
+      },
+      "delta": {
+        "x": 68.73529411764707,
+        "y": -68.73529411764707
+      },
+      "projectedPixels": 97.2062843875801,
+      "pulseProjectedPixels": 96.49816018814617,
+      "distanceFromRecordedEnd": 1.0664189359833938
+    },
+    {
+      "index": 11,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 10,
+      "pulses": 6,
+      "pulseScale": 0.5776212400607339,
+      "calibratedPulseScale": 0.5776212400607339,
+      "durationMs": 60,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 680.5,
+        "y": 248.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 683.5,
+        "y": 248.5,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 680.446096654275,
+        "y": 247.43494423791822
+      },
+      "expectedAfter": {
+        "x": 683.3011152416357,
+        "y": 247.43494423791822
+      },
+      "delta": {
+        "x": 3,
+        "y": 0
+      },
+      "projectedPixels": 3,
+      "pulseProjectedPixels": 3,
+      "distanceFromRecordedEnd": 1.0834661616558436
+    },
+    {
+      "index": 12,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.5568955092182672,
+      "calibratedPulseScale": 0.5568955092182672,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 1,
+          "requestedError": -1.3791604165307945,
+          "durationMs": 30,
+          "before": {
+            "x": 685.2777777777778,
+            "y": 247.11111111111111,
+            "pixels": 18
+          },
+          "after": {
+            "x": 685.2777777777778,
+            "y": 245.88888888888889,
+            "pixels": 18
+          }
+        }
+      ],
+      "before": {
+        "x": 683.5,
+        "y": 248.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 685.2777777777778,
+        "y": 245.88888888888889,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 683.3011152416357,
+        "y": 247.43494423791822
+      },
+      "expectedAfter": {
+        "x": 684.8538446487967,
+        "y": 245.73195069458032
+      },
+      "delta": {
+        "x": 1.7777777777778283,
+        "y": -2.6111111111111143
+      },
+      "projectedPixels": 3.1272804505482807,
+      "pulseProjectedPixels": 2.2241121968764217,
+      "distanceFromRecordedEnd": 0.4520496595293392
+    },
+    {
+      "index": 13,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 111,
+      "pulses": 64,
+      "pulseScale": 0.5776212400607339,
+      "calibratedPulseScale": 0.5770744946787115,
+      "durationMs": 640,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 685.2777777777778,
+        "y": 245.88888888888889,
+        "pixels": 18
+      },
+      "after": {
+        "x": 717.1111111111111,
+        "y": 245.72222222222223,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 684.8538446487967,
+        "y": 245.73195069458032
+      },
+      "expectedAfter": {
+        "x": 716.6572490706319,
+        "y": 245.6267657992565
+      },
+      "delta": {
+        "x": 31.833333333333258,
+        "y": -0.1666666666666572
+      },
+      "projectedPixels": 31.833710451087473,
+      "pulseProjectedPixels": 31.833710451087477,
+      "distanceFromRecordedEnd": 0.4637916347599817
+    },
+    {
+      "index": 14,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 5,
+      "pulses": 3,
+      "pulseScale": 0.5770744946787115,
+      "calibratedPulseScale": 0.5770744946787115,
+      "durationMs": 30,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 717.1111111111111,
+        "y": 245.72222222222223,
+        "pixels": 18
+      },
+      "after": {
+        "x": 718.8888888888889,
+        "y": 245.72222222222223,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 716.6572490706319,
+        "y": 245.6267657992565
+      },
+      "expectedAfter": {
+        "x": 718.2750929368029,
+        "y": 245.76951672862452
+      },
+      "delta": {
+        "x": 1.7777777777778283,
+        "y": 0
+      },
+      "projectedPixels": 1.7708975111562844,
+      "pulseProjectedPixels": 1.7708975111562844,
+      "distanceFromRecordedEnd": 0.6156153353620837
+    },
+    {
+      "index": 15,
+      "keys": [
+        "w"
+      ],
+      "recordedPulses": 5,
+      "pulses": 3,
+      "pulseScale": 0.5770744946787115,
+      "calibratedPulseScale": 0.5770744946787115,
+      "durationMs": 30,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 718.8888888888889,
+        "y": 245.72222222222223,
+        "pixels": 18
+      },
+      "after": {
+        "x": 718.8421052631579,
+        "y": 244.1578947368421,
+        "pixels": 19
+      },
+      "expectedBefore": {
+        "x": 718.2750929368029,
+        "y": 245.76951672862452
+      },
+      "expectedAfter": {
+        "x": 718.2750929368029,
+        "y": 244.34200743494424
+      },
+      "delta": {
+        "x": -0.04678362573099548,
+        "y": -1.5643274853801188
+      },
+      "projectedPixels": 1.5643274853801186,
+      "pulseProjectedPixels": 1.5643274853801186,
+      "distanceFromRecordedEnd": 0.5961547314589859
+    },
+    {
+      "index": 16,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 100,
+      "pulses": 56,
+      "pulseScale": 0.5568955092182672,
+      "calibratedPulseScale": 0.5626040786330877,
+      "durationMs": 560,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 718.8421052631579,
+        "y": 244.1578947368421,
+        "pixels": 19
+      },
+      "after": {
+        "x": 739.8888888888889,
+        "y": 223.27777777777777,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 718.2750929368029,
+        "y": 244.34200743494424
+      },
+      "expectedAfter": {
+        "x": 739.2118959107806,
+        "y": 222.92936802973978
+      },
+      "delta": {
+        "x": 21.046783625730995,
+        "y": -20.88011695906434
+      },
+      "projectedPixels": 29.643600403538965,
+      "pulseProjectedPixels": 29.64360040353896,
+      "distanceFromRecordedEnd": 0.7613861339266748
+    },
+    {
+      "index": 17,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 15,
+      "pulses": 9,
+      "pulseScale": 0.5770744946787115,
+      "calibratedPulseScale": 0.5359527353275328,
+      "durationMs": 90,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 739.8888888888889,
+        "y": 223.27777777777777,
+        "pixels": 18
+      },
+      "after": {
+        "x": 744.5,
+        "y": 223.5,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 739.2118959107806,
+        "y": 222.92936802973978
+      },
+      "expectedAfter": {
+        "x": 743.4944237918215,
+        "y": 222.92936802973978
+      },
+      "delta": {
+        "x": 4.611111111111086,
+        "y": 0.22222222222222854
+      },
+      "projectedPixels": 4.611111111111086,
+      "pulseProjectedPixels": 4.611111111111086,
+      "distanceFromRecordedEnd": 1.1562025583511089
+    },
+    {
+      "index": 18,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.5626040786330877,
+      "calibratedPulseScale": 0.5626040786330877,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 1,
+          "requestedError": -1.2519134047671514,
+          "durationMs": 27,
+          "before": {
+            "x": 746.4117647058823,
+            "y": 221.88235294117646,
+            "pixels": 17
+          },
+          "after": {
+            "x": 744.7222222222222,
+            "y": 221.88888888888889,
+            "pixels": 18
+          }
+        }
+      ],
+      "before": {
+        "x": 744.5,
+        "y": 223.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 744.7222222222222,
+        "y": 221.88888888888889,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 743.4944237918215,
+        "y": 222.92936802973978
+      },
+      "expectedAfter": {
+        "x": 745.1598513011152,
+        "y": 221.73977695167287
+      },
+      "delta": {
+        "x": 0.2222222222221717,
+        "y": -1.6111111111111143
+      },
+      "projectedPixels": 1.117268972371126,
+      "pulseProjectedPixels": 2.4959051847937457,
+      "distanceFromRecordedEnd": 0.4623349224458896
+    },
+    {
+      "index": 19,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 30,
+      "pulses": 16,
+      "pulseScale": 0.5359527353275328,
+      "calibratedPulseScale": 0.6075615525777155,
+      "durationMs": 160,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "x",
+          "key": "d",
+          "fraction": 1,
+          "requestedError": 1.4471292854191233,
+          "durationMs": 32,
+          "before": {
+            "x": 752.2777777777778,
+            "y": 221.88888888888889,
+            "pixels": 18
+          },
+          "after": {
+            "x": 753.5,
+            "y": 222,
+            "pixels": 16
+          }
+        }
+      ],
+      "before": {
+        "x": 744.7222222222222,
+        "y": 221.88888888888889,
+        "pixels": 18
+      },
+      "after": {
+        "x": 753.5,
+        "y": 222,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 745.1598513011152,
+        "y": 221.73977695167287
+      },
+      "expectedAfter": {
+        "x": 753.724907063197,
+        "y": 221.73977695167287
+      },
+      "delta": {
+        "x": 8.777777777777828,
+        "y": 0.11111111111111427
+      },
+      "projectedPixels": 8.777777777777828,
+      "pulseProjectedPixels": 7.555555555555657,
+      "distanceFromRecordedEnd": 0.3439465393873641
+    },
+    {
+      "index": 20,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 107,
+      "pulses": 60,
+      "pulseScale": 0.5626040786330877,
+      "calibratedPulseScale": 0.557922530628652,
+      "durationMs": 600,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 753.5,
+        "y": 222,
+        "pixels": 16
+      },
+      "after": {
+        "x": 776.5,
+        "y": 199.5,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 753.724907063197,
+        "y": 221.73977695167287
+      },
+      "expectedAfter": {
+        "x": 775.877736472532,
+        "y": 198.7938868236266
+      },
+      "delta": {
+        "x": 23,
+        "y": -22.5
+      },
+      "projectedPixels": 32.16216890785258,
+      "pulseProjectedPixels": 32.16216890785258,
+      "distanceFromRecordedEnd": 0.9411735841305189
+    },
+    {
+      "index": 21,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 10,
+      "pulses": 6,
+      "pulseScale": 0.6075615525777155,
+      "calibratedPulseScale": 0.6075615525777155,
+      "durationMs": 60,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 776.5,
+        "y": 199.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 779.5,
+        "y": 199.5,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 775.877736472532,
+        "y": 198.7938868236266
+      },
+      "expectedAfter": {
+        "x": 778.7327550598926,
+        "y": 198.7938868236266
+      },
+      "delta": {
+        "x": 3,
+        "y": 0
+      },
+      "projectedPixels": 3,
+      "pulseProjectedPixels": 3,
+      "distanceFromRecordedEnd": 1.0427178985557566
+    },
+    {
+      "index": 22,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.557922530628652,
+      "calibratedPulseScale": 0.557922530628652,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 779.5,
+        "y": 199.5,
+        "pixels": 16
+      },
+      "after": {
+        "x": 781,
+        "y": 198,
+        "pixels": 21
+      },
+      "expectedBefore": {
+        "x": 778.7327550598926,
+        "y": 198.7938868236266
+      },
+      "expectedAfter": {
+        "x": 780.221483075719,
+        "y": 197.14654666405792
+      },
+      "delta": {
+        "x": 1.5,
+        "y": -1.5
+      },
+      "projectedPixels": 2.1186123606495726,
+      "pulseProjectedPixels": 2.1186123606495726,
+      "distanceFromRecordedEnd": 1.1551931431681113
+    },
+    {
+      "index": 23,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 65,
+      "pulses": 39,
+      "pulseScale": 0.6075615525777155,
+      "calibratedPulseScale": 0.5903070757792701,
+      "durationMs": 390,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "x",
+          "key": "a",
+          "fraction": 1,
+          "requestedError": -1.3327137546468748,
+          "durationMs": 29,
+          "before": {
+            "x": 800.5,
+            "y": 198,
+            "pixels": 16
+          },
+          "after": {
+            "x": 799.2777777777778,
+            "y": 198.11111111111111,
+            "pixels": 18
+          }
+        }
+      ],
+      "before": {
+        "x": 781,
+        "y": 198,
+        "pixels": 21
+      },
+      "after": {
+        "x": 799.2777777777778,
+        "y": 198.11111111111111,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 780.221483075719,
+        "y": 197.14654666405792
+      },
+      "expectedAfter": {
+        "x": 799.1672862453531,
+        "y": 197.23420074349443
+      },
+      "delta": {
+        "x": 18.27777777777783,
+        "y": 0.11111111111111427
+      },
+      "projectedPixels": 18.278096219455463,
+      "pulseProjectedPixels": 19.49979130316267,
+      "distanceFromRecordedEnd": 0.8838439746760702
+    },
+    {
+      "index": 24,
+      "keys": [
+        "d"
+      ],
+      "recordedPulses": 5,
+      "pulses": 3,
+      "pulseScale": 0.5903070757792701,
+      "calibratedPulseScale": 0.5903070757792701,
+      "durationMs": 30,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 799.2777777777778,
+        "y": 198.11111111111111,
+        "pixels": 18
+      },
+      "after": {
+        "x": 801,
+        "y": 198,
+        "pixels": 21
+      },
+      "expectedBefore": {
+        "x": 799.1672862453531,
+        "y": 197.23420074349443
+      },
+      "expectedAfter": {
+        "x": 800.5947955390334,
+        "y": 197.23420074349443
+      },
+      "delta": {
+        "x": 1.7222222222221717,
+        "y": -0.11111111111111427
+      },
+      "projectedPixels": 1.7222222222221717,
+      "pulseProjectedPixels": 1.7222222222221717,
+      "distanceFromRecordedEnd": 0.866394342347487
+    },
+    {
+      "index": 25,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 136,
+      "pulses": 76,
+      "pulseScale": 0.557922530628652,
+      "calibratedPulseScale": 0.563461059077564,
+      "durationMs": 760,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 0.9473684210526315,
+          "requestedError": -1.3165177503858558,
+          "durationMs": 29,
+          "before": {
+            "x": 827.8888888888889,
+            "y": 171.27777777777777,
+            "pixels": 18
+          },
+          "after": {
+            "x": 827.7894736842105,
+            "y": 170,
+            "pixels": 19
+          }
+        }
+      ],
+      "before": {
+        "x": 801,
+        "y": 198,
+        "pixels": 21
+      },
+      "after": {
+        "x": 829.2222222222222,
+        "y": 168.5,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 800.5947955390334,
+        "y": 197.23420074349443
+      },
+      "expectedAfter": {
+        "x": 828.907063197026,
+        "y": 168.4460966542751
+      },
+      "delta": {
+        "x": 28.22222222222217,
+        "y": -29.5
+      },
+      "projectedPixels": 40.82188673423729,
+      "pulseProjectedPixels": 39.9805725924176,
+      "distanceFromRecordedEnd": 0.31973548730621915
+    },
+    {
+      "index": 26,
+      "keys": [
+        "w"
+      ],
+      "recordedPulses": 10,
+      "pulses": 6,
+      "pulseScale": 0.563461059077564,
+      "calibratedPulseScale": 0.563461059077564,
+      "durationMs": 60,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 829.2222222222222,
+        "y": 168.5,
+        "pixels": 18
+      },
+      "after": {
+        "x": 829.1176470588235,
+        "y": 165.58823529411765,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 828.907063197026,
+        "y": 168.4460966542751
+      },
+      "expectedAfter": {
+        "x": 828.907063197026,
+        "y": 165.5910780669145
+      },
+      "delta": {
+        "x": -0.1045751633986356,
+        "y": -2.911764705882348
+      },
+      "projectedPixels": 2.911764705882348,
+      "pulseProjectedPixels": 2.911764705882348,
+      "distanceFromRecordedEnd": 0.2106030489018191
+    },
+    {
+      "index": 27,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.563461059077564,
+      "calibratedPulseScale": 0.563461059077564,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 829.1176470588235,
+        "y": 165.58823529411765,
+        "pixels": 17
+      },
+      "after": {
+        "x": 830.7222222222222,
+        "y": 164.11111111111111,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 828.907063197026,
+        "y": 165.5910780669145
+      },
+      "expectedAfter": {
+        "x": 830.459792604187,
+        "y": 163.8880845235766
+      },
+      "delta": {
+        "x": 1.6045751633986356,
+        "y": -1.4771241830065378
+      },
+      "projectedPixels": 2.172618253504847,
+      "pulseProjectedPixels": 2.172618253504847,
+      "distanceFromRecordedEnd": 0.34439826243665306
+    },
+    {
+      "index": 28,
+      "keys": [
+        "w"
+      ],
+      "recordedPulses": 273,
+      "pulses": 154,
+      "pulseScale": 0.563461059077564,
+      "calibratedPulseScale": 0.5891022997541195,
+      "durationMs": 1540,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 0.36363636363636365,
+          "requestedError": -1.3651620885039222,
+          "durationMs": 30,
+          "before": {
+            "x": 830.7222222222222,
+            "y": 136.11111111111111,
+            "pixels": 18
+          },
+          "after": {
+            "x": 830.7222222222222,
+            "y": 134.88888888888889,
+            "pixels": 18
+          }
+        },
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 0.6753246753246753,
+          "requestedError": -1.7330242639379776,
+          "durationMs": 38,
+          "before": {
+            "x": 830.7777777777778,
+            "y": 111.5,
+            "pixels": 18
+          },
+          "after": {
+            "x": 830.7222222222222,
+            "y": 109.88888888888889,
+            "pixels": 18
+          }
+        }
+      ],
+      "before": {
+        "x": 830.7222222222222,
+        "y": 164.11111111111111,
+        "pixels": 18
+      },
+      "after": {
+        "x": 830.75,
+        "y": 84.625,
+        "pixels": 16
+      },
+      "expectedBefore": {
+        "x": 830.459792604187,
+        "y": 163.8880845235766
+      },
+      "expectedAfter": {
+        "x": 830.6100567403639,
+        "y": 83.74721189591078
+      },
+      "delta": {
+        "x": 0.027777777777828305,
+        "y": -79.48611111111111
+      },
+      "projectedPixels": 79.48602347304161,
+      "pulseProjectedPixels": 76.65279928664746,
+      "distanceFromRecordedEnd": 0.8888734845849093
+    },
+    {
+      "index": 29,
+      "keys": [
+        "w"
+      ],
+      "recordedPulses": 5,
+      "pulses": 3,
+      "pulseScale": 0.5891022997541195,
+      "calibratedPulseScale": 0.5891022997541195,
+      "durationMs": 30,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 830.75,
+        "y": 84.625,
+        "pixels": 16
+      },
+      "after": {
+        "x": 830.6470588235294,
+        "y": 83,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 830.6100567403639,
+        "y": 83.74721189591078
+      },
+      "expectedAfter": {
+        "x": 830.5989260636101,
+        "y": 82.31970260223048
+      },
+      "delta": {
+        "x": -0.1029411764706083,
+        "y": -1.625
+      },
+      "projectedPixels": 1.625753240183584,
+      "pulseProjectedPixels": 1.625753240183584,
+      "distanceFromRecordedEnd": 0.6819980293149199
+    },
+    {
+      "index": 30,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 50,
+      "pulses": 28,
+      "pulseScale": 0.563461059077564,
+      "calibratedPulseScale": 0.5855846231033697,
+      "durationMs": 280,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 830.6470588235294,
+        "y": 83,
+        "pixels": 17
+      },
+      "after": {
+        "x": 840.8421052631579,
+        "y": 72.84210526315789,
+        "pixels": 19
+      },
+      "expectedBefore": {
+        "x": 830.5989260636101,
+        "y": 82.31970260223048
+      },
+      "expectedAfter": {
+        "x": 841.0408921933085,
+        "y": 71.61338289962825
+      },
+      "delta": {
+        "x": 10.195046439628527,
+        "y": -10.15789473684211
+      },
+      "projectedPixels": 14.390250150830227,
+      "pulseProjectedPixels": 14.390250150830228,
+      "distanceFromRecordedEnd": 1.2446987146440598
+    },
+    {
+      "index": 31,
+      "keys": [
+        "w"
+      ],
+      "recordedPulses": 10,
+      "pulses": 6,
+      "pulseScale": 0.5891022997541195,
+      "calibratedPulseScale": 0.5891022997541195,
+      "durationMs": 60,
+      "alignment": [],
+      "pathAlignment": [
+        {
+          "axis": "y",
+          "key": "w",
+          "fraction": 1,
+          "requestedError": -1.5194134655101124,
+          "durationMs": 33,
+          "before": {
+            "x": 840.8888888888889,
+            "y": 70.27777777777777,
+            "pixels": 18
+          },
+          "after": {
+            "x": 840.8888888888889,
+            "y": 68.72222222222223,
+            "pixels": 18
+          }
+        }
+      ],
+      "before": {
+        "x": 840.8421052631579,
+        "y": 72.84210526315789,
+        "pixels": 19
+      },
+      "after": {
+        "x": 840.8888888888889,
+        "y": 68.72222222222223,
+        "pixels": 18
+      },
+      "expectedBefore": {
+        "x": 841.0408921933085,
+        "y": 71.61338289962825
+      },
+      "expectedAfter": {
+        "x": 841.0408921933085,
+        "y": 68.75836431226766
+      },
+      "delta": {
+        "x": 0.04678362573099548,
+        "y": -4.119883040935662
+      },
+      "projectedPixels": 4.119883040935662,
+      "pulseProjectedPixels": 2.564327485380119,
+      "distanceFromRecordedEnd": 0.15624101646922436
+    },
+    {
+      "index": 32,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 7,
+      "pulses": 4,
+      "pulseScale": 0.5855846231033697,
+      "calibratedPulseScale": 0.5855846231033697,
+      "durationMs": 40,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 840.8888888888889,
+        "y": 68.72222222222223,
+        "pixels": 18
+      },
+      "after": {
+        "x": 842.4117647058823,
+        "y": 67.11764705882354,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 841.0408921933085,
+        "y": 68.75836431226766
+      },
+      "expectedAfter": {
+        "x": 842.4684014869888,
+        "y": 67.33085501858736
+      },
+      "delta": {
+        "x": 1.5228758169934054,
+        "y": -1.6045751633986924
+      },
+      "projectedPixels": 2.2114417960637693,
+      "pulseProjectedPixels": 2.2114417960637693,
+      "distanceFromRecordedEnd": 0.22060226445064895
+    },
+    {
+      "index": 33,
+      "keys": [
+        "w"
+      ],
+      "recordedPulses": 30,
+      "pulses": 18,
+      "pulseScale": 0.5891022997541195,
+      "calibratedPulseScale": 0.6207647822858242,
+      "durationMs": 180,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 842.4117647058823,
+        "y": 67.11764705882354,
+        "pixels": 17
+      },
+      "after": {
+        "x": 842.4117647058823,
+        "y": 58.88235294117647,
+        "pixels": 17
+      },
+      "expectedBefore": {
+        "x": 842.4684014869888,
+        "y": 67.33085501858736
+      },
+      "expectedAfter": {
+        "x": 842.4308354529446,
+        "y": 58.65310115437291
+      },
+      "delta": {
+        "x": 0,
+        "y": -8.235294117647065
+      },
+      "projectedPixels": 8.235216952879064,
+      "pulseProjectedPixels": 8.235216952879064,
+      "distanceFromRecordedEnd": 0.2300436374824104
+    },
+    {
+      "index": 34,
+      "keys": [
+        "d",
+        "w"
+      ],
+      "recordedPulses": 64,
+      "pulses": 37,
+      "pulseScale": 0.5855846231033697,
+      "calibratedPulseScale": 0.5841552041106194,
+      "durationMs": 370,
+      "alignment": [],
+      "pathAlignment": [],
+      "before": {
+        "x": 842.4117647058823,
+        "y": 58.88235294117647,
+        "pixels": 17
+      },
+      "after": {
+        "x": 511.8421052631579,
+        "y": 383.1578947368421,
+        "pixels": 19
+      },
+      "expectedBefore": {
+        "x": 842.4308354529446,
+        "y": 58.65310115437291
+      },
+      "expectedAfter": {
+        "x": 512.7513206808844,
+        "y": 382.22187438857367
+      },
+      "delta": {
+        "x": -330.5696594427244,
+        "y": 324.2755417956656
+      },
+      "projectedPixels": 463.0668553961947,
+      "pulseProjectedPixels": 463.0668553961947,
+      "distanceFromRecordedEnd": 1.304916383606282
+    }
+  ],
+  "gpuStats": {
+    "draws": 3395,
+    "dispatches": 2,
+    "presents": 3395,
+    "passes": 6790,
+    "pipelines": 2,
+    "errors": [],
+    "asyncify": {
+      "yields": 16,
+      "resumes": 16
+    }
+  },
+  "processStatusText": "anywasm-glfwdemo-seed1.awb: stopped; exit code 0; 589275073 instructions; 3.8 M instr/s; 3395 frames"
+}

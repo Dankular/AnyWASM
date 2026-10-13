@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "generatedUtc": "2026-10-13",
+  "target": "DiligentSamples GLFW Demo random Release map",
+  "executable": {
+    "path": "target-eval/DiligentBuild-GLFWDemo-staticcrt/DiligentSamples/Samples/GLFWDemo/Release/GLFWDemo.exe",
+    "sha256": "05060A8B2A29B9210CBF8299DE98C601C81794B0D2EE6431127DD29F36A443E3",
+    "mapGeneration": "std::random_device, yielding a fresh maze per process launch"
+  },
+  "bundle": {
+    "path": "%TEMP%/anywasm-glfwdemo-flashlight-random.awb",
+    "sha256": "616170BFD0423741FB05ACD6645E89396948C4CDA7CD8A12EC92524F6188988B",
+    "files": 8
+  },
+  "browser": "Headless Chrome with WebGPU",
+  "workerSliceInstructions": 250000,
+  "assertion": {
+    "sdfRowMapping": "SDF rows increase upward; captured image rows increase downward",
+    "pixelPatch": "3x3 pixels at consecutive SDF texels",
+    "minimumConsecutivePatches": 3,
+    "minimumMeanLuminanceDelta": 8
+  },
+  "runs": [
+    {
+      "asyncify": {
+        "yields": 16,
+        "resumes": 16
+      },
+      "maxDistanceTexels": 50,
+      "wallDistanceTexels": 18,
+      "computeDispatches": 1,
+      "minimumClearance": 0.5,
+      "meanLuminanceDelta": 0.42614018885589666,
+      "rayResponse": {
+        "maxLuminanceDelta": 91.33333333333333,
+        "bestSample": {
+          "step": 10,
+          "x": 449,
+          "y": 381,
+          "beforeLuminance": 1,
+          "afterLuminance": 92.33333333333333,
+          "luminanceDelta": 91.33333333333333
+        },
+        "sampleCount": 15,
+        "minimumLuminanceDelta": 8,
+        "illuminatedSampleCount": 15,
+        "longestIlluminatedRun": 15,
+        "samples": [
+          {
+            "step": 2,
+            "x": 497,
+            "y": 381,
+            "beforeLuminance": 43.03904444444444,
+            "afterLuminance": 74.20668888888889,
+            "luminanceDelta": 31.16764444444445
+          },
+          {
+            "step": 3,
+            "x": 491,
+            "y": 381,
+            "beforeLuminance": 37.109022222222215,
+            "afterLuminance": 79.58491111111113,
+            "luminanceDelta": 42.47588888888891
+          },
+          {
+            "step": 4,
+            "x": 485,
+            "y": 381,
+            "beforeLuminance": 31.26591111111111,
+            "afterLuminance": 83.43266666666666,
+            "luminanceDelta": 52.166755555555554
+          },
+          {
+            "step": 5,
+            "x": 479,
+            "y": 381,
+            "beforeLuminance": 24.8598,
+            "afterLuminance": 86.51066666666667,
+            "luminanceDelta": 61.650866666666666
+          },
+          {
+            "step": 6,
+            "x": 473,
+            "y": 381,
+            "beforeLuminance": 17.238466666666667,
+            "afterLuminance": 88.9064,
+            "luminanceDelta": 71.66793333333334
+          },
+          {
+            "step": 7,
+            "x": 467,
+            "y": 381,
+            "beforeLuminance": 7.099333333333333,
+            "afterLuminance": 90.92913333333333,
+            "luminanceDelta": 83.82979999999999
+          },
+          {
+            "step": 8,
+            "x": 461,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 92,
+            "luminanceDelta": 91
+          },
+          {
+            "step": 9,
+            "x": 455,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 92.22222222222223,
+            "luminanceDelta": 91.22222222222223
+          },
+          {
+            "step": 10,
+            "x": 449,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 92.33333333333333,
+            "luminanceDelta": 91.33333333333333
+          },
+          {
+            "step": 11,
+            "x": 443,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 92.22222222222223,
+            "luminanceDelta": 91.22222222222223
+          },
+          {
+            "step": 12,
+            "x": 437,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 92,
+            "luminanceDelta": 91
+          },
+          {
+            "step": 13,
+            "x": 431,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 92,
+            "luminanceDelta": 91
+          },
+          {
+            "step": 14,
+            "x": 425,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 91.11111111111111,
+            "luminanceDelta": 90.11111111111111
+          },
+          {
+            "step": 15,
+            "x": 419,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 91,
+            "luminanceDelta": 90
+          },
+          {
+            "step": 16,
+            "x": 413,
+            "y": 381,
+            "beforeLuminance": 1,
+            "afterLuminance": 90.66666666666667,
+            "luminanceDelta": 89.66666666666667
+          }
+        ]
+      },
+      "webGpuValidationErrors": 0,
+      "result": "passed",
+      "brightPixelDelta": 4406,
+      "sdfOrigin": {
+        "originX": 63,
+        "originY": 64
+      },
+      "direction": "left",
+      "presents": 3,
+      "processStatus": "Starting",
+      "clearTexels": 17
+    },
+    {
+      "asyncify": {
+        "yields": 16,
+        "resumes": 16
+      },
+      "maxDistanceTexels": 50,
+      "wallDistanceTexels": 28.284271247461902,
+      "computeDispatches": 1,
+      "minimumClearance": 0.5,
+      "meanLuminanceDelta": 0.8347820897352566,
+      "rayResponse": {
+        "maxLuminanceDelta": 87,
+        "bestSample": {
+          "step": 6,
+          "x": 545,
+          "y": 345,
+          "beforeLuminance": 1,
+          "afterLuminance": 88,
+          "luminanceDelta": 87
+        },
+        "sampleCount": 17,
+        "minimumLuminanceDelta": 8,
+        "illuminatedSampleCount": 17,
+        "longestIlluminatedRun": 17,
+        "samples": [
+          {
+            "step": 2,
+            "x": 521,
+            "y": 369,
+            "beforeLuminance": 40.475022222222215,
+            "afterLuminance": 82.28424444444447,
+            "luminanceDelta": 41.80922222222225
+          },
+          {
+            "step": 3,
+            "x": 527,
+            "y": 363,
+            "beforeLuminance": 32.21866666666667,
+            "afterLuminance": 87.68711111111111,
+            "luminanceDelta": 55.46844444444444
+          },
+          {
+            "step": 4,
+            "x": 533,
+            "y": 357,
+            "beforeLuminance": 23.208288888888887,
+            "afterLuminance": 88.65297777777778,
+            "luminanceDelta": 65.44468888888889
+          },
+          {
+            "step": 5,
+            "x": 539,
+            "y": 351,
+            "beforeLuminance": 11.005733333333334,
+            "afterLuminance": 88.58822222222221,
+            "luminanceDelta": 77.58248888888888
+          },
+          {
+            "step": 6,
+            "x": 545,
+            "y": 345,
+            "beforeLuminance": 1,
+            "afterLuminance": 88,
+            "luminanceDelta": 87
+          },
+          {
+            "step": 7,
+            "x": 551,
+            "y": 339,
+            "beforeLuminance": 1,
+            "afterLuminance": 86.66666666666667,
+            "luminanceDelta": 85.66666666666667
+          },
+          {
+            "step": 8,
+            "x": 557,
+            "y": 333,
+            "beforeLuminance": 1,
+            "afterLuminance": 85.11111111111111,
+            "luminanceDelta": 84.11111111111111
+          },
+          {
+            "step": 9,
+            "x": 563,
+            "y": 327,
+            "beforeLuminance": 1,
+            "afterLuminance": 84,
+            "luminanceDelta": 83
+          },
+          {
+            "step": 10,
+            "x": 569,
+            "y": 321,
+            "beforeLuminance": 1,
+            "afterLuminance": 83,
+            "luminanceDelta": 82
+          },
+          {
+            "step": 11,
+            "x": 575,
+            "y": 315,
+            "beforeLuminance": 1,
+            "afterLuminance": 81.88888888888889,
+            "luminanceDelta": 80.88888888888889
+          },
+          {
+            "step": 12,
+            "x": 581,
+            "y": 309,
+            "beforeLuminance": 1,
+            "afterLuminance": 80.66666666666667,
+            "luminanceDelta": 79.66666666666667
+          },
+          {
+            "step": 13,
+            "x": 587,
+            "y": 303,
+            "beforeLuminance": 1,
+            "afterLuminance": 79.55555555555556,
+            "luminanceDelta": 78.55555555555556
+          },
+          {
+            "step": 14,
+            "x": 593,
+            "y": 297,
+            "beforeLuminance": 1,
+            "afterLuminance": 78.44444444444444,
+            "luminanceDelta": 77.44444444444444
+          },
+          {
+            "step": 15,
+            "x": 599,
+            "y": 291,
+            "beforeLuminance": 1,
+            "afterLuminance": 77.11111111111111,
+            "luminanceDelta": 76.11111111111111
+          },
+          {
+            "step": 16,
+            "x": 605,
+            "y": 285,
+            "beforeLuminance": 1,
+            "afterLuminance": 75.77777777777777,
+            "luminanceDelta": 74.77777777777777
+          },
+          {
+            "step": 17,
+            "x": 611,
+            "y": 279,
+            "beforeLuminance": 1,
+            "afterLuminance": 74.33333333333333,
+            "luminanceDelta": 73.33333333333333
+          },
+          {
+            "step": 18,
+            "x": 617,
+            "y": 273,
+            "beforeLuminance": 1,
+            "afterLuminance": 73,
+            "luminanceDelta": 72
+          }
+        ]
+      },
+      "webGpuValidationErrors": 0,
+      "result": "passed",
+      "brightPixelDelta": 9098,
+      "sdfOrigin": {
+        "originX": 63,
+        "originY": 64
+      },
+      "direction": "down-right",
+      "presents": 3,
+      "processStatus": "Starting",
+      "clearTexels": 19
+    }
+  ],
+  "interpretation": "Two independent launches selected different clear rays in different random layouts. The first produced 15 and the second 17 consecutive lit patches, each exceeding the local luminance threshold. Whole-frame brightness is diagnostic only."
+}

@@ -1,20 +1,60 @@
 const PLAYABLE_KEYS = new Set(['w', 'a', 's', 'd']);
 
-export function buildPlaythroughPlan(record, { pulseMs = 10, targetWidth, targetHeight } = {}) {
+function centeredViewport(width, height, aspect) {
+  const screenAspect = width / height;
+  const viewportWidth = screenAspect > aspect ? height * aspect : width;
+  const viewportHeight = screenAspect > aspect ? height : width / aspect;
+  return {
+    x: (width - viewportWidth) / 2,
+    y: (height - viewportHeight) / 2,
+    width: viewportWidth,
+    height: viewportHeight,
+  };
+}
+
+export function splitPulseCount(pulseCount, maxBatchSize) {
+  if (!Number.isInteger(pulseCount) || pulseCount <= 0 ||
+      !Number.isInteger(maxBatchSize) || maxBatchSize <= 0) {
+    throw new Error('pulseCount and maxBatchSize must be positive integers');
+  }
+
+  const batches = [];
+  for (let remaining = pulseCount; remaining > 0; remaining -= maxBatchSize) {
+    batches.push(Math.min(remaining, maxBatchSize));
+  }
+  return batches;
+}
+
+export function recalibratePulseScale(currentScale, expectedPixels, actualProjectedPixels) {
+  if (!Number.isFinite(currentScale) || currentScale <= 0 ||
+      !Number.isFinite(expectedPixels) || expectedPixels <= 0 ||
+      !Number.isFinite(actualProjectedPixels) || actualProjectedPixels <= 0) {
+    return currentScale;
+  }
+
+  return Math.min(3, Math.max(0.25, currentScale * expectedPixels / actualProjectedPixels));
+}
+
+export function buildPlaythroughPlan(record, { pulseMs = 10, targetWidth, targetHeight, mapAspect = 1 } = {}) {
   if (!Number.isFinite(pulseMs) || pulseMs <= 0) {
     throw new Error('pulseMs must be a positive number');
   }
 
-  let scaleX = 1, scaleY = 1;
+  let scaleX = 1, scaleY = 1, offsetX = 0, offsetY = 0;
   if (targetWidth !== undefined || targetHeight !== undefined) {
     const captureSize = record?.captureSize;
     if (!Number.isFinite(targetWidth) || !Number.isFinite(targetHeight) ||
         !Number.isFinite(captureSize?.width) || !Number.isFinite(captureSize?.height) ||
-        captureSize.width <= 0 || captureSize.height <= 0) {
+        captureSize.width <= 0 || captureSize.height <= 0 ||
+        !Number.isFinite(mapAspect) || mapAspect <= 0) {
       throw new Error('playthrough scaling requires positive captureSize and target dimensions');
     }
-    scaleX = targetWidth / captureSize.width;
-    scaleY = targetHeight / captureSize.height;
+    const sourceViewport = centeredViewport(captureSize.width, captureSize.height, mapAspect);
+    const targetViewport = centeredViewport(targetWidth, targetHeight, mapAspect);
+    scaleX = targetViewport.width / sourceViewport.width;
+    scaleY = targetViewport.height / sourceViewport.height;
+    offsetX = targetViewport.x - sourceViewport.x * scaleX;
+    offsetY = targetViewport.y - sourceViewport.y * scaleY;
   }
 
   const route = record?.result;
@@ -42,8 +82,8 @@ export function buildPlaythroughPlan(record, { pulseMs = 10, targetWidth, target
       durationMs: Math.max(1, Math.round(step.pulses * pulseMs)),
       pulseCount: step.pulses,
       expectedDistance: step.expectedDistance,
-      expectedBefore: { x: step.before.x * scaleX, y: step.before.y * scaleY },
-      expectedAfter: { x: step.after.x * scaleX, y: step.after.y * scaleY },
+      expectedBefore: { x: step.before.x * scaleX + offsetX, y: step.before.y * scaleY + offsetY },
+      expectedAfter: { x: step.after.x * scaleX + offsetX, y: step.after.y * scaleY + offsetY },
     };
   });
 
