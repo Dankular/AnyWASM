@@ -97,6 +97,19 @@
   the cause is not yet established (not investigated further; the `WASM` workflow failure reasons
   were not read). Treat "tests pass" claims in this file as local results until CI is green.
 
+## Dynamic WASM emission: state as of 2026-10-13
+- Until commit `a51b636` **every emitted module was invalid** (the local-group count in `emit_module`
+  was one short, and `emit_inc32` stored RFLAGS without an address). V8 rejected each module, the
+  runtime silently fell back to the interpreter, and the JIT tests that assert `compilations > 0`
+  were failing. With forced emission, `compute.exe` now compiles 2,127 modules and runs 363,707
+  emitted blocks with 0 fallbacks.
+- `node test/wasm_smoke.mjs` (jit-test-api build) still reports **10 failures**, all JIT-specific
+  (cold-page TLB fallback count, packed-double, x87, indirect-JMP chaining, memory-add chaining).
+  The same 10 fail on a build from before the shared-memory work plus only the two fixes above, so
+  they are not caused by that work. Several show `compilations: 0, fallbacks: 0` (emission is not
+  attempted for those fixtures at all); causes not yet investigated. Output correctness of the
+  emitted path is therefore **not yet established** by this suite.
+
 ## Known limits (not hidden)
 - x87 is modelled with f64, not 80-bit; transcendentals compared to 1e-9 relative tolerance.
 - `RCPPS`/`RSQRTPS` (and scalar `RCPSS`/`RSQRTSS`) use the interpreter's exact scalar
