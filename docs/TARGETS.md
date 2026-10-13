@@ -686,7 +686,11 @@ the handler changes the dispatcher control PC within the loaded function; the re
 per-frame CONTEXT pointer and collided flag.
 PE32 second-pass code now passes the x86 one-pointer dispatcher context and implements a bounded
 collided-registration redirect within the pre-searched path, validating the live registration chain
-before changing `NT_TIB.ExceptionList`. This path is compile-checked but has no runtime fixture yet.
+before changing `NT_TIB.ExceptionList`. A synthetic runtime guest-handler regression,
+`pe32_seh_second_pass_resumes_after_a_collided_registration`, returns disposition 3 during phase two,
+redirects to a searched registration, confirms that the already-unwound handler is skipped, and checks
+the resulting `ExceptionList`, target EIP, and target ESP. The compiled MSVC fixture still does not
+return disposition 3, so compiler-generated collided-handler integration remains unverified.
 The dispatcher layout and redirect rule follow the x86 unwind path in the
 [Windows Research Kernel source](https://github.com/mic101/windows/blob/master/WRK-v1.2/base/ntos/rtl/i386/exdsptch.c).
 Redirects from the selected C++ catch frame, nested PE32 `RtlUnwind`, nested x64 `RtlUnwindEx`,

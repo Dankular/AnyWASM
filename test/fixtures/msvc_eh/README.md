@@ -140,8 +140,11 @@ that an exception raised from `__finally` replaces the in-flight exception while
 handler runs exactly once. Both cases return 0 natively and through the HLE-only CLI. A synthetic
 runtime regression separately exercises a handler returning `EXCEPTION_NESTED_EXCEPTION` and checks
 that the next registration sees `EXCEPTION_NESTED_CALL`; the end-to-end fixture does not return
-disposition 2 or 3. Full nested-frame bookkeeping, explicit collided-unwind disposition handling, and
-every compiler-specific EH4 layout remain open.
+disposition 2 or 3. A synthetic PE32 runtime regression now returns `EXCEPTION_COLLIDED_UNWIND` during
+second-pass unwind, redirects through the one-pointer dispatcher context, validates the live
+registration chain, skips the already-unwound frame, and checks the target context restoration. This
+does not exercise a compiler-generated collided handler. Full nested-frame bookkeeping, collided
+unwind integration with the compiled fixture, and every compiler-specific EH4 layout remain open.
 
 On 2026-10-13, the rebuilt release WASM and Asyncify module ran all five fixture packages in
 `test/browser/exception-fixtures.mjs` under Chromium. Every package exited 0 and the page reported no

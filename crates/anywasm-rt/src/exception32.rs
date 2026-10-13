@@ -1386,10 +1386,11 @@ fn read_context(p: &Process, address: u64) -> Result<Context32, Stop> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::TEB_ADDR;
+    use crate::process::{Module, TEB_ADDR};
     use crate::vfs::Vfs;
     use anywasm_cpu::cpu::{CpuMode, RSP};
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
+    use std::collections::HashMap;
 
     const STACK: u64 = 0x70000;
     const CODE: u64 = 0x50000;
@@ -1474,9 +1475,7 @@ mod tests {
         process.wr32(FRAME, OUTER_FRAME as u32).unwrap();
         process.wr32(FRAME + 4, HANDLER as u32).unwrap();
         process.wr32(OUTER_FRAME, u32::MAX).unwrap();
-        process
-            .wr32(OUTER_FRAME + 4, OUTER_HANDLER as u32)
-            .unwrap();
+        process.wr32(OUTER_FRAME + 4, OUTER_HANDLER as u32).unwrap();
         process
             .write_bytes(HANDLER, &[0xb8, 2, 0, 0, 0, 0xc2, 0x10, 0x00])
             .unwrap(); // return ExceptionNestedException
@@ -1498,15 +1497,161 @@ mod tests {
             0x31, 0xc0, // xor eax, eax -- ExceptionContinueExecution
             0xc2, 0x10, 0x00, // ret 16
         ]);
-        process
-            .write_bytes(OUTER_HANDLER, &outer_handler)
-            .unwrap();
+        process.write_bytes(OUTER_HANDLER, &outer_handler).unwrap();
 
         let result = dispatch_raised_exception(&mut process, 0xe123_4567, 0, &[], CALLER);
 
         assert_eq!(result, Ok(0));
         assert_eq!(process.rd32(MARKER).unwrap(), 0x10);
         assert_eq!(process.cpu.rip, LANDING);
+    }
+
+    #[test]
+    fn pe32_seh_second_pass_resumes_after_a_collided_registration() {
+        const FIRST: u64 = STACK + 0x180;
+        const REDIRECT: u64 = STACK + 0x1a0;
+        const TARGET: u64 = STACK + 0x1c0;
+        const TARGET_IP: u64 = CODE + 0x80;
+        const SCOPE_TABLE: u64 = CODE + 0x400;
+        const COOKIE: u64 = CODE + 0x500;
+        const COOKIE_CHECK: u64 = CODE + 0x600;
+        const EXCEPTION_RECORD: u64 = CODE + 0x700;
+        const CONTEXT_RECORD: u64 = CODE + 0x800;
+        const DISPATCHER_CONTEXT: u64 = CODE + 0x900;
+        const SKIPPED_HANDLER_MARKER: u64 = 0x30000;
+        const GLOBAL_COOKIE: u32 = 0x71ab_cdef;
+        const SAVED_ESP: u64 = STACK + 0x500;
+        const FRAME_POINTER: u64 = TARGET + 16;
+
+        let mut process = Process::new(Vfs::new());
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.fs_base = TEB_ADDR;
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        process.modules.push(Module {
+            name: "seh-collided.exe".into(),
+            path: "C:\\seh-collided.exe".into(),
+            base: CODE,
+            size: PAGE_SIZE,
+            entry: CODE,
+            is_dll: false,
+            tls_callbacks: Vec::new(),
+            exports: HashMap::new(),
+            ordinals: HashMap::new(),
+            exception_table_rva: 0,
+            runtime_functions: Vec::new(),
+            resource_rva: 0,
+            resource_size: 0,
+            hle_group: None,
+        });
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(CODE, PAGE_SIZE, PROT_RWX));
+        assert!(process.mem.map(SKIPPED_HANDLER_MARKER, PAGE_SIZE, PROT_RW));
+        process
+            .wr32(TEB_ADDR + 4, (STACK + PAGE_SIZE) as u32)
+            .unwrap();
+        process.wr32(TEB_ADDR + 8, STACK as u32).unwrap();
+        process.wr32(TEB_ADDR, FIRST as u32).unwrap();
+
+        process.wr32(FIRST, REDIRECT as u32).unwrap();
+        process.wr32(FIRST + 4, HANDLER as u32).unwrap();
+        process.wr32(REDIRECT, TARGET as u32).unwrap();
+        process.wr32(REDIRECT + 4, (CODE + 0x180) as u32).unwrap();
+        process.wr32(TARGET, u32::MAX).unwrap();
+        process.wr32(TARGET + 4, HANDLER as u32).unwrap();
+
+        // The current handler publishes REDIRECT through the x86 dispatcher
+        // context, then reports ExceptionCollidedUnwind. The skipped handler
+        // would set a marker if the dispatcher called it again.
+        let mut collided_handler = vec![
+            0x8b, 0x44, 0x24, 0x10, // mov eax, [esp + 16] -- dispatcher context
+            0xba, // mov edx, REDIRECT
+        ];
+        collided_handler.extend_from_slice(&(REDIRECT as u32).to_le_bytes());
+        collided_handler.extend_from_slice(&[
+            0x89, 0x10, // mov [eax], edx
+            0xb8, 3, 0, 0, 0, // ExceptionCollidedUnwind
+            0xc2, 0x10, 0x00, // ret 16
+        ]);
+        process.write_bytes(HANDLER, &collided_handler).unwrap();
+        let mut skipped_handler = vec![0xb9]; // mov ecx, marker
+        skipped_handler.extend_from_slice(&(SKIPPED_HANDLER_MARKER as u32).to_le_bytes());
+        skipped_handler.extend_from_slice(&[
+            0xc7, 0x01, 0xef, 0xbe, 0xad, 0xde, // mov dword ptr [ecx], 0xdeadbeef
+            0x31, 0xc0, // ExceptionContinueSearch
+            0xc2, 0x10, 0x00, // ret 16
+        ]);
+        process.write_bytes(CODE + 0x180, &skipped_handler).unwrap();
+        process.write_bytes(COOKIE_CHECK, &[0xc3]).unwrap();
+
+        process.wr32(COOKIE, GLOBAL_COOKIE).unwrap();
+        process.wr32(SCOPE_TABLE, EH4_NO_GS_COOKIE).unwrap();
+        process.wr32(SCOPE_TABLE + 4, 0).unwrap();
+        process.wr32(SCOPE_TABLE + 8, 0).unwrap();
+        process.wr32(SCOPE_TABLE + 12, 4).unwrap();
+        process
+            .wr32(TARGET + 8, (SCOPE_TABLE as u32) ^ GLOBAL_COOKIE)
+            .unwrap();
+        process.wr32(TARGET + 12, EH4_TOPMOST_TRY_LEVEL).unwrap();
+        process
+            .wr32(
+                FRAME_POINTER,
+                GLOBAL_COOKIE ^ (FRAME_POINTER as u32).wrapping_add(4),
+            )
+            .unwrap();
+        process.wr32(FRAME_POINTER + 4, 0).unwrap();
+        process.wr32(EXCEPTION_RECORD + 4, 0).unwrap();
+        let context = context_from_cpu(&process.cpu, (CODE + 0x40) as u32, RAISE_RSP as u32);
+        write_context(&mut process, CONTEXT_RECORD, &context).unwrap();
+
+        let searched_frames = [
+            SearchFrame32 {
+                registration: FIRST as u32,
+                next: REDIRECT as u32,
+                handler: HANDLER as u32,
+            },
+            SearchFrame32 {
+                registration: REDIRECT as u32,
+                next: TARGET as u32,
+                handler: (CODE + 0x180) as u32,
+            },
+            SearchFrame32 {
+                registration: TARGET as u32,
+                next: u32::MAX,
+                handler: HANDLER as u32,
+            },
+        ];
+        let transfer = GuestSehTransfer32 {
+            target_frame: TARGET,
+            target_ip: TARGET_IP,
+            scope_table: SCOPE_TABLE,
+            cookie_pointer: COOKIE,
+            cookie_check: COOKIE_CHECK,
+            frame_pointer: FRAME_POINTER,
+            saved_esp: SAVED_ESP,
+            selected_level: EH4_TOPMOST_TRY_LEVEL,
+            enclosing_level: EH4_TOPMOST_TRY_LEVEL,
+        };
+
+        assert_eq!(
+            unwind_to_seh_transfer32(
+                &mut process,
+                transfer,
+                &searched_frames,
+                EXCEPTION_RECORD,
+                CONTEXT_RECORD,
+                DISPATCHER_CONTEXT,
+                0,
+                false,
+            ),
+            Ok(0)
+        );
+        assert_eq!(process.rd32(TEB_ADDR).unwrap(), TARGET as u32);
+        assert_eq!(process.rd32(DISPATCHER_CONTEXT).unwrap(), REDIRECT as u32);
+        assert_eq!(process.rd32(SKIPPED_HANDLER_MARKER).unwrap(), 0);
+        assert_eq!(process.cpu.rip, TARGET_IP);
+        assert_eq!(process.cpu.gpr[RSP], SAVED_ESP);
+        assert!(!process.skip_ret);
     }
 
     #[test]

@@ -577,8 +577,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   collided dispatcher frame; its second-pass redirect remains limited to already-searched frames.
   PE32 second-pass code now passes the x86 one-pointer dispatcher context and implements a bounded
   collided-registration redirect within the pre-searched path, validating the live registration
-  chain before changing `NT_TIB.ExceptionList`. This path is compile-checked but has no runtime
-  fixture yet. Redirects from the selected C++ catch frame, nested PE32 `RtlUnwind`, nested x64
+  chain before changing `NT_TIB.ExceptionList`. The synthetic runtime regression
+  `pe32_seh_second_pass_resumes_after_a_collided_registration` returns disposition 3, validates the
+  live chain, confirms the redirected-to frame is skipped, and checks target EIP/ESP restoration.
+  The compiler-generated MSVC fixture still does not return disposition 3, so target integration
+  remains unverified. Redirects from the selected C++ catch frame, nested PE32 `RtlUnwind`, nested x64
   `RtlUnwindEx`, non-null unwind history tables, and redirects outside the pre-searched frames remain
   unsupported. Full nested-frame bookkeeping, arbitrary catch-copy closure layouts, and other
   compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
