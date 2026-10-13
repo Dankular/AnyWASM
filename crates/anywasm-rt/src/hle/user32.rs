@@ -144,6 +144,10 @@ pub struct WinState {
     pub atoms: HashMap<u16, String>,
     pub windows: HashMap<u64, Window>,
     pub queue: VecDeque<Msg>,
+    /// Time from the last message retrieved by GetMessage, as Win32 LONG bits.
+    pub last_get_message_time: i32,
+    /// Thread message metadata exposed by GetMessageExtraInfo/SetMessageExtraInfo.
+    pub message_extra_info: u64,
     pub quit: Option<i32>,
     next: u64,
     next_atom: u16,
@@ -291,6 +295,13 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "IsIconic" | "IsZoomed" => |_| Ok(0),
         "GetMessageA" | "GetMessageW" => get_message,
         "PeekMessageA" | "PeekMessageW" => peek_message,
+        "GetMessageTime" => |p| Ok(p.extra.win.last_get_message_time as i64 as u64),
+        "GetMessageExtraInfo" => |p| Ok(p.extra.win.message_extra_info),
+        "SetMessageExtraInfo" => |p| {
+            let previous = p.extra.win.message_extra_info;
+            p.extra.win.message_extra_info = p.arg(0);
+            Ok(previous)
+        },
         "TranslateMessage" => |_| Ok(1),
         "DispatchMessageA" | "DispatchMessageW" => |p| {
             let m = p.arg(0);
@@ -1835,9 +1846,19 @@ fn read_message_type(p: &Process, m: u64) -> Result<u64, Stop> {
     Ok(p.rd32(m + offset)? as u64)
 }
 
+fn read_message_time(p: &Process, m: u64) -> Result<i32, Stop> {
+    let offset = if p.cpu.mode == CpuMode::X86_32 {
+        16
+    } else {
+        32
+    };
+    Ok(p.rd32(m + offset)? as i32)
+}
+
 fn get_message(p: &mut Process) -> R {
     let (m, h) = (p.arg(0), p.arg(1));
     if fetch(p, m, h, true)? {
+        p.extra.win.last_get_message_time = read_message_time(p, m)?;
         let msg = read_message_type(p, m)?;
         return Ok((msg != WM_QUIT) as u64);
     }

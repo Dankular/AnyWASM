@@ -470,13 +470,25 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
         let args = match name {
             "ReleaseCapture"
             | "GetMessageTime"
+            | "GetMessageExtraInfo"
             | "GetInputState"
             | "GetForegroundWindow"
             | "GetDesktopWindow"
             | "GetActiveWindow" => Some(0),
-            "GetCursorPos" | "GetSystemMetrics" | "GetAsyncKeyState" | "GetKeyboardType"
-            | "GetKeyboardLayout" | "IsRectEmpty" | "GetKeyState" | "IsIconic" | "IsZoomed"
-            | "ClipCursor" | "DestroyWindow" | "CharUpperA" | "CharLowerA" => Some(1),
+            "GetCursorPos"
+            | "GetSystemMetrics"
+            | "GetAsyncKeyState"
+            | "GetKeyboardType"
+            | "GetKeyboardLayout"
+            | "IsRectEmpty"
+            | "GetKeyState"
+            | "IsIconic"
+            | "IsZoomed"
+            | "ClipCursor"
+            | "DestroyWindow"
+            | "CharUpperA"
+            | "CharLowerA"
+            | "SetMessageExtraInfo" => Some(1),
             "GetWindowLongA"
             | "GetWindowThreadProcessId"
             | "GetWindowPlacement"
