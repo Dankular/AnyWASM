@@ -419,6 +419,41 @@ try {
     triText.includes('staging R16_UNORM readback=0000,4000,8000,ffff row_pitch=4'), triText);
   check('D3D11 staging R16_SNORM Map(READ) preserves signed normalized words',
     triText.includes('staging R16_SNORM readback=8000,c000,0000,7fff row_pitch=4'), triText);
+  const normalized16CopyResult = await page.evaluate(async () => {
+    const { GpuExecutor } = await import('/gpu.js');
+    const gpu = new GpuExecutor(document.createElement('canvas'), null, () => {}, { noPresent: true });
+    try {
+      await gpu.init();
+      const formats = [
+        { dxgi: 56, words: [0x1234, 0x1235, 0x8000, 0xffff] },
+        { dxgi: 58, words: [0x1234, 0x1235, 0x8000, 0x7fff] },
+      ];
+      const readbacks = [];
+      for (const [index, format] of formats.entries()) {
+        const source = new Uint8Array(8), sourceView = new DataView(source.buffer);
+        format.words.forEach((value, pixel) => sourceView.setUint16(pixel * 2, value, true));
+        gpu.createTexture(index * 2 + 1, 2, 2, 1, 1, format.dxgi, 0x8, 0, 0);
+        gpu.textureWrite(index * 2 + 1, 0, 0, 0, 0, 2, 2, 4, source.length, source);
+        gpu.createTexture(index * 2 + 2, 2, 2, 1, 1, format.dxgi, 0, 3, 0);
+        gpu.copyResource(index * 2 + 2, index * 2 + 1);
+        gpu.flush();
+        await gpu.device.queue.onSubmittedWorkDone();
+        const bytes = await gpu.readBackResource(index * 2 + 2);
+        readbacks.push(Array.from({ length: 4 }, (_, pixel) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(pixel * 2, true)));
+      }
+      const errors = gpu.stats.errors;
+      gpu.device.destroy();
+      return { readbacks, errors };
+    } catch (error) {
+      gpu.device?.destroy();
+      return { error: String(error) };
+    }
+  });
+  check('D3D11 R16_UNORM/SNORM copies preserve arbitrary normalized words on Map(READ)',
+    !normalized16CopyResult.error && normalized16CopyResult.errors?.length === 0
+      && JSON.stringify(normalized16CopyResult.readbacks) === JSON.stringify([
+        [0x1234, 0x1235, 0x8000, 0xffff], [0x1234, 0x1235, 0x8000, 0x7fff],
+      ]), JSON.stringify(normalized16CopyResult));
   check('D3D11 staging R16_UINT Map(READ) preserves unsigned words',
     triText.includes('staging R16_UINT readback=0000,0001,7fff,ffff row_pitch=4'), triText);
   check('D3D11 staging R16_SINT Map(READ) preserves signed words',

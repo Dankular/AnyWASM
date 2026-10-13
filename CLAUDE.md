@@ -333,7 +333,9 @@ register-stack subset):
       R32G32_FLOAT two-channel texels with row pitches, R32G32_UINT/SINT packed channel words,
       RGBA32_FLOAT four-channel rows and RGBA32_UINT/SINT packed channel words with 32-byte rows,
       R16 and RG16 UNORM/SNORM/UINT/SINT words, RG16_FLOAT rows, and RGBA16_UNORM/SNORM/UINT/SINT
-      words, plus packed RGBA16_FLOAT and R16_FLOAT values,
+      words; R16_UNORM/SNORM preserve adjacent guest words through upload, full-resource copy, and
+      staging readback despite the sampled half-float backing. The suite also checks packed
+      RGBA16_FLOAT and R16_FLOAT values,
       raw BGRA8_UNORM bytes; R10G10B10A2_UNORM/UINT and R11G11B10_FLOAT packed words,
       encoded RGBA8_SRGB and BGRA8_SRGB bytes; RGBA8_UNORM and R8/RG8/RGBA8 SNORM/UINT/SINT plus
       A8_UNORM raw bytes; R8G8_UNORM two-channel texels; odd-width R8_UNORM row packing plus

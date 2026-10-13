@@ -1202,7 +1202,12 @@ export class GpuExecutor {
     this.res.set(id, {
       kind: 'texture', gpu, width: w, height: backingHeight, depth: dimension === '3d' ? Math.max(1, array) : 1,
       mips: Math.max(1, mips), array: dimension === '3d' ? 1 : Math.max(1, array), samples: sampleCount, format, dxgi, bind, cube, dimension,
+      normalized16Raw: null,
     });
+  }
+
+  invalidateNormalized16Raw(resource) {
+    if (resource && (resource.dxgi === 56 || resource.dxgi === 58)) resource.normalized16Raw = null;
   }
 
   resolveTexture(dstId, dstSub, srcId, srcSub, dxgiFormat) {
@@ -1221,6 +1226,7 @@ export class GpuExecutor {
       return;
     }
     this.endPass();
+    this.invalidateNormalized16Raw(dst);
     this.device.pushErrorScope('validation');
     try {
       const srcView = src.gpu.createView({ dimension: '2d', baseMipLevel: srcMip, mipLevelCount: 1, baseArrayLayer: srcSlice, arrayLayerCount: 1 });
@@ -1245,6 +1251,31 @@ export class GpuExecutor {
     const r = this.res.get(id);
     if (!r) return;
     let uploadData = data, uploadRowPitch = rowPitch;
+    if (r.dxgi === 56 || r.dxgi === 58) {
+      const levelWidth = Math.max(1, r.width >> mip), levelHeight = Math.max(1, r.height >> mip);
+      const levelDepth = r.dimension === '3d' ? Math.max(1, r.depth >> mip) : 1;
+      const plane = r.dimension === '3d' ? slice : 0;
+      const subresource = r.dimension === '3d' ? mip : slice * r.mips + mip;
+      const fullPlane = x === 0 && y === 0 && w === levelWidth && h === levelHeight && plane < levelDepth;
+      const shadowSize = levelWidth * levelHeight * levelDepth * 2;
+      r.normalized16Raw ||= new Map();
+      let shadow = r.normalized16Raw.get(subresource);
+      if (shadow && shadow.data.length !== shadowSize) shadow = null;
+      if (shadow?.complete || fullPlane) {
+        if (!shadow) shadow = { data: new Uint8Array(shadowSize), written: new Set(), complete: false };
+        if (shadow.complete && !shadow.written) shadow.written = new Set(Array.from({ length: levelDepth }, (_, index) => index));
+        for (let row = 0; row < h; row++) {
+          const sourceOffset = row * rowPitch;
+          const destinationOffset = ((plane * levelHeight + y + row) * levelWidth + x) * 2;
+          shadow.data.set(data.subarray(sourceOffset, sourceOffset + w * 2), destinationOffset);
+        }
+        if (fullPlane) shadow.written.add(plane);
+        shadow.complete ||= shadow.written.size === levelDepth;
+        r.normalized16Raw.set(subresource, shadow);
+      } else {
+        r.normalized16Raw.delete(subresource);
+      }
+    }
     if (r.dxgi === 56 || r.dxgi === 58) {
       uploadData = new Uint8Array(w * h * 2);
       uploadRowPitch = w * 2;
@@ -1648,6 +1679,7 @@ export class GpuExecutor {
   clearRtv(id, color) {
     const v = this.getView(id);
     if (!v) return;
+    this.invalidateNormalized16Raw(v.tex);
     this.endPass();
     const pass = this.encoder().beginRenderPass({ colorAttachments: [{ view: v.view, loadOp: 'clear', storeOp: 'store', clearValue: { r: color[0], g: color[1], b: color[2], a: color[3] } }] });
     pass.end();
@@ -1723,6 +1755,7 @@ export class GpuExecutor {
       sliceCount = Math.min(desc.slices || tex.array, tex.array - firstSlice);
     }
     if (!sliceCount) return;
+    this.invalidateNormalized16Raw(tex);
 
     const rowBytes = width * pattern.byteLength;
     const bytesPerRow = (rowBytes + 255) & ~255;
@@ -2027,6 +2060,7 @@ export class GpuExecutor {
     pass.setBlendConstant({ r: st.blend.factor[0], g: st.blend.factor[1], b: st.blend.factor[2], a: st.blend.factor[3] });
     pass.setStencilReference(st.depth.ref);
 
+    for (const id of st.rtvs) if (id) this.invalidateNormalized16Raw(this.getView(id)?.tex);
     if (indexed) pass.drawIndexed(count, instances, first, baseVertex, firstInstance);
     else pass.draw(count, instances, first, firstInstance);
     this.stats.draws++;
@@ -2348,6 +2382,7 @@ export class GpuExecutor {
     for (let group = 0; group < bindGroups.length; group++) pass.setBindGroup(group, bindGroups[group]);
     pass.dispatchWorkgroups(x, y, z);
     pass.end();
+    for (const uav of st.uav) if (uav?.id) this.invalidateNormalized16Raw(this.getView(uav.id)?.tex);
     for (const copy of storageBufferCopies) {
       this.encoder().copyBufferToBuffer(copy.scratch, 0, copy.view.bufferResource.gpu, copy.view.offset, copy.size);
     }
@@ -2511,6 +2546,18 @@ export class GpuExecutor {
         const destLayers = d.dimension === '3d' ? Math.max(1, d.depth >> m) : d.array;
         enc.copyTextureToTexture({ texture: s.gpu, mipLevel: m }, { texture: d.gpu, mipLevel: m }, { width: Math.max(1, s.width >> m), height: Math.max(1, s.height >> m), depthOrArrayLayers: Math.min(sourceLayers, destLayers) });
       }
+      if (d.dxgi === 56 || d.dxgi === 58) {
+        const sameExtent = s.dxgi === d.dxgi && s.width === d.width && s.height === d.height
+          && s.depth === d.depth && s.array === d.array && s.mips === d.mips && s.dimension === d.dimension;
+        if (sameExtent) {
+          d.normalized16Raw = new Map();
+          for (const [subresource, shadow] of s.normalized16Raw || []) {
+            if (shadow.complete) d.normalized16Raw.set(subresource, {
+              data: shadow.data.slice(), written: new Set(shadow.written || []), complete: true,
+            });
+          }
+        } else this.invalidateNormalized16Raw(d);
+      }
     }
   }
 
@@ -2619,6 +2666,35 @@ export class GpuExecutor {
     const destZ = d.dimension === '3d' ? dz : dslice;
     const depth = s.dimension === '3d' || d.dimension === '3d' ? box.back - box.f : 1;
     this.encoder().copyTextureToTexture({ texture: s.gpu, mipLevel: smip, origin: { x: box.l, y: box.t, z: sourceZ } }, { texture: d.gpu, mipLevel: dmip, origin: { x: dx, y: dy, z: destZ } }, { width: box.r - box.l, height: box.b - box.t, depthOrArrayLayers: depth });
+    if (d.dxgi === 56 || d.dxgi === 58) {
+      const sourceKey = s.dimension === '3d' ? smip : ssub;
+      const destinationKey = d.dimension === '3d' ? dmip : dsub;
+      const sourceShadow = s.dxgi === d.dxgi ? s.normalized16Raw?.get(sourceKey) : null;
+      const sourceWidth = Math.max(1, s.width >> smip), sourceHeight = Math.max(1, s.height >> smip);
+      const destWidth = Math.max(1, d.width >> dmip), destHeight = Math.max(1, d.height >> dmip);
+      const destDepth = d.dimension === '3d' ? Math.max(1, d.depth >> dmip) : 1;
+      const fullCopy = dx === 0 && dy === 0 && dz === 0 && box.l === 0 && box.t === 0 && box.f === 0
+        && box.r === destWidth && box.b === destHeight && sourceWidth === destWidth && sourceHeight === destHeight
+        && depth === destDepth;
+      d.normalized16Raw ||= new Map();
+      const destShadow = d.normalized16Raw.get(destinationKey);
+      if (sourceShadow?.complete && fullCopy) {
+        d.normalized16Raw.set(destinationKey, {
+          data: sourceShadow.data.slice(), written: new Set(sourceShadow.written || []), complete: true,
+        });
+      } else if (sourceShadow?.complete && destShadow?.complete) {
+        const sourceBytes = s === d ? sourceShadow.data.slice() : sourceShadow.data;
+        for (let z = 0; z < depth; z++) {
+          const sourcePlane = s.dimension === '3d' ? sourceZ + z : 0;
+          const destPlane = d.dimension === '3d' ? destZ + z : 0;
+          for (let row = 0; row < box.b - box.t; row++) {
+            const sourceOffset = ((sourcePlane * sourceHeight + box.t + row) * sourceWidth + box.l) * 2;
+            const destOffset = ((destPlane * destHeight + dy + row) * destWidth + dx) * 2;
+            destShadow.data.set(sourceBytes.subarray(sourceOffset, sourceOffset + (box.r - box.l) * 2), destOffset);
+          }
+        }
+      } else d.normalized16Raw.delete(destinationKey);
+    }
   }
 
   generateMips(viewId) {
@@ -2626,6 +2702,7 @@ export class GpuExecutor {
     const tex = v && this.res.get(v.resource);
     if (!tex || tex.mips < 2) return;
     this.endPass();
+    this.invalidateNormalized16Raw(tex);
     // Simple box-filter chain using the blit pipeline (colour textures only).
     if (isDepth(tex.format) || BLOCK(tex.format)) return;
     if (tex.dimension === '3d') {
@@ -2795,6 +2872,10 @@ export class GpuExecutor {
     const width = Math.max(1, resource.width >> mip);
     const height = Math.max(1, resource.height >> mip);
     const depth = resource.dimension === '3d' ? Math.max(1, resource.depth >> mip) : 1;
+    const rawSubresource = resource.dimension === '3d' ? mip : subresource;
+    const rawShadow = resource.normalized16Raw?.get(rawSubresource);
+    if ((resource.dxgi === 56 || resource.dxgi === 58) && rawShadow?.complete
+      && rawShadow.data.length === width * height * depth * 2) return rawShadow.data.slice();
     if (resource.dxgi === 45 && resource.format === 'depth24plus-stencil8') {
       if (resource.dimension !== '2d' || depth !== 1) throw new Error(`D24_UNORM_S8 readback does not support ${resource.dimension} textures`);
       return this.readBackDepth24Stencil(resource, mip, slice, width, height);
