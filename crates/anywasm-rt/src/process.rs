@@ -595,6 +595,8 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "InterlockedExchangeAdd",
                     "InterlockedExchangeAdd64",
                     "InterlockedExchangePointer",
+                    "SetFileAttributesA",
+                    "SetFileAttributesW",
                     "FreeLibraryAndExitThread",
                     "IsBadWritePtr",
                     "IsBadReadPtr",

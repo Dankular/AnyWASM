@@ -15,6 +15,7 @@ pub struct Vfs {
     files: HashMap<String, Vec<u8>>,
     assets: HashMap<String, AssetFile>,
     directories: HashSet<String>,
+    attributes: HashMap<String, u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +178,33 @@ impl Vfs {
     pub fn exists(&self, path: &str) -> bool {
         let path = norm(path);
         self.files.contains_key(&path) || self.assets.contains_key(&path)
+    }
+
+    /// Return stored attributes or the VFS default for a file or directory.
+    pub fn file_attributes(&self, path: &str) -> Option<u32> {
+        let path = norm(path);
+        if let Some(attributes) = self.attributes.get(&path) {
+            return Some(*attributes);
+        }
+        if self.is_dir(&path) {
+            Some(0x10) // FILE_ATTRIBUTE_DIRECTORY
+        } else if self.files.contains_key(&path) || self.assets.contains_key(&path) {
+            Some(0x80) // FILE_ATTRIBUTE_NORMAL
+        } else {
+            None
+        }
+    }
+
+    /// Store attributes for a path that the caller has already resolved as existing.
+    pub fn set_file_attributes(&mut self, path: &str, attributes: u32) {
+        self.attributes.insert(norm(path), attributes);
+    }
+
+    pub fn is_readonly(&self, path: &str) -> bool {
+        !self.is_dir(path)
+            && self
+                .file_attributes(path)
+                .is_some_and(|attributes| attributes & 0x1 != 0)
     }
 
     /// Register the fixed header and index prefix of an `AGP1` range package.
@@ -379,8 +407,22 @@ impl Vfs {
     }
     pub fn remove(&mut self, path: &str) -> bool {
         let path = norm(path);
+        if self.is_readonly(&path) {
+            return false;
+        }
         let local = self.files.remove(&path).is_some();
         let asset = self.assets.remove(&path).is_some();
+        if local || asset {
+            self.attributes.remove(&path);
+            let mut parent = path.rsplit_once('\\').map(|(parent, _)| parent);
+            while let Some(dir) = parent {
+                if self.is_dir(dir) {
+                    break;
+                }
+                self.attributes.remove(dir);
+                parent = dir.rsplit_once('\\').map(|(parent, _)| parent);
+            }
+        }
         local || asset
     }
     pub fn paths(&self) -> impl Iterator<Item = &String> {

@@ -10,6 +10,7 @@ use anywasm_cpu::CpuMode;
 const INVALID_HANDLE: u64 = u64::MAX;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_READ_FAULT: u32 = 30;
@@ -263,11 +264,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetEndOfFile" | "FlushFileBuffers" => |_| Ok(1),
         "DeleteFileA" => |p| {
             let s = p.read_cstr(p.arg(0))?;
-            Ok(p.vfs.remove(&absolute(&s, &p.current_directory)) as u64)
+            delete_file(p, &s)
         },
         "DeleteFileW" => |p| {
             let s = p.read_wstr(p.arg(0))?;
-            Ok(p.vfs.remove(&absolute(&s, &p.current_directory)) as u64)
+            delete_file(p, &s)
         },
         "GetFileAttributesA" => |p| {
             let s = p.read_cstr(p.arg(0))?;
@@ -276,6 +277,16 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetFileAttributesW" => |p| {
             let s = p.read_wstr(p.arg(0))?;
             Ok(file_attrs(p, &s))
+        },
+        "SetFileAttributesA" => |p| {
+            let s = p.read_cstr(p.arg(0))?;
+            let attributes = p.arg(1) as u32;
+            set_file_attrs(p, &s, attributes)
+        },
+        "SetFileAttributesW" => |p| {
+            let s = p.read_wstr(p.arg(0))?;
+            let attributes = p.arg(1) as u32;
+            set_file_attrs(p, &s, attributes)
         },
         "CreateDirectoryA" => |p| {
             let path = p.read_cstr(p.arg(0))?;
@@ -1908,6 +1919,15 @@ fn emit(p: &mut Process, handle: u64, data: &[u8]) -> Option<usize> {
 
 fn write_file(p: &mut Process) -> R {
     let (h, buf, n, written) = (p.arg(0), p.arg(1), p.arg(2) as usize, p.arg(3));
+    if let Some(Handle::File {
+        path, write: true, ..
+    }) = p.handles.get(&h)
+    {
+        if p.vfs.is_readonly(path) {
+            p.set_last_error(ERROR_ACCESS_DENIED);
+            return Ok(0);
+        }
+    }
     let data = p.read_bytes(buf, n)?;
     match emit(p, h, &data) {
         Some(k) => {
@@ -2159,6 +2179,10 @@ fn create_file(p: &mut Process, wide: bool) -> R {
     }
     let write = access & 0x4000_0000 != 0 || access & 0x1_0000 != 0 || access & 2 != 0;
     let exists = p.vfs.exists(&path);
+    if exists && write && p.vfs.is_readonly(&path) {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(INVALID_HANDLE);
+    }
     match disp {
         1 if exists => {
             p.set_last_error(ERROR_ALREADY_EXISTS);
@@ -2487,12 +2511,53 @@ fn find_close(p: &mut Process) -> R {
 
 fn file_attrs(p: &Process, path: &str) -> u64 {
     let path = absolute(path, &p.current_directory);
-    if p.vfs.exists(&path) {
-        0x80
-    } else if p.vfs.is_dir(&path) || matches!(norm(&path).as_str(), "windows" | "temp") {
-        0x10
+    p.vfs
+        .file_attributes(&path)
+        .or_else(|| matches!(norm(&path).as_str(), "windows" | "temp").then_some(0x10))
+        .map_or(u32::MAX as u64, u64::from)
+}
+
+fn set_file_attrs(p: &mut Process, path: &str, mut attributes: u32) -> R {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const SETTABLE_ATTRIBUTES: u32 = 0x3127; // READONLY | HIDDEN | SYSTEM | ARCHIVE | TEMPORARY | OFFLINE | NOT_CONTENT_INDEXED
+
+    if path.is_empty() {
+        p.set_last_error(ERROR_PATH_NOT_FOUND);
+        return Ok(0);
+    }
+    let absolute_path = absolute(path, &p.current_directory);
+    let key = norm(&absolute_path);
+    let directory = p.vfs.is_dir(&absolute_path) || matches!(key.as_str(), "windows" | "temp");
+    if !directory && !p.vfs.exists(&absolute_path) {
+        p.set_last_error(ERROR_FILE_NOT_FOUND);
+        return Ok(0);
+    }
+    if attributes == 0 || attributes & !(SETTABLE_ATTRIBUTES | FILE_ATTRIBUTE_NORMAL) != 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if attributes & SETTABLE_ATTRIBUTES != 0 {
+        attributes &= !FILE_ATTRIBUTE_NORMAL;
+    }
+    if directory {
+        attributes |= FILE_ATTRIBUTE_DIRECTORY;
+    }
+    p.vfs.set_file_attributes(&absolute_path, attributes);
+    Ok(1)
+}
+
+fn delete_file(p: &mut Process, path: &str) -> R {
+    let absolute_path = absolute(path, &p.current_directory);
+    if p.vfs.is_readonly(&absolute_path) || p.vfs.is_dir(&absolute_path) {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(0);
+    }
+    if p.vfs.remove(&absolute_path) {
+        Ok(1)
     } else {
-        0xffff_ffff
+        p.set_last_error(ERROR_FILE_NOT_FOUND);
+        Ok(0)
     }
 }
 

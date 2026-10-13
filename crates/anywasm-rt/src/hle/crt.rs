@@ -250,7 +250,7 @@ fn stream_write(p: &mut Process, fp: u64, data: &[u8]) -> Result<usize, Stop> {
         FileKind::Stderr => p.stderr.extend_from_slice(data),
         FileKind::Stdin => return Ok(0),
         FileKind::Vfs { path, pos, write } => {
-            if !*write {
+            if !*write || p.vfs.is_readonly(path) {
                 f.err = true;
                 return Ok(0);
             }
@@ -2791,6 +2791,9 @@ fn fopen_impl(p: &mut Process, name: &str, mode: &str) -> R {
     let path = crate::vfs::absolute(name, &p.current_directory);
     let write = mode.contains('w') || mode.contains('a') || mode.contains('+');
     let exists = p.vfs.exists(&path);
+    if exists && write && p.vfs.is_readonly(&path) {
+        return Ok(0);
+    }
     if mode.starts_with('w') {
         p.vfs.insert(&path, Vec::new());
     } else if !exists {
