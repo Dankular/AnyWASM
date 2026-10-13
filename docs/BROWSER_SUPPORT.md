@@ -26,12 +26,13 @@ Cube samples, the +X/+Y seam, and mip queries completed with one draw and no Web
 
 Focused depth cube-array comparison regression on 2026-10-13: Chrome `155.0.8059.40` on Windows x64.
 The synthetic D3D11 fixture covers implicit `SampleCmp` and `SampleCmpLevelZero` on selected two-cube
-D32_FLOAT, D16_UNORM, and D24_UNORM_S8 SRVs starting at face 6. The D24 resource uses an R24G8_TYPELESS
-texture, D24_UNORM_S8 DSVs, and depth-only SRVs. Separate DSVs clear the cubes to 0.25 and 0.75; a LESS
-comparison against 0.5 returns false for cube 0 and true for cube 1 in all three formats and both
-sampling methods, encoded as `[0,0,0,255]` and `[255,255,255,255]`, with one draw and zero WebGPU
-errors. This API fixture also verifies a one-slice DSV view selects its nonzero array layer; it is not
-a selected-target compatibility result.
+D32_FLOAT, D16_UNORM, D24_UNORM_S8, and D32_FLOAT_S8X24 SRVs starting at face 6. D24 uses R24G8_TYPELESS
+with D24_UNORM_S8 DSVs; D32S8 uses R32G8X24_TYPELESS with D32_FLOAT_S8X24 DSVs and requires Chrome's
+`depth32float-stencil8` feature. Both packed formats use depth-only SRVs. Separate DSVs clear the cubes
+to 0.25 and 0.75; LESS against 0.5 returns false for cube 0 and true for cube 1 in all four formats
+and both sampling methods, encoded as `[0,0,0,255]` and `[255,255,255,255]`, with one draw and zero
+WebGPU errors. This API fixture also verifies a one-slice DSV view selects its nonzero array layer; it
+is not a selected-target compatibility result.
 
 An earlier local run on 2026-10-11: Chrome `154.0.8037.98`, selected with `CHROMIUM` on Windows
 x64; `node test/browser/run.mjs` passed all checks. WebGPU reported an NVIDIA adapter, zero
