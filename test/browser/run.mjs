@@ -5654,9 +5654,11 @@ try {
         SamplerComparisonState lessSampler : register(s0);
         float4 main(float4 position : SV_Position) : SV_Target {
           float cubeIndex = position.x < 32.0 ? 0.0 : 1.0;
-          float result = depthImage.SampleCmpLevelZero(lessSampler,
+          float levelZero = depthImage.SampleCmpLevelZero(lessSampler,
             float4(1.0, 0.0, 0.0, cubeIndex), 0.5);
-          return float4(result, 0.0, 0.0, 1.0);
+          float implicitLevel = depthImage.SampleCmp(lessSampler,
+            float4(1.0, 0.0, 0.0, cubeIndex), 0.5);
+          return float4(levelZero, implicitLevel, 0.0, 1.0);
         }
       `, 'main', 'ps_5_0');
       const stream = [];
@@ -5711,11 +5713,11 @@ try {
       return { error: error.message };
     }
   });
-  check('D3D11 TextureCubeArray SampleCmpLevelZero compares selected depth cubes',
+  check('D3D11 TextureCubeArray SampleCmp and SampleCmpLevelZero compare selected depth cubes',
     cubeArrayCompareResult.draws === 1 && cubeArrayCompareResult.errors?.length === 0
       && cubeArrayCompareResult.viewDimension === 'cube-array'
       && near(cubeArrayCompareResult.cube0 || [], [0, 0, 0, 255], 1)
-      && near(cubeArrayCompareResult.cube1 || [], [255, 0, 0, 255], 1),
+      && near(cubeArrayCompareResult.cube1 || [], [255, 255, 0, 255], 1),
     JSON.stringify(cubeArrayCompareResult));
 
   const constantRangeResult = await page.evaluate(async () => {

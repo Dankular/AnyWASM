@@ -25,11 +25,11 @@ and two levels. The captured normalized pixels were `[255,255,32,255]` and `[128
 Cube samples, the +X/+Y seam, and mip queries completed with one draw and no WebGPU errors.
 
 Focused D32 cube-array comparison regression on 2026-10-13: Chrome `155.0.8059.40` on Windows x64.
-The synthetic D3D11 fixture covers `SampleCmpLevelZero` on a D32_FLOAT SRV starting at face 6.
-Separate DSVs clear the two selected cubes to 0.25 and 0.75; a LESS comparison against 0.5 returns
-`[0,0,0,255]` and `[255,0,0,255]` for cube indices 0 and 1, with one draw and zero WebGPU errors.
-This API fixture also verifies a one-slice DSV view selects its nonzero array layer; it is not a
-selected-target compatibility result.
+The synthetic D3D11 fixture covers implicit `SampleCmp` and `SampleCmpLevelZero` on a D32_FLOAT SRV
+starting at face 6. Separate DSVs clear the two selected cubes to 0.25 and 0.75; a LESS comparison
+against 0.5 returns `[0,0,0,255]` and `[255,255,0,255]` for cube indices 0 and 1, with one draw and
+zero WebGPU errors. This API fixture also verifies a one-slice DSV view selects its nonzero array
+layer; it is not a selected-target compatibility result.
 
 An earlier local run on 2026-10-11: Chrome `154.0.8037.98`, selected with `CHROMIUM` on Windows
 x64; `node test/browser/run.mjs` passed all checks. WebGPU reported an NVIDIA adapter, zero

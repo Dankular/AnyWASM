@@ -298,11 +298,12 @@ register-stack subset):
       compiler rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad`
       untestable. `Texture1DArray` and `Texture2DArray` `GetDimensions` now pass through Naga's image
       size and layer queries; shader tests and Chromium pixels verify mip 0/1 widths, two elements,
-      and three levels. D32_FLOAT `TextureCubeArray.SampleCmpLevelZero` with LESS compares a two-cube
-      view beginning at face 6; Chromium reads false for cube 0 and true for cube 1 with no WebGPU
-      validation errors. Cube-array `GetDimensions` also returns the expected 4x4 mip-0 and 2x2
-      mip-1 sizes for the two-cube, two-mip view. Additional sampled dimensions/formats, other anisotropic footprints,
-      other cube-array comparison methods, and array/3D formats beyond the tested RGBA8 samples remain open.
+      and three levels. D32_FLOAT `TextureCubeArray.SampleCmp` and `SampleCmpLevelZero` with LESS
+      compare a two-cube view beginning at face 6; Chromium reads false for cube 0 and true for cube 1
+      for both sampling methods, with no WebGPU validation errors. Cube-array `GetDimensions` also
+      returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip view. Additional
+      sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
+      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 samples remain open.
       Other staging formats and subresource layouts, format/resolve combinations, and render-state
       combinations remain open. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
