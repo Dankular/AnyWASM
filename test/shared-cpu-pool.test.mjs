@@ -108,6 +108,74 @@ test('rejects duplicate guest contexts before claiming any worker', async () => 
   assert.deepEqual([...pool.activeThreads], []);
 });
 
+test('drains a batch after one worker errors and disables only its slot', async () => {
+  const pool = makePool({ workerCount: 2, threadIds: [10, 20] });
+  const requests = [];
+  pool.request = (workerIndex, expectedType, message) => new Promise((resolve, reject) => {
+    assert.equal(expectedType, 'complete');
+    requests.push(() => {
+      if (workerIndex === 0) {
+        reject(new Error('worker crashed during its slice'));
+        return;
+      }
+      const slot = new Int32Array(pool.memory.buffer, message.slotOffset, 16);
+      Atomics.store(slot, 9, 7);
+      Atomics.store(slot, 10, 0);
+      Atomics.store(slot, 0, SharedCpuCompletion.QUANTUM);
+      resolve({ sequence: message.sequence });
+    });
+  });
+
+  const pending = pool.dispatchBatch([
+    { threadId: 10, instructionBudget: 80 },
+    { threadId: 20, instructionBudget: 80 },
+  ], 160);
+  requests.forEach((complete) => complete());
+
+  await assert.rejects(pending, /shared CPU batch failed/);
+  assert.deepEqual(pool.busy, [true, false], 'only the failed worker slot remains unavailable');
+  assert.deepEqual([...pool.activeThreads], [], 'both contexts return to coordinator ownership');
+  const failedSlot = new Int32Array(pool.memory.buffer, pool.layout.slots.offset, 16);
+  const completedSlot = new Int32Array(pool.memory.buffer, pool.layout.slots.offset + 64, 16);
+  assert.equal(Atomics.load(failedSlot, 0), 9, 'the failed slot is disabled');
+  assert.equal(Atomics.load(completedSlot, 0), 0, 'the successful sibling slot is reusable');
+});
+
+test('rejects shared-worker startup without cross-origin isolation', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'crossOriginIsolated');
+  Object.defineProperty(globalThis, 'crossOriginIsolated', {
+    configurable: true,
+    value: false,
+  });
+  try {
+    await assert.rejects(SharedCpuWorkerPool.create({}), /require cross-origin isolation and SharedArrayBuffer/);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'crossOriginIsolated', previous);
+    else delete globalThis.crossOriginIsolated;
+  }
+});
+
+test('disposal rejects pending worker requests and terminates every worker', async () => {
+  const pool = makePool({ workerCount: 2 });
+  let rejectPending;
+  const pending = new Promise((_, reject) => { rejectPending = reject; });
+  pending.catch(() => {});
+  let terminations = 0;
+  pool.workers = [
+    { terminate() { terminations++; } },
+    { terminate() { terminations++; } },
+  ];
+  pool.waiters = [{ reject: rejectPending }, null];
+  pool.busy = [true, false];
+
+  pool.dispose();
+
+  await assert.rejects(pending, /shared CPU worker pool was disposed/);
+  assert.equal(terminations, 2);
+  assert.deepEqual(pool.busy, [true, true]);
+  assert.throws(() => pool.requireInitialized(), /shared CPU worker pool is disposed/);
+});
+
 test('imports only worker-dirty pages, including both sides of a page boundary', () => {
   const pool = makePool();
   const sharedFrames = new Uint8Array(pool.memory.buffer, pool.layout.frames.offset, pool.layout.frames.length);
