@@ -282,7 +282,8 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   See [`docs/TARGETS.md`](TARGETS.md).
 - Direct3D 11 coverage is a vertical slice. Focused browser pixel/readback checks cover the coloured
   triangle (216 pixels), constant-factor and source-alpha blending, reverse-subtract/add/subtract/
-  min/max blending, texture/vertex/index-buffer copies, texture region copies and uploads,
+  min/max blending, texture/vertex/index-buffer copies, texture region copies and uploads, including
+  a partial RG8_UNORM copy with untouched destination texels,
   DXBC clip/discard, 2D and 3D mip generation, fractional-LOD linear filtering, an 8x anisotropic
   sampler request, instance step rates, render-to-texture, multiple render targets, cube/array/3D
   texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, and D3D11.1 constant-buffer

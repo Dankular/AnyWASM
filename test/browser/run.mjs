@@ -1624,6 +1624,27 @@ try {
       };
 
       stream.length = 0;
+      const sourceRg8 = 44, destinationRg8 = 45;
+      gpu.createTexture(sourceRg8, 4, 4, 1, 1, 49, 0, 0, 0, '2d');
+      gpu.createTexture(destinationRg8, 4, 4, 1, 1, 49, 0, 0, 0, '2d');
+      const sourceRg8Bytes = new Uint8Array(4 * 4 * 2), destinationRg8Bytes = new Uint8Array(4 * 4 * 2);
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+        const offset = (y * 4 + x) * 2;
+        sourceRg8Bytes.set([10 + x + y * 4, 50 + x + y * 4], offset);
+        destinationRg8Bytes.set([0xe0, 0xd0], offset);
+      }
+      gpu.textureWrite(sourceRg8, 0, 0, 0, 0, 4, 4, 8, sourceRg8Bytes.length, sourceRg8Bytes);
+      gpu.textureWrite(destinationRg8, 0, 0, 0, 0, 4, 4, 8, destinationRg8Bytes.length, destinationRg8Bytes);
+      command(40, words(destinationRg8, 0, 1, 1, 0, sourceRg8, 0, 1, 0, 0, 3, 2, 1, 1));
+      gpu.execute(append());
+      const copiedRg8Bytes = await gpu.readBackResource(destinationRg8);
+      const rg8Pixel = (x, y) => Array.from(copiedRg8Bytes.slice((y * 4 + x) * 2, (y * 4 + x) * 2 + 2));
+      result.copyRg8 = {
+        copied: [rg8Pixel(1, 1), rg8Pixel(2, 1), rg8Pixel(1, 2), rg8Pixel(2, 2)],
+        outside: [rg8Pixel(0, 1), rg8Pixel(3, 1), rg8Pixel(1, 0), rg8Pixel(1, 3)],
+      };
+
+      stream.length = 0;
       const sourceBuffer = 50, destinationBuffer = 51;
       const sourceBytes = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
       const destinationBytes = new Uint8Array(32).fill(0xee);
@@ -1672,6 +1693,10 @@ try {
       && copyRegionResult.copyArray?.outside?.every((pixel) => near(pixel, [9, 8, 7, 255], 1))
       && near(copyRegionResult.copyArray?.otherMip || [], [77, 76, 75, 255], 1),
     JSON.stringify(copyRegionResult.copyArray));
+  check('D3D11 CopySubresourceRegion copies a partial RG8_UNORM region and preserves untouched texels',
+    copyRegionResult.copyRg8?.copied?.map((pixel) => pixel.join(',')).join(';') === '11,51;12,52;15,55;16,56'
+      && copyRegionResult.copyRg8?.outside?.every((pixel) => pixel[0] === 0xe0 && pixel[1] === 0xd0),
+    JSON.stringify(copyRegionResult.copyRg8));
   const expectedBufferRegion = Array(32).fill(0xee);
   expectedBufferRegion.splice(5, 11, ...Array.from({ length: 11 }, (_, i) => i + 8));
   check('D3D11 CopySubresourceRegion copies unaligned buffer byte ranges and preserves both edges',
