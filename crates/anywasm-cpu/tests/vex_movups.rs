@@ -788,7 +788,10 @@ fn target_shrx_decodes_only_the_supported_32_bit_form() {
         decode(&[0xc4, 0xe2, 0x79, 0xf7, 0xc5], 0x1000).unwrap().op,
         Op::Shlx
     ); // pp=66 is SHLX
-    assert!(decode(&[0xc4, 0xe2, 0x7a, 0xf7, 0xc5], 0x1000).is_err()); // pp=F3 is SARX
+    assert_eq!(
+        decode(&[0xc4, 0xe2, 0x7a, 0xf7, 0xc5], 0x1000).unwrap().op,
+        Op::Sarx
+    ); // pp=F3 is SARX
     let shrx64 = decode(
         &[0xc4, 0xc2, 0xbb, 0xf7, 0x85, 0xf0, 0x00, 0x00, 0x00],
         0x1800_40b1a,
@@ -881,7 +884,8 @@ fn target_blsi_decodes_destination_from_vvvv_and_source_from_modrm_rm() {
     assert_eq!(instruction.ops[1], Opnd::Gpr(0));
 
     assert!(decode(&[0xc4, 0xe2, 0x6c, 0xf3, 0xd8], 0x1000).is_err()); // L=1
-    assert!(decode(&[0xc4, 0xe2, 0x68, 0xf3, 0xd0], 0x1000).is_err()); // /2, not BLSI
+    // /2 is BLSMSK (decoded since the BMI1 family was completed); /1 is BLSR.
+    assert_eq!(decode(&[0xc4, 0xe2, 0x68, 0xf3, 0xd0], 0x1000).unwrap().op, Op::Blsmsk);
 }
 
 #[test]
@@ -1114,7 +1118,8 @@ fn target_bzhi_decodes_modrm_sib_memory_and_vvvv_index_operands() {
     assert_eq!(bzhi.ops[2], Opnd::Gpr(1));
 
     assert!(decode(&[0xc4, 0xc2, 0x74, 0xf5, 0x44, 0x91, 0xfc], 0x1000).is_err()); // VEX.L=1
-    assert!(decode(&[0xc4, 0xc2, 0xf0, 0xf5, 0x44, 0x91, 0xfc], 0x1000).is_err()); // W=1
+    let bzhi64 = decode(&[0xc4, 0xc2, 0xf0, 0xf5, 0x44, 0x91, 0xfc], 0x1000).unwrap(); // W=1
+    assert_eq!((bzhi64.op, bzhi64.osz), (Op::Bzhi, 8));
     assert!(decode(&[0xc4, 0xc2, 0x71, 0xf5, 0x44, 0x91, 0xfc], 0x1000).is_err());
     // pp=66
 }

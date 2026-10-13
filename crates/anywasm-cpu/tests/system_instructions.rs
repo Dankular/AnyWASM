@@ -35,6 +35,18 @@ fn cpuid_reports_the_guest_vendor_and_hides_unsupported_vector_features() {
 
     let (mut cpu, mut mem) = machine(&[0x0f, 0xa2]);
     cpu.gpr[RAX] = 7;
+    cpu.gpr[RCX] = 0;
+    step(&mut cpu, &mut mem).unwrap();
+    // Leaf 7 sub-leaf 0 advertises only BMI1 (EBX bit 3) and BMI2 (EBX bit 8), which are
+    // implemented; AVX2, AVX-512, SHA, etc. stay hidden.
+    assert_eq!(
+        [cpu.gpr[RAX], cpu.gpr[RBX], cpu.gpr[RCX], cpu.gpr[RDX]],
+        [0, (1 << 3) | (1 << 8), 0, 0]
+    );
+
+    let (mut cpu, mut mem) = machine(&[0x0f, 0xa2]);
+    cpu.gpr[RAX] = 7;
+    cpu.gpr[RCX] = 1;
     step(&mut cpu, &mut mem).unwrap();
     assert_eq!(
         [cpu.gpr[RAX], cpu.gpr[RBX], cpu.gpr[RCX], cpu.gpr[RDX]],
