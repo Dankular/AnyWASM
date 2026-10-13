@@ -367,7 +367,10 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
             "IDirect3DDevice9",
             "GetDirect3D" | "GetDeviceCaps" | "GetFVF" | "GetSoftwareVertexProcessing",
         ) => 2,
-        ("IDirect3DDevice9", "GetDisplayMode" | "GetSwapChain" | "GetRenderTarget") => 3,
+        (
+            "IDirect3DDevice9",
+            "GetDisplayMode" | "GetSwapChain" | "GetRenderTarget" | "GetTexture",
+        ) => 3,
         (
             "IDirect3DDevice9",
             "GetCreationParameters"
@@ -526,6 +529,7 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "GetVertexShader") => |p| get_shader9(p, true),
         ("IDirect3DDevice9", "GetPixelShader") => |p| get_shader9(p, false),
         ("IDirect3DDevice9", "SetTexture") => set_texture,
+        ("IDirect3DDevice9", "GetTexture") => get_texture,
         ("IDirect3DDevice9", "GetSamplerState") => get_sampler_state,
         ("IDirect3DDevice9", "SetSamplerState") => set_sampler_state,
         ("IDirect3DDevice9", "GetTextureStageState") => get_texture_stage_state,
@@ -948,7 +952,7 @@ fn set_texture(p: &mut Process) -> R {
     ) {
         return Ok(D3DERR_INVALIDCALL);
     }
-    if stage > 1 {
+    if stage >= 8 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let view = if texture == 0 {
@@ -990,6 +994,34 @@ fn set_texture(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
+fn get_texture(p: &mut Process) -> R {
+    let (device, stage, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if stage >= 8 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let texture = p
+        .extra
+        .com
+        .d3d9_bound_textures
+        .get(&(device, stage))
+        .copied()
+        .unwrap_or(0);
+    if texture != 0 && com::add_ref_obj(p, texture) == 0 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    p.wrptr(out, texture)?;
+    Ok(S_OK)
+}
+
 fn d3d9_sampler_state(p: &Process, device: u64, stage: u32, state: u32, default: u32) -> u32 {
     p.extra
         .com
@@ -1010,7 +1042,7 @@ fn get_sampler_state(p: &mut Process) -> R {
     ) {
         return Ok(D3DERR_INVALIDCALL);
     }
-    if stage > 1 {
+    if stage >= 8 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let default = match state {
@@ -1033,7 +1065,7 @@ fn set_sampler_state(p: &mut Process) -> R {
     ) {
         return Ok(D3DERR_INVALIDCALL);
     }
-    if stage > 1 {
+    if stage >= 8 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
@@ -3525,6 +3557,135 @@ mod tests {
     }
 
     #[test]
+    fn texture_and_sampler_bindings_support_the_eighth_pixel_shader_slot() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        const TEXTURE_ID: u32 = 77;
+        const VIEW_ID: u32 = 1234;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 32,
+                fvf: 0,
+            },
+        );
+        let texture = com::create(
+            &mut p,
+            "IDirect3DTexture9",
+            com::Kind::Direct3DTexture9 {
+                id: TEXTURE_ID,
+                device,
+                width: 4,
+                height: 4,
+                levels: 1,
+                format: 21,
+                pool: 0,
+            },
+        );
+        p.extra.com.d3d9_texture_views.insert(TEXTURE_ID, VIEW_ID);
+        p.cpu.gpr[RSP] = STACK;
+        for (offset, value) in [(4, device as u32), (8, 7), (12, texture as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "SetTexture").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, binding) = commands
+            .iter()
+            .find(|(opcode, _)| *opcode == op::SET_SRVS)
+            .expect("SetTexture should bind stage 7");
+        assert_eq!(
+            binding,
+            &[
+                1u32.to_le_bytes(),
+                7u32.to_le_bytes(),
+                1u32.to_le_bytes(),
+                VIEW_ID.to_le_bytes(),
+            ]
+            .concat(),
+        );
+        assert_eq!(p.extra.com.objs[&texture].refs, 2);
+
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::GetTexture"),
+            Some(12)
+        );
+        let get_texture =
+            method("IDirect3DDevice9", "GetTexture").expect("GetTexture should be dispatched");
+        for (offset, value) in [(4, device as u32), (8, 7), (12, OUT as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(get_texture(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), texture as u32);
+        assert_eq!(p.extra.com.objs[&texture].refs, 3);
+        p.wr32(STACK + 8, 6).unwrap();
+        p.wr32(OUT, 0xdead_beef).unwrap();
+        assert_eq!(get_texture(&mut p).unwrap(), S_OK);
+        assert_eq!(p.rd32(OUT).unwrap(), 0);
+
+        for (offset, value) in [(4, device as u32), (8, 7), (12, 6), (16, 2)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "SetSamplerState").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        let (_, binding) = commands
+            .iter()
+            .find(|(opcode, payload)| {
+                *opcode == op::SET_SAMPLERS && payload[4..8] == 7u32.to_le_bytes()
+            })
+            .expect("SetSamplerState should bind sampler 7");
+        assert_eq!(
+            &binding[0..12],
+            &[1u32.to_le_bytes(), 7u32.to_le_bytes(), 1u32.to_le_bytes(),].concat(),
+        );
+        p.wr32(STACK + 16, OUT as u32).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "GetSamplerState").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        assert_eq!(p.rd32(OUT).unwrap(), 2);
+
+        p.wr32(STACK + 8, 8).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "SetTexture").unwrap()(&mut p).unwrap(),
+            D3DERR_NOTAVAILABLE
+        );
+        p.wr32(STACK + 12, OUT as u32).unwrap();
+        p.wr32(OUT, 0xdead_beef).unwrap();
+        assert_eq!(get_texture(&mut p).unwrap(), D3DERR_NOTAVAILABLE);
+        assert_eq!(p.rd32(OUT).unwrap(), 0xdead_beef);
+        p.wr32(STACK + 12, 6).unwrap();
+        p.wr32(STACK + 16, 2).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "SetSamplerState").unwrap()(&mut p).unwrap(),
+            D3DERR_NOTAVAILABLE
+        );
+        p.wr32(STACK + 16, OUT as u32).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "GetSamplerState").unwrap()(&mut p).unwrap(),
+            D3DERR_NOTAVAILABLE
+        );
+    }
+
+    #[test]
     fn set_sampler_state_rebuilds_the_d3d9_sampler_with_linear_minification() {
         const STACK: u64 = 0x10000;
         let mut p = Process::new(Vfs::new());
@@ -3640,7 +3801,7 @@ mod tests {
         p.wr32(STACK + 12, 4).unwrap(); // D3DSAMP_BORDERCOLOR is outside this HLE slice.
         assert_eq!(get_sampler_state(&mut p).unwrap(), D3DERR_NOTAVAILABLE);
         assert_eq!(p.rd32(OUT).unwrap(), 0xdead_beef);
-        p.wr32(STACK + 8, 2).unwrap();
+        p.wr32(STACK + 8, 8).unwrap();
         p.wr32(STACK + 12, 10).unwrap();
         assert_eq!(get_sampler_state(&mut p).unwrap(), D3DERR_NOTAVAILABLE);
         p.wr32(STACK + 8, 1).unwrap();
