@@ -93,6 +93,59 @@ test('dispatches distinct contexts together within one process-wide budget', asy
   assert.deepEqual([...pool.activeThreads], []);
 });
 
+test('holds an early HLE completion until every sibling slice reaches a safe point', async () => {
+  const pool = makePool({ workerCount: 2, threadIds: [10, 20] });
+  const requests = [];
+  pool.request = (workerIndex, expectedType, message) => new Promise((resolve) => {
+    assert.equal(expectedType, 'complete');
+    requests.push({ workerIndex, message, resolve });
+  });
+
+  const importedContexts = [];
+  let coordinatorMutation = false;
+  const coordinator = pool.dispatchBatch([
+    { threadId: 10, instructionBudget: 80 },
+    { threadId: 20, instructionBudget: 80 },
+  ], 160).then((completions) => {
+    pool.importTo({
+      importSharedCpuContext(threadId) { importedContexts.push(threadId); },
+    });
+    coordinatorMutation = true;
+    return completions;
+  });
+
+  const finish = ({ workerIndex, message, resolve }, state, retired) => {
+    const slot = new Int32Array(pool.memory.buffer, message.slotOffset, 16);
+    Atomics.store(slot, 9, retired);
+    Atomics.store(slot, 10, 0);
+    Atomics.store(slot, 0, state);
+    resolve({ sequence: message.sequence });
+  };
+
+  assert.equal(requests.length, 2, 'both sibling slices must be in flight');
+  finish(requests[0], SharedCpuCompletion.HLE, 7);
+  await Promise.resolve();
+
+  assert.equal(coordinatorMutation, false, 'the coordinator must not import an early HLE result');
+  assert.deepEqual(importedContexts, []);
+  assert.throws(
+    () => pool.importTo({}),
+    /shared CPU memory can only be changed at a worker safe point/,
+  );
+
+  finish(requests[1], SharedCpuCompletion.QUANTUM, 9);
+  const completions = await coordinator;
+
+  assert.equal(coordinatorMutation, true);
+  assert.deepEqual(importedContexts, [10, 20]);
+  assert.deepEqual(completions.map(({ threadId, state, retiredInstructions }) => [
+    threadId, state, retiredInstructions,
+  ]), [
+    [10, SharedCpuCompletion.HLE, 7n],
+    [20, SharedCpuCompletion.QUANTUM, 9n],
+  ]);
+});
+
 test('rejects duplicate guest contexts before claiming any worker', async () => {
   const pool = makePool({ workerCount: 2, threadIds: [10] });
   let sends = 0;
