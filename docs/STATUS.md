@@ -504,8 +504,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   lazily from function lookup and SEH frame search, validating the returned entry against the control
   PC. A runtime regression registers one through ntdll, executes the guest callback via
   `RtlLookupFunctionEntry`, checks the PC/context arguments and returned entry, and verifies range
-  exclusion and deletion. Guest-generated-code exception unwinding through a grown or callback table
-  remains unverified; the optional out-of-process debugger callback DLL is not used.
+  exclusion and deletion. A separate exception-dispatch regression confirms callback lookup invokes
+  the guest language handler, continues search, and lets the top-level filter resume at an edited
+  landing-pad context. Exception dispatch through a grown table remains unverified; the optional
+  out-of-process debugger callback DLL is not used.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
   this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested

@@ -1802,6 +1802,7 @@ fn unsupported<T>(p: &mut Process, detail: String) -> Result<T, Stop> {
 mod tests {
     use super::*;
     use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
     use anywasm_cpu::mem::{Fault, FaultKind, PAGE_SIZE, PROT_RW, PROT_RWX};
 
     const INFO: u64 = 0x10000;
@@ -2388,6 +2389,101 @@ mod tests {
         assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], CODE as u64);
         assert!(process.skip_ret);
         assert_eq!(process.rd32(VEH_MARKER).unwrap(), 1);
+    }
+
+    #[test]
+    fn callback_managed_function_table_participates_in_exception_search() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const TABLE_IDENTIFIER: u64 = 0x200003;
+        const TABLE_LENGTH: u64 = 0x1000;
+        const CALLBACK: u64 = IMAGE_BASE + 0x700;
+        const CALLBACK_CONTEXT: u64 = 0xfeed_beef;
+        const CALLER: u64 = IMAGE_BASE + 0x110;
+        const FUNCTION_ENTRY: u64 = IMAGE_BASE + 0x500;
+        const EXCEPTION_HANDLER: u64 = IMAGE_BASE + 0x600;
+        const TOP_LEVEL_FILTER: u64 = IMAGE_BASE + 0x780;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const SEEN_PC: u64 = INFO + 0x300;
+        const SEEN_CONTEXT: u64 = INFO + 0x308;
+        const HANDLER_MARKER: u64 = INFO + 0x310;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x160;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions.clear();
+        process.modules.push(module);
+
+        process.wr32(FUNCTION_ENTRY, 0x100).unwrap();
+        process.wr32(FUNCTION_ENTRY + 4, 0x120).unwrap();
+        process.wr32(FUNCTION_ENTRY + 8, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 0x09).unwrap(); // version 1, EHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process
+            .wr32(IMAGE_BASE + 0x304, (EXCEPTION_HANDLER - IMAGE_BASE) as u32)
+            .unwrap();
+
+        let mut callback_code = vec![0x48, 0xb8]; // mov rax, SEEN_PC
+        callback_code.extend_from_slice(&SEEN_PC.to_le_bytes());
+        callback_code.extend_from_slice(&[0x48, 0x89, 0x08]); // mov [rax], rcx
+        callback_code.extend_from_slice(&[0x48, 0xb8]); // mov rax, SEEN_CONTEXT
+        callback_code.extend_from_slice(&SEEN_CONTEXT.to_le_bytes());
+        callback_code.extend_from_slice(&[0x48, 0x89, 0x10]); // mov [rax], rdx
+        callback_code.extend_from_slice(&[0x48, 0xb8]); // mov rax, FUNCTION_ENTRY
+        callback_code.extend_from_slice(&FUNCTION_ENTRY.to_le_bytes());
+        callback_code.push(0xc3);
+        process.write_bytes(CALLBACK, &callback_code).unwrap();
+
+        let mut exception_handler = vec![0x48, 0xb8]; // mov rax, HANDLER_MARKER
+        exception_handler.extend_from_slice(&HANDLER_MARKER.to_le_bytes());
+        exception_handler.extend_from_slice(&[
+            0xc7, 0x00, 1, 0, 0, 0, // mov dword ptr [rax], 1
+            0xb8, 1, 0, 0, 0, // EXCEPTION_CONTINUE_SEARCH
+            0xc3,
+        ]);
+        process
+            .write_bytes(EXCEPTION_HANDLER, &exception_handler)
+            .unwrap();
+
+        let mut top_filter = vec![0x48, 0x8b, 0x41, 0x08]; // mov rax, [rcx + ContextRecord]
+        top_filter.extend_from_slice(&[0x48, 0xba]); // mov rdx, LANDING_PAD
+        top_filter.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        top_filter.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0xb8, 0xff, 0xff, 0xff, 0xff, // EXCEPTION_CONTINUE_EXECUTION
+            0xc3,
+        ]);
+        process.write_bytes(TOP_LEVEL_FILTER, &top_filter).unwrap();
+        process.top_level_exception_filter = TOP_LEVEL_FILTER;
+
+        let install = crate::hle::lookup("ntdll", "RtlInstallFunctionTableCallback").unwrap();
+        process.cpu.gpr[RSP] = STACK + 0x500;
+        process.cpu.gpr[RCX] = TABLE_IDENTIFIER;
+        process.cpu.gpr[RDX] = IMAGE_BASE;
+        process.cpu.gpr[R8] = TABLE_LENGTH;
+        process.cpu.gpr[R9] = CALLBACK;
+        process
+            .wr64(process.cpu.gpr[RSP] + 0x28, CALLBACK_CONTEXT)
+            .unwrap();
+        assert_eq!(install(&mut process), Ok(1));
+
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+        process.wr64(RAISE_RSP + 8, 0).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd64(SEEN_PC).unwrap(), CALLER);
+        assert_eq!(process.rd64(SEEN_CONTEXT).unwrap(), CALLBACK_CONTEXT);
+        assert_eq!(process.rd32(HANDLER_MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert!(process.skip_ret);
     }
 
     #[test]
