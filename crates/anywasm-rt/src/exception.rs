@@ -2487,6 +2487,108 @@ mod tests {
     }
 
     #[test]
+    fn callback_managed_function_table_participates_in_phase_two_unwind() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const TABLE_IDENTIFIER: u64 = 0x200007;
+        const TABLE_LENGTH: u64 = 0x1000;
+        const CALLBACK: u64 = IMAGE_BASE + 0x700;
+        const CALLBACK_CONTEXT: u64 = 0xfeed_beef;
+        const CALLER: u64 = IMAGE_BASE + 0x110;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x160;
+        const FUNCTION_ENTRY: u64 = IMAGE_BASE + 0x500;
+        const EXCEPTION_HANDLER: u64 = IMAGE_BASE + 0x600;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const CALLBACK_COUNT: u64 = INFO + 0x300;
+        const HANDLER_COUNT: u64 = INFO + 0x304;
+        const LAST_PC: u64 = INFO + 0x308;
+        const LAST_CONTEXT: u64 = INFO + 0x310;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions.clear();
+        process.modules.push(module);
+
+        process.wr32(FUNCTION_ENTRY, 0x100).unwrap();
+        process.wr32(FUNCTION_ENTRY + 4, 0x180).unwrap();
+        process.wr32(FUNCTION_ENTRY + 8, 0x300).unwrap();
+        process.wr8(IMAGE_BASE + 0x300, 0x19).unwrap(); // version 1, EHANDLER | UHANDLER
+        process.wr8(IMAGE_BASE + 0x301, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x302, 0).unwrap();
+        process.wr8(IMAGE_BASE + 0x303, 0).unwrap();
+        process
+            .wr32(IMAGE_BASE + 0x304, (EXCEPTION_HANDLER - IMAGE_BASE) as u32)
+            .unwrap();
+
+        let scope_table = IMAGE_BASE + 0x308;
+        process.wr32(scope_table, 1).unwrap();
+        process.wr32(scope_table + 4, 0x100).unwrap();
+        process.wr32(scope_table + 8, 0x180).unwrap();
+        process.wr32(scope_table + 12, 1).unwrap(); // Catch-all filter.
+        process.wr32(scope_table + 16, 0x160).unwrap();
+
+        let c_handler = process
+            .thunk_for("crt", "__C_specific_handler", true)
+            .unwrap();
+        let mut exception_handler = vec![0x48, 0xb8]; // mov rax, HANDLER_COUNT
+        exception_handler.extend_from_slice(&HANDLER_COUNT.to_le_bytes());
+        exception_handler.extend_from_slice(&[
+            0x83, 0x00, 0x01, // add dword ptr [rax], 1
+            0x48, 0xb8,
+        ]);
+        exception_handler.extend_from_slice(&c_handler.to_le_bytes());
+        exception_handler.extend_from_slice(&[0xff, 0xe0]); // jmp to __C_specific_handler
+        process
+            .write_bytes(EXCEPTION_HANDLER, &exception_handler)
+            .unwrap();
+
+        let mut callback = vec![0x48, 0xb8]; // mov rax, CALLBACK_COUNT
+        callback.extend_from_slice(&CALLBACK_COUNT.to_le_bytes());
+        callback.extend_from_slice(&[
+            0x83, 0x00, 0x01, // add dword ptr [rax], 1
+            0x48, 0xb8,
+        ]);
+        callback.extend_from_slice(&LAST_PC.to_le_bytes());
+        callback.extend_from_slice(&[0x48, 0x89, 0x08]); // mov [rax], rcx
+        callback.extend_from_slice(&[0x48, 0xb8]);
+        callback.extend_from_slice(&LAST_CONTEXT.to_le_bytes());
+        callback.extend_from_slice(&[0x48, 0x89, 0x10]); // mov [rax], rdx
+        callback.extend_from_slice(&[0x48, 0xb8]);
+        callback.extend_from_slice(&FUNCTION_ENTRY.to_le_bytes());
+        callback.push(0xc3);
+        process.write_bytes(CALLBACK, &callback).unwrap();
+
+        let install = crate::hle::lookup("ntdll", "RtlInstallFunctionTableCallback").unwrap();
+        process.cpu.gpr[RSP] = STACK + 0x500;
+        process.cpu.gpr[RCX] = TABLE_IDENTIFIER;
+        process.cpu.gpr[RDX] = IMAGE_BASE;
+        process.cpu.gpr[R8] = TABLE_LENGTH;
+        process.cpu.gpr[R9] = CALLBACK;
+        process
+            .wr64(process.cpu.gpr[RSP] + 0x28, CALLBACK_CONTEXT)
+            .unwrap();
+        assert_eq!(install(&mut process), Ok(1));
+
+        process.wr64(RAISE_RSP, CALLER).unwrap();
+        process.wr64(RAISE_RSP + 8, IMAGE_BASE + 0x120).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], CODE as u64);
+        assert!(process.skip_ret);
+        assert_eq!(process.rd32(HANDLER_COUNT).unwrap(), 2);
+        assert_eq!(process.rd32(CALLBACK_COUNT).unwrap(), 4);
+        assert_eq!(process.rd64(LAST_PC).unwrap(), LANDING_PAD);
+        assert_eq!(process.rd64(LAST_CONTEXT).unwrap(), CALLBACK_CONTEXT);
+    }
+
+    #[test]
     fn dispatcher_context_uses_the_x64_field_offsets_observed_in_the_target() {
         let mut process = process_with_memory();
         write_dispatcher_context(
