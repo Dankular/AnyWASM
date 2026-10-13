@@ -58,6 +58,8 @@
 - [x] Add a WASM differential fixture for the decoded instruction pair; assert interpreter, cached, and emitted execution have equal retired count, full CPU state, and mapped memory. `node test/wasm_jit_x86_movzx.mjs` passes with 10 retired instructions, 2 emitted executions, and matching 776-byte CPU / 2,204,385-byte mapped-memory snapshots.
 - [ ] Run a forced-emission GTA replay with the new pair and confirm nonzero target execution counters without disrupting the normal loading path.
 
+Replay attempt (2026-10-13): `GTA_JIT_MIN_PREFIX=1` ran for the 60-second boot limit, then the harness timed out waiting for the canvas to become visible. The last worker snapshot showed 2,282,754 guest instructions, 313,115 emitted executions, 513,483 emitted guest instructions, zero JIT failures, and zero presents. This confirms general JIT activity only; it does not show that the target `MOVZX` pair executed or that the normal loading path completed, so the checkpoint remains open.
+
 ### Task 3: Accelerate the measured GTA parser path
 
 **Files:**
