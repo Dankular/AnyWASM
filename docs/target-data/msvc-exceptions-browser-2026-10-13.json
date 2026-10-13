@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-13",
+  "target": "MSVC x64/PE32 C++ EH and PE32 C SEH fixtures",
+  "browser": "Playwright Chromium revision 1234",
+  "mode": "HLE-only AWB packages; each package contains one fixture executable and no runtime DLLs",
+  "browserWasmSha256": "38C98D5AD13BB9A7953F683EFE42F0D256CEE1704EFCF2AA72F90F8411B48CBB",
+  "results": [
+    { "fixture": "eh3-dynamic", "processStatus": 1, "exitCode": 0, "instructions": 536 },
+    { "fixture": "eh4-dynamic", "processStatus": 1, "exitCode": 0, "instructions": 527 },
+    { "fixture": "eh3-x86-dynamic", "processStatus": 1, "exitCode": 0, "instructions": 976 },
+    { "fixture": "eh3-x86-direct", "processStatus": 1, "exitCode": 0, "instructions": 567 },
+    { "fixture": "seh-x86", "processStatus": 1, "exitCode": 0, "instructions": 458 }
+  ],
+  "pageErrors": [],
+  "staleArtifactFinding": "The prior browser WASM predated commit 711dad4 and the x86 startup fixture exited 94 because the thrown-object destructor was absent. Rebuilding the current source and rerunning Asyncify produced the passing results above.",
+  "scope": "This verifies these five finite fixtures in Chromium; it does not establish broad browser gameplay acceptance or cover every PE32 exception layout."
+}

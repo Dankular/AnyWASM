@@ -134,3 +134,4 @@
 - [x] **Step 2: Run `cargo build --workspace`** and verify every crate builds.
 - [x] **Step 3: Re-run Tutorial03 HLE-only and runtime-DLL browser captures**; verify a visible frame, the import report, and WebGPU error count.
 - [x] **Step 4: Update status notes** to distinguish EH3/EH4 coverage, actual Diligent rendering, and remaining PE32/C++ gaps.
+- [x] **Step 5: Execute the x64 EH3/EH4, PE32 EH3 startup/direct, and PE32 C SEH fixtures through HLE-only Chromium packages**; all five exited 0 after rebuilding the browser WASM past the PE32 thrown-object destructor fix.

@@ -62,6 +62,21 @@ Build and inspect the imported exception entry points from the repository root:
 .\target\debug\anywasm.exe run .\target\msvc-cpp-eh\seh-x86.exe --max-steps 2000000
 ```
 
+To run the five fixtures through the browser runtime without MSVC/UCRT DLLs, build the browser WASM
+from the current source and run the Chromium smoke test:
+
+```powershell
+cargo build -p anywasm-wasm --target wasm32-unknown-unknown --release
+node scripts/asyncify-wasm.mjs
+Copy-Item target\wasm32-unknown-unknown\release\anywasm_wasm.asyncified.wasm web\anywasm_wasm.wasm
+$env:CHROMIUM = 'C:\path\to\chrome.exe'
+node test/browser/exception-fixtures.mjs
+```
+
+The test packs each executable by itself, uploads it through the page's `.awb` input, and requires a
+normal process exit with code 0. It needs the fixtures built by `build.ps1` and `playwright-core`
+installed from `test/browser/package.json`.
+
 These fixtures cover the minimum compiler-generated records needed to start EH3/EH4 runtime work;
 they do not cover virtual bases, `/EHa`, `exception_ptr`, or unknown future EH4 encodings.
 

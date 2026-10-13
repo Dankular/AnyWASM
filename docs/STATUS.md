@@ -352,12 +352,17 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   execution is already inside a catch; try-body catches use the establisher frame. The HLE-only
   guest runs for both FH3 and FH4 fixtures now return 0 under a 2,000,000-step cap, including
   adjusted base-reference, catch-all, nested catch, and unwind-funclet paths. The focused EH suite
-  passes 30 tests; the runtime library suite passes 172. HLE-only runs and runs with the installed
-  VCRUNTIME redist plus the actual system `ucrtbase.dll` both return 0. Runtime traces confirm guest
-  execution in `ucrtbase.dll` and VCRUNTIME; API-set contracts without physical VFS DLLs still use
+  passes 30 tests; the runtime library suite now passes 180 unit tests. HLE-only runs and runs with
+  the installed VCRUNTIME redist plus the actual system `ucrtbase.dll` both return 0. Runtime
+  traces confirm guest execution in `ucrtbase.dll` and VCRUNTIME; API-set contracts without physical VFS DLLs still use
   HLE. The host `--workspace` build succeeds: the worker crate enables `no_std` only on `wasm32` and
   uses the host `std` runtime elsewhere. The shared-memory `wasm32` worker build also succeeds with
-  atomics and imported-memory linker flags. Browser execution of the exception fixtures remains.
+  atomics and imported-memory linker flags. A Chromium HLE-only smoke now runs the x64 EH3/EH4,
+  PE32 EH3 startup/direct, and PE32 C SEH fixtures; all five packages exited 0 with no page errors.
+  The first run exposed a stale browser WASM that predated the PE32 thrown-object destructor fix
+  (x86 startup fixture exit 94); rebuilding and Asyncify-processing the current runtime made all
+  fixtures pass. Evidence is in
+  [`docs/target-data/msvc-exceptions-browser-2026-10-13.json`](target-data/msvc-exceptions-browser-2026-10-13.json).
   PE32 EH3 now reads absolute-pointer throw/function metadata, searches the x86 registration state's
   active try blocks, and contains a bounded second-pass unwind to a selected registration frame.
   The dispatcher sets the x86 unwind flags, runs intervening frame handlers, unlinks frames above
