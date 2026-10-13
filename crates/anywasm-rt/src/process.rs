@@ -1215,6 +1215,15 @@ impl Process {
     }
 
     fn sync_current_teb_to_backing(&mut self) -> Result<(), Stop> {
+        if self.current_teb_base == TEB_ADDR && self.cpu.mode == CpuMode::X86_64 {
+            // The initial thread's TEB lives in the HLE alias itself. Before another thread's TEB
+            // is loaded over the alias, give the initial thread its own backing page; otherwise its
+            // TLS vector, last error and exception state would be overwritten and never restored.
+            let backing = self
+                .try_alloc_virtual(0x1000, PROT_RW)
+                .ok_or_else(|| Stop::Crash("guest allocation failed while allocating main-thread TEB backing".into()))?;
+            self.current_teb_base = backing;
+        }
         self.copy_teb_page(TEB_ADDR, self.current_teb_base)?;
         if self.current_teb_base != TEB_ADDR && self.cpu.mode == CpuMode::X86_64 {
             self.wr64(self.current_teb_base + 0x30, self.current_teb_base)?;
@@ -1599,6 +1608,10 @@ impl Process {
         } else {
             // The x64 TEB page is already thread-owned. Preserve guest-written fields from it
             // instead of overwriting them with the scheduler's older scalar snapshot.
+            // `last_error` equals the backing page's value at save time; it differs only when a
+            // wait completion (e.g. a condition-variable timeout, ERROR_TIMEOUT) updated it
+            // while the thread was blocked, so reapplying it is always correct.
+            self.wr32(TEB_ADDR + 0x68, context.last_error)?;
             self.cpu.gs_base = TEB_ADDR;
             self.cpu.fs_base = 0;
         }

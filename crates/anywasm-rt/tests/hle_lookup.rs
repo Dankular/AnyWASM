@@ -21,8 +21,8 @@ fn implemented_current_directory_and_directory_creation_imports_are_reported_tru
     }
     for name in ["SetFileAttributesA", "SetFileAttributesW"] {
         assert!(
-            hle::lookup("kernel32", name).is_none(),
-            "{name} must stop as an unimplemented import while it does not change runtime state"
+            hle::lookup("kernel32", name).is_some(),
+            "{name} should be implemented (virtual file attributes)"
         );
     }
 }
