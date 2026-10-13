@@ -665,13 +665,16 @@ handler and CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fi
 filter selection, continuation, and normal and unwind-time `__finally` execution. Native and
 HLE-only runs now also verify a nested exception escaping a filter to an outer handler and an
 exception raised during `__finally`. A synthetic handler test covers disposition 2 setting
-`EXCEPTION_NESTED_CALL` before search continues. These runs do not exercise explicit dispositions 2
-or 3 end to end. The rebuilt release WASM and Asyncify module also pass all five HLE-only exception
+`EXCEPTION_NESTED_CALL` before search continues. A second-pass x64 test covers disposition 3 by
+redirecting to another searched frame, checking the resumed handler's unwind, target, and collided
+flags, and preserving restored register state. First-pass collided dispatch, nested `RtlUnwindEx`
+during phase two, and PE32 collided dispositions remain unsupported. The rebuilt release WASM and
+Asyncify module also pass all five HLE-only exception
 fixture packages in Chromium with no page errors. The compiled PE32
 EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and
 one caller/callee catch transfer; the direct-entry and normal-startup x86 variants return 0 in the
-HLE-only runtime. Full nested-frame bookkeeping, explicit collided-unwind disposition handling, other
-PE32 frame layouts, and broader compiler metadata remain unverified. See
+HLE-only runtime. Full nested-frame bookkeeping, redirects outside the searched x64 frames, non-null
+unwind history tables, other PE32 frame layouts, and broader compiler metadata remain unverified. See
 [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
 for the fixture matrix and exit-code meanings.
 

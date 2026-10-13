@@ -23,10 +23,14 @@ const EXCEPTION_CONTINUE_EXECUTION_FILTER: i32 = -1;
 const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
 const EXCEPTION_UNWINDING: u32 = 0x2;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
+const EXCEPTION_COLLIDED_UNWIND_FLAG: u32 = 0x40;
 const DISPATCHER_CONTROL_PC: u64 = 0x00;
 const DISPATCHER_IMAGE_BASE: u64 = 0x08;
+const DISPATCHER_FUNCTION_ENTRY: u64 = 0x10;
 const DISPATCHER_ESTABLISHER_FRAME: u64 = 0x18;
 const DISPATCHER_TARGET_IP: u64 = 0x20;
+const DISPATCHER_CONTEXT_RECORD: u64 = 0x28;
+const DISPATCHER_LANGUAGE_HANDLER: u64 = 0x30;
 const DISPATCHER_HANDLER_DATA: u64 = 0x38;
 const DISPATCHER_HISTORY_TABLE: u64 = 0x40;
 const DISPATCHER_SCOPE_INDEX: u64 = 0x48;
@@ -46,6 +50,7 @@ const UNW_FLAG_UHANDLER: u8 = 2;
 const UNW_FLAG_CHAININFO: u8 = 4;
 const EXCEPTION_NESTED_EXCEPTION: u64 = 2;
 const EXCEPTION_NESTED_CALL: u32 = 0x10;
+const EXCEPTION_COLLIDED_UNWIND_DISPOSITION: u32 = 3;
 
 const WINDOWS_GPRS: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
@@ -906,6 +911,7 @@ fn complete_guest_unwind(
             unwind.target_ip, unwind.target_frame
         )));
     }
+    let mut active_frames = frames.to_vec();
     let mut transfer_context = target_frame.context.clone();
     let target_scope_index = p.rd32(dispatcher_context + 0x48)?;
     if p.trace_imports {
@@ -925,8 +931,14 @@ fn complete_guest_unwind(
     // Second-pass handlers run as nested calls from RtlUnwindEx. Preserve that active stack
     // position so their frames grow below the exception record and handler locals.
     p.cpu.gpr[RSP] = unwind.call_rsp;
-    for (index, frame) in frames.iter().take(target_index + 1).enumerate() {
+    let mut index = 0;
+    let mut collided = false;
+    let mut collided_count = 0;
+    let mut redirected_scope_index = None;
+    while index <= target_index {
+        let frame = &active_frames[index];
         if frame.function_entry == 0 {
+            index += 1;
             continue;
         }
         let mut caller_context = frame.context.clone();
@@ -941,13 +953,16 @@ fn complete_guest_unwind(
             false,
         )?;
         if result.handler == 0 {
+            index += 1;
             continue;
         }
-        let scope_index = if index == target_index {
-            target_scope_index
-        } else {
-            0
-        };
+        let scope_index = redirected_scope_index.take().unwrap_or_else(|| {
+            if index == target_index {
+                target_scope_index
+            } else {
+                0
+            }
+        });
         if index < target_index {
             let next_frame = &frames[index + 1];
             if caller_context.rip != next_frame.context.rip
@@ -1003,6 +1018,11 @@ fn complete_guest_unwind(
                 EXCEPTION_TARGET_UNWIND
             } else {
                 0
+            }
+            | if collided {
+                EXCEPTION_COLLIDED_UNWIND_FLAG
+            } else {
+                0
             };
         p.wr32(unwind.exception_record + 4, phase_two_flags)?;
         let disposition = match p.call_guest(
@@ -1022,6 +1042,81 @@ fn complete_guest_unwind(
             }
             Err(stop) => return Err(stop),
         };
+        if disposition == EXCEPTION_COLLIDED_UNWIND_DISPOSITION {
+            collided_count += 1;
+            if collided_count > MAX_EXCEPTION_FRAMES {
+                return Err(Stop::Crash(format!(
+                    "RtlUnwindEx exceeded {MAX_EXCEPTION_FRAMES} collided-unwind redirects"
+                )));
+            }
+            let (redirect_index, restored_context, scope_index) = resolve_collided_unwind_frame(
+                p,
+                &active_frames,
+                dispatcher_context,
+                index,
+                target_index,
+            )?;
+            active_frames[redirect_index].context = restored_context;
+            for next_index in redirect_index + 1..=target_index {
+                let previous_frame = &active_frames[next_index - 1];
+                let mut caller_context = previous_frame.context.clone();
+                if previous_frame.function_entry == 0 {
+                    unwind_leaf(p, &mut caller_context)?;
+                } else {
+                    unwind_function(
+                        p,
+                        previous_frame.image_base,
+                        previous_frame.control_pc,
+                        previous_frame.function_entry,
+                        2,
+                        &mut caller_context,
+                        0,
+                        false,
+                    )?;
+                }
+                let searched_frame = &frames[next_index];
+                if caller_context.rip != searched_frame.control_pc
+                    || caller_context.gpr[RSP] != searched_frame.context.gpr[RSP]
+                {
+                    return Err(Stop::Crash(format!(
+                        "RtlUnwindEx collided frame walk diverged after {:#x}: next=({:#x},{:#x}), searched=({:#x},{:#x})",
+                        previous_frame.control_pc,
+                        caller_context.rip,
+                        caller_context.gpr[RSP],
+                        searched_frame.control_pc,
+                        searched_frame.context.gpr[RSP]
+                    )));
+                }
+                let establisher = if searched_frame.function_entry == 0 {
+                    caller_context.gpr[RSP]
+                } else {
+                    read_frame_register(
+                        p,
+                        searched_frame.image_base,
+                        searched_frame.control_pc,
+                        searched_frame.function_entry,
+                        &caller_context,
+                    )?
+                };
+                if establisher != searched_frame.establisher {
+                    return Err(Stop::Crash(format!(
+                        "RtlUnwindEx collided frame walk changed establisher {:#x} to {establisher:#x}",
+                        searched_frame.establisher
+                    )));
+                }
+                active_frames[next_index].context = caller_context;
+            }
+            transfer_context = active_frames[target_index].context.clone();
+            write_context(
+                p,
+                unwind.context_record,
+                &active_frames[redirect_index].context,
+            )?;
+            index = redirect_index;
+            redirected_scope_index = Some(scope_index);
+            collided = true;
+            continue;
+        }
         if disposition != EXCEPTION_CONTINUE_SEARCH as u32 {
             return Err(Stop::Unimplemented {
                 dll: "ntdll".into(),
@@ -1032,6 +1127,8 @@ fn complete_guest_unwind(
             });
         }
         p.wr32(unwind.exception_record + 4, EXCEPTION_UNWINDING)?;
+        collided = false;
+        index += 1;
     }
 
     let consolidation_callback = if p.rd32(unwind.exception_record)? == STATUS_UNWIND_CONSOLIDATE {
@@ -1124,6 +1221,71 @@ fn complete_guest_unwind(
         );
     }
     Ok(())
+}
+
+fn resolve_collided_unwind_frame(
+    p: &mut Process,
+    frames: &[ExceptionFrame],
+    dispatcher_context: u64,
+    current_index: usize,
+    target_index: usize,
+) -> Result<(usize, Context64, u32), Stop> {
+    let control_pc = p.rd64(dispatcher_context + DISPATCHER_CONTROL_PC)?;
+    let image_base = p.rd64(dispatcher_context + DISPATCHER_IMAGE_BASE)?;
+    let function_entry = p.rd64(dispatcher_context + DISPATCHER_FUNCTION_ENTRY)?;
+    let establisher = p.rd64(dispatcher_context + DISPATCHER_ESTABLISHER_FRAME)?;
+    let context_record = p.rd64(dispatcher_context + DISPATCHER_CONTEXT_RECORD)?;
+    let language_handler = p.rd64(dispatcher_context + DISPATCHER_LANGUAGE_HANDLER)?;
+    let handler_data = p.rd64(dispatcher_context + DISPATCHER_HANDLER_DATA)?;
+    let history_table = p.rd64(dispatcher_context + DISPATCHER_HISTORY_TABLE)?;
+    let scope_index = p.rd32(dispatcher_context + DISPATCHER_SCOPE_INDEX)?;
+    if history_table != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "ntdll".into(),
+            name: "collided RtlUnwindEx with a non-null history table".into(),
+        });
+    }
+
+    let mut restored_context = read_context(p, context_record)?;
+    restored_context.rip = control_pc;
+    let Some((redirect_index, _frame)) = frames
+        .iter()
+        .enumerate()
+        .skip(current_index)
+        .take(target_index.saturating_sub(current_index) + 1)
+        .find(|(_, frame)| {
+            frame.control_pc == control_pc
+                && frame.image_base == image_base
+                && frame.function_entry == function_entry
+                && frame.establisher == establisher
+        })
+    else {
+        return Err(Stop::Crash(format!(
+            "RtlUnwindEx collided dispatcher context does not identify a searched frame (pc={control_pc:#x}, establisher={establisher:#x})"
+        )));
+    };
+    let calculated_establisher =
+        read_frame_register(p, image_base, control_pc, function_entry, &restored_context)?;
+    let mut caller_context = restored_context.clone();
+    let result = unwind_function(
+        p,
+        image_base,
+        control_pc,
+        function_entry,
+        2,
+        &mut caller_context,
+        0,
+        false,
+    )?;
+    if calculated_establisher != establisher
+        || result.handler != language_handler
+        || result.handler_data != handler_data
+    {
+        return Err(Stop::Crash(format!(
+            "RtlUnwindEx collided dispatcher metadata does not match frame {establisher:#x}"
+        )));
+    }
+    Ok((redirect_index, restored_context, scope_index))
 }
 
 fn context_from_cpu(cpu: &Cpu, rip: u64, rsp: u64) -> Context64 {
@@ -2984,6 +3146,156 @@ mod tests {
                 .unwrap(),
             ORIGINAL_RSP + 8
         );
+    }
+
+    #[test]
+    fn second_pass_resumes_at_the_dispatcher_context_after_collided_unwind() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const GUEST_STACK: u64 = 0x80000;
+        const STACK_LIMIT: u64 = GUEST_STACK;
+        const STACK_BASE: u64 = GUEST_STACK + 0x10000;
+        const ORIGINAL_RSP: u64 = GUEST_STACK + 0x4000;
+        const UNWIND_CALL_RSP: u64 = GUEST_STACK + 0x2000;
+        const EXCEPTION_RECORD: u64 = GUEST_STACK + 0x2f00;
+        const CONTEXT_RECORD: u64 = INFO + 0x200;
+        const REDIRECT_CONTEXT: u64 = INFO + 0x800;
+        const DISPATCHER_CONTEXT: u64 = INFO + 0x100;
+        const SEEN_FLAGS: u64 = INFO + 0x180;
+        const FIRST_HANDLER_RVA: u32 = 0x800;
+        const TARGET_HANDLER_RVA: u32 = 0x900;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(GUEST_STACK, 0x10000, PROT_RW));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK_BASE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK_LIMIT).unwrap();
+
+        let mut module = test_module();
+        module.runtime_functions = vec![
+            anywasm_pe::RuntimeFunction {
+                begin_address: 0x100,
+                end_address: 0x120,
+                unwind_info_address: 0x300,
+            },
+            anywasm_pe::RuntimeFunction {
+                begin_address: 0x200,
+                end_address: 0x220,
+                unwind_info_address: 0x320,
+            },
+        ];
+        process.modules.push(module);
+        for (entry_rva, begin, end, unwind_rva, handler_rva) in [
+            (0x500, 0x100, 0x120, 0x300, FIRST_HANDLER_RVA),
+            (0x50c, 0x200, 0x220, 0x320, TARGET_HANDLER_RVA),
+        ] {
+            process.wr32(IMAGE_BASE + entry_rva, begin).unwrap();
+            process.wr32(IMAGE_BASE + entry_rva + 4, end).unwrap();
+            process
+                .wr32(IMAGE_BASE + entry_rva + 8, unwind_rva)
+                .unwrap();
+            let unwind_info = IMAGE_BASE + unwind_rva as u64;
+            process.wr8(unwind_info, 0x11).unwrap(); // version 1, UHANDLER
+            process.wr8(unwind_info + 1, 0).unwrap();
+            process.wr8(unwind_info + 2, 0).unwrap();
+            process.wr8(unwind_info + 3, 0).unwrap();
+            process.wr32(unwind_info + 4, handler_rva).unwrap();
+        }
+
+        let first_pc = IMAGE_BASE + 0x110;
+        let target_pc = IMAGE_BASE + 0x210;
+        let target_frame = ORIGINAL_RSP + 8;
+        let target_function_entry = IMAGE_BASE + 0x50c;
+        let mut first_context = context();
+        first_context.rip = first_pc;
+        first_context.gpr[RSP] = ORIGINAL_RSP;
+        process.wr64(ORIGINAL_RSP, target_pc).unwrap();
+        let mut target_context = first_context.clone();
+        target_context.rip = target_pc;
+        target_context.gpr[RSP] = target_frame;
+        let mut redirected_context = target_context.clone();
+        redirected_context.gpr[RBX] = 0xfeed_beef;
+        write_context(&mut process, CONTEXT_RECORD, &first_context).unwrap();
+        write_context(&mut process, REDIRECT_CONTEXT, &redirected_context).unwrap();
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            MSVC_CPP_EXCEPTION,
+            0,
+            first_pc,
+            &[MSVC_CPP_MAGIC, 0, 0, IMAGE_BASE],
+        )
+        .unwrap();
+
+        let first_handler = IMAGE_BASE + FIRST_HANDLER_RVA as u64;
+        let target_handler = IMAGE_BASE + TARGET_HANDLER_RVA as u64;
+        let mut first_handler_code = vec![0x4c, 0x89, 0xc8]; // mov rax, r9 (DISPATCHER_CONTEXT)
+        for (offset, value) in [
+            (0x00, target_pc),
+            (0x08, IMAGE_BASE),
+            (0x10, target_function_entry),
+            (0x18, target_frame),
+            (0x28, REDIRECT_CONTEXT),
+            (0x30, target_handler),
+            (0x38, IMAGE_BASE + 0x328), // target UNWIND_INFO handler data
+        ] {
+            first_handler_code.extend_from_slice(&[0x48, 0xba]); // mov rdx, value
+            first_handler_code.extend_from_slice(&value.to_le_bytes());
+            first_handler_code.extend_from_slice(&[0x48, 0x89, 0x50, offset]); // mov [rax+offset], rdx
+        }
+        first_handler_code.extend_from_slice(&[
+            0xb8, 3, 0, 0, 0, // ExceptionCollidedUnwind
+            0xc3,
+        ]);
+        process
+            .write_bytes(first_handler, &first_handler_code)
+            .unwrap();
+
+        let mut target_handler_code = vec![0x8b, 0x41, 0x04]; // mov eax, [rcx + ExceptionFlags]
+        target_handler_code.extend_from_slice(&[0x48, 0xba]); // mov rdx, SEEN_FLAGS
+        target_handler_code.extend_from_slice(&SEEN_FLAGS.to_le_bytes());
+        target_handler_code.extend_from_slice(&[
+            0x89, 0x02, // mov [rdx], eax
+            0xb8, 1, 0, 0, 0, // ExceptionContinueSearch
+            0xc3,
+        ]);
+        process
+            .write_bytes(target_handler, &target_handler_code)
+            .unwrap();
+
+        let frames = vec![
+            ExceptionFrame {
+                control_pc: first_pc,
+                image_base: IMAGE_BASE,
+                function_entry: IMAGE_BASE + 0x500,
+                establisher: ORIGINAL_RSP,
+                context: first_context,
+            },
+            ExceptionFrame {
+                control_pc: target_pc,
+                image_base: IMAGE_BASE,
+                function_entry: target_function_entry,
+                establisher: target_frame,
+                context: target_context,
+            },
+        ];
+        let unwind = GuestUnwind {
+            target_frame,
+            target_ip: target_pc,
+            call_rsp: UNWIND_CALL_RSP,
+            exception_record: EXCEPTION_RECORD,
+            return_value: 0x55,
+            context_record: CONTEXT_RECORD,
+            history_table: 0,
+        };
+
+        complete_guest_unwind(&mut process, &frames, DISPATCHER_CONTEXT, unwind).unwrap();
+
+        assert_eq!(process.rd32(SEEN_FLAGS).unwrap(), 0x62);
+        assert_eq!(process.cpu.rip, target_pc);
+        assert_eq!(process.cpu.gpr[RSP], target_frame);
+        assert_eq!(process.cpu.gpr[RBX], 0xfeed_beef);
+        assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], 0x55);
     }
 
     #[test]

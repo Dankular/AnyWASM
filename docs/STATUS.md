@@ -231,8 +231,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `__finally` behavior are covered by a built x86 fixture. Native and HLE-only PE32 fixture runs also
   verify an exception escaping an `__except` filter and one raised from `__finally`. A synthetic
   handler test checks the basic `EXCEPTION_NESTED_EXCEPTION` to `EXCEPTION_NESTED_CALL` search
-  transition. Full nested-frame bookkeeping, explicit collided-unwind dispositions, and broader
-  compiler-specific C/C++ runtime behavior remain open. The rebuilt release WASM and Asyncify module
+  transition. A second-pass test covers `EXCEPTION_COLLIDED_UNWIND` redirecting to a searched frame,
+  preserving restored register state, and setting the collided flag on the resumed handler. First-pass
+  collided dispatch, nested `RtlUnwindEx` escaping a second-pass handler, non-null unwind history tables,
+  and redirects outside the searched frames remain unsupported. Full nested-frame bookkeeping and
+  broader compiler-specific C/C++ runtime behavior remain open. The rebuilt release WASM and Asyncify module
   also passes all five HLE-only PE32/x64 exception packages in Chromium with zero page errors. A
   direct-entry PE32 EH3 fixture now
   verifies by-value/reference catches, catch-all, nested catches, and destructor
@@ -523,9 +526,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   unwind-time `__finally` execution. The PE32 EH3 path also executes the fixture's compiler-generated
   nontrivial catch-copy callback. A filter-raised exception escaping to its outer handler and an
   exception raised during `__finally` are covered end to end; a synthetic PE32 test covers the basic
-  nested-disposition flag/search transition. Full nested-frame bookkeeping, explicit collided-unwind
-  disposition handling, arbitrary catch-copy closure layouts, and other compiler-specific EH4 layouts
-  remain unsupported. Across the x64 and PE32
+  nested-disposition flag/search transition. The x64 second-pass dispatcher also supports a bounded
+  collided-unwind redirect across already-searched frames; first-pass collided dispatch, nested
+  `RtlUnwindEx` during phase two, and PE32 collided dispositions remain unsupported. Full nested-frame
+  bookkeeping, arbitrary catch-copy closure layouts, and other compiler-specific EH4 layouts remain
+  unsupported. Across the x64 and PE32
   subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
   and privileged instructions, and software breakpoints. A browser
   fixture now executes one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and
