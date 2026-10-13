@@ -73,8 +73,10 @@ export class InPlaceSharedCpuPool extends SharedCpuWorkerPool {
 
   release(block) {
     if (!block) return;
-    this.anyWasm.x.aw_free(block.raw, block.bytes + 64);
-    this.allocations = this.allocations.filter((entry) => entry.raw !== block.raw);
+    const index = this.allocations.findIndex((entry) => entry.raw === block.raw);
+    if (index < 0) return;
+    const [allocation] = this.allocations.splice(index, 1);
+    this.anyWasm.x.aw_free(allocation.raw, allocation.bytes);
   }
 
   async initialize() {
@@ -257,6 +259,16 @@ export class InPlaceSharedCpuPool extends SharedCpuWorkerPool {
   }
 
   dispose() {
+    if (this.disposed) return;
     super.dispose();
+    const allocations = this.allocations || [];
+    this.allocations = [];
+    for (const allocation of allocations) {
+      this.anyWasm.x.aw_free(allocation.raw, allocation.bytes);
+    }
+    this.mapBlock = null;
+    this.dirtyBlock = null;
+    this.contextBlock = null;
+    this.stackBlock = null;
   }
 }

@@ -317,7 +317,10 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   and limits are in `docs/TARGETS.md`. After shared-pool capacity growth, a GTA replay remained in
   shared-worker mode through 1,004 presents and 192,968,377 guest instructions, beyond the prior
   capacity fallback point. It still recorded zero two-context batches and did not reach gameplay.
-  See the paired runs in `docs/TARGETS.md`.
+  See the paired runs in `docs/TARGETS.md`. In-place pool disposal now stops its workers and frees
+  all remaining guest allocations with their recorded allocation sizes, including the separately
+  aligned worker stacks. This cleanup has syntax-check evidence; the design's browser dispose-during-
+  work verification remains outstanding.
 - DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
   dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE
   callbacks run after DLL initialization and before the EXE entry point. Synthetic regressions cover
