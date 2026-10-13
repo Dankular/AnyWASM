@@ -427,11 +427,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
   this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested
-  x64 CPU-fault subset and first PE32 linked-handler subset. PE32 C++ EH3 now has an unverified
-  outer-frame catch-transfer path; x86 nested/collided unwind dispositions, custom catch-copy
-  closures, and EH4 are not implemented. Across the x64 and PE32 subsets, tested
-  CPU-fault statuses include access violations, integer divide errors, illegal and privileged
-  instructions, and software breakpoints. A browser
+  x64 CPU-fault subset and PE32 linked-handler subsets. PE32 C++ EH3's outer-frame catch-transfer
+  path remains unverified. The bounded PE32 `_except_handler4_common` subset is implemented and
+  fixture-tested for continue-search, continue-execution, exception-code access, and normal or
+  unwind-time `__finally` execution. Nested/collided unwind dispositions, custom catch-copy
+  closures, and other compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
+  subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
+  and privileged instructions, and software breakpoints. A browser
   fixture now executes one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and
   verifies a following draw samples it into a pixel. A follow-up headless Chromium replay fixes the group's hidden
   draw-parameter binding and captures a nonempty 1040x807 frame from the selected target with one
