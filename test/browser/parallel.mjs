@@ -3,14 +3,23 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 
-const repoRoot = new URL('../../', import.meta.url).pathname;
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const server = spawn(process.execPath, ['web/serve.mjs', '8131'], { cwd: repoRoot, stdio: 'ignore' });
 await new Promise((resolve) => setTimeout(resolve, 800));
-const dir = '/opt/pw-browsers';
-const versioned = readdirSync(dir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
-const executablePath = process.env.CHROMIUM || (versioned ? `${dir}/${versioned}/chrome-linux/chrome` : undefined);
+const browserDir = process.env.PLAYWRIGHT_BROWSERS_PATH || (process.platform === 'win32'
+  ? join(homedir(), 'AppData', 'Local', 'ms-playwright')
+  : '/opt/pw-browsers');
+const versioned = process.env.CHROMIUM ? undefined
+  : readdirSync(browserDir).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
+const defaultExecutable = versioned && (process.platform === 'win32'
+  ? join(browserDir, versioned, 'chrome-win', 'chrome.exe')
+  : join(browserDir, versioned, 'chrome-linux', 'chrome'));
+const executablePath = process.env.CHROMIUM || defaultExecutable;
 const browser = await chromium.launch({ executablePath, args: ['--no-sandbox'] });
 try {
   const page = await browser.newPage();

@@ -98,7 +98,8 @@
 
 **Files:** `test/shared-cpu-pool.test.mjs`, `crates/anywasm-rt/tests/run_exe.rs`, `fixtures/`, `test/wasm_smoke.mjs`, `web/main.js`, `web/worker.js`
 
-- [ ] Extend the shared-pool fixture to run two distinct contexts concurrently, prove actual overlap, and verify an atomic shared counter and per-context markers.
+- [x] Add shared-pool unit coverage for two distinct contexts in separate slots/context offsets, concurrent request dispatch, process-wide budget reservation, completion markers, and duplicate-context rejection (`test/shared-cpu-pool.test.mjs`).
+- [x] Keep the two-thread Chromium fixture and no-std overlap probe as separate evidence: `test/browser/parallel.mjs` checks a two-context batch plus per-thread/locked-total results; `test/wasm_shared_memory_probe.mjs` directly measured maximum worker concurrency of two and checked atomic totals, context checksums, and stack guards.
 - [ ] Add a Win64 guest fixture that creates two threads, exercises TLS/TEB isolation, Win32 synchronization and interlocked shared state, joins both threads, and checks a deterministic result.
 - [ ] Cover ready-state filtering, global budget reservation, HLE serialization, faults, mapping barriers, worker startup failure, worker failure during work, stop/dispose, and no-isolation fallback.
 - [x] Report selected execution mode and a specific fallback/failure reason in the browser status path.

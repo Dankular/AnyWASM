@@ -238,12 +238,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   BLENDTEXTUREALPHA/BLENDFACTORALPHA, DOTPRODUCT3, triangle fans, alpha blending, and alpha
   testing across all comparison functions at the equality boundary. GDI support is
   limited to virtual display DCs and basic caps.
-- Browser guest threads are still cooperative. The 2026-10-12 SharedArrayBuffer feasibility probe
-  reached two concurrent no-std Wasm workers with disjoint contexts/stacks and an exact shared
-  atomic count. Full-runtime-shaped instances alias mutable statics and a stand-in cursor value; the
-  probe does not exercise `std`'s allocator, and the production runtime still cannot link against
-  shared memory because its prebuilt `std` lacks atomics/bulk-memory. A coordinator/CPU-worker split
-  is documented in
+- Browser guest execution has an opt-in SharedArrayBuffer CPU-worker path. The 2026-10-12
+  feasibility probe reached two concurrent no-std Wasm workers with disjoint contexts/stacks, an
+  exact shared atomic count, and a measured maximum concurrency of two. Full-runtime-shaped
+  instances alias mutable statics and a stand-in cursor value; the probe does not exercise `std`'s
+  allocator, and the production runtime still cannot link against shared memory because its
+  prebuilt `std` lacks atomics/bulk-memory. A coordinator/CPU-worker split is documented in
   [`sharedarraybuffer-guest-threads-design.md`](superpowers/specs/2026-10-12-sharedarraybuffer-guest-threads-design.md);
   `anywasm-cpu-state` contains the `no_std` fixed-layout CPU context, decoder, generic instruction
   executor, versioned shared-memory header, atomic worker-slot handoff, and permission-checked
@@ -252,9 +252,12 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   stops at the coordinator's HLE-thunk range, and publishes its full CPU context. The process
   snapshot ABI and browser copy-back are wired into the opt-in `?sharedCpuWorkers` path. A
   cross-origin-isolated headless Chrome smoke started the CPU worker and ran `hello.exe` to exit 0.
-  This proves worker startup and the serial active-context handoff only; concurrent guest-thread
-  scheduling, x87 worker execution, locked guest operations, and target-level acceptance remain
-  open. The worker artifact uses the unstable `+atomics` feature and LLD `--no-check-features`
+  The two-thread `parallel_test.exe` browser fixture also requires shared-worker mode, a batch with
+  two guest contexts, more than 500,000 worker-retired instructions, and the exact per-thread
+  prime counts plus locked shared total (`5133`, `4459`, `9592`). This verifies production-pool
+  batch dispatch and guest results; the separate feasibility probe is the direct measurement of
+  simultaneous worker execution. Target-level acceptance remains open. The worker artifact uses
+  the unstable `+atomics` feature and LLD `--no-check-features`
   because the installed sysroot core objects lack shared-memory feature metadata. A separate
   HLE-only Tutorial01 probe confirmed cross-origin isolation and rendered 719 draws and 360 presents
   in 30 seconds with no WebGPU errors; the process remained active, so target completion is not

@@ -40,6 +40,18 @@ The exact observation and limits are in
 [`target-data/shared-cpu-worker-tutorial01.json`](target-data/shared-cpu-worker-tutorial01.json).
 Asteroids has not been run; none of these fixtures is a full runtime acceptance pass.
 
+### Synthetic parallel guest-thread fixture
+
+`test/browser/parallel.mjs` runs `fixtures/parallel_test.exe` through the shared CPU worker pool in
+cross-origin-isolated Chromium. It requires the shared-worker mode, more than 500,000 worker-retired
+instructions, and a batch containing both guest contexts. The guest writes distinct prime counts
+for each thread and updates a shared total with a locked instruction; the harness checks
+`t0=5133 t1=4459 total=9592` and exit code 0. `test/shared-cpu-pool.test.mjs` also checks that two
+contexts occupy separate worker slots and context offsets while sharing one process-wide
+instruction reservation. The standalone no-std overlap probe directly observed two workers active
+at once and checked atomic totals, context checksums, and stack guards. These synthetic results do
+not establish target performance or Diligent acceptance.
+
 ## Sources and build
 
 Built from DiligentEngine `efe5da2270c6edfc8b0d2e39e946b35acbeaa874`, with DiligentCore at
