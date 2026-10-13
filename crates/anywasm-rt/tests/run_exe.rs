@@ -216,6 +216,35 @@ fn create_thread_runs_finite_worker_with_isolated_tls_and_thread_identity() {
 }
 
 #[test]
+fn parallel_threads_preserve_dynamic_tls_and_last_error_across_hle() {
+    let (stop, out, err, p) = run("parallel_test.exe");
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
+    assert_eq!(
+        out,
+        "t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444 mainTls=0x5555 mainLast=0x6666\r\n"
+    );
+    assert!(err.is_empty());
+}
+
+#[test]
+fn vectored_breakpoint_handler_resumes_guest_execution() {
+    let (stop, out, err, p) = run("shared_fault_test.exe");
+    assert_eq!(
+        stop,
+        Stop::Exit(0),
+        "stdout: {out:?}; stderr: {err:?}; unimplemented: {:?}",
+        p.unimplemented_log
+    );
+    assert_eq!(out, "fault handled\r\n");
+    assert!(err.is_empty());
+}
+
+#[test]
 fn cooperative_threads_resume_condition_variable_waiters_after_lock_reacquisition() {
     let (stop, out, err, p) = run("thread_sync_test.exe");
     assert_eq!(

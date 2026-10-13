@@ -23,6 +23,9 @@ const checkFlashlight = options.includes('--check-flashlight');
 const checkMapReset = options.includes('--check-map-reset');
 const checkUav = options.includes('--check-uav');
 const normalWorkerSlices = options.includes('--normal-slices');
+const cooperativeCpu = options.includes('--cooperative');
+const sharedCpuWorkers = options.includes('--shared-cpu-workers');
+const diagProgress = options.includes('--diag-progress') || sharedCpuWorkers;
 const playthroughArgument = options.find((argument) => argument.startsWith('--playthrough='));
 const pulseMsArgument = options.find((argument) => argument.startsWith('--pulse-ms='));
 const pulseMs = pulseMsArgument ? Number(pulseMsArgument.slice('--pulse-ms='.length)) : 10;
@@ -32,8 +35,11 @@ const playthroughRecord = playthroughArgument
 if (playthroughRecord && (checkMovement || checkDirections || checkAim || checkFlashlight || checkMapReset)) {
   throw new Error('--playthrough cannot be combined with the independent input probes');
 }
+if (cooperativeCpu && sharedCpuWorkers) {
+  throw new Error('--cooperative and --shared-cpu-workers cannot be combined');
+}
 if (!process.argv[2] || !existsSync(bundlePath)) {
-  throw new Error('usage: CHROMIUM=<browser> node test/browser/target.mjs <target.awb> [frame.png] [--playthrough=<record.json>]');
+  throw new Error('usage: CHROMIUM=<browser> node test/browser/target.mjs <target.awb> [frame.png] [--cooperative|--shared-cpu-workers] [--playthrough=<record.json>]');
 }
 if (!process.env.CHROMIUM) throw new Error('set CHROMIUM to a local Chromium executable');
 
@@ -65,7 +71,11 @@ try {
     await route.fulfill({ response, body: source, contentType: 'text/javascript' });
   });
 
-  await page.goto('http://localhost:8099/index.html?test=1');
+  const query = new URLSearchParams({ test: '1' });
+  if (sharedCpuWorkers) query.set('sharedCpuWorkers', '1');
+  else if (cooperativeCpu) query.set('sharedCpuWorkers', '0');
+  if (diagProgress) query.set('diagProgress', '1');
+  await page.goto(`http://localhost:8099/index.html?${query}`);
   await page.locator('#file').setInputFiles(bundlePath);
   await page.waitForFunction(
     () => window.__gpuStats || document.querySelector('#stat')?.dataset.status !== undefined,
@@ -78,12 +88,21 @@ try {
     status: document.querySelector('#stat')?.textContent,
     terminal: document.querySelector('#term')?.textContent,
     workerStatus: document.querySelector('#stat')?.dataset.status,
+    executionMode: window.__executionMode,
+    trace: window.__workerDiag && Object.fromEntries(
+      ['rip', 'instructions', 'exceptionSp', 'exceptionStack', 'threads', 'regs', 'callFrames', 'gameState']
+        .filter((key) => key in window.__workerDiag)
+        .map((key) => [key, window.__workerDiag[key]]),
+    ),
   }));
   assert.ok(stats.dispatches > 0,
     `the target should execute its compute dispatch: ${JSON.stringify({ stats, startupDiagnostics, workerDiagnostics })}`);
   assert.ok(stats.draws > 0,
     `the target should submit graphics draws: ${JSON.stringify({ stats, startupDiagnostics, workerDiagnostics })}`);
   assert.deepEqual(stats.errors, [], 'the target frame should have no WebGPU validation errors');
+  if (diagProgress) {
+    await page.waitForFunction(() => window.__workerDiag?.executionMode, null, { timeout: 30_000 });
+  }
 
   let uavReadback;
   if (checkUav) {
@@ -482,7 +501,12 @@ try {
     assert.ok(rayResponse.longestIlluminatedRun >= 3,
       `holding the left mouse button should brighten at least three adjacent patches along the selected clear ray: ${JSON.stringify(flashlight)}`);
   }
-  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, uavReadback, movement, aim, flashlight, mapReset, playthrough: playthroughReplay, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
+  const runtimeDiagnostics = diagProgress ? await page.evaluate(() => window.__workerDiag) : null;
+  if (sharedCpuWorkers) {
+    assert.equal(runtimeDiagnostics?.executionMode, 'shared-cpu-workers',
+      `the selected target should stay on the shared-worker path: ${JSON.stringify(runtimeDiagnostics)}`);
+  }
+  console.log(JSON.stringify({ bundle: bundlePath, frame: outputPath, stats, runtimeDiagnostics, uavReadback, movement, aim, flashlight, mapReset, playthrough: playthroughReplay, inputDiagnostics, workerDiagnostics, ...result }, null, 2));
 } finally {
   await browser?.close();
   server.kill();

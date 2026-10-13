@@ -1,0 +1,96 @@
+{
+  "date": "2026-10-13",
+  "sample": "DiligentSamples GLFWDemo.exe",
+  "bundle": {
+    "path": "%TEMP%/anywasm-glfwdemo-hle-sab.awb",
+    "sha256": "BAA0598336F938B40BE9CBF48105CB7CF848B78A06732454EFC6EF4D2C8F7214",
+    "files": 8,
+    "sizeBytes": 7963719
+  },
+  "runtime": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "6863D34E6DE623CDCE2DF691BC878AE93612670CBCA24F6563C24B483CBE8B06",
+    "builtFromCurrentSources": true
+  },
+  "conditions": {
+    "browser": "Google Chrome",
+    "crossOriginIsolated": true,
+    "sliceBudgetPerWorkerLoop": 250000,
+    "sameBundleForBothRuns": true,
+    "captureBound": "first GPU frame/progress sample; harness timeout 240 seconds"
+  },
+  "commands": {
+    "cooperative": "node test/browser/target.mjs <bundle.awb> <frame.png> --normal-slices --cooperative --diag-progress",
+    "sharedCpuWorkers": "node test/browser/target.mjs <bundle.awb> <frame.png> --normal-slices --shared-cpu-workers"
+  },
+  "runs": [
+    {
+      "mode": "cooperative",
+      "workerCount": 0,
+      "workerRetiredInstructions": "0",
+      "twoContextParallelBatches": 0,
+      "progressTraceInstructions": 577750000,
+      "executionModeReason": "",
+      "statusAtCapture": "Starting",
+      "terminalStatus": null,
+      "importStop": null,
+      "gpu": {
+        "draws": 3,
+        "dispatches": 1,
+        "presents": 3,
+        "passes": 6,
+        "pipelines": 2,
+        "errors": [],
+        "asyncifyYields": 16,
+        "asyncifyResumes": 16
+      },
+      "capture": {
+        "path": "target/GLFWDemo-SharedArrayBuffer-cooperative.png",
+        "sha256": "8D9365563B46142100BB1B91D9A1B051A6A0B174A94E5E720B1FCA2FFAAD8AEE",
+        "width": 1024,
+        "height": 768,
+        "nonTransparentPixels": 589824,
+        "nonBlackPixels": 589824,
+        "centerRgba": [23, 255, 32, 255],
+        "greenMarker": { "x": 511.5, "y": 383.5, "pixels": 16 }
+      }
+    },
+    {
+      "mode": "shared-cpu-workers",
+      "workerCount": 2,
+      "workerRetiredInstructions": "2800103",
+      "twoContextParallelBatches": 0,
+      "progressTraceInstructions": 578981918,
+      "executionModeReason": "",
+      "statusAtCapture": "Starting",
+      "terminalStatus": null,
+      "importStop": null,
+      "gpu": {
+        "draws": 30,
+        "dispatches": 1,
+        "presents": 30,
+        "passes": 60,
+        "pipelines": 2,
+        "errors": [],
+        "asyncifyYields": 3959330,
+        "asyncifyResumes": 3959330
+      },
+      "capture": {
+        "path": "target/GLFWDemo-SharedArrayBuffer-shared.png",
+        "sha256": "64CC991C15B9F5A7C0A526F35C4B9BC7699698D7B0E44B4C02CFFDB1409A2263",
+        "width": 1024,
+        "height": 768,
+        "nonTransparentPixels": 589824,
+        "nonBlackPixels": 589824,
+        "centerRgba": [23, 255, 32, 255],
+        "greenMarker": { "x": 511.5, "y": 383.5, "pixels": 16 }
+      }
+    }
+  ],
+  "notes": [
+    "Both runs reached a visible frame and one SDF compute dispatch with no WebGPU validation errors.",
+    "The shared pool initialized two workers, but zero two-context batches were observed; this target run does not establish concurrent guest execution.",
+    "Neither run reached an import stop or terminal status during capture.",
+    "Wall layouts differ between captures, so this pair does not establish pixel equivalence or a speed result."
+  ]
+}

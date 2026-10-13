@@ -253,17 +253,27 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   snapshot ABI and browser copy-back are wired into the opt-in `?sharedCpuWorkers` path. A
   cross-origin-isolated headless Chrome smoke started the CPU worker and ran `hello.exe` to exit 0.
   The two-thread `parallel_test.exe` browser fixture also requires shared-worker mode, a batch with
-  two guest contexts, more than 500,000 worker-retired instructions, and the exact per-thread
-  prime counts plus locked shared total (`5133`, `4459`, `9592`). This verifies production-pool
-  batch dispatch and guest results; the separate feasibility probe is the direct measurement of
-  simultaneous worker execution. The coordinator's runnable-context query omits blocked,
+  two guest contexts, more than 500,000 worker-retired instructions, and exact prime counts, dynamic
+  TLS values, per-thread TEB last-error values, and a locked shared total. A second fixture verifies
+  a worker-reported breakpoint returns to the coordinator's vectored exception handler and resumes;
+  a simulated worker-module HTTP 503 verifies that startup failure leaves the guest usable in
+  cooperative mode. A worker stop now restores the original RIP for instructions that advance RIP
+  before returning an exception, so the coordinator can dispatch it once. These fixtures verify
+  production-pool handoff and guest results; the separate feasibility probe is the direct
+  measurement of simultaneous worker execution. The coordinator's runnable-context query omits blocked,
   suspended, exited, and stale ready-queue entries; PE32 remains active-context-only while it uses
   the fixed TEB alias. Target-level acceptance remains open. The worker artifact uses the unstable
   `+atomics` feature and LLD `--no-check-features`
   because the installed sysroot core objects lack shared-memory feature metadata. A separate
   HLE-only Tutorial01 probe confirmed cross-origin isolation and rendered 719 draws and 360 presents
   in 30 seconds with no WebGPU errors; the process remained active, so target completion is not
-  established. Shared memory now uses worker/coordinator dirty-page tracking, cached mapping rows,
+  established. A paired first-frame GLFW Demo replay with the current source-built runtime reached
+  one SDF dispatch in both cooperative and shared-worker modes. The shared pool created two workers
+  and retired 2.8 million instructions, but recorded zero two-context parallel batches; this target
+  did not exercise overlap. Both captures remained in `Starting`, with no import stop, terminal
+  status, or WebGPU validation errors. See the paired counters and pixel metrics in
+  [`TARGETS.md`](TARGETS.md#shared-cpu-worker-target-comparison-2026-10-13). Shared memory now uses
+  worker/coordinator dirty-page tracking, cached mapping rows,
   and full refreshes after mapping or protection changes. Shared-memory atomic operations outside
   the worker backend's supported width or alignment stop at the faulting instruction with a
   distinct coordinator-fallback reason, so the serialized interpreter retries them. The live probe

@@ -40,6 +40,8 @@ GetCurrentThreadId
 GetThreadId
 GetExitCodeThread
 CreateThread
+AddVectoredExceptionHandler
+RemoveVectoredExceptionHandler
 ExitThread
 ResumeThread
 WaitForSingleObject

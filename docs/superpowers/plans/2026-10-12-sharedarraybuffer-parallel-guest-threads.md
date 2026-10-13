@@ -90,7 +90,7 @@
 - [x] Verify the serialized CPU ABI carries all architectural state used by the worker, including x87, flags, FS/GS bases, instruction count, and stop metadata.
 - [x] Distinguish quantum, HLE, guest fault, thread exit, and worker failure; never advance RIP for an instruction that did not retire. Win32 scheduling yields are requested by serialized HLE and now remain effective across a saved-context handoff, instead of restoring the previous thread directly. The worker ABI also distinguishes process/thread return trampolines and retries unsupported atomic operations at their original RIP.
 - [x] Hand complete faulting contexts to existing coordinator exception dispatch and resume only from its resulting context.
-- [ ] Keep decoded/JIT state worker-local and enforce generation checks before each translated block if JIT execution is enabled.
+- [x] Keep decoded/JIT state worker-local and enforce generation checks before each translated block if JIT execution is enabled. The shared no-std worker executes interpreter steps and owns no JIT cache; mapping, code, and dispatch generations are validated at the start of each bounded slice. Worker exits now restore the unretired instruction RIP before coordinator dispatch.
 
 **Acceptance:** The worker never loses a context at an unsupported instruction, exception, HLE call, or thread exit, and its reported retired count matches the returned context.
 
@@ -100,12 +100,12 @@
 
 - [x] Add shared-pool unit coverage for two distinct contexts in separate slots/context offsets, concurrent request dispatch, process-wide budget reservation, completion markers, and duplicate-context rejection (`test/shared-cpu-pool.test.mjs`).
 - [x] Keep the two-thread Chromium fixture and no-std overlap probe as separate evidence: `test/browser/parallel.mjs` checks a two-context batch plus per-thread/locked-total results; `test/wasm_shared_memory_probe.mjs` directly measured maximum worker concurrency of two and checked atomic totals, context checksums, and stack guards.
-- [ ] Add a Win64 guest fixture that creates two threads, exercises TLS/TEB isolation, Win32 synchronization and interlocked shared state, joins both threads, and checks a deterministic result.
+- [x] Add a Win64 guest fixture that creates two threads, exercises dynamic TLS and TEB last-error isolation across HLE, waits for both threads, updates locked shared state, and checks deterministic per-thread counts (`fixtures/parallel_test.c`).
 - [x] Cover global budget reservation, dirty-page/mapping resync, worker failure during work, partial-startup cleanup, pool disposal, and rejection when cross-origin isolation is unavailable (`test/shared-cpu-pool.test.mjs`).
 - [x] Cover runnable-state filtering and the PE32 active-context restriction (`process::scheduler_tests`).
-- [ ] Cover serialized HLE/fault handoff and cooperative fallback after startup failure.
+- [x] Cover serialized HLE/fault handoff and cooperative fallback after startup failure. `parallel_test.exe` passes through TLS, last-error, thread-join, and output HLEs; `shared_fault_test.exe` resumes from a worker-reported breakpoint through the coordinator's vectored exception handler; a simulated HTTP 503 worker-module response completes the same guest cooperatively.
 - [x] Report selected execution mode and a specific fallback/failure reason in the browser status path.
-- [ ] Keep any test-only tracing behind explicit flags; do not ship hard-coded address or target-specific debug traces in the default path.
+- [x] Keep any test-only tracing behind explicit flags; do not ship hard-coded address or target-specific debug traces in the default path. No default-path tracing was added; existing target diagnostics remain opt-in.
 
 **Acceptance:** The browser fixture proves overlap rather than merely creating multiple workers; all fallback/error cases leave the cooperative runtime usable when no worker execution began.
 
@@ -113,10 +113,10 @@
 
 **Files:** `test/wasm_smoke.mjs`, `docs/TARGETS.md`, `docs/STATUS.md`, `CLAUDE.md`
 
-- [ ] Run the full Rust workspace suite, shared-pool tests, Wasm smoke suite, and a cross-origin-isolated browser replay.
-- [ ] Replay the selected Diligent target with a bounded process budget and record active worker count, concurrent overlap, import/stop reason, shader/present counters, and captured pixels separately.
-- [ ] Compare against the cooperative baseline at the same limits and report the next observable milestone or the exact blocker.
-- [ ] Update target and status documentation with only behaviors directly established by the fixtures and replay.
+- [x] Run the full Rust workspace suite, shared-pool tests, Wasm smoke suite, and a cross-origin-isolated browser replay. The Rust workspace suite passed with `CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0`, and `CARGO_PROFILE_TEST_DEBUG=0` using a temp target directory; all 10 shared-pool tests, the Wasm smoke suite, and the shared-thread, fault, and startup-fallback Chromium replays passed.
+- [x] Replay the selected Diligent target with the production 250,000-instruction worker-loop budget and record worker count, parallel batches, stop state, GPU counters, and captured pixel metrics separately. The shared pool created two workers and retired 2,800,103 instructions, but the target produced zero two-context batches; it remained in `Starting` with no import stop or terminal status.
+- [x] Compare against the cooperative baseline using the same target bundle and worker-loop slice. Both reached one SDF dispatch and a visible frame at roughly 578 million instructions; this sample shows the shared path works, but provides no target concurrency or speed result.
+- [x] Update target and status documentation with the bounded replay results while keeping target parallelism and terminal acceptance open.
 
 **Acceptance:** Synthetic concurrency, guest synchronization, browser fallback, and target progress are reported as separate results; target rendering is claimed only when browser pixels establish it.
 

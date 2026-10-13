@@ -42,11 +42,18 @@ Asteroids has not been run; none of these fixtures is a full runtime acceptance 
 
 ### Synthetic parallel guest-thread fixture
 
-`test/browser/parallel.mjs` runs `fixtures/parallel_test.exe` through the shared CPU worker pool in
-cross-origin-isolated Chromium. It requires the shared-worker mode, more than 500,000 worker-retired
-instructions, and a batch containing both guest contexts. The guest writes distinct prime counts
-for each thread and updates a shared total with a locked instruction; the harness checks
-`t0=5133 t1=4459 total=9592` and exit code 0. `test/shared-cpu-pool.test.mjs` also checks that two
+`test/browser/parallel.mjs` packs and runs `fixtures/parallel_test.exe` through the shared CPU worker
+pool in cross-origin-isolated Chromium. It requires the shared-worker mode, more than 500,000
+worker-retired instructions, and a batch containing both guest contexts. The guest writes distinct
+prime counts for each thread, stores different dynamic TLS values and TEB last-error values across
+HLE boundaries, waits for both threads, and updates a shared total with a locked instruction. The
+harness checks `t0=5133 t1=4459 total=9592 tls0=0x1111 tls1=0x2222 last0=0x3333 last1=0x4444
+mainTls=0x5555 mainLast=0x6666` and exit code 0. `MODE=fault` runs
+`fixtures/shared_fault_test.exe`: a shared-worker breakpoint returns to the coordinator, the
+vectored exception handler resumes the guest, and the process exits 0. `MODE=fail-startup` serves
+HTTP 503 for the worker module; the same parallel fixture finishes cooperatively with zero worker
+retirements and reports the fallback reason. The harness creates temporary AWB files, so no demo
+bundle needs to be prebuilt. `test/shared-cpu-pool.test.mjs` also checks that two
 contexts occupy separate worker slots and context offsets while sharing one process-wide
 instruction reservation. It verifies failed-worker cleanup, partial-startup cleanup, pool disposal,
 and rejection when cross-origin isolation is absent. The standalone no-std overlap probe directly
@@ -868,6 +875,27 @@ post-fix replay reproduced these values; the report is saved in
 The standalone 4x4 R32_FLOAT fixture also reads all 16 written values as 0.25. This verifies the
 selected target's SDF output for one deterministic state; it does not establish other UAV
 formats/readback paths, all gameplay states, or game acceptance.
+
+### Shared CPU worker target comparison (2026-10-13)
+
+The current source-built browser runtime replayed the same static-CRT GLFW Demo bundle in
+cross-origin-isolated Chromium with the production 250,000-instruction worker-loop slice, first
+with shared workers disabled and then with `--shared-cpu-workers`. Both runs reached a visible
+1024x768 frame, completed one SDF compute dispatch, used two pipelines, and reported no WebGPU
+validation errors. The cooperative sample recorded 3 draws and 3 presents; the shared-worker sample
+recorded 30 draws and 30 presents. Their progress traces were at 577,750,000 and 578,981,918 guest
+instructions, respectively.
+
+The shared pool created two workers and reported 2,800,103 worker-retired instructions, but recorded
+zero two-context parallel batches. This target therefore confirms rendering through the shared
+worker path, not concurrent guest execution. Neither capture reached an import stop or terminal
+process status; both still showed `Starting` when the bounded first-frame harness closed. The
+captures each contain 589,824 non-transparent and non-black pixels, with the green player marker at
+(511.5, 383.5). Their wall layouts differ, so this pair does not establish pixel equivalence or a
+speed result. The synthetic parallel fixture and overlap probe remain the evidence for actual worker
+concurrency. Bundle and capture hashes, run modes, and counters are recorded in
+[`target-data/glfwdemo-shared-cpu-workers-2026-10-13.json`](target-data/glfwdemo-shared-cpu-workers-2026-10-13.json);
+the PNGs are local ignored artifacts under `target/`.
 
 This verifies all four keyboard movement directions, cursor-aimed Space movement in all four
 directions, a flashlight response for one seed/aim direction, and map regeneration in the selected

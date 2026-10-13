@@ -148,9 +148,14 @@ pub unsafe extern "C" fn aw_cpu_worker_slice(
             payload_address = context.rip;
             break;
         }
+        let instruction_rip = context.rip;
         match exec_core::step(context, &mut memory) {
             Ok(()) => retired = context.icount.saturating_sub(initial_icount),
             Err(exit) => {
+                // Some interpreter exits, including INT3 and software interrupts, advance RIP
+                // before returning. They did not retire in the worker: restore the instruction
+                // boundary so the coordinator can dispatch the exception or fallback exactly once.
+                context.rip = instruction_rip;
                 completion_state = CompletionState::Fault;
                 (stop_reason, payload_address, payload_value) = encode_exit(exit, context.rip);
                 retired = context.icount.saturating_sub(initial_icount);
