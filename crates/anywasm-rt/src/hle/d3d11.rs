@@ -3305,6 +3305,73 @@ mod tests {
     }
 
     #[test]
+    fn create_texture2d_sample_counts_match_reported_quality_levels() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(DESC, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+
+        let query = method("ID3D11Device", "CheckMultisampleQualityLevels").unwrap();
+        for (index, (samples, supported)) in [(2u32, false), (4, true), (8, false)]
+            .into_iter()
+            .enumerate()
+        {
+            p.cpu.gpr[RCX] = 0;
+            p.cpu.gpr[RDX] = DXGI_FORMAT_R8G8B8A8_UNORM as u64;
+            p.cpu.gpr[R8] = samples as u64;
+            p.cpu.gpr[R9] = OUT;
+            assert_eq!(query(&mut p).unwrap(), S_OK);
+            assert_eq!(
+                p.rd32(OUT).unwrap(),
+                u32::from(supported),
+                "{samples}x quality levels"
+            );
+
+            let mut desc = Vec::new();
+            for value in [
+                8u32,
+                8,
+                1,
+                1,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                samples,
+                0,
+                0,
+                0x20,
+                0,
+                0,
+            ] {
+                desc.extend(value.to_le_bytes());
+            }
+            p.write_bytes(DESC, &desc).unwrap();
+            p.cpu.gpr[RCX] = 0;
+            p.cpu.gpr[RDX] = DESC;
+            p.cpu.gpr[R8] = 0;
+            p.cpu.gpr[R9] = OUT + (index as u64 * 8);
+            let commands_before = p.extra.gpu.buf.len();
+            assert_eq!(
+                create_texture2d(&mut p).unwrap(),
+                if supported { S_OK } else { E_INVALIDARG },
+                "{samples}x texture creation must match the capability query"
+            );
+            if supported {
+                assert_ne!(p.rd64(OUT + (index as u64 * 8)).unwrap(), 0);
+            } else {
+                assert_eq!(
+                    p.extra.gpu.buf.len(),
+                    commands_before,
+                    "unsupported {samples}x must not emit a texture"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resolve_subresource_emits_the_source_and_destination_resources() {
         use crate::vfs::Vfs;
         use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
