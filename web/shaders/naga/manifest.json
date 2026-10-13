@@ -6,8 +6,8 @@
       "sha256": "19aa5430e6ba68598593163dbc479e17f7a7a7ba7ff51b98ae4b2fcf4707db57"
     },
     "winebrowser_shader_wgsl_bg.wasm": {
-      "bytes": 1385789,
-      "sha256": "4a36cc5f2ae0dbf8d00e5a597eb97ca211cf5eb2011f3535b26187dc7286f33f"
+      "bytes": 1385793,
+      "sha256": "62814aa27a31169ea952f9d8ccdba1c939898925e68ab48752afb263774f7713"
     }
   },
   "drawParameters": {
@@ -18,6 +18,7 @@
   "format": 1,
   "maximumWasmMemoryBytes": 134217728,
   "nagaArrayImageQueries": "ImageQuery::Size plus ImageQuery::NumLayers",
+  "nagaCapabilities": "CUBE_ARRAY_TEXTURES",
   "nagaVersion": "30.0.1",
   "package": "winebrowser-shader-wgsl",
   "wasmBindgenVersion": "0.2.121"

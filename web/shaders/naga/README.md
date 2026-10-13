@@ -9,10 +9,13 @@ uniform at binding 0.
 Naga's SPIR-V frontend does not model array layers in `OpImageQuerySize`. The
 retained Naga source includes a local fix that composes the spatial size query
 with `ImageQuery::NumLayers`, so `Texture1DArray` and `Texture2DArray`
-`GetDimensions` calls can be translated. Cube-array resource types remain an
-independent Naga frontend gap. The 1D D3D texture
-lowering in `web/shaders.js` still maps its backing image query back to the
-one-dimensional width and array-element outputs.
+`GetDimensions` calls can be translated. The wrapper enables Naga's
+`CUBE_ARRAY_TEXTURES` validation capability, allowing `TextureCubeArray`
+`SampleLevel` and `GetDimensions` to lower to WGSL `texture_cube_array` types.
+The browser regression checks a two-cube SRV range, cube-face filtering, and
+the selected view's dimensions. The 1D D3D texture lowering in
+`web/shaders.js` maps its backing image query to the one-dimensional width and
+array-element outputs.
 
 To rebuild on Windows, install the Rust `wasm32-unknown-unknown` target and
 `wasm-bindgen` 0.2.121, then run `./build.ps1`. The script uses the committed

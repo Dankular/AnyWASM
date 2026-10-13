@@ -7,6 +7,13 @@ otherwise the script expects a Chromium under `/opt/pw-browsers`. The cross-engi
 `test/browser/cross-engine.mjs`; `CHROMIUM`, `FIREFOX`, and `WEBKIT` can select executables, and
 `BROWSER` can select one engine.
 
+Focused cube-array regression on 2026-10-13: Playwright Chromium `151.0.7922.34` on Windows x64.
+The synthetic D3D11 fixture selected two cubes starting at face 6, sampled both cube indices,
+checked the linear +X/+Y edge blend, and read the selected view dimensions as 4x4 with two cubes and
+one mip. The fixture reported one draw, zero WebGPU validation errors, and pixels
+`[0,255,0,255]`, `[0,0,255,255]`, `[0,127,127,255]`, and `[255,255,32,255]`. This is API fixture
+evidence, not a selected-target compatibility result.
+
 An earlier local run on 2026-10-11: Chrome `154.0.8037.98`, selected with `CHROMIUM` on Windows
 x64; `node test/browser/run.mjs` passed all checks. WebGPU reported an NVIDIA adapter, zero
 validation errors, and successful triangle/textured back-buffer checks. This was still a headless

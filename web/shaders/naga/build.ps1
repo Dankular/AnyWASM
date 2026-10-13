@@ -55,6 +55,7 @@ try {
         format = 1
         maximumWasmMemoryBytes = 134217728
         nagaArrayImageQueries = 'ImageQuery::Size plus ImageQuery::NumLayers'
+        nagaCapabilities = 'CUBE_ARRAY_TEXTURES'
         nagaVersion = '30.0.1'
         package = 'winebrowser-shader-wgsl'
         wasmBindgenVersion = '0.2.121'

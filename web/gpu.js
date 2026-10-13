@@ -1570,6 +1570,10 @@ export class GpuExecutor {
     } else {
       d.baseMipLevel = v.mip; d.mipLevelCount = Math.min(v.mips || tex.mips, tex.mips - v.mip);
       if (v.dim === 8 || tex.dimension === '3d') { d.dimension = '3d'; }
+      else if (v.dim === 10) {
+        d.dimension = 'cube-array'; d.baseArrayLayer = v.slice;
+        d.arrayLayerCount = Math.min(v.slices * 6, tex.array - v.slice);
+      }
       else if (v.dim === 9 || (tex.cube && v.dim !== 5)) { d.dimension = 'cube'; d.baseArrayLayer = 0; d.arrayLayerCount = 6; }
       else if (tex.dimension === '1d') {
         const arrayView = v.dim === 3;

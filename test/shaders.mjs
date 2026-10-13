@@ -180,6 +180,37 @@ check('Texture1DArray UAV stores lower to a 2D array storage texture',
     && /textureStore\(/.test(texture1dArrayUavCs?.wgsl || '')
     && !/texture_storage_1d(?:<|_array)/.test(texture1dArrayUavCs?.wgsl || ''),
   texture1dArrayUavError || texture1dArrayUavCs?.wgsl || 'translation returned no WGSL');
+let textureCubeArrayPs, textureCubeArrayError = '';
+try {
+  textureCubeArrayPs = t.translate(t.compileHlsl(`
+    TextureCubeArray<float4> image : register(t0);
+    SamplerState smp : register(s0);
+    float4 main() : SV_Target {
+      return image.SampleLevel(smp, float4(1.0, 0.0, 0.0, 1.0), 0.0);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { textureCubeArrayError = String(error); }
+check('TextureCubeArray SampleLevel lowers to a WGSL cube-array texture',
+  /texture_cube_array<f32>/.test(textureCubeArrayPs?.wgsl || '')
+    && /textureSampleLevel\(/.test(textureCubeArrayPs?.wgsl || ''),
+  textureCubeArrayError || textureCubeArrayPs?.wgsl || 'translation returned no WGSL');
+let textureCubeArrayDimensionsPs, textureCubeArrayDimensionsError = '';
+try {
+  textureCubeArrayDimensionsPs = t.translate(t.compileHlsl(`
+    TextureCubeArray<float4> image : register(t0);
+    float4 main() : SV_Target {
+      uint width, height, elements, levels;
+      image.GetDimensions(0, width, height, elements, levels);
+      return float4(width, height, elements, levels);
+    }
+  `, 'main', 'ps_5_0'));
+} catch (error) { textureCubeArrayDimensionsError = String(error); }
+check('TextureCubeArray GetDimensions lowers size, cube count, and mip count',
+  /texture_cube_array<f32>/.test(textureCubeArrayDimensionsPs?.wgsl || '')
+    && /textureDimensions\(t0_(?:,\s*0i)?\)/.test(textureCubeArrayDimensionsPs?.wgsl || '')
+    && /textureNumLayers\(t0_\)/.test(textureCubeArrayDimensionsPs?.wgsl || '')
+    && /textureNumLevels\(t0_\)/.test(textureCubeArrayDimensionsPs?.wgsl || ''),
+  textureCubeArrayDimensionsError || textureCubeArrayDimensionsPs?.wgsl || 'translation returned no WGSL');
 let threw = false; try { t.compileHlsl('float4 x( {', 'x', 'ps_5_0'); } catch (e) { threw = /HLSL/.test(e.message); }
 check('syntax errors reported', threw);
 let sdfWgsl = '', sdfError = '';

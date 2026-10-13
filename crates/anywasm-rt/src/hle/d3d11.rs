@@ -1364,6 +1364,8 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
         }
     } else if vk == ViewKind::Uav && info.array > 1 {
         5
+    } else if vk == ViewKind::Srv && info.misc & 0x4 != 0 {
+        if info.array > 6 { 10 } else { 9 }
     } else {
         4
     };
@@ -1385,6 +1387,11 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
         mip_dim(info.depth, 0)
     } else {
         info.array.max(1)
+    };
+    let default_slices = if desc == 0 && vk == ViewKind::Srv && default_dim == 10 {
+        default_slices / 6
+    } else {
+        default_slices
     };
     let (mut format, mut dim, mut a, mut b, mut c, mut d) = (
         info.format,
@@ -1411,6 +1418,12 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
                 c = p.rd32(desc + 16)?; // FirstArraySlice
                 d = p.rd32(desc + 20)?; // ArraySize
+            }
+            (ViewKind::Srv, 10) => {
+                a = p.rd32(desc + 8)?; // MostDetailedMip
+                b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
+                c = p.rd32(desc + 16)?; // First2DArrayFace
+                d = p.rd32(desc + 20)?; // NumCubes
             }
             (ViewKind::Srv, 1) => {
                 a = p.rd32(desc + 8)?; // FirstElement
@@ -2547,6 +2560,76 @@ mod tests {
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(fields, vec![explicit_view_id, 2, texture_id, 28, 3, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn create_texturecube_array_srv_tracks_cube_ranges() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const DESC: u64 = 0x10000;
+        const VIEW_DESC: u64 = 0x11000;
+        const OUT: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        for address in [DESC, VIEW_DESC, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let texture_desc = [4u32, 4, 1, 18, 28, 1, 0, 0, 0x8, 0, 0x4]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        p.write_bytes(DESC, &texture_desc).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = DESC;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = OUT;
+        assert_eq!(create_texture2d(&mut p).unwrap(), S_OK);
+
+        let texture = p.rd64(OUT).unwrap();
+        let texture_id = kind_of(&p, texture)
+            .and_then(|kind| kind.host_id())
+            .expect("CreateTexture2D should return a GPU texture resource");
+        let create_srv = method("ID3D11Device", "CreateShaderResourceView").unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = OUT;
+        assert_eq!(create_srv(&mut p).unwrap(), S_OK);
+
+        let default_view_id = kind_of(&p, p.rd64(OUT).unwrap())
+            .and_then(|kind| kind.host_id())
+            .unwrap();
+        let (_, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
+        let default_fields = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(default_fields, vec![default_view_id, 2, texture_id, 28, 10, 0, 1, 0, 3]);
+
+        let explicit_desc = [28u32, 10, 0, 1, 6, 2]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        p.write_bytes(VIEW_DESC, &explicit_desc).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = VIEW_DESC;
+        p.cpu.gpr[R9] = OUT;
+        assert_eq!(create_srv(&mut p).unwrap(), S_OK);
+
+        let explicit_view_id = kind_of(&p, p.rd64(OUT).unwrap())
+            .and_then(|kind| kind.host_id())
+            .unwrap();
+        let (_, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
+        let explicit_fields = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            explicit_fields,
+            vec![explicit_view_id, 2, texture_id, 28, 10, 0, 1, 6, 2]
+        );
     }
 
     #[test]

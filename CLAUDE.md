@@ -287,21 +287,17 @@ register-stack subset):
       anisotropic Texture2D comparison SampleCmpLevelZero also returns `[110, 0, 0, 255]` for the
       same edge-crossing LESS footprint. vkd3d rejects the documented float2 Texture2DArray.SampleGrad
       gradients with E5002, but accepts float3 gradients and lowers their xy components to vec2; the
-      pixel regression uses this compiler workaround. Cube-array filtering remains open.
-      `TextureCubeArray.SampleLevel` generates SPIR-V with `Dim=Cube, Arrayed=1`, which the vendored Naga
-      frontend rejects as an invalid image type (`Type [3] '' is invalid`, surfaced in the browser as
-      `op 6: undefined`). The checked-in Naga frontend is generated JS/WASM; rebuilding a source bridge
-      could not fetch Cargo dependencies because crates.io TLS failed. The bundled vkd3d compiler also
-      rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad` untestable.
-      Texture1DArray `GetDimensions` still fails Naga SPIR-V validation (`Function [0] 'main' is
-      invalid`), matching an equivalent Texture2DArray query. Additional sampled dimensions/formats and
-      other anisotropic cases remain open;
-      an 8x anisotropic
-      sampler request; instance step rates; render-to-texture; multiple render targets; cube-array, array,
-      and 3D texture sampling; depth/stencil; cull, fill, scissor, and depth bias; 4x MSAA resolves
-      for RGBA8, BGRA8, RGBA16_FLOAT, RGBA8_SRGB, BGRA8_SRGB, R10G10B10A2_UNORM, and
-      R11G11B10_FLOAT; 4x D24S8 depth testing with an RGBA8 color resolve; and
-      D3D11.1 constant-buffer ranges. Staging `Map(READ)`
+      pixel regression uses this compiler workaround. `TextureCubeArray.SampleLevel` now validates in
+      the pinned Naga bridge with `CUBE_ARRAY_TEXTURES` enabled. Chromium samples indices 0 and 1 from
+      a two-cube view beginning at face 6, verifies the +X/+Y linear seam, and reads the expected
+      width, height, cube count, and mip count with no WebGPU validation errors. The bundled vkd3d
+      compiler rejects the `ps_6_8` profile with E5033, leaving `SampleCmpBias` and `SampleCmpGrad`
+      untestable. `Texture1DArray` and `Texture2DArray` `GetDimensions` now pass through Naga's image
+      size and layer queries; shader tests and Chromium pixels verify mip 0/1 widths, two elements,
+      and three levels. Additional sampled dimensions/formats, other anisotropic footprints,
+      cube-array comparison methods, and array/3D formats beyond the tested RGBA8 samples remain open.
+      Other staging formats and subresource layouts, format/resolve combinations, and render-state
+      combinations remain open. Staging `Map(READ)`
       verifies RGBA8 back-buffer pixels, copied buffer values, two-row R32_FLOAT texels and
       R32_UINT/SINT words,
       R32G32_FLOAT two-channel texels with row pitches, R32G32_UINT/SINT packed channel words,

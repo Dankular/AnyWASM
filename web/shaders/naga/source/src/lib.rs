@@ -80,7 +80,7 @@ fn emit_wgsl(bytes: &[u8], adjust_coordinate_space: bool) -> Result<String, Stri
     let validator = || {
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
+            naga::valid::Capabilities::CUBE_ARRAY_TEXTURES,
         )
     };
     let information = validator()
