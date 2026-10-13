@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-13T16:09:25+01:00",
+  "target": "Diligent Tutorial03_Texturing",
+  "browser": {
+    "name": "Chrome",
+    "version": "155.0.8059.40",
+    "platform": "Windows x64"
+  },
+  "runtime": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "fc841f7ff8e17ca1a20415a5bd6c5f5669a0c370bd7b4b098d7830a377c2048b"
+  },
+  "bundle": {
+    "path": "target/Tutorial03_Texturing-hle-only.awb",
+    "sha256": "fc6d43dbdae75e0457d78dfe2c6ea58a6aed7342ba682e4912f500a3d7590c25",
+    "localMsvcOrUcrtDlls": false,
+    "arguments": "--mode d3d11",
+    "cpuMode": "cooperative"
+  },
+  "firstFrame": {
+    "draws": 59,
+    "dispatches": 0,
+    "presents": 30,
+    "passes": 119,
+    "pipelines": 2,
+    "asyncifyYields": 16,
+    "asyncifyResumes": 16,
+    "webgpuErrors": [],
+    "backBuffer": {
+      "width": 1280,
+      "height": 1024,
+      "nonBlackPixels": 1310720,
+      "nonTransparentPixels": 1310720
+    },
+    "visualContent": "textured Diligent logo cube",
+    "unresolvedImportBeforeFrame": false
+  },
+  "page": {
+    "status": "Starting Tutorial03_Texturing-hle-only.awb…",
+    "terminalStatus": null,
+    "exitCode": null,
+    "pageErrors": []
+  },
+  "network": {
+    "httpErrorResponses": [],
+    "consoleErrors": [
+      {
+        "text": "Failed to load resource: the server responded with a status of 404 (Not Found)",
+        "url": "http://localhost:8921/favicon.ico"
+      }
+    ]
+  },
+  "screenshot": "docs/images/tutorial03-hle-only-first-frame-recheck-2026-10-13.png",
+  "interpretation": "The HLE-only package rendered its textured cube without a local MSVC/UCRT runtime DLL or an unresolved import before the first frame. The only observed 404 was the browser favicon. Later guest execution and terminal status remain unverified."
+}

@@ -500,7 +500,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   A current-source Tutorial03 HLE-only replay continued for 30 seconds after the first frame and for
   15 seconds after Escape, reaching 2,820 presents with no WebGPU validation errors or unresolved-import
   stop. It remained in `Starting` with no terminal status; later imports and orderly shutdown remain
-  unverified. See `docs/target-data/tutorial03-hle-lifecycle-2026-10-13.json`.
+  unverified. A fresh 16:09 browser recheck rendered the same textured cube from the HLE-only package
+  with 59 draws, 30 presents, and zero WebGPU errors; response capture located the only 404 at
+  `/favicon.ico`. It also remained in `Starting`. See
+  [`tutorial03-hle-first-frame-recheck-2026-10-13.json`](target-data/tutorial03-hle-first-frame-recheck-2026-10-13.json)
+  and [`the captured frame`](images/tutorial03-hle-only-first-frame-recheck-2026-10-13.png).
   Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in
