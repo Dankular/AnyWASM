@@ -1480,7 +1480,7 @@ try {
       upload.set(textureBytes, 36);
       command(5, upload); // UpdateSubresource-style padded texture upload
       command(39, words(4)); // D3D11 GenerateMips on the all-level SRV
-      command(40, words(9, 0, 10, 10, 0, 3, 0, 1, 1, 1, 0, 3, 3, 1));
+      command(40, words(9, 0, 10, 10, 0, 3, 0, 1, 1, 0, 3, 3, 1, 1));
       command(40, words(9, 0, 20, 20, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0)); // copy mip 1 (2x2)
       command(40, words(9, 0, 24, 24, 0, 3, 2, 0, 0, 0, 0, 0, 0, 0)); // copy mip 2 (1x1)
       gpu.execute(append());
@@ -1556,13 +1556,42 @@ try {
         gpu.textureWrite(source3d, 0, z, 0, 0, 4, 4, 16, sourceSlice.length, sourceSlice);
         gpu.textureWrite(destination3d, 0, z, 0, 0, 4, 4, 16, destinationSlice.length, destinationSlice);
       }
-      command(40, words(destination3d, 0, 0, 1, 1, source3d, 0, 1, 1, 1, 1, 3, 3, 3));
+      command(40, words(destination3d, 0, 0, 1, 1, source3d, 0, 1, 1, 1, 3, 3, 3, 1));
       gpu.execute(append());
       const copiedVolume = await gpu.readBackResource(destination3d, 0);
       const atVolume = (x, y, z) => Array.from(copiedVolume.slice(((z * 4 + y) * 4 + x) * 4, ((z * 4 + y) * 4 + x) * 4 + 4));
       result.copy3d = {
         copied: [atVolume(0, 1, 1), atVolume(1, 1, 1), atVolume(0, 2, 2), atVolume(1, 2, 2)],
         outside: [atVolume(2, 1, 1), atVolume(0, 0, 1), atVolume(0, 1, 0)],
+      };
+
+      stream.length = 0;
+      const sourceArray = 42, destinationArray = 43;
+      gpu.createTexture(sourceArray, 4, 4, 2, 2, 28, 0, 0, 0, '2d');
+      gpu.createTexture(destinationArray, 4, 4, 2, 2, 28, 0, 0, 0, '2d');
+      const sourceMip1 = Uint8Array.from([
+        11, 12, 13, 255, 21, 22, 23, 255,
+        31, 32, 33, 255, 41, 42, 43, 255,
+      ]);
+      const destinationMip1 = new Uint8Array(16).fill(0);
+      for (let i = 0; i < 4; i++) destinationMip1.set([9, 8, 7, 255], i * 4);
+      const destinationMip0 = new Uint8Array(4 * 4 * 4);
+      for (let i = 0; i < 16; i++) destinationMip0.set([77, 76, 75, 255], i * 4);
+      gpu.textureWrite(sourceArray, 1, 0, 0, 0, 2, 2, 8, sourceMip1.length, sourceMip1);
+      gpu.textureWrite(destinationArray, 1, 1, 0, 0, 2, 2, 8, destinationMip1.length, destinationMip1);
+      gpu.textureWrite(destinationArray, 0, 1, 0, 0, 4, 4, 16, destinationMip0.length, destinationMip0);
+      command(40, words(destinationArray, 3, 0, 1, 0, sourceArray, 1, 1, 0, 0, 2, 1, 1, 1));
+      gpu.execute(append());
+      const copiedSourceArray = await gpu.readBackResource(sourceArray, 1);
+      const copiedDestinationArray = await gpu.readBackResource(destinationArray, 3);
+      const untouchedDestinationMip = await gpu.readBackResource(destinationArray, 2);
+      const arrayPixel = (bytes, width, x, y) => Array.from(bytes.slice((y * width + x) * 4, (y * width + x) * 4 + 4));
+      result.copyArray = {
+        source: arrayPixel(copiedSourceArray, 2, 1, 0),
+        copied: arrayPixel(copiedDestinationArray, 2, 0, 1),
+        outside: [arrayPixel(copiedDestinationArray, 2, 0, 0), arrayPixel(copiedDestinationArray, 2, 1, 0),
+          arrayPixel(copiedDestinationArray, 2, 1, 1)],
+        otherMip: arrayPixel(untouchedDestinationMip, 4, 0, 0),
       };
 
       stream.length = 0;
@@ -1576,7 +1605,7 @@ try {
         payload.set(words(id, 0, data.length)); payload.set(data, 12); command(3, payload);
       };
       writeBuffer(sourceBuffer, sourceBytes); writeBuffer(destinationBuffer, destinationBytes);
-      command(40, words(destinationBuffer, 0, 5, 0, 0, sourceBuffer, 0, 1, 7, 0, 0, 18, 1, 1));
+      command(40, words(destinationBuffer, 0, 5, 0, 0, sourceBuffer, 0, 7, 0, 0, 18, 0, 0, 1));
       gpu.execute(append());
       result.copyBuffer = Array.from(await gpu.readBackResource(destinationBuffer));
 
@@ -1585,7 +1614,7 @@ try {
       const overlappingBytes = Uint8Array.from({ length: 32 }, (_, i) => i);
       command(2, words(overlappingBuffer, overlappingBytes.length, 0, 0, 0, 0));
       writeBuffer(overlappingBuffer, overlappingBytes);
-      command(40, words(overlappingBuffer, 0, 8, 0, 0, overlappingBuffer, 0, 1, 4, 0, 0, 16, 1, 1));
+      command(40, words(overlappingBuffer, 0, 8, 0, 0, overlappingBuffer, 0, 4, 0, 0, 16, 0, 0, 1));
       gpu.execute(append());
       result.copyBufferOverlap = Array.from(await gpu.readBackResource(overlappingBuffer));
       result.errors = gpu.stats.errors;
@@ -1608,6 +1637,12 @@ try {
     copyRegionResult.copy3d?.copied?.map((pixel) => pixel[0]).join(',') === '21,22,41,42'
       && copyRegionResult.copy3d?.outside?.every((pixel) => pixel[0] === 9 && pixel[1] === 8 && pixel[2] === 7 && pixel[3] === 255),
     JSON.stringify(copyRegionResult.copy3d));
+  check('D3D11 CopySubresourceRegion selects array/mip subresources and preserves outside texels',
+    near(copyRegionResult.copyArray?.source || [], [21, 22, 23, 255], 1)
+      && near(copyRegionResult.copyArray?.copied || [], [21, 22, 23, 255], 1)
+      && copyRegionResult.copyArray?.outside?.every((pixel) => near(pixel, [9, 8, 7, 255], 1))
+      && near(copyRegionResult.copyArray?.otherMip || [], [77, 76, 75, 255], 1),
+    JSON.stringify(copyRegionResult.copyArray));
   const expectedBufferRegion = Array(32).fill(0xee);
   expectedBufferRegion.splice(5, 11, ...Array.from({ length: 11 }, (_, i) => i + 8));
   check('D3D11 CopySubresourceRegion copies unaligned buffer byte ranges and preserves both edges',

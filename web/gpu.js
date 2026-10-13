@@ -2582,12 +2582,12 @@ export class GpuExecutor {
 
   copyRegion(dv) {
     const u = (i) => dv.getUint32(i * 4, true);
-    const [dst, dsub, dx, dy, dz, src, ssub, hasBox] = [u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(7)];
+    const [dst, dsub, dx, dy, dz, src, ssub, hasBox] = [u(0), u(1), u(2), u(3), u(4), u(5), u(6), u(13)];
     const d = this.res.get(dst), s = this.res.get(src);
     if (!d || !s) return;
     this.endPass();
     if (d.kind === 'buffer' && s.kind === 'buffer') {
-      const l = hasBox ? u(8) : 0, r = hasBox ? u(11) : s.size;
+      const l = hasBox ? u(7) : 0, r = hasBox ? u(10) : s.size;
       const sourceOffset = l, destOffset = dx;
       const sourceSize = s.d3dSize ?? s.size, destinationSize = d.d3dSize ?? d.size;
       const size = Math.max(0, Math.min(r - l, sourceSize - sourceOffset, destinationSize - destOffset));
@@ -2599,7 +2599,7 @@ export class GpuExecutor {
       return;
     }
     const smip = ssub % s.mips, sslice = Math.floor(ssub / s.mips), dmip = dsub % d.mips, dslice = Math.floor(dsub / d.mips);
-    const box = hasBox ? { l: u(8), t: u(9), f: u(10), r: u(11), b: u(12), back: u(13) } : { l: 0, t: 0, f: 0, r: Math.max(1, s.width >> smip), b: Math.max(1, s.height >> smip), back: s.dimension === '3d' ? Math.max(1, s.depth >> smip) : 1 };
+    const box = hasBox ? { l: u(7), t: u(8), f: u(9), r: u(10), b: u(11), back: u(12) } : { l: 0, t: 0, f: 0, r: Math.max(1, s.width >> smip), b: Math.max(1, s.height >> smip), back: s.dimension === '3d' ? Math.max(1, s.depth >> smip) : 1 };
     const sourceZ = s.dimension === '3d' ? box.f : sslice;
     const destZ = d.dimension === '3d' ? dz : dslice;
     const depth = s.dimension === '3d' || d.dimension === '3d' ? box.back - box.f : 1;
