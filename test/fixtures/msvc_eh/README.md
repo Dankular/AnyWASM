@@ -48,6 +48,11 @@ and both normal and unwind-time termination handlers pass:
 | 5 | Execution does not resume after `RaiseException` |
 | 6 | The outer handler fails to catch or the unwind-time `__finally` does not run once |
 | 7 | A filter-raised nested exception or the original exception is not caught |
+| 8 | The escaping nested exception is not caught by the outer handler |
+| 9 | The filter does not run once for each nested exception |
+| 10 | The exception raised from `__finally` does not replace the in-flight exception |
+| 11 | The nested filter unexpectedly enters its own handler |
+| 12 | The colliding `__finally` handler does not run exactly once |
 
 Build and inspect the imported exception entry points from the repository root:
 
@@ -130,10 +135,18 @@ verified `EXCEPTION_CONTINUE_SEARCH`, `EXCEPTION_CONTINUE_EXECUTION`, exception-
 EH4 registration record and cookie-encoded scope table, validates local cookies with the image's
 `__security_check_cookie`, and transfers to the selected handler through the PE32 dispatcher. This
 also verifies a filter that raises and catches a second exception before selecting the original
-exception. A synthetic runtime regression separately exercises a handler returning
-`EXCEPTION_NESTED_EXCEPTION` and checks that the next registration sees `EXCEPTION_NESTED_CALL`.
-Full nested-frame bookkeeping, a nested exception escaping its filter, collided unwind dispositions,
-and every compiler-specific EH4 layout remain open.
+exception. It verifies that an uncaught exception raised in a filter reaches the outer handler, and
+that an exception raised from `__finally` replaces the in-flight exception while the termination
+handler runs exactly once. Both cases return 0 natively and through the HLE-only CLI. A synthetic
+runtime regression separately exercises a handler returning `EXCEPTION_NESTED_EXCEPTION` and checks
+that the next registration sees `EXCEPTION_NESTED_CALL`; the end-to-end fixture does not return
+disposition 2 or 3. Full nested-frame bookkeeping, explicit collided-unwind disposition handling, and
+every compiler-specific EH4 layout remain open.
+
+On 2026-10-13, the rebuilt release WASM and Asyncify module ran all five fixture packages in
+`test/browser/exception-fixtures.mjs` under Chromium. Every package exited 0 and the page reported no
+JavaScript errors. The `seh-x86` package includes the filter-raised and `__finally` exception cases
+above.
 
 On 2026-10-13, the C++ fixture added exit code 60 for a cross-registration-frame transfer: a noinline
 callee owns a `DestructorProbe` and throws `Derived`, while its caller catches `Base` by reference and

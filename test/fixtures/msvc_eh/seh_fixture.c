@@ -8,6 +8,11 @@ static const DWORD kUnwindCode = 0xE0424343;
 static const DWORD kNestedOuterCode = 0xE0424246;
 static const DWORD kNestedInnerCode = 0xE0424247;
 static volatile LONG g_nested_caught_code;
+static const DWORD kEscapingNestedOuterCode = 0xE0424248;
+static const DWORD kEscapingNestedInnerCode = 0xE0424249;
+static volatile LONG g_nested_filter_calls;
+static const DWORD kCollidedOuterCode = 0xE042424A;
+static const DWORD kCollidedInnerCode = 0xE042424B;
 
 static int nested_filter(void) {
     __try {
@@ -18,11 +23,29 @@ static int nested_filter(void) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+static int nested_filter_escape(EXCEPTION_POINTERS *pointers) {
+    DWORD code = pointers->ExceptionRecord->ExceptionCode;
+    ++g_nested_filter_calls;
+    if (code == kEscapingNestedOuterCode) {
+        RaiseException(kEscapingNestedInnerCode, 0, 0, NULL);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static void raise_through_finally(void) {
     __try {
         RaiseException(kUnwindCode, 0, 0, NULL);
     } __finally {
         ++g_finally_runs;
+    }
+}
+
+static void raise_through_colliding_finally(void) {
+    __try {
+        RaiseException(kCollidedOuterCode, 0, 0, NULL);
+    } __finally {
+        ++g_finally_runs;
+        RaiseException(kCollidedInnerCode, 0, 0, NULL);
     }
 }
 
@@ -83,6 +106,31 @@ int main(void) {
 
     if (caught_code != (LONG)kNestedOuterCode
         || g_nested_caught_code != (LONG)kNestedInnerCode) return 7;
+
+    volatile LONG escaping_nested_caught_code = 0;
+    g_nested_filter_calls = 0;
+    __try {
+        __try {
+            RaiseException(kEscapingNestedOuterCode, 0, 0, NULL);
+        } __except (nested_filter_escape(GetExceptionInformation())) {
+            return 11;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        escaping_nested_caught_code = (LONG)GetExceptionCode();
+    }
+
+    if (escaping_nested_caught_code != (LONG)kEscapingNestedInnerCode) return 8;
+    if (g_nested_filter_calls != 2) return 9;
+
+    caught_code = 0;
+    g_finally_runs = 0;
+    __try {
+        raise_through_colliding_finally();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        caught_code = (LONG)GetExceptionCode();
+    }
+    if (caught_code != (LONG)kCollidedInnerCode) return 10;
+    if (g_finally_runs != 1) return 12;
 
     return 0;
 }

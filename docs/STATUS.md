@@ -228,8 +228,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   exceptions, while a scheduler regression checks per-thread ExceptionList state. PE32 now also
   handles the MSVC EH4 C SEH path: the image-local handler's cookie-encoded scope table, filter
   continue-search/continue-execution/execute-handler results, and normal plus unwind-time
-  `__finally` behavior are covered by a built x86 fixture. PE32 nested and collided unwind plus
-  broader compiler-specific C/C++ runtime behavior remain open. A direct-entry PE32 EH3 fixture now
+  `__finally` behavior are covered by a built x86 fixture. Native and HLE-only PE32 fixture runs also
+  verify an exception escaping an `__except` filter and one raised from `__finally`. A synthetic
+  handler test checks the basic `EXCEPTION_NESTED_EXCEPTION` to `EXCEPTION_NESTED_CALL` search
+  transition. Full nested-frame bookkeeping, explicit collided-unwind dispositions, and broader
+  compiler-specific C/C++ runtime behavior remain open. The rebuilt release WASM and Asyncify module
+  also passes all five HLE-only PE32/x64 exception packages in Chromium with zero page errors. A
+  direct-entry PE32 EH3 fixture now
   verifies by-value/reference catches, catch-all, nested catches, and destructor
   unwind. General Win32/PE32 compatibility remains incomplete. Other CPU exits, audio, DirectInput/
   XInput, general D3D9, D3D12, and OpenGL remain unsupported. The D3D9
@@ -481,8 +486,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `_except_handler4_common` subset is implemented and
   fixture-tested for continue-search, continue-execution, exception-code access, and normal or
   unwind-time `__finally` execution. The PE32 EH3 path also executes the fixture's compiler-generated
-  nontrivial catch-copy callback. Nested/collided unwind dispositions, arbitrary catch-copy closure
-  layouts, and other compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
+  nontrivial catch-copy callback. A filter-raised exception escaping to its outer handler and an
+  exception raised during `__finally` are covered end to end; a synthetic test covers the basic
+  nested-disposition flag/search transition. Full nested-frame bookkeeping, explicit collided-unwind
+  disposition handling, arbitrary catch-copy closure layouts, and other compiler-specific EH4 layouts
+  remain unsupported. Across the x64 and PE32
   subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
   and privileged instructions, and software breakpoints. A browser
   fixture now executes one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and

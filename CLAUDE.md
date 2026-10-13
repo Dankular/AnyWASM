@@ -190,8 +190,11 @@ register-stack subset):
       vectored handlers and linked NT_TIB exception registrations, resumes edited contexts, and
       applies RaiseException's x86 stdcall cleanup. Synthetic guest execution covers selected x86
       illegal, privileged, divide, and breakpoint exceptions; a scheduler regression preserves each
-      thread's NT_TIB.ExceptionList. PE32 nested/collided unwind and compiler-specific C/C++ handlers,
-      other CPU exits, and version 2 unwind data remain open.
+      thread's NT_TIB.ExceptionList. The MSVC PE32 C fixture passes nested exceptions escaping a
+      filter and exceptions raised during `__finally` natively, through the CLI, and in a browser
+      package. A synthetic handler regression covers disposition 2 setting `EXCEPTION_NESTED_CALL`.
+      Full nested-frame bookkeeping, explicit collided-unwind disposition handling, compiler-specific
+      C/C++ handlers, other CPU exits, and version 2 unwind data remain open.
 - [~] **More of kernel32/ntdll/user32/shlwapi**: target-grounded work adds
       `VerifyVersionInfoA/W`, `PathFileExistsA/W`, and cooperative wait support alongside the
       earlier `InitializeSListHead`, `GetCapture`, `IsWindowUnicode`, `GetDlgItem`, and

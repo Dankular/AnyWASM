@@ -628,11 +628,17 @@ compiled real-world `__try` binary. Synthetic tests also cover vectored-continue
 callback returns, plus top-level filter replacement and resumption with a modified context. PE32
 exception support is partial: synthetic tests cover `RaiseException` through an x86 registration
 handler and CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fixture verifies
-filter selection, continuation, and normal and unwind-time `__finally` execution. The compiled PE32
+filter selection, continuation, and normal and unwind-time `__finally` execution. Native and
+HLE-only runs now also verify a nested exception escaping a filter to an outer handler and an
+exception raised during `__finally`. A synthetic handler test covers disposition 2 setting
+`EXCEPTION_NESTED_CALL` before search continues. These runs do not exercise explicit dispositions 2
+or 3 end to end. The rebuilt release WASM and Asyncify module also pass all five HLE-only exception
+fixture packages in Chromium with no page errors. The compiled PE32
 EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and
 one caller/callee catch transfer; the direct-entry and normal-startup x86 variants return 0 in the
-HLE-only runtime. Other PE32 frame layouts, nested/collided dispositions, and broader compiler
-metadata remain unverified. See [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
+HLE-only runtime. Full nested-frame bookkeeping, explicit collided-unwind disposition handling, other
+PE32 frame layouts, and broader compiler metadata remain unverified. See
+[`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
 for the fixture matrix and exit-code meanings.
 
 The next imports are `advapi32!RegOpenKeyExA` probes for
