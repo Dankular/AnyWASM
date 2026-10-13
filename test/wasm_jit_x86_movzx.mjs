@@ -17,10 +17,13 @@ assert.ok(existsSync(cliPath), `missing AnyWASM CLI: ${cliPath}`);
 
 const executable = readFileSync(fixturePath);
 const entryPair = Buffer.from([0x0f, 0xb6, 0x1e, 0x0f, 0xb6, 0xc3]);
+const parserLeaPair = Buffer.from([0x8d, 0x04, 0xbf, 0x8d, 0x7c, 0x43, 0xd0]);
 assert.equal(executable.readUInt16LE(executable.readUInt32LE(0x3c) + 4), 0x014c,
   'fixture must be a PE32 x86 executable');
 assert.notEqual(executable.indexOf(entryPair), -1,
   'fixture must contain adjacent MOVZX EBX,[ESI] and MOVZX EAX,BL instructions');
+assert.notEqual(executable.indexOf(parserLeaPair), -1,
+  'fixture must contain the scaled LEA pair from the GTA format parser');
 
 const tempDir = mkdtempSync(join(tmpdir(), 'anywasm-movzx-'));
 const bundlePath = join(tempDir, 'jit_movzx_x86.awb');
@@ -72,16 +75,22 @@ try {
   const emitted = await run({ jitMinPrefix: 1 });
   const cached = await run({});
   const interpreted = await run({ jit: false, jitMinPrefix: 1 });
-
   for (const [name, result] of [['emitted', emitted], ['cached', cached], ['interpreter', interpreted]]) {
-    assert.equal(result.status, Status.EXITED, `${name} status`);
-    assert.equal(result.exitCode, 0, `${name} exit code`);
+    const detail = `${name} result: ${JSON.stringify({
+      status: result.status,
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      jitStats: result.jitStats,
+    })}`;
+    assert.equal(result.status, Status.EXITED, `${name} status; ${detail}`);
+    assert.equal(result.exitCode, 0, `${name} exit code; ${detail}`);
   }
   assert.ok(emitted.jitStats.compilations > 0, 'forced emission must compile a block');
   assert.ok(emitted.jitStats.executions > 0,
     `forced emission must execute a generated block: ${JSON.stringify(emitted.jitStats)}`);
-  assert.ok(emitted.jitStats.emittedGuestInstructions >= 3,
-    'generated execution must include the immediate load and both MOVZX instructions');
+  assert.ok(emitted.jitStats.emittedGuestInstructions >= 9,
+    'generated execution must include the MOVZX and scaled-LEA parser block');
   assert.ok(emitted.jitStats.registerRegisterHits > 0,
     'generated execution must retire past MOVZX EAX,BL');
   assert.equal(cached.jitStats.executions, 0, 'cached-only run must not execute emitted blocks');

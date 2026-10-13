@@ -74,6 +74,12 @@
 - [ ] Benchmark GTA at fixed post-New-Game checkpoints; record emitted instructions per second, compilation count, execution count, fallbacks, presents, and pending ranges.
 - [ ] Keep a compatible hotness/prefix threshold as the default only when GTA and representative fixture throughput improve over cached-only execution.
 
+Progress: x86-32 emission now includes the two scaled `LEA` instructions at `gta_sa.exe+0x8291b0`.
+The PE32 differential fixture covers the measured `MOVZX` pair and `LEA` pair; interpreter, cached,
+and emitted modes agree on exit status, 15 retired instructions, full CPU state, and mapped memory.
+This is instruction-family coverage only; the parser's helper-call path and GTA throughput benchmark
+remain open.
+
 ### Task 4: Dispatch independently runnable GTA guest threads concurrently
 
 **Files:**

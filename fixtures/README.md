@@ -8,7 +8,8 @@ Apache-2.0; the license text is included at
 [`licenses/DiligentEngine-License.txt`](licenses/DiligentEngine-License.txt).
 
 `jit_movzx_x86.exe` is a freestanding PE32 fixture for the adjacent
-`MOVZX EBX, byte ptr [ESI]` / `MOVZX EAX, BL` sequence observed in GTA's parser. Rebuild it with
+`MOVZX EBX, byte ptr [ESI]` / `MOVZX EAX, BL` sequence and the scaled `LEA` pair observed in GTA's
+parser. Rebuild it with
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File fixtures/build_jit_movzx_x86.ps1`; run
 `node test/wasm_jit_x86_movzx.mjs` to compare interpreter, cached-only, and emitted WASM execution,
 including complete CPU snapshots, mapped memory, and retired-instruction counts. The fixture reads

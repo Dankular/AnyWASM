@@ -541,6 +541,9 @@ fn safe_x86_32_instruction(instruction: JitInstruction) -> bool {
             width: 4,
             ..
         } => dst < 8 && source < 8,
+        JitInstruction::Lea { dst, address, .. } => {
+            dst < 8 && address.addr32 && inline_address_shape(address)
+        }
         _ => false,
     }
 }
@@ -737,7 +740,11 @@ fn translate_inc(inst: Inst) -> Option<JitInstruction> {
 }
 
 fn translate_lea(inst: Inst, mode: CpuMode) -> Option<JitInstruction> {
-    if inst.op != Op::Lea || inst.osz != 8 {
+    let operand_size_matches_mode = match mode {
+        CpuMode::X86_32 => inst.osz == 4,
+        CpuMode::X86_64 => inst.osz == 8,
+    };
+    if inst.op != Op::Lea || !operand_size_matches_mode {
         return None;
     }
     let (Opnd::Gpr(dst), Opnd::Mem(address)) = (inst.ops[0], inst.ops[1]) else {
@@ -2867,6 +2874,31 @@ mod tests {
             .wasm
             .windows(8)
             .any(|bytes| bytes == [0x20, 12, 0x42, 0xff, 1, 0x83, 0x21, 9]));
+    }
+
+    #[test]
+    fn emits_x86_32_scaled_lea_in_the_gta_scanner() {
+        // These are the two scaled address calculations immediately after the scanner's
+        // digit-classification test at gta_sa.exe+0x8291b0.
+        let lea_accumulator =
+            decode_mode(&[0x8d, 0x04, 0xbf], 0x8291b0, CpuMode::X86_32).unwrap();
+        let lea_digit =
+            decode_mode(&[0x8d, 0x7c, 0x43, 0xd0], 0x8291b3, CpuMode::X86_32).unwrap();
+        assert_eq!(lea_accumulator.op, Op::Lea);
+        assert_eq!(lea_accumulator.osz, 4);
+        assert_eq!(lea_digit.op, Op::Lea);
+        assert_eq!(lea_digit.osz, 4);
+
+        let emitted = emit_mov_block_mode(
+            0x8291b0,
+            0x8291b0,
+            &[lea_accumulator, lea_digit],
+            1,
+            CpuMode::X86_32,
+        )
+        .expect("the GTA scanner's scaled 32-bit LEA instructions should be emitted");
+
+        assert_eq!(emitted.instruction_count(), 2);
     }
 
     #[test]

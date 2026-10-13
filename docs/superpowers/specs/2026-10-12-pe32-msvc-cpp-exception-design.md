@@ -90,12 +90,16 @@ silently selecting a handler.
   or outer-frame `/EHsc` catches. Build the fixture with EH4 disabled so it exercises
   `__CxxFrameHandler3` explicitly.
 - x64 PE32+ EH3/EH4 parsing and dispatch remain on the existing code path.
-- `/EHa` conversion of arbitrary CPU faults into C++ catches, CLR/WinRT exceptions, x86 EH4,
+- `/EHa` conversion of arbitrary CPU faults into C++ catches, CLR/WinRT exceptions, native x86 EH4,
   exception specifications, `exception_ptr`, and future compiler encodings remain out of scope.
+  The installed MSVC 14.29 and 14.44 `ehdata_forceinclude.h` headers set
+  `_EH_RELATIVE_FUNCINFO` to `0` for native x86; EH4's relative function metadata path is enabled
+  for x64/ARM targets. Keep PE32 C++ FH4 unsupported until a native x86 image demonstrates a
+  concrete handler thunk and metadata ABI.
 - One direct cross-registration-frame catch transfer and inner-frame destructor are fixture-verified.
-  Other frame layouts remain untested. Custom x86 catch-copy closures and the post-catch
-  thrown-object destructor are not implemented; trivial by-value copies use a checked guest-memory
-  copy. Nested/collided SEH unwind dispositions remain unsupported.
+  Other frame layouts remain untested. X86 catch-copy functions use the guest `__thiscall` ABI with
+  checked destination and source ranges; the post-catch thrown-object destructor remains
+  unimplemented. Nested/collided SEH unwind dispositions remain unsupported.
 - Unwind funclets execute as guest code and lower their registration state before running. Nested
   exception behavior during cleanup has not been verified.
 - An unmatched C++ exception continues through outer registration frames, then follows the existing
