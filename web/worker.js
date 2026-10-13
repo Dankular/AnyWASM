@@ -273,7 +273,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
     try {
       const tool = new ShaderTool(new URL('./shaders/', import.meta.url));
       await tool.init();
-      exec = new GpuExecutor(canvas, tool, log, { noPresent: testMode });
+      exec = new GpuExecutor(canvas, tool, log, { noPresent: testMode, profile: new URL(self.location.href).searchParams.has('profileGpu') });
       exec.onWindow = (win) => postMessage({ type: 'window', ...win });
       await exec.init();
       w.hostIo.gpuExecutor = exec;

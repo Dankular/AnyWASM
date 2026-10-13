@@ -74,6 +74,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
     if (new URLSearchParams(location.search).has('sharedCpuWorkers')) {
       workerUrl.searchParams.set('sharedCpuWorkers', '');
     }
+    if (new URLSearchParams(location.search).has('profileGpu')) workerUrl.searchParams.set('profileGpu', '');
     if (new URLSearchParams(location.search).has('inPlaceCpu')) {
       workerUrl.searchParams.set('inPlaceCpu', '');
     }

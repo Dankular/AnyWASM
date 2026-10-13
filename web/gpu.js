@@ -6,6 +6,7 @@
 // draw sees exactly the data that was uploaded before it. Render passes are kept open across
 // consecutive draws and closed whenever a copy, clear or attachment change needs the encoder.
 
+const OP_NAMES = new Map();
 const OP = {
   WINDOW: 1, CREATE_BUFFER: 2, BUFFER_WRITE: 3, CREATE_TEXTURE2D: 4, TEXTURE_WRITE: 5, CREATE_SHADER: 6,
   CREATE_INPUT_LAYOUT: 7, CREATE_SAMPLER: 8, CREATE_BLEND: 9, CREATE_RASTER: 10, CREATE_DEPTH: 11, CREATE_VIEW: 12,
@@ -16,6 +17,7 @@ const OP = {
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
   SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49, CLEAR_UAV: 50, PUSH_STATE: 51, POP_STATE: 52, CREATE_TEXTURE1D: 53,
 };
+for (const [name, code] of Object.entries(OP)) OP_NAMES.set(code, name);
 
 // DXGI_FORMAT -> GPUTextureFormat (colour and depth). Approximations are noted.
 const TEX = {
@@ -885,7 +887,8 @@ export class GpuExecutor {
    * @param {OffscreenCanvas|HTMLCanvasElement} canvas
    * @param {import('./shaders.js').ShaderTool} tool
    */
-  constructor(canvas, tool, log = () => {}, { noPresent = false } = {}) {
+  constructor(canvas, tool, log = () => {}, { noPresent = false, profile = false } = {}) {
+    this.profile = profile; // record CPU-side time per command (see recordProfile)
     this.noPresent = noPresent; // skip the canvas blit (headless test mode; see docs/STATUS.md)
     this.canvas = canvas;
     this.tool = tool;
@@ -922,6 +925,7 @@ export class GpuExecutor {
     this.ring = null;
     this.ringOff = 0;
     this.stats = { draws: 0, dispatches: 0, presents: 0, passes: 0, pipelines: 0, lastComputeUavs: [], errors: [] };
+    if (this.profile) this.stats.profile = {};
     this.lastPresentSyncInterval = 1;
     this.st = defaultPipelineState();
     this.stateStack = [];
@@ -1028,10 +1032,24 @@ export class GpuExecutor {
       const op = dvAll.getUint32(p, true), len = dvAll.getUint32(p + 4, true);
       const dv = new DataView(buf.buffer, buf.byteOffset + p + 8, len);
       const bytes = buf.subarray(p + 8, p + 8 + len);
+      const started = this.profile ? performance.now() : 0;
       try { this.dispatch(op, dv, bytes); } catch (e) { this.stats.errors.push(`op ${op}: ${e.message}`); this.log(`op ${op} failed: ${e.stack || e.message}`); }
+      if (this.profile) this.recordProfile(op, performance.now() - started, len);
       p += 8 + len;
     }
+    const flushStarted = this.profile ? performance.now() : 0;
     this.flush();
+    if (this.profile) this.recordProfile('FLUSH', performance.now() - flushStarted, 0);
+  }
+
+  /** CPU-side (JavaScript) time spent issuing each command, when constructed with `profile: true`. */
+  recordProfile(op, ms, bytes) {
+    const name = typeof op === 'string' ? op : (OP_NAMES.get(op) ?? `OP_${op}`);
+    const entry = (this.stats.profile[name] ||= { count: 0, ms: 0, bytes: 0, maxMs: 0 });
+    entry.count++;
+    entry.ms += ms;
+    entry.bytes += bytes;
+    if (ms > entry.maxMs) entry.maxMs = ms;
   }
 
   dispatch(op, dv, bytes) {
@@ -1051,7 +1069,7 @@ export class GpuExecutor {
       case OP.CREATE_BUFFER: {
         const size = Math.max(16, (u(1) + 15) & ~15);
         const gpu = this.device.createBuffer({ size, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), misc: u(4), stride: u(5), shadow: new Uint8Array(size) });
+        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), misc: u(4), stride: u(5), shadow: (u(2) & 0x2) ? new Uint8Array(size) : null }); // CPU copy only for index buffers (wireframe fill reads indices); everything else lives only in the GPU buffer
         break;
       }
       case OP.BUFFER_WRITE: {
