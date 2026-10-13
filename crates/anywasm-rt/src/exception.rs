@@ -25,6 +25,7 @@ const EXCEPTION_UNWINDING: u32 = 0x2;
 const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
 const DISPATCHER_CONTROL_PC: u64 = 0x00;
 const DISPATCHER_IMAGE_BASE: u64 = 0x08;
+const DISPATCHER_ESTABLISHER_FRAME: u64 = 0x18;
 const DISPATCHER_TARGET_IP: u64 = 0x20;
 const DISPATCHER_HANDLER_DATA: u64 = 0x38;
 const DISPATCHER_HISTORY_TABLE: u64 = 0x40;
@@ -43,6 +44,8 @@ const MAX_C_SCOPE_ENTRIES: u32 = 4096;
 const UNW_FLAG_EHANDLER: u8 = 1;
 const UNW_FLAG_UHANDLER: u8 = 2;
 const UNW_FLAG_CHAININFO: u8 = 4;
+const EXCEPTION_NESTED_EXCEPTION: u64 = 2;
+const EXCEPTION_NESTED_CALL: u32 = 0x10;
 
 const WINDOWS_GPRS: [usize; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
@@ -238,6 +241,8 @@ fn dispatch_context_exception_inner(
     let mut control_pc = context.rip;
     let mut last_rsp = context.gpr[RSP];
     let mut frames = Vec::new();
+    let mut search_flags = flags;
+    let mut nested_frame = 0;
 
     if dispatch_vectored_exception_handlers(p, exception_record, context_record)? {
         return resume_exception(p, exception_record, context_record, skip_ret_on_resume);
@@ -250,7 +255,7 @@ fn dispatch_context_exception_inner(
                 exception_record,
                 context_record,
                 code,
-                flags,
+                search_flags,
                 skip_ret_on_resume,
                 format!(
                     "search left guest stack after {frame_number} frames (pc={control_pc:#x}, rsp={last_rsp:#x})"
@@ -263,7 +268,7 @@ fn dispatch_context_exception_inner(
                 exception_record,
                 context_record,
                 code,
-                flags,
+                search_flags,
                 skip_ret_on_resume,
                 format!("search reached non-module PC {control_pc:#x} after {frame_number} frames"),
             );
@@ -300,6 +305,7 @@ fn dispatch_context_exception_inner(
         if result.handler != 0 {
             // Windows passes the original exception context to every first-pass handler.
             // The per-frame context is carried separately by the dispatcher walk.
+            p.wr32(exception_record + 4, search_flags)?;
             write_context(p, context_record, &exception_context)?;
             write_dispatcher_context(
                 p,
@@ -337,7 +343,7 @@ fn dispatch_context_exception_inner(
                     let context_record = unwind.context_record;
                     complete_guest_unwind(p, &frames, dispatcher_context, unwind)?;
                     // The continue handlers see the final context after phase-two unwind.
-                    p.wr32(exception_record + 4, flags)?;
+                    p.wr32(exception_record + 4, search_flags)?;
                     dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
                     restore_exception_context(p, context_record, skip_ret_on_resume)?;
                     return Ok(0);
@@ -353,10 +359,16 @@ fn dispatch_context_exception_inner(
                     .as_bytes(),
                 );
             }
+            search_flags |= p.rd32(exception_record + 4)? & EXCEPTION_NONCONTINUABLE;
+            if nested_frame == establisher {
+                search_flags &= !EXCEPTION_NESTED_CALL;
+                nested_frame = 0;
+            }
+            p.wr32(exception_record + 4, search_flags)?;
             match disposition as u64 {
                 EXCEPTION_CONTINUE_SEARCH => {}
                 EXCEPTION_CONTINUE_EXECUTION => {
-                    if flags & EXCEPTION_NONCONTINUABLE != 0 {
+                    if search_flags & EXCEPTION_NONCONTINUABLE != 0 {
                         return Err(Stop::Crash(format!(
                             "noncontinuable exception code={code:#x} cannot continue execution"
                         )));
@@ -367,6 +379,11 @@ fn dispatch_context_exception_inner(
                         context_record,
                         skip_ret_on_resume,
                     );
+                }
+                EXCEPTION_NESTED_EXCEPTION => {
+                    search_flags |= EXCEPTION_NESTED_CALL;
+                    nested_frame = nested_frame
+                        .max(p.rd64(dispatcher_context + DISPATCHER_ESTABLISHER_FRAME)?);
                 }
                 value => {
                     return Err(Stop::Unimplemented {
@@ -393,7 +410,7 @@ fn dispatch_context_exception_inner(
                 exception_record,
                 context_record,
                 code,
-                flags,
+                search_flags,
                 skip_ret_on_resume,
                 format!("search exhausted the guest stack after {frame_number} frames"),
             );
@@ -460,6 +477,7 @@ fn dispatch_unhandled_exception(
     reason: String,
 ) -> Result<u64, Stop> {
     let exception_pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS_SIZE, true);
+    p.wr32(exception_record + 4, flags)?;
     dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
     p.wr64(exception_pointers, exception_record)?;
     p.wr64(exception_pointers + 8, context_record)?;
@@ -2389,6 +2407,117 @@ mod tests {
         assert_eq!(process.cpu.gpr[anywasm_cpu::cpu::RAX], CODE as u64);
         assert!(process.skip_ret);
         assert_eq!(process.rd32(VEH_MARKER).unwrap(), 1);
+    }
+
+    #[test]
+    fn nested_exception_disposition_marks_outer_x64_handler() {
+        const IMAGE_BASE: u64 = 0x1400_0000_0;
+        const INNER: u64 = IMAGE_BASE + 0x110;
+        const OUTER: u64 = IMAGE_BASE + 0x210;
+        const TOP: u64 = IMAGE_BASE + 0x310;
+        const LANDING_PAD: u64 = IMAGE_BASE + 0x380;
+        const INNER_HANDLER: u64 = IMAGE_BASE + 0x600;
+        const OUTER_HANDLER: u64 = IMAGE_BASE + 0x680;
+        const TOP_HANDLER: u64 = IMAGE_BASE + 0x700;
+        const RAISE_RSP: u64 = STACK + 0x600;
+        const OUTER_FLAGS: u64 = INFO + 0x300;
+        const TOP_FLAGS: u64 = INFO + 0x304;
+        const CODE: u32 = 0xe123_4567;
+
+        let mut process = process_with_memory();
+        assert!(process.mem.map(IMAGE_BASE, 0x2000, PROT_RWX));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.wr64(TEB_ADDR + 0x08, STACK + PAGE_SIZE).unwrap();
+        process.wr64(TEB_ADDR + 0x10, STACK).unwrap();
+        let mut module = test_module();
+        module.runtime_functions = vec![
+            anywasm_pe::RuntimeFunction {
+                begin_address: 0x100,
+                end_address: 0x120,
+                unwind_info_address: 0x400,
+            },
+            anywasm_pe::RuntimeFunction {
+                begin_address: 0x200,
+                end_address: 0x240,
+                unwind_info_address: 0x420,
+            },
+            anywasm_pe::RuntimeFunction {
+                begin_address: 0x300,
+                end_address: 0x340,
+                unwind_info_address: 0x440,
+            },
+        ];
+        process.modules.push(module);
+
+        for (entry, begin, end, unwind) in [
+            (IMAGE_BASE + 0x500, 0x100, 0x120, 0x400),
+            (IMAGE_BASE + 0x50c, 0x200, 0x240, 0x420),
+            (IMAGE_BASE + 0x518, 0x300, 0x340, 0x440),
+        ] {
+            process.wr32(entry, begin).unwrap();
+            process.wr32(entry + 4, end).unwrap();
+            process.wr32(entry + 8, unwind).unwrap();
+        }
+        for (info, handler) in [
+            (IMAGE_BASE + 0x400, INNER_HANDLER),
+            (IMAGE_BASE + 0x420, OUTER_HANDLER),
+            (IMAGE_BASE + 0x440, TOP_HANDLER),
+        ] {
+            process.wr8(info, 0x09).unwrap(); // version 1, EHANDLER
+            process.wr8(info + 1, 0).unwrap();
+            process.wr8(info + 2, 0).unwrap();
+            process.wr8(info + 3, 0).unwrap();
+            process
+                .wr32(info + 4, (handler - IMAGE_BASE) as u32)
+                .unwrap();
+        }
+        let outer_establisher = RAISE_RSP + 16;
+        let mut inner_handler = vec![0x4c, 0x89, 0xc8]; // mov rax, r9 (DISPATCHER_CONTEXT)
+        inner_handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, outer establisher
+        inner_handler.extend_from_slice(&outer_establisher.to_le_bytes());
+        inner_handler.extend_from_slice(&[
+            0x48, 0x89, 0x50, 0x18, // mov [rax + DISPATCHER_CONTEXT.EstablisherFrame], rdx
+            0xb8, 2, 0, 0, 0, // ExceptionNestedException
+            0xc3,
+        ]);
+        process.write_bytes(INNER_HANDLER, &inner_handler).unwrap();
+
+        let mut outer_handler = vec![0x8b, 0x41, 0x04]; // mov eax, [rcx + ExceptionFlags]
+        outer_handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, OUTER_FLAGS
+        outer_handler.extend_from_slice(&OUTER_FLAGS.to_le_bytes());
+        outer_handler.extend_from_slice(&[
+            0x89, 0x02, // mov [rdx], eax
+            0xb8, 1, 0, 0, 0, // ExceptionContinueSearch
+            0xc3,
+        ]);
+        process.write_bytes(OUTER_HANDLER, &outer_handler).unwrap();
+
+        let mut top_handler = vec![0x8b, 0x41, 0x04]; // mov eax, [rcx + ExceptionFlags]
+        top_handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, TOP_FLAGS
+        top_handler.extend_from_slice(&TOP_FLAGS.to_le_bytes());
+        top_handler.extend_from_slice(&[0x89, 0x02]); // mov [rdx], eax
+        top_handler.extend_from_slice(&[0x4c, 0x89, 0xc0]); // mov rax, r8 (CONTEXT)
+        top_handler.extend_from_slice(&[0x48, 0xba]); // mov rdx, LANDING_PAD
+        top_handler.extend_from_slice(&LANDING_PAD.to_le_bytes());
+        top_handler.extend_from_slice(&[
+            0x48, 0x89, 0x90, 0xf8, 0, 0, 0, // mov [rax + CONTEXT.Rip], rdx
+            0x31, 0xc0, // ExceptionContinueExecution
+            0xc3,
+        ]);
+        process.write_bytes(TOP_HANDLER, &top_handler).unwrap();
+
+        process.wr64(RAISE_RSP, INNER).unwrap();
+        process.wr64(RAISE_RSP + 8, OUTER).unwrap();
+        process.wr64(RAISE_RSP + 16, TOP).unwrap();
+        process.wr64(RAISE_RSP + 24, 0).unwrap();
+        process.cpu.gpr[RSP] = RAISE_RSP;
+        let result = dispatch_raised_exception(&mut process, CODE, 0, &[], INNER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(OUTER_FLAGS).unwrap(), EXCEPTION_NESTED_CALL);
+        assert_eq!(process.rd32(TOP_FLAGS).unwrap(), 0);
+        assert_eq!(process.cpu.rip, LANDING_PAD);
+        assert!(process.skip_ret);
     }
 
     #[test]

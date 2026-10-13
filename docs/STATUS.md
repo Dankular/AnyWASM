@@ -512,14 +512,17 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   used.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
-  this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested
+  this path is compile-checked but not runtime-verified. X64 exception search now propagates
+  `EXCEPTION_NESTED_CALL` from an `ExceptionNestedException` disposition to the recorded outer
+  establisher and clears it when that frame is reached; a three-frame runtime regression checks the
+  set and clear transitions. General SEH remains open beyond the tested
   x64 CPU-fault subset and PE32 linked-handler subsets. One direct PE32 C++ EH3 outer-frame catch and
   inner-frame destructor path is verified; other frame layouts remain untested. The bounded PE32
   `_except_handler4_common` subset is implemented and
   fixture-tested for continue-search, continue-execution, exception-code access, and normal or
   unwind-time `__finally` execution. The PE32 EH3 path also executes the fixture's compiler-generated
   nontrivial catch-copy callback. A filter-raised exception escaping to its outer handler and an
-  exception raised during `__finally` are covered end to end; a synthetic test covers the basic
+  exception raised during `__finally` are covered end to end; a synthetic PE32 test covers the basic
   nested-disposition flag/search transition. Full nested-frame bookkeeping, explicit collided-unwind
   disposition handling, arbitrary catch-copy closure layouts, and other compiler-specific EH4 layouts
   remain unsupported. Across the x64 and PE32
