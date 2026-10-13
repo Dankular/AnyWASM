@@ -71,7 +71,8 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
   }
   if (!reuseWorker) {
     const workerUrl = new URL('./worker.js', import.meta.url);
-    if (new URLSearchParams(location.search).get('sharedCpuWorkers') !== '0') {
+    const searchParams = new URLSearchParams(location.search);
+    if (searchParams.has('sharedCpuWorkers') && searchParams.get('sharedCpuWorkers') !== '0') {
       workerUrl.searchParams.set('sharedCpuWorkers', '');
     }
     if (new URLSearchParams(location.search).has('profileGpu')) workerUrl.searchParams.set('profileGpu', '');

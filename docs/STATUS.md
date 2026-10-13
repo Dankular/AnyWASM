@@ -259,7 +259,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   a simulated worker-module HTTP 503 verifies that startup failure leaves the guest usable in
   cooperative mode. A worker stop now restores the original RIP for instructions that advance RIP
   before returning an exception, so the coordinator can dispatch it once. These fixtures verify
-  production-pool handoff and guest results; the separate feasibility probe is the direct
+  production-pool handoff and guest results. The browser launcher now enables this path only when
+  `sharedCpuWorkers` is explicitly present; an absent parameter stays cooperative as the design
+  requires. `test/browser/cpu-mode-default.test.mjs` verifies the default, and the explicit shared
+  `parallel_test.exe` run still passes with two workers, 888,720 worker-retired instructions, and five
+  two-context batches. Before this correction, an absent parameter selected shared mode: the
+  Tutorial03 first-frame capture recorded 4,174,472 Asyncify yields for 30 presents, while cooperative
+  mode recorded 16 for the same frame count. The separate feasibility probe is the direct
   measurement of simultaneous worker execution. The coordinator's runnable-context query omits blocked,
   suspended, exited, and stale ready-queue entries; PE32 remains active-context-only while it uses
   the fixed TEB alias. Target-level acceptance remains open. The worker artifact uses the unstable
@@ -418,6 +424,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   presents, two pipelines, 16 Asyncify yields/resumes, and no WebGPU validation errors. Its page
   remained in `Starting` and the report recorded one generic console 404 without identifying a failed
   HTTP response. The capture details are in `docs/TARGETS.md`.
+  A 2026-10-13 cooperative-mode recheck captured the Diligent triangle and textured cube directly from
+  1280x1024 backbuffers, with 59 draws, 30 presents, 16 Asyncify yield/resume pairs, and no WebGPU errors
+  per sample. No unresolved runtime MSVCP import appeared before either frame; the current source
+  analyzer's static MSVCP misses remain outside these exercised paths. See
+  `docs/target-data/diligent-hle-only-browser-2026-10-13.json`.
   Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in

@@ -8,8 +8,14 @@ capture recorded 59 draws, 30 presents, two pipelines, and no WebGPU validation 
 HLE-only browser replay without local MSVC/UCRT DLLs continued rendering; its 45-second report recorded
 2,759 draws, 1,380 presents, 5,519 passes, two pipelines, and zero WebGPU validation errors. It ended
 with the page still in `Starting`, without terminal process status. The only 404 was the browser's
-`/favicon.ico` request; the page context reported no failed requests or HTTP errors for sample resources. An
-earlier HLE-only CLI capture without runtime DLLs passed the observed narrow stream constructors,
+`/favicon.ico` request; the page context reported no failed requests or HTTP errors for sample resources.
+On 2026-10-13, HLE-only Tutorial01 and Tutorial03 first-frame captures showed the colored triangle and
+textured cube in cooperative CPU mode, with no local MSVC/UCRT DLLs and no unresolved runtime MSVCP
+import before either frame. Both pages stayed active; the captures do not establish later imports or
+shutdown. See [the capture record](target-data/diligent-hle-only-browser-2026-10-13.json) and screenshots
+in [`docs/images/tutorial01-hle-only-current.png`](images/tutorial01-hle-only-current.png) and
+[`docs/images/tutorial03-hle-only-current.png`](images/tutorial03-hle-only-current.png). An earlier
+HLE-only CLI capture without runtime DLLs passed the observed narrow stream constructors,
 stream-buffer lock/unlock, `good`, `sputn`/`xsputn`, `setstate`, uncaught-exception query, `_Osfx`,
 unsigned-integer insertion, the stream and iostream destructors, and `sputc`, then faulted at
 `tutorial03_texturing.exe+0x34fc` while inserting the ANSI string `\x1b[39m`. Static imports remain a
@@ -303,6 +309,20 @@ the resource is unidentified. The bundle hash is
 `c027ddc6dea26ed77c0e7a01d7f9164e7d899ffa4edd4791b792fb03c32c39a6`; the report data is in
 [`target-data/tutorial01-hle-browser.json`](target-data/tutorial01-hle-browser.json). The screenshot,
 bundle, and one-off Playwright report script are ignored local artifacts under `target/`.
+
+### 2026-10-13 HLE-only first-frame recheck
+
+The HLE-only Tutorial01 and Tutorial03 bundles were replayed in Playwright Chromium revision 1234 with
+the browser runtime in cooperative mode, now the default. Tutorial01 used a URL without a
+`sharedCpuWorkers` parameter; Tutorial03 used `?sharedCpuWorkers=0`. Both bundles omit local MSVC/UCRT
+runtime DLLs. Their first 30 presents each recorded 59 draws, 119 passes, two pipelines, 16 Asyncify
+yields and resumes, and no WebGPU validation errors. Direct 1280x1024 back-buffer captures show the
+colored triangle and textured Diligent cube. No unresolved MSVCP import appeared before either frame.
+
+The pages remained in `Starting` at capture, which does not negate the verified frames; later imports
+and orderly shutdown remain unverified. The source analyzer still lists missing static imports, including
+MSVCP140 names, but these captures show those names are not a blocker on the exercised path. The browser
+mode regression and explicit two-worker overlap results are in the linked capture record.
 
 Reproduction from the repository root, using an HLE-only directory prepared from the named files
 above:
@@ -1023,10 +1043,11 @@ protection. Mod overlays remain unverified.
 - Extend the virtual registry only from observed target paths and required values. The current
   `RegOpenKeyExA` slice supports predefined roots and missing-key results; it does not provide
   registry query, create, write, or persisted-value behavior.
-- Continue the HLE-only Tutorial03 replay past its bounded browser capture. The latest run without
-  local MSVC/UCRT DLLs recorded 2,759 draws and 1,380 presents with no WebGPU validation errors, but
-  remained in `Starting` with no terminal process status. The only 404 was `/favicon.ico`; capture the
-  sample's intended process lifecycle.
+- HLE-only Tutorial01 and Tutorial03 now have visible cooperative-mode first-frame captures without
+  local MSVC/UCRT DLLs; neither hit an unresolved runtime MSVCP import before rendering. Their pages
+  remained in `Starting`, so later imports and orderly shutdown are still unverified. A controlled
+  close/input replay can establish lifecycle behavior without treating the tutorials' active render
+  loops as failed first-frame runs.
 - Keep Asteroids outside the redistributable acceptance set until the Intel-origin code and sample
   media have a documented licence review.
 - The D3D11-only GLFW Demo remains the selected game candidate. The latest package-aware source-built

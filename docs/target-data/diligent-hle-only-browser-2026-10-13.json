@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-10-13",
+  "browser": "Playwright Chromium revision 1234",
+  "runtimeWasm": {
+    "path": "web/anywasm_wasm.wasm",
+    "sha256": "aa72110cb6c239250f8da6319cc4717f5543540580356e195e69e59d59e11403",
+    "lastWriteLocal": "2026-10-13 06:58:38 Europe/London"
+  },
+  "samples": {
+    "Tutorial01_HelloTriangle": {
+      "bundle": "HLE-only D3D11 bundle; no local MSVC/UCRT runtime DLLs",
+      "bundleSha256": "c027ddc6dea26ed77c0e7a01d7f9164e7d899ffa4edd4791b792fb03c32c39a6",
+      "launchMode": "cooperative default; URL had no sharedCpuWorkers parameter",
+      "gpuStats": {
+        "draws": 59,
+        "dispatches": 0,
+        "presents": 30,
+        "passes": 119,
+        "pipelines": 2,
+        "asyncifyYields": 16,
+        "asyncifyResumes": 16,
+        "webgpuErrors": []
+      },
+      "backBuffer": {
+        "width": 1280,
+        "height": 1024,
+        "nonTransparentPixels": 1310720
+      },
+      "visualContent": "colored gradient triangle",
+      "processStatus": "Starting",
+      "screenshot": "docs/images/tutorial01-hle-only-current.png"
+    },
+    "Tutorial03_Texturing": {
+      "bundle": "HLE-only D3D11 bundle; no local MSVC/UCRT runtime DLLs",
+      "bundleSha256": "fc6d43dbdae75e0457d78df5c2e6ea58a6aed7342ba682e4912f500a3d7590c25",
+      "launchMode": "cooperative via ?sharedCpuWorkers=0; this matches the new default",
+      "gpuStats": {
+        "draws": 59,
+        "dispatches": 0,
+        "presents": 30,
+        "passes": 119,
+        "pipelines": 2,
+        "asyncifyYields": 16,
+        "asyncifyResumes": 16,
+        "webgpuErrors": []
+      },
+      "backBuffer": {
+        "width": 1280,
+        "height": 1024,
+        "nonTransparentPixels": 1310720
+      },
+      "visualContent": "textured Diligent logo cube",
+      "processStatus": "Starting",
+      "screenshot": "docs/images/tutorial03-hle-only-current.png"
+    }
+  },
+  "modeSelectionRegression": {
+    "command": "node --test test/browser/cpu-mode-default.test.mjs",
+    "result": "passed",
+    "defaultMode": "cooperative",
+    "workerCount": 0,
+    "helloExitCode": 0
+  },
+  "explicitSharedWorkerRegression": {
+    "command": "node test/browser/parallel.mjs",
+    "result": "passed",
+    "executionMode": "shared-cpu-workers",
+    "workerCount": 2,
+    "workerRetiredInstructions": "888720",
+    "parallelBatches": 5,
+    "fixtureExitCode": 0
+  },
+  "sharedDefaultBeforeCorrection": {
+    "urlHadSharedCpuWorkersParameter": false,
+    "actualMode": "shared-cpu-workers",
+    "tutorial03Presents": 30,
+    "asyncifyYields": 4174472,
+    "asyncifyResumes": 4174472
+  },
+  "limitations": [
+    "Neither interactive tutorial reached a terminal process status during first-frame capture.",
+    "Static analysis still lists missing imports, including MSVCP140 names; no unresolved MSVCP import appeared before these frames."
+  ]
+}
