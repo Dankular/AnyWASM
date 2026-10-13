@@ -583,8 +583,13 @@ build the `.pdata`/scope-table records directly; they do not establish compatibi
 compiled real-world `__try` binary. Synthetic tests also cover vectored-continue ordering and ignored
 callback returns, plus top-level filter replacement and resumption with a modified context. PE32
 exception support is partial: synthetic tests cover `RaiseException` through an x86 registration
-handler and CPU exceptions through VEH resumption. Compiled x86 `__try`/`__finally` and the PE32
-C++ EH3 search and two-pass catch-transfer paths remain unverified.
+handler and CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fixture verifies
+filter selection, continuation, and normal and unwind-time `__finally` execution. The compiled PE32
+EH3 fixtures verify typed by-value/reference catches, catch-all, nested catches, unwind cleanup, and
+one caller/callee catch transfer; the direct-entry and normal-startup x86 variants return 0 in the
+HLE-only runtime. Other PE32 frame layouts, nested/collided dispositions, and broader compiler
+metadata remain unverified. See [`test/fixtures/msvc_eh/README.md`](../test/fixtures/msvc_eh/README.md)
+for the fixture matrix and exit-code meanings.
 
 The next imports are `advapi32!RegOpenKeyExA` probes for
 `Software\Microsoft\Direct3D\Direct3D12` under predefined roots `HKCU` and `HKLM`, with options

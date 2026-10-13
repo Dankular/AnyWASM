@@ -454,8 +454,9 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   inner-frame destructor path is verified; other frame layouts remain untested. The bounded PE32
   `_except_handler4_common` subset is implemented and
   fixture-tested for continue-search, continue-execution, exception-code access, and normal or
-  unwind-time `__finally` execution. Nested/collided unwind dispositions, custom catch-copy
-  closures, and other compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
+  unwind-time `__finally` execution. The PE32 EH3 path also executes the fixture's compiler-generated
+  nontrivial catch-copy callback. Nested/collided unwind dispositions, arbitrary catch-copy closure
+  layouts, and other compiler-specific EH4 layouts remain unsupported. Across the x64 and PE32
   subsets, tested CPU-fault statuses include access violations, integer divide errors, illegal
   and privileged instructions, and software breakpoints. A browser
   fixture now executes one R32_FLOAT storage-texture dispatch, checks the UAV value by readback, and
