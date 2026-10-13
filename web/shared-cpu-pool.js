@@ -42,14 +42,15 @@ function layoutFor({ workerCount, contextCount, pageCount, base }) {
   cursor = align(cursor + slots.length, 64);
   const contexts = { offset: cursor, length: contextCount * CPU_BYTES };
   cursor = align(cursor + contexts.length, 8);
+  // Keep stacks before the growable mapping/frame regions so their pointers stay stable.
+  const stacks = { offset: cursor, length: workerCount * WORKER_STACK_BYTES };
+  cursor = align(cursor + stacks.length, 16);
   const pageMap = { offset: cursor, length: pageCount * 16 };
   cursor = align(cursor + pageMap.length, 8);
   const dirtyMap = { offset: cursor, length: Math.ceil(pageCount / 8) };
   cursor = align(cursor + dirtyMap.length, PAGE_BYTES);
   const frames = { offset: cursor, length: pageCount * PAGE_BYTES };
   cursor = align(cursor + frames.length, 16);
-  const stacks = { offset: cursor, length: workerCount * WORKER_STACK_BYTES };
-  cursor += stacks.length;
   if (cursor > 0xffff_ffff || base + cursor > MAX_WASM_PAGES * WASM_PAGE_BYTES) {
     throw new RangeError('shared CPU worker memory exceeds its 1 GiB maximum');
   }
@@ -257,12 +258,12 @@ export class SharedCpuWorkerPool {
     };
   }
 
-  /** Export the current quiescent AnyWasm process into this pool's fixed layout. */
+  /** Export the current quiescent AnyWasm process into this pool's current layout. */
   publishFrom(anyWasm) {
     this.requireQuiescent();
     const pageCount = Number(anyWasm.sharedSnapshotPageCount());
     const mappingGeneration = anyWasm.sharedSnapshotMappingGeneration();
-    if (pageCount > this.pageCapacity) throw new Error('guest mapping size exceeded shared CPU page capacity');
+    this.ensurePageCapacity(pageCount);
     const threadIds = anyWasm.sharedCpuRunnableThreadIds();
     if (threadIds.length > this.contextCount) {
       throw new Error('guest thread count exceeded shared CPU context capacity');
@@ -290,6 +291,45 @@ export class SharedCpuWorkerPool {
       if (delta.dirtyPages.length) anyWasm.clearSharedSnapshotDirtyPages(delta.dirtyPages);
     }
     return threadIds;
+  }
+
+  /** Grow the mapping and frame regions while all workers are stopped. */
+  ensurePageCapacity(pageCount) {
+    if (!Number.isSafeInteger(pageCount) || pageCount < 0 || pageCount > 0xffff_ffff) {
+      throw new RangeError('guest mapping page count must be a u32');
+    }
+    if (pageCount <= this.pageCapacity) return false;
+    this.requireQuiescent();
+
+    const slack = Math.max(4096, Math.ceil(pageCount / 4));
+    const withSlack = Math.min(0xffff_ffff, pageCount + slack);
+    const capacities = withSlack > pageCount ? [withSlack, pageCount] : [pageCount];
+    let lastError;
+    for (const pageCapacity of capacities) {
+      try {
+        const layout = layoutFor({
+          workerCount: this.workerCount,
+          contextCount: this.contextCount,
+          pageCount: pageCapacity,
+          base: this.layout.base,
+        });
+        if (layout.stacks.offset !== this.layout.stacks.offset) {
+          throw new Error('shared CPU worker stack region moved during pool growth');
+        }
+        const requiredPages = Math.ceil((layout.base + layout.totalBytes) / WASM_PAGE_BYTES);
+        const currentPages = this.memory.buffer.byteLength / WASM_PAGE_BYTES;
+        if (requiredPages > currentPages) this.memory.grow(requiredPages - currentPages);
+
+        this.pageCapacity = pageCapacity;
+        this.pageCount = pageCount;
+        this.layout = layout;
+        this.initializeHeader();
+        return true;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new RangeError('guest mappings exceed shared CPU worker memory');
   }
 
   /** Publish only coordinator-written frames when the mapping generation is unchanged. */

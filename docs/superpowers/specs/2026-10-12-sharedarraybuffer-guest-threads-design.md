@@ -121,9 +121,11 @@ process counter, and advances the scheduler quantum when the imported context is
 reserve disjoint Wasm stacks, and claim/collect worker slots; `web/build.sh` emits the separate worker
 module with its stack pointer export. The `?sharedCpuWorkers` path currently dispatches only the
 coordinator's active context, preserving the single TEB/TLS view; it replays HLE and faulting
-instructions on the coordinator and falls back to cooperative execution if the shared layout must
-grow. True concurrent guest threads still need per-thread TEB/TLS isolation and scheduler handoff,
-plus a browser worker exercise and target replay.
+instructions on the coordinator. At quiescent handoffs, the shared pool can grow its mapping and
+frame regions while keeping worker stacks at stable offsets; it falls back to cooperative execution
+if that growth exceeds the 1 GiB shared-memory limit or cannot be allocated. True concurrent guest
+threads still need per-thread TEB/TLS isolation and scheduler handoff, plus a browser worker exercise
+and target replay.
 
 ## Success criteria
 

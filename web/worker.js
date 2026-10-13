@@ -97,7 +97,6 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
           workerCount: 2,
           contextCount: Math.max(threadIds.length, 64),
           pageCount,
-          pageCapacity: pageCount + Math.max(4096, Math.ceil(pageCount / 4)),
         });
       }
       sharedCpuPool.publishFrom(w);
