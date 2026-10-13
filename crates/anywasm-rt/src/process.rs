@@ -4506,6 +4506,9 @@ mod scheduler_tests {
     const DLL_TLS_CALLBACK_BASE: u64 = DLL_ORDER_COUNTER + 0x28;
     const DLL_TLS_CALLBACK_REASON: u64 = DLL_ORDER_COUNTER + 0x30;
     const DLL_TLS_CALLBACK_RESERVED: u64 = DLL_ORDER_COUNTER + 0x38;
+    const DLL_MAIN_BASE: u64 = DLL_ORDER_COUNTER + 0x40;
+    const DLL_MAIN_REASON: u64 = DLL_ORDER_COUNTER + 0x44;
+    const DLL_MAIN_RESERVED: u64 = DLL_ORDER_COUNTER + 0x48;
 
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -4600,6 +4603,100 @@ mod scheduler_tests {
             pe[callback_file..callback_file + callback_code.len()].copy_from_slice(callback_code);
         }
         pe
+    }
+
+    fn minimal_pe32(image_base: u32, is_dll: bool, code: &[u8], import: Option<&str>) -> Vec<u8> {
+        let mut pe = vec![0u8; 0x600];
+        pe[..2].copy_from_slice(b"MZ");
+        put_u32(&mut pe, 0x3c, 0x80);
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+
+        let coff = 0x84;
+        put_u16(&mut pe, coff, anywasm_pe::MACHINE_I386);
+        put_u16(&mut pe, coff + 2, 1);
+        put_u16(&mut pe, coff + 16, 224);
+        put_u16(&mut pe, coff + 18, 0x0102 | if is_dll { 0x2000 } else { 0 });
+
+        let optional = coff + 20;
+        put_u16(&mut pe, optional, 0x010b);
+        put_u32(&mut pe, optional + 16, 0x1000);
+        put_u32(&mut pe, optional + 20, 0x1000);
+        put_u32(&mut pe, optional + 24, 0x1000);
+        put_u32(&mut pe, optional + 28, image_base);
+        put_u32(&mut pe, optional + 32, 0x1000);
+        put_u32(&mut pe, optional + 36, 0x200);
+        put_u32(&mut pe, optional + 56, 0x2000);
+        put_u32(&mut pe, optional + 60, 0x200);
+        put_u16(&mut pe, optional + 68, 3);
+        put_u32(&mut pe, optional + 72, 0x100000);
+        put_u32(&mut pe, optional + 76, 0x1000);
+        put_u32(&mut pe, optional + 80, 0x100000);
+        put_u32(&mut pe, optional + 84, 0x1000);
+        put_u32(&mut pe, optional + 92, 16);
+        if import.is_some() {
+            put_u32(&mut pe, optional + 96 + 8, 0x1100);
+            put_u32(&mut pe, optional + 96 + 12, 40);
+        }
+
+        let section = optional + 224;
+        pe[section..section + 5].copy_from_slice(b".text");
+        put_u32(&mut pe, section + 8, 0x400);
+        put_u32(&mut pe, section + 12, 0x1000);
+        put_u32(&mut pe, section + 16, 0x400);
+        put_u32(&mut pe, section + 20, 0x200);
+        put_u32(&mut pe, section + 36, 0x60000020);
+        pe[0x200..0x200 + code.len()].copy_from_slice(code);
+
+        if let Some(name) = import {
+            // A descriptor with an empty thunk list is enough to add a dependency edge.
+            put_u32(&mut pe, 0x300 + 12, 0x1130);
+            put_u32(&mut pe, 0x300 + 16, 0x1140);
+            pe[0x330..0x330 + name.len()].copy_from_slice(name.as_bytes());
+            pe[0x330 + name.len()] = 0;
+        }
+        pe
+    }
+
+    fn minimal_pe32_with_tls_callback(
+        image_base: u32,
+        code: &[u8],
+        import: Option<&str>,
+        callback_code: &[u8],
+    ) -> Vec<u8> {
+        let mut pe = minimal_pe32(image_base, true, code, import);
+        let optional = 0x98;
+        let tls_dir = 0x1180usize;
+        let tls_dir_file = 0x200 + (tls_dir - 0x1000);
+        put_u32(&mut pe, optional + 96 + 9 * 8, tls_dir as u32);
+        put_u32(&mut pe, optional + 96 + 9 * 8 + 4, 24);
+
+        // PE32 TLS directory fields and callback entries contain 32-bit VAs.
+        put_u32(&mut pe, tls_dir_file + 8, image_base + 0x11c0);
+        put_u32(&mut pe, tls_dir_file + 12, image_base + 0x11d0);
+        let callbacks_file = 0x200 + (0x11d0 - 0x1000);
+        put_u32(&mut pe, callbacks_file, image_base + 0x1200);
+        let callback_file = 0x200 + (0x1200 - 0x1000);
+        assert!(callback_code.len() <= 0x100);
+        pe[callback_file..callback_file + callback_code.len()].copy_from_slice(callback_code);
+        pe
+    }
+
+    fn x86_recording_attach_code(order_slot: u32, arg_slots: Option<[u32; 3]>) -> Vec<u8> {
+        let mut code = vec![0xa1]; // mov eax, [counter]
+        code.extend_from_slice(&(DLL_ORDER_COUNTER as u32).to_le_bytes());
+        code.extend_from_slice(&[0x40, 0xa3]); // inc eax; mov [counter], eax
+        code.extend_from_slice(&(DLL_ORDER_COUNTER as u32).to_le_bytes());
+        code.push(0xa3); // mov [order slot], eax
+        code.extend_from_slice(&order_slot.to_le_bytes());
+        if let Some([base_slot, reason_slot, reserved_slot]) = arg_slots {
+            for (stack_offset, slot) in [(4u8, base_slot), (8, reason_slot), (12, reserved_slot)] {
+                code.extend_from_slice(&[0x8b, 0x44, 0x24, stack_offset]); // mov eax, [esp+offset]
+                code.push(0xa3); // mov [slot], eax
+                code.extend_from_slice(&slot.to_le_bytes());
+            }
+        }
+        code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xc2, 0x0c, 0]); // return TRUE; ret 12
+        code
     }
 
     fn tls_recording_callback_code(order_slot: u64) -> Vec<u8> {
@@ -4790,6 +4887,71 @@ mod scheduler_tests {
     fn startup_dll_initialization_runs_dependencies_before_importers() {
         let process = dll_order_process(true);
         assert_dependency_initialized_first(&process);
+    }
+
+    #[test]
+    fn pe32_dll_initialization_runs_tls_then_dependency_first_dllmain() {
+        let mut vfs = Vfs::new();
+        vfs.insert(
+            "pe32-order.exe",
+            minimal_pe32(0x0040_0000, false, &[0xc3], Some("a.dll")),
+        );
+        vfs.insert(
+            "a.dll",
+            minimal_pe32(
+                0x1000_0000,
+                true,
+                &x86_recording_attach_code(DLL_A_ORDER as u32, None),
+                Some("b.dll"),
+            ),
+        );
+        vfs.insert(
+            "b.dll",
+            minimal_pe32_with_tls_callback(
+                0x1100_0000,
+                &x86_recording_attach_code(
+                    DLL_B_ORDER as u32,
+                    Some([
+                        DLL_MAIN_BASE as u32,
+                        DLL_MAIN_REASON as u32,
+                        DLL_MAIN_RESERVED as u32,
+                    ]),
+                ),
+                None,
+                &x86_recording_attach_code(
+                    DLL_TLS_CALLBACK_ORDER as u32,
+                    Some([
+                        DLL_TLS_CALLBACK_BASE as u32,
+                        DLL_TLS_CALLBACK_REASON as u32,
+                        DLL_TLS_CALLBACK_RESERVED as u32,
+                    ]),
+                ),
+            ),
+        );
+        let mut process = Process::new(vfs);
+        assert!(process.mem.map(DLL_ORDER_COUNTER, 0x1000, PROT_RW));
+
+        process.load_exe("pe32-order.exe", None).unwrap();
+
+        let b = process
+            .modules
+            .iter()
+            .find(|module| module.name == "b.dll")
+            .unwrap();
+        assert_eq!(process.cpu.mode, CpuMode::X86_32);
+        assert_eq!(process.mem.read_u32(DLL_ORDER_COUNTER).unwrap(), 3);
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_ORDER).unwrap(), 1);
+        assert_eq!(process.mem.read_u32(DLL_B_ORDER).unwrap(), 2);
+        assert_eq!(process.mem.read_u32(DLL_A_ORDER).unwrap(), 3);
+        assert_eq!(
+            process.mem.read_u32(DLL_TLS_CALLBACK_BASE).unwrap(),
+            b.base as u32
+        );
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_REASON).unwrap(), 1);
+        assert_eq!(process.mem.read_u32(DLL_TLS_CALLBACK_RESERVED).unwrap(), 0);
+        assert_eq!(process.mem.read_u32(DLL_MAIN_BASE).unwrap(), b.base as u32);
+        assert_eq!(process.mem.read_u32(DLL_MAIN_REASON).unwrap(), 1);
+        assert_eq!(process.mem.read_u32(DLL_MAIN_RESERVED).unwrap(), 0);
     }
 
     #[test]

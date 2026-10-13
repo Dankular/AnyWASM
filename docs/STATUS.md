@@ -290,9 +290,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
 - DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
   dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE
   callbacks run after DLL initialization and before the EXE entry point. Synthetic regressions cover
-  callback order, process-attach arguments, EXE startup, and the DLL dependency chain. Static TLS
-  data is initialized. Named forwarded exports are resolved opportunistically, with failed names
-  omitted. The selected Diligent EXE and three DLLs have no TLS callbacks or forwarded exports, so
+  callback order, process-attach arguments, EXE startup, and the DLL dependency chain. A PE32
+  regression now exercises a three-image dependency chain, TLS-before-`DllMain` ordering, and x86
+  callback arguments. Static TLS data is initialized. Named forwarded exports are resolved
+  opportunistically; failed names are omitted. The selected Diligent EXE and three DLLs have no TLS
+  callbacks or forwarded exports, so
   they do not verify those paths. The bounded target replay
   completed process attach for the D3D11 engine and D3DCompiler; Archiver was not observed loading.
   See [`docs/TARGETS.md`](TARGETS.md).

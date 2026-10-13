@@ -488,6 +488,10 @@ verify process-attach callbacks run in image order before `DllMain`, receive the
 Dependency-first DLL initialization is covered synthetically; a target trace containing TLS callbacks
 and a bundled dependency chain remains outstanding.
 
+The PE32 loader path has a focused synthetic regression with a 32-bit EXE and a two-DLL dependency
+chain. It verifies the leaf DLL's TLS callback runs before its `DllMain`, both receive the expected
+x86 process-attach arguments, and the importing DLL's `DllMain` runs afterward.
+
 ### Bounded AnyWASM trial
 
 The EXE was run with the Release output directory as its VFS root so the companion DLLs and shader
