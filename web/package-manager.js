@@ -271,7 +271,7 @@ export class PackageManager {
       if (chosen && chosen !== entry.version) throw new Error(`dependency conflict for ${entry.id}: ${chosen} and ${entry.version}`);
       selectedVersions.set(entry.id, entry.version);
       if (resolved.has(key)) return;
-      if (resolved.size + visiting.size >= 128) throw new Error('dependency graph exceeds 128 packages');
+      if (resolved.size >= 128) throw new Error('dependency graph exceeds 128 packages');
       visiting.add(key);
       const raw = await fetchJson(entry.manifestUrl, `manifest for ${key}`);
       const manifest = await validateManifest(raw, entry, entry.manifestUrl);

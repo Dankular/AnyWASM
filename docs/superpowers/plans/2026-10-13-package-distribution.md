@@ -36,7 +36,7 @@
 
 - [x] Implement strict catalog/manifest validation, exact-version dependency graph resolution, four-task bounded artifact concurrency, and IndexedDB transactions.
 - [x] Run JavaScript syntax checks and install the actual local GTA package; the browser accepted its bundle and AGP index hashes and displayed the installed version.
-- [ ] Exercise invalid manifests, dependency failures, interrupted downloads, and storage-quota errors.
+- [x] Exercise invalid catalog URLs and manifests, missing/cyclic/conflicting dependencies, interrupted replacement downloads, storage-quota failures, and the 128-package graph boundary in a 10-case headless Chromium suite. A valid 128-package closure installs; a larger graph fails before artifact downloads.
 
 ### Task 2: Package manager UI and installed launch
 
@@ -46,7 +46,7 @@
 
 - [x] Render catalogs and state through DOM text APIs; add catalog and install controls.
 - [x] Launch the selected installed bundle from IndexedDB with its manifest entry point and remote asset URL. The bounded browser capture entered the guest and reached 30 presents with no page or GPU errors.
-- [ ] Verify reload persistence, uninstall, and dependency protection; the bounded launch capture did not reach gameplay or terminal status.
+- [x] Verify reload persistence, uninstall, and dependency protection through the shipped page. An installed app and its dependency survive reload; the dependency cannot be removed until the app is removed.
 
 ### Task 3: Package generation and cache scheduling
 

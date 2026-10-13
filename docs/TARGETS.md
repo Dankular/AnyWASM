@@ -932,8 +932,11 @@ the AGP payload range-streamed. The local GTA catalog was generated with
 `scripts/pack-gta-sa.ps1 -MetadataOnly`, which checked that the existing local AWB/AGP matched the
 installed file inventory without rewriting the 5,013,432,573-byte AGP. A Chromium install displayed
 the installed GTA package; launching it reached 30 presents with no page or GPU errors before the
-bounded capture ended. This did not reach gameplay. Dependency failure cases, reload persistence,
-removal behavior, and mod overlays remain unverified.
+bounded capture ended. This did not reach gameplay. A separate 10-case headless Chromium suite is
+reproducible with `node --test test/browser/package-manager.test.mjs`; it covers invalid catalog and
+manifest data, missing/cyclic/conflicting dependencies, the 128-package graph boundary, failed
+replacement downloads, storage-quota errors, reload persistence, uninstall, and dependency
+protection. Mod overlays remain unverified.
 
 ## Next evidence needed
 
