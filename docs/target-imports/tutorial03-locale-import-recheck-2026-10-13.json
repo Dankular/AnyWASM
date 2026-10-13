@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-13",
+  "target": "DiligentSamples Tutorial03_Texturing.exe",
+  "analyzer": "target/debug/anywasm.exe analyze target/msvcp-vfs-probe03-hle-only/Tutorial03_Texturing.exe --dir target/msvcp-vfs-probe03-hle-only --json",
+  "scope": "static import binding coverage; not a runtime call trace",
+  "implemented": 230,
+  "missing": 21,
+  "msvcp140Missing": [
+    "?_Syserror_map@std@@YAPEBDH@Z",
+    "?_Throw_Cpp_error@std@@YAXH@Z",
+    "?_Xlength_error@std@@YAXPEBD@Z",
+    "?_Xbad_alloc@std@@YAXXZ"
+  ],
+  "newlyResolvedMsvcpImports": [
+    "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ",
+    "?id@?$ctype@_W@std@@2V0locale@2@A",
+    "?_Id_cnt@id@locale@std@@0HA"
+  ],
+  "interpretation": "The earlier 227 implemented / 24 missing report had seven missing MSVCP140 imports. This recheck has four. Static missing imports do not establish that a symbol is called or blocks rendering; HLE-only browser captures rendered before any unresolved MSVCP stop."
+}

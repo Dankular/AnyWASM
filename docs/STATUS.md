@@ -525,6 +525,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   import stops; the only console error was the favicon 404. The page still had no terminal status.
   The source hash, bundle hash, counters, and both captures are recorded in
   [`tutorial03-hle-only-current-source-recheck-2026-10-13.json`](target-data/tutorial03-hle-only-current-source-recheck-2026-10-13.json).
+  A fresh CLI build initially exposed an exhaustive-match omission for the already handled PE32
+  `GuestUnwind32` transfer; the CLI now reports that as an internal transfer escaping its
+  dispatcher. Rebuilding the CLI then produced a current Tutorial03 import report of 230 implemented
+  / 21 missing, with four MSVCP140 names remaining after adding `_Getgloballocale` and the two
+  zero-initialized locale ID data imports. This is static coverage only; no new runtime call or
+  pre-render stop is claimed. See
+  `docs/target-imports/tutorial03-locale-import-recheck-2026-10-13.json`.
   Asteroids remains analyzer-only pending licence review.
   The current source-built, package-aware analyzer reports 84 missing static imports for the
   D3D11-only `/MT` build: 40 in the EXE, 9 in GraphicsEngineD3D11, 8 in Archiver, and 27 in

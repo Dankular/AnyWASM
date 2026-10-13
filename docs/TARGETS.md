@@ -27,7 +27,11 @@ HLE-only CLI capture without runtime DLLs passed the observed narrow stream cons
 stream-buffer lock/unlock, `good`, `sputn`/`xsputn`, `setstate`, uncaught-exception query, `_Osfx`,
 unsigned-integer insertion, the stream and iostream destructors, and `sputc`, then faulted at
 `tutorial03_texturing.exe+0x34fc` while inserting the ANSI string `\x1b[39m`. Static imports remain a
-packaging concern when those DLLs are absent.
+packaging concern when those DLLs are absent. A fresh source-built analyzer recheck after adding
+the MSVC global-locale getter and locale ID data cells reports 230 implemented / 21 missing imports,
+with four MSVCP140 imports still unresolved. This report is static binding coverage; it does not
+establish that any remaining import is called or blocks the rendered path. See the
+[locale import recheck](target-imports/tutorial03-locale-import-recheck-2026-10-13.json).
 
 ### D3D9 fixed-function regression
 

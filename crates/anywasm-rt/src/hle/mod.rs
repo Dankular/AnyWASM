@@ -136,6 +136,8 @@ pub fn data_symbol(group: &str, name: &str) -> Option<u64> {
     if group == "msvcp" {
         return match name {
             crt::MSVC_STD_COUT_SYMBOL | crt::MSVC_STD_CERR_SYMBOL => Some(0xe0),
+            crt::MSVC_WCHAR_CTYPE_ID_SYMBOL => Some(8),
+            crt::MSVC_LOCALE_ID_COUNT_SYMBOL => Some(4),
             _ => None,
         };
     }

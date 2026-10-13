@@ -26,6 +26,8 @@ pub struct CFile {
 const FILE_SIZE: u64 = 0x30;
 pub const MSVC_STD_COUT_SYMBOL: &str = "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
 pub const MSVC_STD_CERR_SYMBOL: &str = "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+pub const MSVC_WCHAR_CTYPE_ID_SYMBOL: &str = "?id@?$ctype@_W@std@@2V0locale@2@A";
+pub const MSVC_LOCALE_ID_COUNT_SYMBOL: &str = "?_Id_cnt@id@locale@std@@0HA";
 const MSVC_STD_COUT_OBJECT: &str = "msvcp:std::cout:object";
 const MSVC_STD_CERR_OBJECT: &str = "msvcp:std::cerr:object";
 const MSVC_STD_COUT_BUFFER: &str = "msvcp:std::cout:streambuf";
@@ -1388,6 +1390,12 @@ fn msvc_ios_base_getloc(p: &mut Process) -> R {
     Ok(output)
 }
 
+/// Return the stable process-global C locale implementation used by synthesized stream values.
+fn msvc_get_global_locale(p: &mut Process) -> R {
+    let locale = msvc_locale_value(p, "msvcp:std::locale:global")?;
+    Ok(p.rd64(locale + 8)?)
+}
+
 fn msvc_ctype_wchar_getcat(p: &mut Process) -> R {
     let facet_out = p.arg(0);
     if facet_out != 0 {
@@ -1899,6 +1907,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "__anywasm_ios_base_set_width" => msvc_ios_base_set_width,
         "?good@ios_base@std@@QEBA_NXZ" => msvc_ios_base_good,
         "?getloc@ios_base@std@@QEBA?AVlocale@2@XZ" => msvc_ios_base_getloc,
+        "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ" => msvc_get_global_locale,
         "__anywasm_locale_facet_incref" => msvc_locale_facet_incref,
         "__anywasm_locale_facet_decref" => msvc_locale_facet_decref,
         "__anywasm_locale_facet_destructor" => msvc_locale_facet_destructor,
