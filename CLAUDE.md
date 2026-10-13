@@ -310,7 +310,9 @@ register-stack subset):
       width, height, cube count, and mip count with no WebGPU validation errors. A selected RGBA16_FLOAT
       cube-array view returns its two expected half-float colors; an R8_UNORM view beginning at face 6
       returns `[128, 0, 0, 255]` and `[64, 0, 0, 255]` for cube indices 0 and 1 and reports its view
-      dimensions, with no WebGPU validation errors. The bundled vkd3d compiler reports E5005 for
+      dimensions, with no WebGPU validation errors. An RGBA8_SRGB cube-array view beginning at face 6
+      selects both cubes and returns linearized colors [55, 13, 134, 255] and [13, 134, 55, 128],
+      with alpha preserved and no WebGPU validation errors. The bundled vkd3d compiler reports E5005 for
       `SampleCmpBias`/`SampleCmpGrad` under `ps_5_0` and E5033 (unknown target profile) for `ps_6_0`
       and `ps_6_8`, leaving those methods untestable with this compiler. `Texture1DArray` and
       `Texture2DArray` `GetDimensions` now pass through Naga's image
@@ -321,9 +323,9 @@ register-stack subset):
       methods, with no WebGPU validation errors. Combined depth/stencil SRVs use the aspect-specific
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
-      view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
-      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8, R8_UNORM, RG8_UNORM, R16_UNORM,
-      and R16_SNORM cases remain open.
+      view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_UNORM, and R16_SNORM;
+      the sRGB cube-array sample is also verified. Other sampled dimensions/formats, anisotropic
+      footprints, cube-array SampleCmpBias/SampleCmpGrad, and array/3D format cases remain open.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
       sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; a Rust table test enumerates all ten
       advertised color/depth formats at 2x, 4x, and 8x and checks representative unsupported formats.
