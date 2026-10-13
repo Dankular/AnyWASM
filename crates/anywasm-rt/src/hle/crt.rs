@@ -865,11 +865,15 @@ fn msvc_ostream_write_padding(p: &mut Process, streambuf: u64, mut count: u64, f
     Ok(1)
 }
 
-/// Insert an unsigned integer using the stream's base, adjustment, fill, and width fields.
-/// The target in this path uses the default C locale, whose integer punctuation is empty.
-fn msvc_ostream_insert_u32(p: &mut Process) -> R {
+/// Insert an integer using the stream's base, adjustment, fill, and width fields. The target in
+/// this path uses the default C locale, whose integer punctuation is empty.
+fn msvc_ostream_insert_integer(
+    p: &mut Process,
+    mut value: u64,
+    negative: bool,
+    operand_bits: u32,
+) -> R {
     let this = p.arg(0);
-    let value = p.arg(1) as u32 as u64;
     let ios = msvc_basic_ostream_ios(p, this)?;
     let streambuf = p.rd64(ios + 0x48)?;
 
@@ -896,7 +900,15 @@ fn msvc_ostream_insert_u32(p: &mut Process) -> R {
         0x0800 => (16, flags & 0x4 != 0),
         _ => (10, false),
     };
-    let mut digits = [0u8; 32];
+    if negative && base != 10 {
+        let operand_mask = if operand_bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << operand_bits) - 1
+        };
+        value = 0u64.wrapping_sub(value) & operand_mask;
+    }
+    let mut digits = [0u8; 64];
     let mut start = digits.len();
     let alphabet = if uppercase {
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -924,8 +936,14 @@ fn msvc_ostream_insert_u32(p: &mut Process) -> R {
             prefix_len = 1;
         }
     }
-    let sign = if flags & 0x20 != 0 { Some(b'+') } else { None };
-    let mut body = [0u8; 35];
+    let sign = if negative && base == 10 {
+        Some(b'-')
+    } else if flags & 0x20 != 0 && !negative {
+        Some(b'+')
+    } else {
+        None
+    };
+    let mut body = [0u8; 67];
     let mut body_len = 0;
     if let Some(sign) = sign {
         body[body_len] = sign;
@@ -992,6 +1010,31 @@ fn msvc_ostream_insert_u32(p: &mut Process) -> R {
     let unlock = p.rd64(vtable + 16)?;
     p.call_guest(unlock, &[streambuf])?;
     Ok(this)
+}
+
+fn msvc_ostream_insert_i32(p: &mut Process) -> R {
+    let value = p.arg(1) as u32 as i32;
+    msvc_ostream_insert_integer(p, value.unsigned_abs() as u64, value < 0, 32)
+}
+
+fn msvc_ostream_insert_u16(p: &mut Process) -> R {
+    let value = p.arg(1) as u16 as u64;
+    msvc_ostream_insert_integer(p, value, false, 16)
+}
+
+fn msvc_ostream_insert_u32(p: &mut Process) -> R {
+    let value = p.arg(1) as u32 as u64;
+    msvc_ostream_insert_integer(p, value, false, 32)
+}
+
+fn msvc_ostream_insert_u64(p: &mut Process) -> R {
+    let value = p.arg(1);
+    msvc_ostream_insert_integer(p, value, false, 64)
+}
+
+fn msvc_thrd_yield(p: &mut Process) -> R {
+    p.request_thread_yield();
+    Ok(0)
 }
 
 fn msvc_ostream_insert_ios_base_manipulator(p: &mut Process) -> R {
@@ -1542,6 +1585,15 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z" => {
             msvc_ostream_insert_u32
         }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z" => {
+            msvc_ostream_insert_i32
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@G@Z" => {
+            msvc_ostream_insert_u16
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z" => {
+            msvc_ostream_insert_u64
+        }
         "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@M@Z" => {
             msvc_ostream_insert_float
         }
@@ -1567,6 +1619,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         }
         "?uncaught_exception@std@@YA_NXZ" => msvc_uncaught_exception,
         "_Thrd_hardware_concurrency" => msvc_thrd_hardware_concurrency,
+        "_Thrd_yield" => msvc_thrd_yield,
         "??0_Lockit@std@@QEAA@H@Z" => msvc_lockit_ctor,
         "??1_Lockit@std@@QEAA@XZ" => msvc_lockit_dtor,
         "_Mtx_lock" => msvc_mtx_lock,

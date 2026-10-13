@@ -316,8 +316,8 @@
   `tutorial03_texturing.exe+0x44280`. Its trace contains no guest `Present` or unresolved-import stop.
   A current-source HLE-only CLI probe without MSVC/UCRT DLLs reached D3DCompiler `HeapAlloc` calls,
   then stopped at the synchronous callback budget; no unresolved MSVCP call appeared in that short
-  trace. The current-source analyzer report lists 205 implemented / 46 missing static imports for
-  Tutorial03, including 26 of 65 MSVCP140 imports and 3 of 18 VCRUNTIME140 imports still missing.
+  trace. The current-source analyzer report lists 209 implemented / 42 missing static imports for
+  Tutorial03, including 22 of 65 MSVCP140 imports and 3 of 18 VCRUNTIME140 imports still missing.
   The full report is in `docs/target-imports/tutorial03-current-source.json`; its preflight is static
   review only. These local DLLs are not a product package. The first
   browser report with that package stopped at unsupported `VPERMILPS xmm0,xmm5,0x55` with zero GPU
@@ -336,7 +336,7 @@
   uninitialized auxiliary ostream during insertion of the ANSI string `\x1b[39m`; that capture
   predates the current stream handlers. An earlier analyzer snapshot reported 165 implemented /
   86 missing imports, including 61 of 65 MSVCP140 imports missing. The current-source report now
-  records 205 implemented / 46 missing, including 26 of 65 MSVCP140 imports missing. The local
+  records 209 implemented / 42 missing, including 22 of 65 MSVCP140 imports missing. The local
   runtime DLLs are not a product dependency or redistribution decision.
   A separate HLE-only browser bundle of Tutorial01_HelloTriangle, also without local MSVC/UCRT DLLs,
   now renders the colored triangle at the normal 250,000-instruction worker slice: 659 draws, 330
