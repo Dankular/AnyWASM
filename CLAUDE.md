@@ -284,6 +284,8 @@ register-stack subset):
       `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. A
       separate 8x anisotropic R8_UNORM Texture2DArray Sample returns `[76, 0, 0, 255]` at that edge,
       verifying format-specific channel defaults.
+      Texture3D R8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a
+      3D edge footprint, verifying channel defaults and edge weighting.
       TextureCube SRV selects the expected
       color for all six
       signed-axis directions and linearly blends taps across +X/+Y, +X/+Z, and +X/-Y boundaries to
@@ -308,7 +310,7 @@ register-stack subset):
       WebGPU depth format. Cube-array
       `GetDimensions` also returns the expected 4x4 mip-0 and 2x2 mip-1 sizes for the two-cube, two-mip
       view. Additional sampled dimensions/formats, other anisotropic footprints, cube-array `SampleCmpBias` and
-      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 samples remain open.
+      `SampleCmpGrad`, and array/3D formats beyond the tested RGBA8 and R8_UNORM cases remain open.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
       sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; Rust HLE tests cover the reports and
       command fields, while Chromium verifies the resolve pixels. Other staging formats and

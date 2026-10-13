@@ -5954,8 +5954,24 @@ try {
       command(21, words(1, 2, 0)); command(19, words(1, 0, 1, 5)); command(20, words(1, 0, 1, 6));
       command(29, words(3, 0)); gpu.execute(append());
       const pixels = await gpu.readBackbuffer(1);
-      const at = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { outside: at(10), straddle: at(32), draws: gpu.stats.draws, errors: gpu.stats.errors };
+      stream.length = 0;
+      command(46, words(15, 4, 4, 2, 1, 61, 0x8, 0, 0)); // R8_UNORM volume texture
+      command(12, words(16, 2, 15, 61, 8, 0, 1, 0, 1)); // Texture3D SRV
+      const uploadR8Slice = (z, value) => {
+        const texels = new Uint8Array(16).fill(value);
+        const payload = new Uint8Array(36 + texels.length);
+        payload.set(words(15, 0, z, 0, 0, 4, 4, 4, texels.length));
+        payload.set(texels, 36); command(5, payload);
+      };
+      uploadR8Slice(0, 0); uploadR8Slice(1, 128);
+      command(19, words(1, 0, 1, 16)); command(29, words(3, 0)); gpu.execute(append());
+      const r8Pixels = await gpu.readBackbuffer(1);
+      const at = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
+      const result = {
+        outside: at(pixels, 10), straddle: at(pixels, 32),
+        r8Outside: at(r8Pixels, 10), r8Straddle: at(r8Pixels, 32),
+        draws: gpu.stats.draws, errors: gpu.stats.errors,
+      };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -5963,10 +5979,14 @@ try {
     }
   });
   check('D3D11 Texture3D CopyResource and BORDER sampling preserve slices and edge footprints',
-    texture3dResult.draws === 1 && texture3dResult.errors.length === 0
+    texture3dResult.draws === 2 && texture3dResult.errors.length === 0
       && near(texture3dResult.outside || [], [0, 0, 255, 255], 1)
       && near(texture3dResult.straddle || [], [0, 230, 26, 255], 2),
     JSON.stringify(texture3dResult));
+  check('D3D11 Texture3D R8_UNORM BORDER sampling preserves channel defaults at outside and edge footprints',
+    near(texture3dResult.r8Outside || [], [0, 0, 0, 255], 1)
+      && near(texture3dResult.r8Straddle || [], [115, 0, 0, 255], 4),
+    JSON.stringify({ outside: texture3dResult.r8Outside, straddle: texture3dResult.r8Straddle }));
 
   const texture3dMipsResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
