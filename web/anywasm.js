@@ -276,7 +276,7 @@ export class AnyWasm {
     if (typeof source === 'string') bytes = await (await fetch(source)).arrayBuffer();
     else if (typeof Response !== 'undefined' && source instanceof Response) bytes = await source.arrayBuffer();
     let instance;
-    const sharedMemory = importedMemory?.buffer instanceof SharedArrayBuffer;
+    const sharedMemory = typeof SharedArrayBuffer !== 'undefined' && importedMemory?.buffer instanceof SharedArrayBuffer;
     let asyncifyData = 0;
     const asyncifyControl = { resumeSliceSteps: 0n, yields: 0, resumes: 0 };
     const hostIo = {
