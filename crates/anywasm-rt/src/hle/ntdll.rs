@@ -69,38 +69,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "RtlNtStatusToDosError" => |_| Ok(317),
         "RtlVirtualUnwind" => crate::exception::rtl_virtual_unwind,
-        "RtlUnwind" => |p| rtl_unwind_unimplemented(p, "RtlUnwind", 4),
+        "RtlUnwind" => crate::exception32::rtl_unwind,
         "RtlUnwindEx" => crate::exception::rtl_unwind_ex,
         _ => return None,
     })
-}
-
-fn rtl_unwind_unimplemented(p: &mut Process, name: &str, arg_count: usize) -> R {
-    if p.trace_imports {
-        let args = (0..arg_count)
-            .map(|index| format!("{:#x}", p.arg(index)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let caller = p.rd64(p.cpu.gpr[RSP]).unwrap_or(0);
-        let context = (arg_count >= 5).then(|| p.arg(4));
-        let context_state = context
-            .map(|address| {
-                format!(
-                    " context={address:#x} context_rip={:#x} context_rsp={:#x}",
-                    p.rd64(address + 0xf8).unwrap_or(0),
-                    p.rd64(address + 0x98).unwrap_or(0)
-                )
-            })
-            .unwrap_or_default();
-        p.stderr.extend_from_slice(
-            format!("[seh] {name} args=[{args}] caller={caller:#x}{context_state}\n").as_bytes(),
-        );
-    }
-    Err(Stop::Unimplemented {
-        dll: "ntdll".into(),
-        name: format!("{name} (exception unwinding is not implemented)"),
-    }
-    .also(p))
 }
 
 fn rtl_lookup_function_entry(p: &mut Process) -> R {
@@ -445,18 +417,6 @@ pub(crate) fn rtl_pc_to_file_header(p: &mut Process) -> R {
         Ok(image_base)
     } else {
         Ok(0)
-    }
-}
-
-trait Also {
-    fn also(self, p: &mut Process) -> Self;
-}
-impl Also for Stop {
-    fn also(self, p: &mut Process) -> Self {
-        if let Stop::Unimplemented { dll, name } = &self {
-            p.unimplemented_log.push((dll.clone(), name.clone()));
-        }
-        self
     }
 }
 

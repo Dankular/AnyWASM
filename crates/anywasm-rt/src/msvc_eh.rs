@@ -1523,7 +1523,7 @@ fn unwind3_to_state(
             .ok_or_else(|| malformed(format!("EH3 unwind state {state} is out of range")))?;
         if let Some(action) = entry.action {
             unwind_funclet(p, action, establisher).map_err(|stop| match stop {
-                Stop::GuestUnwind(_) => Stop::Crash(
+                Stop::GuestUnwind(_) | Stop::GuestUnwind32(_) => Stop::Crash(
                     "guest exception escaped an EH3 unwind funclet during phase two".into(),
                 ),
                 other => other,
@@ -1553,7 +1553,7 @@ fn unwind4_to_state(
                     .action
                     .ok_or_else(|| malformed("EH4 unwind funclet has no action RVA"))?;
                 unwind_funclet(p, action, establisher).map_err(|stop| match stop {
-                    Stop::GuestUnwind(_) => Stop::Crash(
+                    Stop::GuestUnwind(_) | Stop::GuestUnwind32(_) => Stop::Crash(
                         "guest exception escaped an EH4 unwind funclet during phase two".into(),
                     ),
                     other => other,
@@ -1575,7 +1575,7 @@ fn unwind4_to_state(
                     object_slot
                 };
                 p.call_guest(action, &[object]).map_err(|stop| match stop {
-                    Stop::GuestUnwind(_) => Stop::Crash(
+                    Stop::GuestUnwind(_) | Stop::GuestUnwind32(_) => Stop::Crash(
                         "guest exception escaped an EH4 destructor during phase two".into(),
                     ),
                     other => other,
@@ -1637,7 +1637,7 @@ fn call_catch_funclet(
             if let Some(unwind_function) = exception.throw_info.unwind_function {
                 match p.call_guest(unwind_function, &[exception.object_address]) {
                     Ok(_) => Ok(continuation),
-                    Err(Stop::GuestUnwind(_)) => Err(Stop::Crash(
+                    Err(Stop::GuestUnwind(_) | Stop::GuestUnwind32(_)) => Err(Stop::Crash(
                         "guest exception escaped the thrown-object destructor".into(),
                     )),
                     Err(stop) => Err(stop),

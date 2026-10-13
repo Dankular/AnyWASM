@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::process::{GuestSehTransfer32, Process, Stop, TEB_ADDR};
+use crate::process::{GuestSehTransfer32, GuestUnwind32, Process, Stop, TEB_ADDR};
 use anywasm_cpu::cpu::{Cpu, CpuMode, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP};
 use anywasm_cpu::mem::{Access, PROT_X};
 use anywasm_cpu::{DecodeError, Exit};
@@ -46,6 +46,7 @@ const STATUS_INTEGER_DIVIDE_BY_ZERO: u32 = 0xc000_0094;
 const STATUS_ILLEGAL_INSTRUCTION: u32 = 0xc000_001d;
 const STATUS_PRIVILEGED_INSTRUCTION: u32 = 0xc000_0096;
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
+const STATUS_UNWIND: u32 = 0xc000_0027;
 const MAX_SEH_FRAMES: usize = 128;
 
 #[derive(Clone)]
@@ -53,6 +54,78 @@ struct Context32 {
     gpr: [u64; 16],
     eip: u32,
     eflags: u32,
+}
+
+/// Capture the non-returning PE32 `RtlUnwind` request for the active dispatcher.
+pub(crate) fn rtl_unwind(p: &mut Process) -> Result<u64, Stop> {
+    if p.cpu.mode != CpuMode::X86_32 {
+        let name = "RtlUnwind for non-PE32 process".to_owned();
+        p.unimplemented_log.push(("ntdll".into(), name.clone()));
+        return Err(Stop::Unimplemented {
+            dll: "ntdll".into(),
+            name,
+        });
+    }
+
+    let target_frame = p.arg(0) as u32 as u64;
+    let requested_ip = p.arg(1) as u32 as u64;
+    let mut exception_record = p.arg(2) as u32 as u64;
+    let return_value = p.arg(3) as u32 as u64;
+    let hle_esp = p.cpu.gpr[RSP] as u32 as u64;
+    validate_stack(p, hle_esp)?;
+    let return_ip = p.rd32(hle_esp)?;
+    let resumed_esp = hle_esp
+        .checked_add(20)
+        .ok_or_else(|| Stop::Crash("RtlUnwind PE32 stack pointer overflow".into()))?;
+    validate_stack(p, resumed_esp)?;
+
+    if exception_record == 0 {
+        exception_record = crate::hle::kernel32::alloc_block(p, EXCEPTION_RECORD32_SIZE, true);
+        write_exception_record(p, exception_record, STATUS_UNWIND, 0, return_ip, &[])?;
+    } else {
+        // Validate the record before changing its flags.
+        let _ = p.rd32(exception_record)?;
+        let _ = p.rd32(exception_record + 4)?;
+    }
+    let mut flags = p.rd32(exception_record + 4)? | EXCEPTION_UNWINDING;
+    if target_frame == 0 {
+        flags |= EXCEPTION_EXIT_UNWIND;
+    }
+    p.wr32(exception_record + 4, flags)?;
+
+    let target_ip = if target_frame == 0 || requested_ip == 0 {
+        return_ip as u64
+    } else {
+        requested_ip
+    };
+    if target_frame != 0
+        && p.mem
+            .prot_of(target_ip)
+            .is_none_or(|protection| protection & PROT_X == 0)
+    {
+        return Err(Stop::Crash(format!(
+            "RtlUnwind PE32 target IP {target_ip:#x} is not executable"
+        )));
+    }
+
+    let mut context = context_from_cpu(&p.cpu, target_ip as u32, resumed_esp as u32);
+    context.gpr[RAX] = return_value;
+    if p.trace_imports {
+        p.stderr.extend_from_slice(
+            format!(
+                "[seh32] RtlUnwind target_frame={target_frame:#010x} target_ip={target_ip:#010x} exception_record={exception_record:#010x} return={return_value:#010x}\n"
+            )
+            .as_bytes(),
+        );
+    }
+    Err(Stop::GuestUnwind32(GuestUnwind32 {
+        target_frame,
+        target_ip,
+        exception_record,
+        return_value,
+        context_gpr: context.gpr,
+        context_eflags: context.eflags,
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -697,6 +770,7 @@ fn dispatch_exception_inner(
                     skip_ret_on_resume,
                 );
             }
+            Err(Stop::GuestUnwind32(unwind)) => return unwind_to_rtl32(p, unwind),
             Err(stop) => return Err(stop),
         };
         if registration == nested_registration {
@@ -765,6 +839,196 @@ fn dispatch_exception_inner(
         skip_ret_on_resume,
         format!("search exceeded {MAX_SEH_FRAMES} registration frames"),
     )
+}
+
+fn unwind_to_rtl32(p: &mut Process, unwind: GuestUnwind32) -> Result<u64, Stop> {
+    let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
+    let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
+    if stack_limit >= stack_base {
+        return Err(Stop::Crash(format!(
+            "invalid PE32 TEB stack bounds {stack_limit:#x}..{stack_base:#x} during RtlUnwind"
+        )));
+    }
+
+    let (frames, target_index) = active_unwind_frames32(p, unwind.target_frame)?;
+
+    let context_record = crate::hle::kernel32::alloc_block(p, CONTEXT32_SIZE, true);
+    let mut context = Context32 {
+        gpr: unwind.context_gpr,
+        eip: unwind.target_ip as u32,
+        eflags: unwind.context_eflags,
+    };
+    context.gpr[RAX] = unwind.return_value as u32 as u64;
+    write_context(p, context_record, &context)?;
+    let dispatcher_context = crate::hle::kernel32::alloc_block(p, DISPATCHER_CONTEXT32_SIZE, true);
+    let unwind_flags = p.rd32(unwind.exception_record + 4)? | EXCEPTION_UNWINDING;
+    let mut index = 0;
+    let mut collided_count = 0;
+    let unwind_count = target_index.map_or(frames.len(), |target| target + 1);
+    while index < unwind_count {
+        let frame = frames[index];
+        let target_unwind = target_index == Some(index);
+        p.wr32(
+            unwind.exception_record + 4,
+            unwind_flags
+                | if target_unwind {
+                    EXCEPTION_TARGET_UNWIND
+                } else if target_index.is_none() {
+                    EXCEPTION_EXIT_UNWIND
+                } else {
+                    0
+                },
+        )?;
+        let frame_address = frame.registration as u64;
+        if p.rd32(frame_address)? != frame.next || p.rd32(frame_address + 4)? != frame.handler {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind registration frame {frame_address:#x} changed during unwind"
+            )));
+        }
+        let previous_ebp = p.cpu.gpr[RBP];
+        p.cpu.gpr[RBP] = frame_address + 12;
+        p.wr32(dispatcher_context, frame.registration)?;
+        let result = p.call_guest(
+            frame.handler as u64,
+            &[
+                unwind.exception_record,
+                frame_address,
+                context_record,
+                dispatcher_context,
+            ],
+        );
+        p.cpu.gpr[RBP] = previous_ebp;
+        let disposition = match result {
+            Ok(disposition) => disposition as u32,
+            Err(
+                Stop::GuestUnwind32(_)
+                | Stop::GuestUnwind(_)
+                | Stop::GuestCatch32(_)
+                | Stop::GuestSehTransfer32(_),
+            ) => {
+                return Err(Stop::Crash(
+                    "nested guest unwind transfer escaped a PE32 RtlUnwind handler".into(),
+                ));
+            }
+            Err(stop) => return Err(stop),
+        };
+        if disposition == EXCEPTION_COLLIDED_UNWIND {
+            let Some(target) = target_index else {
+                return Err(Stop::Crash(
+                    "PE32 exit unwind collided before reaching the end of the registration chain"
+                        .into(),
+                ));
+            };
+            if target_unwind {
+                return Err(Stop::Crash(
+                    "PE32 RtlUnwind collided from its selected target frame".into(),
+                ));
+            }
+            collided_count += 1;
+            if collided_count > MAX_SEH_FRAMES {
+                return Err(Stop::Crash(format!(
+                    "PE32 RtlUnwind exceeded {MAX_SEH_FRAMES} collided redirects"
+                )));
+            }
+            index = resume_collided_unwind32(p, dispatcher_context, &frames, index, target)?;
+            continue;
+        }
+        if disposition != EXCEPTION_CONTINUE_SEARCH {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind handler {:#x} returned invalid disposition {disposition}",
+                frame.handler
+            )));
+        }
+        if p.rd32(TEB_ADDR)? != frame.registration {
+            return Err(Stop::Crash(format!(
+                "PE32 ExceptionList changed while RtlUnwind processed frame {frame_address:#x}"
+            )));
+        }
+        if !target_unwind {
+            p.wr32(TEB_ADDR, frame.next)?;
+        }
+        index += 1;
+        if target_unwind {
+            p.wr32(unwind.exception_record + 4, unwind_flags)?;
+            p.cpu.gpr = context.gpr;
+            p.cpu.rip = context.eip as u64;
+            p.cpu.rflags = context.eflags as u64;
+            p.skip_ret = false;
+            if p.trace_imports {
+                p.stderr.extend_from_slice(
+                    format!(
+                        "[seh32] RtlUnwind transfer frame={:#010x} ip={:#010x} esp={:#010x} return={:#010x}\n",
+                        unwind.target_frame,
+                        unwind.target_ip,
+                        context.gpr[RSP] as u32,
+                        context.gpr[RAX] as u32
+                    )
+                    .as_bytes(),
+                );
+            }
+            return Ok(0);
+        }
+    }
+
+    Err(Stop::Crash(
+        "PE32 RtlUnwind exit unwind reached the end of the registration chain".into(),
+    ))
+}
+
+fn active_unwind_frames32(
+    p: &Process,
+    target_frame: u64,
+) -> Result<(Vec<SearchFrame32>, Option<usize>), Stop> {
+    let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
+    let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
+    let mut frames = Vec::new();
+    let mut registration = p.rd32(TEB_ADDR)?;
+    let mut visited = HashSet::new();
+    while registration != EXCEPTION_CHAIN_END {
+        if frames.len() == MAX_SEH_FRAMES {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind registration chain exceeded {MAX_SEH_FRAMES} frames"
+            )));
+        }
+        let frame = registration as u64;
+        if frame < stack_limit
+            || frame & 3 != 0
+            || frame.checked_add(8).is_none_or(|end| end > stack_base)
+        {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind registration frame {frame:#x} is outside TEB stack bounds or unaligned"
+            )));
+        }
+        if !visited.insert(registration) {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind registration chain contains a cycle at {frame:#x}"
+            )));
+        }
+        let next = p.rd32(frame)?;
+        let handler = p.rd32(frame + 4)?;
+        if handler == 0 {
+            return Err(Stop::Crash(format!(
+                "PE32 RtlUnwind registration frame {frame:#x} has a null handler"
+            )));
+        }
+        frames.push(SearchFrame32 {
+            registration,
+            next,
+            handler,
+        });
+        if target_frame != 0 && registration as u64 == target_frame {
+            let target_index = frames.len() - 1;
+            return Ok((frames, Some(target_index)));
+        }
+        registration = next;
+    }
+    if target_frame == 0 {
+        Ok((frames, None))
+    } else {
+        Err(Stop::Crash(format!(
+            "PE32 RtlUnwind target frame {target_frame:#x} is not in the active registration chain"
+        )))
+    }
 }
 
 fn unwind_to_catch32(

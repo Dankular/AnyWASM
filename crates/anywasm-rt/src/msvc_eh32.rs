@@ -595,6 +595,7 @@ pub(crate) fn frame_handler3(p: &mut Process) -> Result<u64, Stop> {
                 p.call_guest(unwind_function, &[exception.object_address])
                     .map_err(|stop| match stop {
                         Stop::GuestUnwind(_)
+                        | Stop::GuestUnwind32(_)
                         | Stop::GuestCatch32(_)
                         | Stop::GuestSehTransfer32(_) => Stop::Crash(
                             "guest exception escaped an x86 thrown-object destructor".into(),
@@ -681,7 +682,10 @@ fn unwind_state_map(
             p.cpu.gpr[RBP] = previous_ebp;
             if let Err(stop) = result {
                 return Err(match stop {
-                    Stop::GuestUnwind(_) | Stop::GuestCatch32(_) | Stop::GuestSehTransfer32(_) => {
+                    Stop::GuestUnwind(_)
+                    | Stop::GuestUnwind32(_)
+                    | Stop::GuestCatch32(_)
+                    | Stop::GuestSehTransfer32(_) => {
                         unsupported("a guest exception was raised from an x86 C++ unwind funclet")
                     }
                     other => other,
