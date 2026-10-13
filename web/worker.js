@@ -317,7 +317,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
       if (sharedInstructionBudgetRemaining === 0n) break;
       if (w.callbackSuspended) {
         const before = w.retiredInstructionsExact();
-        status = w.run(Number(sharedInstructionBudgetRemaining < 1n ? sharedInstructionBudgetRemaining : 1n));
+        status = w.run(Number(sharedInstructionBudgetRemaining));
         chargeSharedInstructionBudget(before);
         if (!w.hostWaitPending && !w.callbackSuspended) {
           if (sharedHandoffPendingFinish) {
@@ -345,8 +345,11 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
           try {
             status = w.run(1);
           } finally {
-            if (switched && !w.hostWaitPending) w.finishSharedCpuCoordinatorTurn();
-            else if (switched) sharedHandoffPendingFinish = true;
+            if (switched && !w.hostWaitPending && !w.callbackSuspended) {
+              w.finishSharedCpuCoordinatorTurn();
+            } else if (switched) {
+              sharedHandoffPendingFinish = true;
+            }
           }
           chargeSharedInstructionBudget(before);
           sharedNeedsCoordinatorTurn = pendingSharedCompletions.length > 0;

@@ -329,7 +329,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   all remaining guest allocations with their recorded allocation sizes, including the separately
   aligned worker stacks. A regression now verifies that an in-flight request rejection does not
   access its shared worker slot after disposal; all 14 shared-pool Node tests pass. Browser-level
-  dispose-during-work verification remains outstanding.
+  dispose-during-work verification remains outstanding. Shared-mode guest callbacks now resume with
+  the remaining instruction allowance for the current 250,000-instruction pump, and a saved-thread
+  coordinator handoff remains active until a suspended callback finishes. This removes the prior
+  one-instruction resume limit from that path; a fresh browser replay is still needed to measure its
+  effect on Asyncify yields and target progress.
 - DLL initialization remains partial: bundled DLL TLS callbacks and `DllMain` calls now follow
   dependency-first loading, with callbacks invoked in image order before each DLL entry point. EXE
   callbacks run after DLL initialization and before the EXE entry point. Synthetic regressions cover
