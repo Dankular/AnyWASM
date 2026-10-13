@@ -301,10 +301,11 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
 - Direct3D 11 coverage is a vertical slice. Focused browser pixel/readback checks cover the coloured
   triangle (216 pixels), constant-factor and source-alpha blending, reverse-subtract/add/subtract/
   min/max blending, texture/vertex/index-buffer copies, texture region copies and uploads, including
-  a partial RG8_UNORM texel copy and a BC1 block copy that preserve neighboring destination data,
+  a partial RG8_UNORM texel copy and BC1/BC4 block copies that preserve neighboring destination data,
   DXBC clip/discard, 2D and 3D mip generation, R8_UNORM/RG8_UNORM/R16_UNORM/R16_SNORM Texture3D
   samples with outside and edge pixels, fractional-LOD linear filtering, an 8x anisotropic
-  sampler request, instance step rates, render-to-texture, multiple render targets, cube/array/3D
+  sampler request plus an 8x anisotropic BC4 BORDER pixel check, instance step rates, render-to-texture,
+  multiple render targets, cube/array/3D
   texture sampling, depth/stencil, rasterizer state, 4x MSAA resolve, D24S8 depth with
   alpha-to-coverage and complementary sample masks, and D3D11.1 constant-buffer ranges. The D3D9 fixed-function slice now has pixel checks for selected FVF layouts, triangle-fan
   rendering, stage-0 SELECTARG1/SELECTARG2, MODULATE/MODULATE2X, ADD/SUBTRACT, ADDSMOOTH,

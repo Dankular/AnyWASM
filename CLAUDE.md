@@ -269,7 +269,7 @@ register-stack subset):
       and Texture1DArray sampling lower to 2D backing textures, with a 3-mip/2-slice array pixel-tested
       at layer 0/mip 1 and layer 1/mip 2; texture and buffer `CopySubresourceRegion`, including a
       partial RG8_UNORM box, partial R16_UNORM/SNORM copies with copied and untouched words retained
-      through staging readback, and an aligned BC1 block with untouched destination data, plus `UpdateSubresource`;
+      through staging readback, and aligned BC1 and BC4 blocks with untouched neighbouring data, plus `UpdateSubresource`;
       DXBC clip/discard; 2D and 3D `GenerateMips`;
       fractional-LOD linear filtering; repeat/mirror/clamp/MIRROR_ONCE sampler address pixels;
       BORDER verifies configured color for point and linear taps in 2D RGBA8 Sample, SampleLevel,
@@ -287,6 +287,8 @@ register-stack subset):
       `[0, 151, 104, 255]` for an explicit 8x footprint crossing the right edge on layer 1. A
       separate 8x anisotropic R8_UNORM Texture2DArray Sample returns `[76, 0, 0, 255]`, while
       RG8_UNORM returns `[38, 114, 0, 255]` at that edge, verifying format-specific channel defaults.
+      An 8x anisotropic BC4_UNORM Texture2D SampleGrad also verifies a constant interior and a
+      channel-correct BORDER blend across the right edge.
       Texture3D R8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 0, 0, 255]` at a
       3D edge footprint, verifying channel defaults and edge weighting.
       Texture3D RG8_UNORM BORDER sampling returns `[0, 0, 0, 255]` outside and `[115, 58, 0, 255]`

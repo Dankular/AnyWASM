@@ -2019,6 +2019,98 @@ try {
       && anisotropicSamplerResult.errors?.length === 0,
     JSON.stringify(anisotropicSamplerResult));
 
+  const anisotropicBc4Result = await page.evaluate(async () => {
+    const { ShaderTool } = await import('/shaders.js');
+    const { GpuExecutor } = await import('/gpu.js');
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    try {
+      const tool = new ShaderTool(new URL('/shaders/', location.href));
+      await tool.init();
+      const gpu = new GpuExecutor(canvas, tool, () => {}, { noPresent: true });
+      await gpu.init();
+      if (!gpu.device.features.has('texture-compression-bc')) {
+        gpu.device.destroy();
+        return { skipped: true };
+      }
+
+      const vertex = tool.compileHlsl(`
+        float4 main(uint vertexId : SV_VertexID) : SV_Position {
+          float x = vertexId == 2 ? 3.0 : -1.0;
+          float y = vertexId == 1 ? 3.0 : -1.0;
+          return float4(x, y, 0.0, 1.0);
+        }
+      `, 'main', 'vs_5_0');
+      const pixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = position.x < 32.0 ? float2(0.5, 0.5) : float2(0.95, 0.5);
+          return image.SampleGrad(borderSampler, coordinate, float2(0.2, 0.0), float2(0.0, 0.001));
+        }
+      `, 'main', 'ps_5_0');
+      const stream = [];
+      const words = (...values) => {
+        const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
+        values.forEach((value, index) => view.setUint32(index * 4, value >>> 0, true));
+        return data;
+      };
+      const command = (op, payload) => {
+        const padded = (payload.length + 3) & ~3, data = new Uint8Array(8 + padded);
+        const view = new DataView(data.buffer);
+        view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
+        stream.push(data);
+      };
+      const shader = (id, stage, dxbc) => {
+        const header = words(id, stage, dxbc.length), payload = new Uint8Array(header.length + dxbc.length);
+        payload.set(header); payload.set(dxbc, header.length); command(6, payload);
+      };
+      command(38, words(1, 0, 9, 64, 64, 28));
+      command(12, words(2, 0, 9, 28, 4, 0, 1, 0, 1));
+      command(4, words(3, 8, 4, 1, 1, 80, 8, 0, 1, 0)); // two-block BC4_UNORM SRV texture
+      const bc4Blocks = new Uint8Array(16);
+      for (let block = 0; block < 2; block++) {
+        bc4Blocks[block * 8] = 255;
+        bc4Blocks[block * 8 + 1] = 255; // both endpoints encode constant red=1
+      }
+      const upload = new Uint8Array(36 + bc4Blocks.length);
+      upload.set(words(3, 0, 0, 0, 0, 8, 4, 16, bc4Blocks.length));
+      upload.set(bc4Blocks, 36); command(5, upload);
+      command(12, words(4, 2, 3, 80, 4, 0, 1, 0, 1));
+      const sampler = new Uint8Array(56), samplerView = new DataView(sampler.buffer);
+      samplerView.setUint32(0, 5, true); samplerView.setUint32(4, 0x55, true);
+      samplerView.setUint32(8, 4, true); samplerView.setUint32(12, 3, true); samplerView.setUint32(16, 3, true);
+      samplerView.setUint32(24, 8, true); samplerView.setUint32(28, 1, true);
+      [0.25, 0.5, 0.75, 1].forEach((value, index) => samplerView.setFloat32(32 + index * 4, value, true));
+      samplerView.setFloat32(48, 0, true); samplerView.setFloat32(52, 0, true);
+      command(8, sampler);
+      command(27, words(2, 0, 0, 0, 0x3f800000));
+      shader(1, 0, vertex); shader(2, 1, pixel);
+      command(17, words(0, 1)); command(17, words(1, 2));
+      command(19, words(1, 0, 1, 4)); command(20, words(1, 0, 1, 5));
+      command(21, words(1, 2, 0)); command(29, words(3, 0));
+      const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+      let offset = 0;
+      for (const part of stream) { commands.set(part, offset); offset += part.length; }
+      gpu.execute(commands);
+      const pixels = await gpu.readBackbuffer(1);
+      const pixelAt = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
+      const result = { center: pixelAt(16), edge: pixelAt(48), errors: gpu.stats.errors };
+      gpu.device.destroy();
+      return result;
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  check(anisotropicBc4Result.skipped
+    ? 'D3D11 BC texture-compression adapter skip for anisotropic BC4 BORDER sampling'
+    : 'D3D11 8x anisotropic BORDER sampling filters BC4 values across a texture edge',
+    anisotropicBc4Result.skipped
+      || (anisotropicBc4Result.center?.[0] >= 254 && anisotropicBc4Result.edge?.[0] > 64
+        && anisotropicBc4Result.edge[0] < 255 && anisotropicBc4Result.center?.slice(1).join(',') === '0,0,255'
+        && anisotropicBc4Result.edge?.slice(1).join(',') === '0,0,255' && anisotropicBc4Result.errors?.length === 0),
+    JSON.stringify(anisotropicBc4Result));
+
   const samplerAddressResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
     const { GpuExecutor } = await import('/gpu.js');
