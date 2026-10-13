@@ -1383,7 +1383,11 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     } else if vk == ViewKind::Uav && info.array > 1 {
         5
     } else if vk == ViewKind::Srv && info.misc & 0x4 != 0 {
-        if info.array > 6 { 10 } else { 9 }
+        if info.array > 6 {
+            10
+        } else {
+            9
+        }
     } else {
         4
     };
@@ -1731,15 +1735,15 @@ fn copy_subresource_region(p: &mut Process) -> R {
         .u32(s)
         .u32(ssub);
     if sbox != 0 {
-        pk = pk.u32(1);
         for i in 0..6 {
             pk = pk.u32(p.rd32(sbox + 4 * i)?);
         }
+        pk = pk.u32(1);
     } else {
-        pk = pk.u32(0);
         for _ in 0..6 {
             pk = pk.u32(0);
         }
+        pk = pk.u32(0);
     }
     p.extra.gpu.emit(op::COPY_REGION, pk);
     Ok(0)
@@ -2133,7 +2137,9 @@ fn get_desc(p: &mut Process) -> R {
         }
         Kind::Texture1D { id } => {
             let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-            let vals = [r.width, r.mips, r.array, r.format, r.usage, r.bind, r.cpu, r.misc];
+            let vals = [
+                r.width, r.mips, r.array, r.format, r.usage, r.bind, r.cpu, r.misc,
+            ];
             for (i, v) in vals.iter().enumerate() {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
@@ -2532,17 +2538,26 @@ mod tests {
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            assert_eq!(fields, vec![texture_id, *mip, *slice, 0, 0, *width, 1, *pitch, *pitch]);
+            assert_eq!(
+                fields,
+                vec![texture_id, *mip, *slice, 0, 0, *width, 1, *pitch, *pitch]
+            );
             assert_eq!(&payload[36..], texels);
         }
 
         p.cpu.gpr[RCX] = texture;
         p.cpu.gpr[RDX] = OUT;
-        assert_eq!(method("ID3D11Resource", "GetType").unwrap()(&mut p).unwrap(), S_OK);
+        assert_eq!(
+            method("ID3D11Resource", "GetType").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
         assert_eq!(p.rd32(OUT).unwrap(), 2); // D3D11_RESOURCE_DIMENSION_TEXTURE1D
         p.cpu.gpr[RCX] = texture;
         p.cpu.gpr[RDX] = DESC;
-        assert_eq!(method("ID3D11Texture1D", "GetDesc").unwrap()(&mut p).unwrap(), S_OK);
+        assert_eq!(
+            method("ID3D11Texture1D", "GetDesc").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
         let actual_desc = (0..8)
             .map(|index| p.rd32(DESC + index * 4).unwrap())
             .collect::<Vec<_>>();
@@ -2552,7 +2567,10 @@ mod tests {
         p.cpu.gpr[RDX] = texture;
         p.cpu.gpr[R8] = 0; // default Texture1DArray SRV
         p.cpu.gpr[R9] = OUT;
-        assert_eq!(method("ID3D11Device", "CreateShaderResourceView").unwrap()(&mut p).unwrap(), S_OK);
+        assert_eq!(
+            method("ID3D11Device", "CreateShaderResourceView").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
         let srv = p.rd64(OUT).unwrap();
         let view_id = kind_of(&p, srv).and_then(|kind| kind.host_id()).unwrap();
         let (opcode, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
@@ -2584,7 +2602,10 @@ mod tests {
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
-        assert_eq!(fields, vec![explicit_view_id, 2, texture_id, 28, 3, 1, 1, 1, 1]);
+        assert_eq!(
+            fields,
+            vec![explicit_view_id, 2, texture_id, 28, 3, 1, 1, 1, 1]
+        );
     }
 
     #[test]
@@ -2630,7 +2651,10 @@ mod tests {
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
-        assert_eq!(default_fields, vec![default_view_id, 2, texture_id, 28, 10, 0, 1, 0, 3]);
+        assert_eq!(
+            default_fields,
+            vec![default_view_id, 2, texture_id, 28, 10, 0, 1, 0, 3]
+        );
 
         let explicit_desc = [28u32, 10, 0, 1, 6, 2]
             .into_iter()
@@ -3802,7 +3826,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             copy_words,
-            vec![dst_id, 0, 0, 1, 0, src_id, 0, 1, 1, 1, 0, 3, 3, 1]
+            vec![dst_id, 0, 0, 1, 0, src_id, 0, 1, 1, 0, 3, 3, 1, 1]
         );
     }
 
