@@ -231,7 +231,9 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `__finally` behavior are covered by a built x86 fixture. Native and HLE-only PE32 fixture runs also
   verify an exception escaping an `__except` filter and one raised from `__finally`. A synthetic
   handler test checks the basic `EXCEPTION_NESTED_EXCEPTION` to `EXCEPTION_NESTED_CALL` search
-  transition. A second-pass test covers `EXCEPTION_COLLIDED_UNWIND` redirecting to a searched frame,
+  transition. PE32 search now tracks the x86 dispatcher registration pointer and clears
+  `EXCEPTION_NESTED_CALL` when that registration is reached; the clear transition has no runtime
+  fixture yet. A second-pass test covers `EXCEPTION_COLLIDED_UNWIND` redirecting to a searched frame,
   preserving restored register state, and setting the collided flag on the resumed handler. First-pass
   collided search now restores a validated dispatcher frame and retries its handler; a synthetic test
   changes the control PC within a loaded function and checks the separate per-frame CONTEXT pointer and

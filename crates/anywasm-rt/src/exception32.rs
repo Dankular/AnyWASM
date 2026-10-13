@@ -631,6 +631,7 @@ fn dispatch_exception_inner(
     let mut registration = p.rd32(TEB_ADDR)?;
     let mut visited = HashSet::new();
     let mut searched_frames = Vec::new();
+    let mut nested_registration = 0;
     for frame_number in 0..MAX_SEH_FRAMES {
         if registration == EXCEPTION_CHAIN_END {
             return unhandled_exception(
@@ -698,6 +699,14 @@ fn dispatch_exception_inner(
             }
             Err(stop) => return Err(stop),
         };
+        if registration == nested_registration {
+            let exception_flags = p.rd32(exception_record + 4)?;
+            p.wr32(
+                exception_record + 4,
+                exception_flags & !EXCEPTION_NESTED_CALL,
+            )?;
+            nested_registration = 0;
+        }
         if p.trace_imports {
             p.stderr.extend_from_slice(
                 format!(
@@ -722,6 +731,19 @@ fn dispatch_exception_inner(
                     exception_record + 4,
                     exception_flags | EXCEPTION_NESTED_CALL,
                 )?;
+                let nested = p.rd32(dispatcher_context)?;
+                if nested > nested_registration {
+                    let nested_address = nested as u64;
+                    if nested_address < stack_limit
+                        || nested_address >= stack_base
+                        || nested_address & 3 != 0
+                    {
+                        return Err(Stop::Crash(format!(
+                            "PE32 nested exception registration {nested_address:#x} is outside TEB stack bounds or unaligned"
+                        )));
+                    }
+                    nested_registration = nested;
+                }
                 registration = next;
             }
             EXCEPTION_COLLIDED_UNWIND => {

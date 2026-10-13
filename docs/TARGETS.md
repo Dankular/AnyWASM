@@ -665,7 +665,9 @@ handler and CPU exceptions through VEH resumption. The compiled `seh-x86.exe` fi
 filter selection, continuation, and normal and unwind-time `__finally` execution. Native and
 HLE-only runs now also verify a nested exception escaping a filter to an outer handler and an
 exception raised during `__finally`. A synthetic handler test covers disposition 2 setting
-`EXCEPTION_NESTED_CALL` before search continues. A second-pass x64 test covers disposition 3 by
+`EXCEPTION_NESTED_CALL` before search continues. PE32 search now tracks the x86 dispatcher registration
+pointer and clears the nested flag when it reaches that registration; the clear transition has no
+runtime fixture yet. A second-pass x64 test covers disposition 3 by
 redirecting to another searched frame, checking the resumed handler's unwind, target, and collided
 flags, and preserving restored register state. X64 first-pass search also has a synthetic retry test:
 the handler changes the dispatcher control PC within the loaded function; the resumed call sees the
