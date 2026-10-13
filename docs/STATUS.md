@@ -488,10 +488,13 @@ measures only JavaScript time spent issuing commands, not GPU execution time.
   `SystemFunction036`; PE `.pdata` parsing and `RtlLookupFunctionEntry` over static and registered
   dynamic function tables work through ntdll and forwarded kernel32 imports. `RtlAddFunctionTable`
   and `RtlDeleteFunctionTable` register and remove guest-owned tables. The growable-table API family
-  now supports empty registration, bounded sorted-entry growth, lookup, and deletion; runtime-crate
-  regressions cover those transitions and reject entries outside the declared code range. Callback
-  function tables remain open, and guest-generated-code exception unwinding through a grown table is
-  not yet verified.
+  supports empty registration, bounded sorted-entry growth, lookup, and deletion; runtime-crate
+  regressions cover those transitions and reject entries outside the declared code range.
+  `RtlInstallFunctionTableCallback` now stores callback-managed ranges and invokes the guest callback
+  lazily from function lookup and SEH frame search, validating the returned entry against the control
+  PC. This path is build-checked but has no callback-specific regression or runtime replay yet; the
+  optional out-of-process debugger callback DLL is not used. Guest-generated-code exception unwinding
+  through a grown or callback table remains unverified.
   A tested version 1 `RtlVirtualUnwind` subset is in place. Exception search now treats mapped
   executable addresses inside loaded PE images without a matching `.pdata` entry as leaf frames;
   this path is compile-checked but not runtime-verified. General SEH remains open beyond the tested

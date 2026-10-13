@@ -11,6 +11,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RtlLookupFunctionEntry" => rtl_lookup_function_entry,
         "RtlAddFunctionTable" => rtl_add_function_table,
         "RtlDeleteFunctionTable" => rtl_delete_function_table,
+        "RtlInstallFunctionTableCallback" => rtl_install_function_table_callback,
         "RtlAddGrowableFunctionTable" => rtl_add_growable_function_table,
         "RtlGrowFunctionTable" => rtl_grow_function_table,
         "RtlDeleteGrowableFunctionTable" => rtl_delete_growable_function_table,
@@ -105,7 +106,7 @@ fn rtl_unwind_unimplemented(p: &mut Process, name: &str, arg_count: usize) -> R 
 fn rtl_lookup_function_entry(p: &mut Process) -> R {
     let control_pc = p.arg(0);
     let image_base_out = p.arg(1);
-    let Some((base, entry)) = crate::exception::lookup_frame(p, control_pc) else {
+    let Some((base, entry)) = crate::exception::lookup_frame(p, control_pc)? else {
         if image_base_out != 0 {
             p.wr64(image_base_out, 0)?;
         }
@@ -164,6 +165,7 @@ fn rtl_add_function_table(p: &mut Process) -> R {
         entry_count,
         base,
         growable: None,
+        callback: None,
     });
     Ok(1)
 }
@@ -178,6 +180,47 @@ fn rtl_delete_function_table(p: &mut Process) -> R {
         return Ok(0);
     };
     p.dynamic_function_tables.remove(index);
+    Ok(1)
+}
+
+fn rtl_install_function_table_callback(p: &mut Process) -> R {
+    let table_identifier = p.arg(0);
+    let base = p.arg(1);
+    let length = p.arg(2) as u32;
+    let callback = p.arg(3);
+    let context = p.arg(4);
+    let Some(range_end) = base.checked_add(length as u64) else {
+        return Ok(0);
+    };
+
+    if table_identifier & 3 != 3
+        || length == 0
+        || range_end <= base
+        || callback == 0
+        || !p
+            .mem
+            .prot_of(callback)
+            .is_some_and(|protection| protection & anywasm_cpu::mem::PROT_X != 0)
+        || p.dynamic_function_tables
+            .iter()
+            .any(|registered| registered.table == table_identifier)
+    {
+        return Ok(0);
+    }
+
+    // OutOfProcessCallbackDll is only used by an external debugger. The in-process
+    // unwinder resolves entries through the guest callback below.
+    p.dynamic_function_tables.push(DynamicFunctionTable {
+        table: table_identifier,
+        entry_count: 0,
+        base,
+        growable: None,
+        callback: Some(CallbackFunctionTable {
+            length,
+            callback,
+            context,
+        }),
+    });
     Ok(1)
 }
 
@@ -233,6 +276,7 @@ fn rtl_add_growable_function_table(p: &mut Process) -> R {
             maximum_entry_count,
             range_end,
         }),
+        callback: None,
     });
     p.next_growable_function_table_handle = next_handle;
     Ok(0)

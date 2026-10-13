@@ -239,6 +239,14 @@ pub struct DynamicFunctionTable {
     pub entry_count: u32,
     pub base: u64,
     pub growable: Option<GrowableFunctionTable>,
+    pub callback: Option<CallbackFunctionTable>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CallbackFunctionTable {
+    pub length: u32,
+    pub callback: u64,
+    pub context: u64,
 }
 
 #[derive(Clone, Copy, Debug)]

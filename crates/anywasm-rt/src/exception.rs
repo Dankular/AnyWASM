@@ -257,7 +257,7 @@ fn dispatch_context_exception_inner(
                 ),
             );
         }
-        let Some((module_base, function_entry)) = lookup_frame(p, control_pc) else {
+        let Some((module_base, function_entry)) = lookup_frame(p, control_pc)? else {
             return dispatch_unhandled_exception(
                 p,
                 exception_record,
@@ -590,14 +590,24 @@ pub(crate) fn c_specific_handler(p: &mut Process) -> Result<u64, Stop> {
     let target_ip = p.rd64(dispatcher_context + DISPATCHER_TARGET_IP)?;
     let handler_data = p.rd64(dispatcher_context + DISPATCHER_HANDLER_DATA)?;
     let mut scope_index = p.rd32(dispatcher_context + DISPATCHER_SCOPE_INDEX)?;
-    let Some(image_end) = p
+    let image_end = p
         .modules
         .iter()
         .find(|module| module.hle_group.is_none() && module.base == image_base)
         .map(|module| module.base.saturating_add(module.size))
-    else {
+        .or_else(|| {
+            p.dynamic_function_tables
+                .iter()
+                .filter(|table| table.base == image_base)
+                .find_map(|table| {
+                    table
+                        .callback
+                        .and_then(|callback| table.base.checked_add(callback.length as u64))
+                })
+        });
+    let Some(image_end) = image_end else {
         return Err(Stop::Crash(format!(
-            "__C_specific_handler image base {image_base:#x} is not a loaded image"
+            "__C_specific_handler image base {image_base:#x} is not a loaded image or callback-managed range"
         )));
     };
     let table_end = handler_data
@@ -713,7 +723,7 @@ pub(crate) fn c_specific_handler(p: &mut Process) -> Result<u64, Stop> {
             EXCEPTION_EXECUTE_HANDLER => {
                 let target_ip =
                     c_scope_image_address(image_base, image_end, jump_target, "landing pad")?;
-                if lookup_frame(p, target_ip).is_none() {
+                if lookup_frame(p, target_ip)?.is_none() {
                     return Err(Stop::Crash(format!(
                         "__C_specific_handler landing pad {target_ip:#x} is outside loaded guest images"
                     )));
@@ -773,7 +783,7 @@ pub(crate) fn rtl_unwind_ex(p: &mut Process) -> Result<u64, Stop> {
             "non-null unwind history tables are not implemented".into(),
         );
     }
-    if lookup_frame(p, unwind.target_ip).is_none() {
+    if lookup_frame(p, unwind.target_ip)?.is_none() {
         return Err(Stop::Crash(format!(
             "RtlUnwindEx target IP {:#x} is outside loaded guest images",
             unwind.target_ip
@@ -782,7 +792,7 @@ pub(crate) fn rtl_unwind_ex(p: &mut Process) -> Result<u64, Stop> {
     let context = read_context(p, unwind.context_record)?;
     let stack_base = p.rd64(TEB_ADDR + 0x08)?;
     let stack_limit = p.rd64(TEB_ADDR + 0x10)?;
-    if lookup_frame(p, context.rip).is_none()
+    if lookup_frame(p, context.rip)?.is_none()
         || context.gpr[RSP] < stack_limit
         || context.gpr[RSP] >= stack_base
     {
@@ -855,7 +865,8 @@ fn complete_guest_unwind(
             unwind.call_rsp
         )));
     }
-    let Some((target_image_base, target_function_entry)) = lookup_frame(p, unwind.target_ip) else {
+    let Some((target_image_base, target_function_entry)) = lookup_frame(p, unwind.target_ip)?
+    else {
         return Err(Stop::Crash(format!(
             "RtlUnwindEx target IP {:#x} is outside loaded guest images",
             unwind.target_ip
@@ -1062,7 +1073,7 @@ fn complete_guest_unwind(
             unwind.target_ip
         }
     });
-    let Some((transfer_image_base, transfer_function_entry)) = lookup_frame(p, transfer_ip) else {
+    let Some((transfer_image_base, transfer_function_entry)) = lookup_frame(p, transfer_ip)? else {
         return Err(Stop::Crash(format!(
             "exception target continuation {transfer_ip:#x} is outside loaded guest images"
         )));
@@ -1158,11 +1169,50 @@ fn write_dispatcher_context(
     Ok(())
 }
 
-pub(crate) fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
-    for table in &p.dynamic_function_tables {
+pub(crate) fn lookup_frame(p: &mut Process, control_pc: u64) -> Result<Option<(u64, u64)>, Stop> {
+    for index in 0..p.dynamic_function_tables.len() {
+        let table = p.dynamic_function_tables[index];
         let Some(rva) = control_pc.checked_sub(table.base) else {
             continue;
         };
+        if let Some(callback) = table.callback {
+            if rva >= callback.length as u64 {
+                continue;
+            }
+            let entry = p.call_guest(callback.callback, &[control_pc, callback.context])?;
+            if entry == 0 {
+                return Ok(p
+                    .mem
+                    .prot_of(control_pc)
+                    .is_some_and(|protection| protection & PROT_X != 0)
+                    .then_some((table.base, 0)));
+            }
+            let Some(_entry_end) = entry.checked_add(12) else {
+                return Err(Stop::Crash(format!(
+                    "function table callback {:#x} returned overflowing entry {entry:#x}",
+                    callback.callback
+                )));
+            };
+            let begin = p.rd32(entry)?;
+            let end = p.rd32(entry + 4)?;
+            let unwind = p.rd32(entry + 8)?;
+            if entry & 3 != 0
+                || begin >= end
+                || rva < begin as u64
+                || rva >= end as u64
+                || end as u64 > callback.length as u64
+                || unwind == 0
+                || unwind & 3 != 0
+                || table.base.checked_add(end as u64).is_none()
+                || table.base.checked_add(unwind as u64).is_none()
+            {
+                return Err(Stop::Crash(format!(
+                    "function table callback {:#x} returned invalid entry {entry:#x} for PC {control_pc:#x}",
+                    callback.callback
+                )));
+            }
+            return Ok(Some((table.base, entry)));
+        }
         let mut low = 0usize;
         let mut high = table.entry_count as usize;
         let mut valid = true;
@@ -1200,7 +1250,7 @@ pub(crate) fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
         };
         let end = end as u64;
         if rva < end {
-            return Some((table.base, entry));
+            return Ok(Some((table.base, entry)));
         }
     }
 
@@ -1208,7 +1258,10 @@ pub(crate) fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
         module.hle_group.is_none()
             && control_pc >= module.base
             && control_pc - module.base < module.size
-    })?;
+    });
+    let Some(module) = module else {
+        return Ok(None);
+    };
     let rva = control_pc - module.base;
     let index = module
         .runtime_functions
@@ -1216,19 +1269,19 @@ pub(crate) fn lookup_frame(p: &Process, control_pc: u64) -> Option<(u64, u64)> {
         .checked_sub(1)
         .filter(|index| rva < module.runtime_functions[*index].end_address as u64);
     if let Some(index) = index {
-        return Some((
+        return Ok(Some((
             module.base,
             module.base + module.exception_table_rva as u64 + index as u64 * 12,
-        ));
+        )));
     }
 
     // PE leaf functions have no RUNTIME_FUNCTION entry. Keep this internal marker distinct
     // from an unknown PC so exception dispatch can apply the ordinary one-return unwind. The
     // public RtlLookupFunctionEntry wrapper still turns entry 0 into a null result.
-    p.mem
+    Ok(p.mem
         .prot_of(control_pc)
         .is_some_and(|protection| protection & PROT_X != 0)
-        .then_some((module.base, 0))
+        .then_some((module.base, 0)))
 }
 
 /// Emulate the x64 `RtlVirtualUnwind` subset described in the runtime design.
@@ -2373,10 +2426,10 @@ mod tests {
         process.modules.push(test_module());
 
         assert_eq!(
-            lookup_frame(&process, 0x1400_00110),
+            lookup_frame(&mut process, 0x1400_00110).unwrap(),
             Some((0x1400_0000_0, 0x1400_00500))
         );
-        assert_eq!(lookup_frame(&process, 0x1400_00120), None);
+        assert_eq!(lookup_frame(&mut process, 0x1400_00120).unwrap(), None);
     }
 
     #[test]
