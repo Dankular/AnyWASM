@@ -1071,7 +1071,7 @@ export class GpuExecutor {
       case OP.CREATE_BUFFER: {
         const size = Math.max(16, (u(1) + 15) & ~15);
         const gpu = this.device.createBuffer({ size, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), misc: u(4), stride: u(5), shadow: (u(2) & 0x2) ? new Uint8Array(size) : null }); // CPU copy only for index buffers (wireframe fill reads indices); everything else lives only in the GPU buffer
+        this.res.set(u(0), { kind: 'buffer', gpu, size, d3dSize: u(1), bind: u(2), misc: u(4), stride: u(5), shadow: (u(2) & 0x2) || u(2) === 0 ? new Uint8Array(size) : null }); // CPU copy only for index buffers and bind-less (staging/copy) buffers: wireframe fill reads indices, and data can reach an index buffer through a copy
         break;
       }
       case OP.BUFFER_WRITE: {
