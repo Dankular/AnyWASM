@@ -331,7 +331,8 @@ register-stack subset):
       view. The tested array/3D formats include RGBA8, R8_UNORM, RG8_UNORM, R16_UNORM, and R16_SNORM;
       the sRGB and R10G10B10A2_UNORM cube-array samples are also verified. Other sampled dimensions/
       formats, anisotropic footprints, cube-array SampleCmpBias/SampleCmpGrad, and array/3D format cases
-      remain open.
+      remain open. An 8x anisotropic BC4_UNORM Texture2D BORDER test covers Sample, SampleBias, and
+      SampleGrad with constant interior values and channel-correct edge blends.
       D3D11 `CheckMultisampleQualityLevels` reports one 4x level and `CreateTexture2D` forwards the
       sample count for `R10G10B10A2_UNORM` and `R11G11B10_FLOAT`; a Rust table test enumerates all ten
       advertised color/depth formats at 2x, 4x, and 8x and checks representative unsupported formats.

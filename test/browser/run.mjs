@@ -2073,6 +2073,24 @@ try {
           return image.SampleGrad(borderSampler, coordinate, float2(0.2, 0.0), float2(0.0, 0.001));
         }
       `, 'main', 'ps_5_0');
+      const implicitPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = position.x < 32.0 ? float2(0.5, 0.5)
+            : float2(0.95 + (position.x - 48.0) * 0.2, 0.5);
+          return image.Sample(borderSampler, coordinate);
+        }
+      `, 'main', 'ps_5_0');
+      const biasPixel = tool.compileHlsl(`
+        Texture2D<float4> image : register(t0);
+        SamplerState borderSampler : register(s0);
+        float4 main(float4 position : SV_Position) : SV_Target {
+          float2 coordinate = position.x < 32.0 ? float2(0.5, 0.5)
+            : float2(0.95 + (position.x - 48.0) * 0.2, 0.5);
+          return image.SampleBias(borderSampler, coordinate, 0.0);
+        }
+      `, 'main', 'ps_5_0');
       const stream = [];
       const words = (...values) => {
         const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer);
@@ -2084,6 +2102,12 @@ try {
         const view = new DataView(data.buffer);
         view.setUint32(0, op, true); view.setUint32(4, padded, true); data.set(payload, 8);
         stream.push(data);
+      };
+      const append = () => {
+        const size = stream.reduce((total, part) => total + part.length, 0), commands = new Uint8Array(size);
+        let offset = 0;
+        for (const part of stream) { commands.set(part, offset); offset += part.length; }
+        return commands;
       };
       const shader = (id, stage, dxbc) => {
         const header = words(id, stage, dxbc.length), payload = new Uint8Array(header.length + dxbc.length);
@@ -2118,8 +2142,19 @@ try {
       for (const part of stream) { commands.set(part, offset); offset += part.length; }
       gpu.execute(commands);
       const pixels = await gpu.readBackbuffer(1);
-      const pixelAt = (x) => Array.from(pixels.data.slice((32 * pixels.width + x) * 4, (32 * pixels.width + x) * 4 + 4));
-      const result = { center: pixelAt(16), edge: pixelAt(48), errors: gpu.stats.errors };
+      const pixelAt = (data, x) => Array.from(data.data.slice((32 * data.width + x) * 4, (32 * data.width + x) * 4 + 4));
+      const sampleGrad = { center: pixelAt(pixels, 16), edge: pixelAt(pixels, 48) };
+      stream.length = 0;
+      shader(3, 1, implicitPixel); command(17, words(1, 3)); command(29, words(3, 0));
+      gpu.execute(append());
+      const implicitPixels = await gpu.readBackbuffer(1);
+      const sample = { center: pixelAt(implicitPixels, 16), edge: pixelAt(implicitPixels, 48) };
+      stream.length = 0;
+      shader(4, 1, biasPixel); command(17, words(1, 4)); command(29, words(3, 0));
+      gpu.execute(append());
+      const biasPixels = await gpu.readBackbuffer(1);
+      const sampleBias = { center: pixelAt(biasPixels, 16), edge: pixelAt(biasPixels, 48) };
+      const result = { sampleGrad, sample, sampleBias, errors: gpu.stats.errors };
       gpu.device.destroy();
       return result;
     } catch (error) {
@@ -2128,12 +2163,23 @@ try {
   });
   check(anisotropicBc4Result.skipped
     ? 'D3D11 BC texture-compression adapter skip for anisotropic BC4 BORDER sampling'
-    : 'D3D11 8x anisotropic BORDER sampling filters BC4 values across a texture edge',
+    : 'D3D11 8x anisotropic BORDER SampleGrad filters BC4 values across a texture edge',
     anisotropicBc4Result.skipped
-      || (anisotropicBc4Result.center?.[0] >= 254 && anisotropicBc4Result.edge?.[0] > 64
-        && anisotropicBc4Result.edge[0] < 255 && anisotropicBc4Result.center?.slice(1).join(',') === '0,0,255'
-        && anisotropicBc4Result.edge?.slice(1).join(',') === '0,0,255' && anisotropicBc4Result.errors?.length === 0),
+      || (anisotropicBc4Result.sampleGrad?.center?.[0] >= 254 && anisotropicBc4Result.sampleGrad?.edge?.[0] > 64
+        && anisotropicBc4Result.sampleGrad.edge[0] < 255 && anisotropicBc4Result.sampleGrad.center.slice(1).join(',') === '0,0,255'
+        && anisotropicBc4Result.sampleGrad.edge.slice(1).join(',') === '0,0,255' && anisotropicBc4Result.errors?.length === 0),
     JSON.stringify(anisotropicBc4Result));
+  for (const method of ['sample', 'sampleBias']) {
+    const samples = anisotropicBc4Result[method];
+    check(anisotropicBc4Result.skipped
+      ? `D3D11 BC texture-compression adapter skip for anisotropic BC4 ${method}`
+      : `D3D11 8x anisotropic BORDER ${method === 'sample' ? 'Sample' : 'SampleBias'} filters BC4 values across a texture edge`,
+      anisotropicBc4Result.skipped
+        || (samples?.center?.[0] >= 254 && samples?.edge?.[0] > 64 && samples.edge[0] < 255
+          && samples.center.slice(1).join(',') === '0,0,255' && samples.edge.slice(1).join(',') === '0,0,255'
+          && anisotropicBc4Result.errors?.length === 0),
+      JSON.stringify(samples));
+  }
 
   const samplerAddressResult = await page.evaluate(async () => {
     const { ShaderTool } = await import('/shaders.js');
