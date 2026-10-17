@@ -196,6 +196,74 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
     }
 }
 
+/// Whether an import has a usable runtime implementation.
+///
+/// A small number of exports have diagnostic-only handlers so a call can stop with a more
+/// specific `Stop::Unimplemented` reason than the generic unresolved-import path. Those
+/// handlers are useful at runtime but must not make `analyze` claim that the import is covered.
+pub fn import_is_implemented(group: &str, name: &str) -> bool {
+    let diagnostic_only = match group {
+        "user32" => matches!(
+            name,
+            "DialogBoxParamA"
+                | "EndDialog"
+                | "CreateIconIndirect"
+                | "CreateIconFromResource"
+                | "WaitForInputIdle"
+                | "FillRect"
+                | "MessageBoxA"
+                | "MessageBoxW"
+        ),
+        "kernel32" => matches!(
+            name,
+            "QueueUserAPC"
+                | "GetWriteWatch"
+                | "CreatePipe"
+                | "CreateNamedPipeW"
+                | "ConnectNamedPipe"
+                | "DisconnectNamedPipe"
+                | "CreateProcessW"
+                | "DeviceIoControl"
+                | "OpenEventW"
+                | "OpenMutexW"
+                | "OpenSemaphoreW"
+        ),
+        "crt" => matches!(name, "_beginthread" | "strspn" | "strcspn" | "strpbrk"),
+        _ => false,
+    };
+    !diagnostic_only && lookup(group, name).is_some()
+}
+
+#[cfg(test)]
+mod import_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_only_import_handlers_are_not_reported_as_implemented() {
+        for (group, name) in [
+            ("user32", "DialogBoxParamA"),
+            ("user32", "EndDialog"),
+            ("user32", "MessageBoxA"),
+            ("user32", "MessageBoxW"),
+            ("kernel32", "CreatePipe"),
+            ("kernel32", "OpenEventW"),
+            ("crt", "_beginthread"),
+            ("crt", "strspn"),
+        ] {
+            assert!(
+                lookup(group, name).is_some(),
+                "{group}!{name} diagnostic handler"
+            );
+            assert!(
+                !import_is_implemented(group, name),
+                "{group}!{name} must remain visible as an uncovered import"
+            );
+        }
+        assert!(import_is_implemented("user32", "CreateWindowExA"));
+        assert!(import_is_implemented("kernel32", "CreateFileW"));
+    }
+}
+
 /// Imports that are *data* (a variable the program reads), not code.
 pub fn data_symbol(group: &str, name: &str) -> Option<u64> {
     if group == "msvcp" {

@@ -435,11 +435,11 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "EndDialog" => end_dialog,
         "CreateIconIndirect" => create_icon_indirect_unimplemented,
         "CreateIconFromResource" => create_icon_from_resource_unimplemented,
-        "RegisterDeviceNotificationA" => register_device_notification_a_unimplemented,
+        "RegisterDeviceNotificationA" => register_device_notification_a,
         "WaitForInputIdle" => wait_for_input_idle_unimplemented,
         "FillRect" => fill_rect_unimplemented,
-        "RegisterDeviceNotificationW" => register_device_notification_unimplemented,
-        "UnregisterDeviceNotification" => |p| Ok(p.handles.remove(&p.arg(0)).is_some() as u64),
+        "RegisterDeviceNotificationW" => register_device_notification_w,
+        "UnregisterDeviceNotification" => unregister_device_notification,
         "EnumDisplayDevicesW" => enum_display_devices_w,
         "EnumDisplaySettingsW" => enum_display_settings_w,
         "EnumDisplayMonitors" => enum_display_monitors,
@@ -819,7 +819,15 @@ fn create_icon_from_resource_unimplemented(p: &mut Process) -> R {
     })
 }
 
-fn register_device_notification_a_unimplemented(p: &mut Process) -> R {
+fn register_device_notification_a(p: &mut Process) -> R {
+    register_device_notification(p, false)
+}
+
+fn register_device_notification_w(p: &mut Process) -> R {
+    register_device_notification(p, true)
+}
+
+fn register_device_notification(p: &mut Process, wide: bool) -> R {
     const DEVICE_NOTIFY_SERVICE_HANDLE: u32 = 0x0000_0001;
     const DEVICE_NOTIFY_ALL_INTERFACE_CLASSES: u32 = 0x0000_0004;
     const ERROR_INVALID_HANDLE: u32 = 6;
@@ -837,13 +845,13 @@ fn register_device_notification_a_unimplemented(p: &mut Process) -> R {
     let reserved = p.rd32(filter + 8)?;
     let handle_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
     let minimum_size = match device_type {
-        5 => 29, // header + class GUID + one ANSI terminator byte
+        5 => 28 + if wide { 2 } else { 1 }, // header + class GUID + one encoded terminator
         6 => {
             (if p.cpu.mode == CpuMode::X86_32 { 12 } else { 16 })
             + handle_size
             + 16 // class GUID
             + 4 // name offset
-            + 1
+                + if wide { 2 } else { 1 }
         } // device-specific payload
         _ => 0,
     };
@@ -856,21 +864,35 @@ fn register_device_notification_a_unimplemented(p: &mut Process) -> R {
         return Ok(0);
     }
     if flags & DEVICE_NOTIFY_SERVICE_HANDLE != 0 {
-        return Err(Stop::Unimplemented {
-            dll: "user32".into(),
-            name: "RegisterDeviceNotificationA service recipient; service control handles are not modeled".into(),
-        });
-    }
-    if !p.extra.win.windows.contains_key(&recipient) {
         p.set_last_error(ERROR_INVALID_HANDLE);
         return Ok(0);
     }
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!(
-            "RegisterDeviceNotificationA hwnd={recipient:#x} filter_type={device_type}; device arrival/removal broadcasts are not modeled"
-        ),
-    })
+    if recipient != HWND_DESKTOP && !p.extra.win.windows.contains_key(&recipient) {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    }
+    let filter_data = p.read_bytes(filter, filter_size as usize)?;
+    Ok(p.new_handle(Handle::DeviceNotification {
+        recipient,
+        filter_type: device_type,
+        flags,
+        filter: filter_data,
+        wide,
+    }))
+}
+
+fn unregister_device_notification(p: &mut Process) -> R {
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    let handle = p.arg(0);
+    if !matches!(
+        p.handles.get(&handle),
+        Some(Handle::DeviceNotification { .. })
+    ) {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    }
+    p.handles.remove(&handle);
+    Ok(1)
 }
 
 fn wait_for_input_idle_unimplemented(p: &mut Process) -> R {
@@ -1537,13 +1559,6 @@ fn map_window_points(p: &mut Process) -> R {
         p.wr32(address + 4, y as u32)?;
     }
     Ok(((dy as u16 as u32) << 16 | dx as u16 as u32) as u64)
-}
-
-fn register_device_notification_unimplemented(_p: &mut Process) -> R {
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: "RegisterDeviceNotification device-change delivery is not modeled".into(),
-    })
 }
 
 fn remove_clipboard_viewer(p: &mut Process, hwnd: u64) -> bool {
@@ -4594,7 +4609,7 @@ mod tests {
     }
 
     #[test]
-    fn device_notification_registration_validates_filters_and_exposes_missing_device_delivery() {
+    fn device_notification_registration_validates_and_tracks_the_virtual_subscription() {
         const WINDOW: u64 = HWND_BASE + 0x50;
         const FILTER: u64 = 0x0003_7000;
         let mut p = test_process_with_args(&[]);
@@ -4631,10 +4646,62 @@ mod tests {
 
         p.wr32(FILTER, 29).unwrap();
         set_args(&mut p, &[WINDOW as u32, FILTER as u32, 4]);
+        let register = lookup("RegisterDeviceNotificationA").unwrap();
+        let notification = register(&mut p).unwrap();
+        assert_ne!(notification, 0);
         assert!(matches!(
-            lookup("RegisterDeviceNotificationA").unwrap()(&mut p),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("RegisterDeviceNotificationA") && name.contains("device arrival/removal")
+            p.handles.get(&notification),
+            Some(Handle::DeviceNotification {
+                recipient,
+                filter_type: 5,
+                flags: 4,
+                filter,
+                wide: false,
+            }) if *recipient == WINDOW && filter.len() == 29
+        ));
+
+        set_args(&mut p, &[notification as u32]);
+        assert_eq!(
+            lookup("UnregisterDeviceNotification").unwrap()(&mut p),
+            Ok(1)
+        );
+        assert!(!p.handles.contains_key(&notification));
+        assert_eq!(
+            lookup("UnregisterDeviceNotification").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 6);
+    }
+
+    #[test]
+    fn wide_device_notification_requires_a_wide_terminator_and_tracks_encoding() {
+        const WINDOW: u64 = HWND_BASE + 0x60;
+        const FILTER: u64 = 0x0003_8000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(FILTER, 0x1000, PROT_RW));
+        p.extra.win.windows.insert(WINDOW, test_window(true, 0));
+        p.wr32(FILTER, 29).unwrap();
+        p.wr32(FILTER + 4, 5).unwrap();
+        p.wr32(FILTER + 8, 0).unwrap();
+        set_args(&mut p, &[WINDOW as u32, FILTER as u32, 0]);
+        assert_eq!(
+            lookup("RegisterDeviceNotificationW").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        p.wr32(FILTER, 30).unwrap();
+        set_args(&mut p, &[WINDOW as u32, FILTER as u32, 0]);
+        let notification = lookup("RegisterDeviceNotificationW").unwrap()(&mut p).unwrap();
+        assert!(matches!(
+            p.handles.get(&notification),
+            Some(Handle::DeviceNotification {
+                recipient,
+                filter_type: 5,
+                wide: true,
+                ..
+            }) if *recipient == WINDOW
         ));
     }
 

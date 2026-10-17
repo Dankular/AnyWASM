@@ -183,6 +183,50 @@ pub fn lookup(name: &str) -> Option<HleFn> {
     })
 }
 
+/// Number of x86 stack bytes removed by Winsock's WINAPI/stdcall exports.
+///
+/// Name imports are normally resolved from the generated Windows SDK signatures. Ordinal
+/// imports have no name for that lookup, so keep their ABI here next to the ordinal aliases.
+pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
+    Some(match name {
+        "accept" | "#1" => 12,
+        "bind" | "#2" => 12,
+        "closesocket" | "#3" => 4,
+        "connect" | "#4" => 12,
+        "getpeername" | "#5" => 12,
+        "getsockname" | "#6" => 12,
+        "getsockopt" | "#7" => 20,
+        "htonl" | "#8" | "htons" | "#9" => 4,
+        "ioctlsocket" | "#10" => 12,
+        "inet_addr" | "#11" | "inet_ntoa" | "#12" => 4,
+        "listen" | "#13" => 8,
+        "ntohl" | "#14" | "ntohs" | "#15" => 4,
+        "recv" | "#16" => 16,
+        "recvfrom" | "#17" => 24,
+        "select" | "#18" => 20,
+        "send" | "#19" => 16,
+        "sendto" | "#20" => 24,
+        "setsockopt" | "#21" => 20,
+        "shutdown" | "#22" => 8,
+        "socket" | "#23" => 12,
+        "gethostbyaddr" | "#51" => 12,
+        "gethostbyname" | "#52" | "getprotobyname" | "#53" => 4,
+        "gethostname" | "#57" => 8,
+        "WSAGetLastError" | "#111" | "WSACleanup" | "#116" => 0,
+        "WSAStartup" | "#115" => 8,
+        "__WSAFDIsSet" | "#151" => 8,
+        "WSACreateEvent" => 0,
+        "WSACloseEvent" | "WSASetEvent" | "WSAResetEvent" => 4,
+        "WSAWaitForMultipleEvents" => 20,
+        "WSAGetOverlappedResult" => 20,
+        "WSAIoctl" => 36,
+        "WSARecv" => 28,
+        "WSARecvFrom" => 36,
+        "WSASocketA" | "WSASocketW" => 24,
+        _ => return None,
+    })
+}
+
 fn wsa_error(p: &mut Process, error: i32) {
     p.extra.ws2_32.last_error.insert(p.current_thread_id, error);
 }

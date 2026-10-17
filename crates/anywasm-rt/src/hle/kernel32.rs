@@ -1012,6 +1012,7 @@ fn handle_type_name(handle: &Handle) -> &'static str {
         Handle::Find { .. } => "find cursor",
         Handle::Event { .. } => "event",
         Handle::ChangeNotification { .. } => "change notification",
+        Handle::DeviceNotification { .. } => "device notification",
         Handle::Mutex { .. } => "mutex",
         Handle::Semaphore { .. } => "semaphore",
         Handle::Thread { .. } => "thread",

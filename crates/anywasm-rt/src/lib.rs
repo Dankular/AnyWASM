@@ -18,5 +18,5 @@ mod x86_abi_generated;
 
 pub use anywasm_cpu::SharedSnapshotError;
 pub use bundle::Bundle;
-pub use process::{Process, RunResult, Stop};
+pub use process::{x86_import_cleanup_bytes, Process, RunResult, Stop};
 pub use vfs::Vfs;

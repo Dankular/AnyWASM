@@ -1,7 +1,7 @@
 //! `anywasm` command line tool.
 //!
 //! ```text
-//! anywasm analyze <exe> [--json]          compatibility report (which imports are implemented)
+//! anywasm analyze <exe> [--json]          import and x86 ABI compatibility report
 //! anywasm run <exe> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--hook SPEC]... [--trace-imports|--trace-modules] [--max-steps N] [-- args...]
 //! anywasm pack <exe> -o <out.awb> [--dir D] [--exclude PATH] [--cwd GUEST_DIR] [--hook SPEC]... [--args "..."]
 //! ```
@@ -21,6 +21,7 @@ struct ImportStatus {
     bundled: bool,
     implemented: Vec<String>,
     missing: Vec<String>,
+    abi_missing: Vec<String>,
 }
 
 #[derive(Default)]
@@ -129,6 +130,7 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
             bundled: is_bundled,
             implemented: vec![],
             missing: vec![],
+            abi_missing: vec![],
         });
         if let Some(f) = feature_of(&canon) {
             r.features.insert(f);
@@ -141,15 +143,31 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
                 ImportName::Name { name, .. } => name.clone(),
                 ImportName::Ordinal(o) => format!("#{o}"),
             };
-            let ok = if let Some(image) = bundled_image {
-                bundled_exported(image, &e.name)
+            let has_bundled_export = bundled_image
+                .map(|image| bundled_exported(image, &e.name))
+                .unwrap_or(false);
+            let data_import = group
+                .map(|g| hle::data_symbol(g, &name).is_some())
+                .unwrap_or(false);
+            let ok = if bundled_image.is_some() {
+                has_bundled_export
             } else {
                 group
                     .map(|g| {
-                        hle::lookup(g, &name).is_some() || hle::data_symbol(g, &name).is_some()
+                        hle::import_is_implemented(g, &name) || hle::data_symbol(g, &name).is_some()
                     })
                     .unwrap_or(false)
             };
+            // Calls into a bundled guest DLL retain the guest binary's native ABI. HLE imports
+            // cross the host boundary and need an explicit callee/caller cleanup rule.
+            if ok
+                && !has_bundled_export
+                && !data_import
+                && pe.machine == anywasm_pe::MACHINE_I386
+                && group.is_some_and(|g| anywasm_rt::x86_import_cleanup_bytes(g, &name).is_none())
+            {
+                st.abi_missing.push(name.clone());
+            }
             if ok {
                 st.implemented.push(name);
             } else {
@@ -217,10 +235,14 @@ fn bundled_exported(image: &BundledImage, name: &ImportName) -> bool {
     }
 }
 
-fn preflight_status(known_blockers: usize, missing_imports: usize) -> &'static str {
+fn preflight_status(
+    known_blockers: usize,
+    missing_imports: usize,
+    missing_abi: usize,
+) -> &'static str {
     if known_blockers != 0 {
         "blocked"
-    } else if missing_imports != 0 {
+    } else if missing_imports != 0 || missing_abi != 0 {
         "review"
     } else {
         "no_known_blockers"
@@ -265,9 +287,10 @@ mod tests {
 
     #[test]
     fn preflight_status_does_not_treat_missing_imports_as_definitive_blockers() {
-        assert_eq!(preflight_status(1, 2), "blocked");
-        assert_eq!(preflight_status(0, 2), "review");
-        assert_eq!(preflight_status(0, 0), "no_known_blockers");
+        assert_eq!(preflight_status(1, 2, 3), "blocked");
+        assert_eq!(preflight_status(0, 2, 0), "review");
+        assert_eq!(preflight_status(0, 0, 1), "review");
+        assert_eq!(preflight_status(0, 0, 0), "no_known_blockers");
     }
 
     #[test]
@@ -305,8 +328,12 @@ mod tests {
 }
 
 fn print_report(r: &Report, json: bool) {
-    let (imp, miss): (usize, usize) = r.imports.iter().fold((0, 0), |a, i| {
-        (a.0 + i.implemented.len(), a.1 + i.missing.len())
+    let (imp, miss, abi_miss): (usize, usize, usize) = r.imports.iter().fold((0, 0, 0), |a, i| {
+        (
+            a.0 + i.implemented.len(),
+            a.1 + i.missing.len(),
+            a.2 + i.abi_missing.len(),
+        )
     });
     if json {
         let list = |v: &[String]| {
@@ -323,11 +350,12 @@ fn print_report(r: &Report, json: bool) {
             .iter()
             .map(|i| {
                 format!(
-                    "{{\"dll\":{},\"bundled\":{},\"implemented\":{},\"missing\":{}}}",
+                    "{{\"dll\":{},\"bundled\":{},\"implemented\":{},\"missing\":{},\"abiMissing\":{}}}",
                     json_quote(&i.dll),
                     i.bundled,
                     list(&i.implemented),
-                    list(&i.missing)
+                    list(&i.missing),
+                    list(&i.abi_missing)
                 )
             })
             .collect::<Vec<_>>()
@@ -356,9 +384,22 @@ fn print_report(r: &Report, json: bool) {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let preflight_status = preflight_status(r.blockers.len(), miss);
+        let unresolved_abi = r
+            .imports
+            .iter()
+            .filter(|i| !i.abi_missing.is_empty())
+            .map(|i| {
+                format!(
+                    "{{\"dll\":{},\"symbols\":{}}}",
+                    json_quote(&i.dll),
+                    list(&i.abi_missing)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let preflight_status = preflight_status(r.blockers.len(), miss, abi_miss);
         println!(
-            "{{\"schemaVersion\":1,\"machine\":{},\"subsystem\":{},\"dll\":{},\"dotnet\":{},\"imageBase\":\"{:#x}\",\"implemented\":{imp},\"missing\":{miss},\"features\":[{feats}],\"blockers\":{blockers},\"imports\":[{imports}],\"preflight\":{{\"status\":{},\"staticOnly\":true,\"runtimeSuccessGuaranteed\":false,\"definitiveBlockers\":{definitive_blockers},\"potentiallyUnusedMissingImports\":[{potentially_unused}]}}}}",
+            "{{\"schemaVersion\":1,\"machine\":{},\"subsystem\":{},\"dll\":{},\"dotnet\":{},\"imageBase\":\"{:#x}\",\"implemented\":{imp},\"missing\":{miss},\"abiMissing\":{abi_miss},\"features\":[{feats}],\"blockers\":{blockers},\"imports\":[{imports}],\"preflight\":{{\"status\":{},\"staticOnly\":true,\"runtimeSuccessGuaranteed\":false,\"definitiveBlockers\":{definitive_blockers},\"potentiallyUnusedMissingImports\":[{potentially_unused}],\"unresolvedX86AbiImports\":[{unresolved_abi}]}}}}",
             json_quote(&r.machine),
             json_quote(&r.subsystem),
             r.is_dll,
@@ -389,7 +430,7 @@ fn print_report(r: &Report, json: bool) {
     for b in &r.blockers {
         println!("BLOCKER     : {b}");
     }
-    println!("\nImports ({imp} implemented, {miss} missing):");
+    println!("\nImports ({imp} implemented, {miss} missing, {abi_miss} without x86 ABI cleanup):");
     for i in &r.imports {
         let tag = if i.bundled {
             "bundled DLL".to_string()
@@ -399,16 +440,26 @@ fn print_report(r: &Report, json: bool) {
                 .unwrap_or_else(|| "NO HOST LIBRARY".into())
         };
         println!(
-            "  {:<34} [{tag}] {} ok, {} missing",
+            "  {:<34} [{tag}] {} ok, {} missing, {} ABI gaps",
             i.dll,
             i.implemented.len(),
-            i.missing.len()
+            i.missing.len(),
+            i.abi_missing.len()
         );
         for m in i.missing.iter().take(12) {
             println!("      - missing {m}");
         }
         if i.missing.len() > 12 {
             println!("      ... and {} more", i.missing.len() - 12);
+        }
+        for m in i.abi_missing.iter().take(12) {
+            println!("      - missing x86 ABI cleanup for {m}");
+        }
+        if i.abi_missing.len() > 12 {
+            println!(
+                "      ... and {} more x86 ABI gaps",
+                i.abi_missing.len() - 12
+            );
         }
     }
     println!();
@@ -417,10 +468,10 @@ fn print_report(r: &Report, json: bool) {
             "Verdict: cannot run ({} blocker(s) above).",
             r.blockers.len()
         );
-    } else if miss == 0 {
-        println!("Verdict: every imported function has a host implementation (this does not prove the program will work).");
+    } else if miss == 0 && abi_miss == 0 {
+        println!("Verdict: every imported function resolves and has known x86 cleanup metadata (this does not prove the program will work).");
     } else {
-        println!("Verdict: {miss} imported function(s) are not implemented; the program stops when it first calls one.");
+        println!("Verdict: {miss} imported function(s) are not implemented and {abi_miss} imported function(s) lack x86 cleanup metadata.");
     }
 }
 
@@ -612,25 +663,7 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
         return Err(error);
     }
     p.install_native_hooks(&o.hooks)?;
-    if std::env::var_os("ANYWASM_GTA_STARTUP_PROBE_SKIP_EVENT15").is_some() {
-        const BRANCH: u64 = 0x748851;
-        let opcode = p
-            .mem
-            .read_u8(BRANCH)
-            .map_err(|error| format!("startup probe could not read {BRANCH:#x}: {error:?}"))?;
-        if opcode != 0x75 {
-            return Err(format!(
-                "startup probe expected JNE at {BRANCH:#x}, found {opcode:#04x}"
-            ));
-        }
-        p.mem
-            .write_force(BRANCH, &[0xeb])
-            .map_err(|error| format!("startup probe could not patch {BRANCH:#x}: {error:?}"))?;
-        eprintln!("[gta-startup-probe] patched event 0x15 rejection branch in guest memory");
-    }
     let mut left = o.max_steps;
-    let inject_enter_on_idle = std::env::var_os("ANYWASM_GTA_PROBE_ENTER_ON_IDLE").is_some();
-    let mut input_injected = false;
     let stop = loop {
         if left == 0 {
             break Stop::StepLimit;
@@ -650,14 +683,6 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
                 if left == 0 {
                     break Stop::StepLimit;
                 }
-            }
-            Stop::Idle if inject_enter_on_idle && !input_injected => {
-                p.queue_input_event(4, 0, 320, 240);
-                p.queue_input_event(5, 0, 320, 240);
-                p.queue_input_event(0, 13, 0, 0);
-                p.queue_input_event(1, 13, 0, 0);
-                input_injected = true;
-                eprintln!("[gta-probe] injected left click and Enter at first idle");
             }
             other => break other,
         }

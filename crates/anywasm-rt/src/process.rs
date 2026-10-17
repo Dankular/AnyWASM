@@ -359,6 +359,13 @@ pub enum Handle {
         signaled: bool,
         changed_after_signal: bool,
     },
+    DeviceNotification {
+        recipient: u64,
+        filter_type: u32,
+        flags: u32,
+        filter: Vec<u8>,
+        wide: bool,
+    },
     Mutex {
         owner: Option<u32>,
         recursion: u32,
@@ -619,6 +626,29 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
         // std::uncaught_exception is a free __cdecl function in the Sims 3 MSVC runtime.
         return Some(0);
     }
+    if group == "msvcp" {
+        // MSVC 8's decorated C++ members use __thiscall: `this` is in ECX, and only
+        // explicit stack parameters are popped by the callee. Static/free helpers use
+        // __cdecl and therefore leave all argument cleanup to the guest caller.
+        return Some(match name {
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z"
+            | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z"
+            | "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z" => 4,
+            "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHPBDH@Z"
+            | "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z"
+            | "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADH@Z"
+            | "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z" => 8,
+            "?length@?$char_traits@D@std@@SAIPBD@Z"
+            | "?eof@?$char_traits@D@std@@SAHXZ"
+            | "?eq_int_type@?$char_traits@D@std@@SA_NABH0@Z"
+            | "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ"
+            | "?_Unlock@_Mutex@std@@QAEXXZ"
+            | "?_Lock@_Mutex@std@@QAEXXZ"
+            | "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ"
+            | "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z" => 0,
+            _ => return None,
+        });
+    }
     if group == "com" {
         // COM methods use stdcall on x86, with `this` included in the callee-popped
         // argument list. Keep the shared IUnknown entries here; graphics and input
@@ -675,6 +705,11 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
     }
     if group == "netapi32" {
         if let Some(bytes) = hle::netapi32::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "ws2_32" {
+        if let Some(bytes) = hle::ws2_32::stdcall_stack_bytes(name) {
             return Some(bytes);
         }
     }
@@ -1267,8 +1302,15 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
         .or_else(|| crate::x86_abi_generated::cleanup_bytes(group, name))
 }
 
+/// Return the x86 stack-byte cleanup required by an HLE import, including the generated
+/// Win32 prototype table and reviewed per-library conventions. `None` means the imported
+/// call cannot be dispatched safely without adding ABI metadata.
+pub fn x86_import_cleanup_bytes(group: &str, name: &str) -> Option<u64> {
+    stdcall_stack_bytes(group, name)
+}
+
 fn x86_abi_cleanup_bytes(group: &str, name: &str) -> Result<u64, Stop> {
-    stdcall_stack_bytes(group, name).ok_or_else(|| Stop::AbiUnimplemented {
+    x86_import_cleanup_bytes(group, name).ok_or_else(|| Stop::AbiUnimplemented {
         dll: group.to_string(),
         name: name.to_string(),
     })
@@ -2309,6 +2351,9 @@ impl Process {
                 }
             }
             Handle::ChangeNotification { .. } => {}
+            Handle::DeviceNotification { .. } => {
+                unreachable!("device notification handles are not waitable")
+            }
             Handle::Mutex { owner, recursion } => {
                 if *owner == Some(id) {
                     *recursion = recursion.saturating_add(1);
@@ -4738,6 +4783,7 @@ impl Process {
             let traced_args = match (group, name.as_str()) {
                 ("kernel32", "HeapAlloc") => Some(3),
                 ("kernel32", "TlsGetValue") => Some(1),
+                ("kernel32", "WideCharToMultiByte") => Some(6),
                 ("kernel32", "GetModuleHandleA") => Some(1),
                 ("kernel32", "GetProcAddress") => Some(2),
                 ("kernel32", "GetLogicalProcessorInformationEx") => Some(3),
@@ -5920,6 +5966,117 @@ mod scheduler_tests {
         assert_eq!(stdcall_stack_bytes("vorbisfile", "ov_read"), Some(0));
         assert_eq!(stdcall_stack_bytes("eax", "#6"), Some(12));
         assert_eq!(stdcall_stack_bytes("ntdll", "RtlUnwind"), Some(16));
+        for (ordinal, bytes) in [
+            ("#1", 12),
+            ("#2", 12),
+            ("#3", 4),
+            ("#4", 12),
+            ("#5", 12),
+            ("#6", 12),
+            ("#7", 20),
+            ("#8", 4),
+            ("#9", 4),
+            ("#10", 12),
+            ("#11", 4),
+            ("#12", 4),
+            ("#13", 8),
+            ("#14", 4),
+            ("#15", 4),
+            ("#16", 16),
+            ("#17", 24),
+            ("#18", 20),
+            ("#19", 16),
+            ("#20", 24),
+            ("#21", 20),
+            ("#22", 8),
+            ("#23", 12),
+            ("#51", 12),
+            ("#52", 4),
+            ("#53", 4),
+            ("#57", 8),
+            ("#111", 0),
+            ("#115", 8),
+            ("#116", 0),
+            ("#151", 8),
+        ] {
+            assert_eq!(
+                stdcall_stack_bytes("ws2_32", ordinal),
+                Some(bytes),
+                "Winsock ordinal {ordinal}"
+            );
+        }
+        for (symbol, bytes) in [
+            ("WSACreateEvent", 0),
+            ("WSACloseEvent", 4),
+            ("WSAWaitForMultipleEvents", 20),
+            ("WSAGetOverlappedResult", 20),
+            ("WSAIoctl", 36),
+            ("WSARecv", 28),
+            ("WSARecvFrom", 36),
+            ("WSASetEvent", 4),
+            ("WSAResetEvent", 4),
+            ("WSASocketA", 24),
+            ("WSASocketW", 24),
+        ] {
+            assert_eq!(
+                stdcall_stack_bytes("ws2_32", symbol),
+                Some(bytes),
+                "Winsock API {symbol}"
+            );
+        }
+        for (symbol, bytes) in [
+            (
+                "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z",
+                4,
+            ),
+            (
+                "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z",
+                4,
+            ),
+            ("?length@?$char_traits@D@std@@SAIPBD@Z", 0),
+            (
+                "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z",
+                4,
+            ),
+            ("?eof@?$char_traits@D@std@@SAHXZ", 0),
+            ("?eq_int_type@?$char_traits@D@std@@SA_NABH0@Z", 0),
+            (
+                "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHPBDH@Z",
+                8,
+            ),
+            (
+                "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z",
+                8,
+            ),
+            (
+                "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ",
+                0,
+            ),
+            ("?_Unlock@_Mutex@std@@QAEXXZ", 0),
+            ("?_Lock@_Mutex@std@@QAEXXZ", 0),
+            (
+                "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADH@Z",
+                8,
+            ),
+            (
+                "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z",
+                8,
+            ),
+            (
+                "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ",
+                0,
+            ),
+            (
+                "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z",
+                0,
+            ),
+        ] {
+            assert_eq!(
+                stdcall_stack_bytes("msvcp", symbol),
+                Some(bytes),
+                "MSVCP80 ABI for {symbol}"
+            );
+        }
         assert_eq!(
             x86_abi_cleanup_bytes("crt", "_XcptFilter"),
             Ok(0),
