@@ -2011,21 +2011,31 @@ mod tests {
         assert!(p.mem.protect(BASE, IMAGE_SIZE, PROT_RWX));
 
         p.wr32(TEST_EXCEPTION_RECORD, MSVC_CPP_EXCEPTION).unwrap();
-        p.wr32(TEST_EXCEPTION_RECORD + 4, exception_flags)
-            .unwrap();
+        p.wr32(TEST_EXCEPTION_RECORD + 4, exception_flags).unwrap();
         p.wr64(TEST_EXCEPTION_RECORD + 8, 0).unwrap();
-        p.wr64(TEST_EXCEPTION_RECORD + 16, BASE + 0x1100)
-            .unwrap();
+        p.wr64(TEST_EXCEPTION_RECORD + 16, BASE + 0x1100).unwrap();
         p.wr32(TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_PARAMETERS, 4)
             .unwrap();
-        p.wr64(TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS, MSVC_CPP_MAGIC)
-            .unwrap();
-        p.wr64(TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS + 8, BASE + 0x8000)
-            .unwrap();
-        p.wr64(TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS + 16, BASE + 0x600)
-            .unwrap();
-        p.wr64(TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS + 24, BASE)
-            .unwrap();
+        p.wr64(
+            TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS,
+            MSVC_CPP_MAGIC,
+        )
+        .unwrap();
+        p.wr64(
+            TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS + 8,
+            BASE + 0x8000,
+        )
+        .unwrap();
+        p.wr64(
+            TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS + 16,
+            BASE + 0x600,
+        )
+        .unwrap();
+        p.wr64(
+            TEST_EXCEPTION_RECORD + EXCEPTION_RECORD_ARGUMENTS + 24,
+            BASE,
+        )
+        .unwrap();
 
         p.wr32(BASE + 0x1200, 0x1000).unwrap(); // runtime-function begin RVA
         p.wr32(BASE + 0x1204, 0x1100).unwrap(); // runtime-function end RVA
@@ -2264,7 +2274,11 @@ mod tests {
         assert_eq!(unwind.target_ip, BASE + 0x500);
         assert_eq!(unwind.exception_record, TEST_EXCEPTION_RECORD);
         assert_eq!(unwind.context_record, TEST_CONTEXT_RECORD);
-        assert_eq!(p.rd32(TEST_DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX).unwrap(), 1);
+        assert_eq!(
+            p.rd32(TEST_DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX)
+                .unwrap(),
+            1
+        );
         assert_eq!(
             p.read_bytes(TEST_EXCEPTION_RECORD, 0x98).unwrap(),
             exception_before
@@ -2291,7 +2305,11 @@ mod tests {
         assert_eq!(unwind.target_ip, BASE + 0xf00);
         assert_eq!(unwind.exception_record, TEST_EXCEPTION_RECORD);
         assert_eq!(unwind.context_record, TEST_CONTEXT_RECORD);
-        assert_eq!(p.rd32(TEST_DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX).unwrap(), 1);
+        assert_eq!(
+            p.rd32(TEST_DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -2305,12 +2323,19 @@ mod tests {
         let exception_before = p.read_bytes(TEST_EXCEPTION_RECORD, 0x98).unwrap();
         let thunk = p.thunk_for("crt", "__CxxFrameHandler3", true).unwrap();
 
-        assert_eq!(p.call_guest(thunk, &args).unwrap(), EXCEPTION_CONTINUE_SEARCH);
+        assert_eq!(
+            p.call_guest(thunk, &args).unwrap(),
+            EXCEPTION_CONTINUE_SEARCH
+        );
         assert_eq!(
             p.read_bytes(TEST_EXCEPTION_RECORD, 0x98).unwrap(),
             exception_before
         );
-        assert_eq!(p.rd32(TEST_DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX).unwrap(), 0x55);
+        assert_eq!(
+            p.rd32(TEST_DISPATCHER_CONTEXT + DISPATCHER_SCOPE_INDEX)
+                .unwrap(),
+            0x55
+        );
     }
 
     #[test]
@@ -2326,17 +2351,15 @@ mod tests {
         let continuation = BASE + 0x1600;
         guest_return_u64(&mut p, BASE + 0x500, continuation);
         let flags = EXCEPTION_NONCONTINUABLE | EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND;
-        let args = setup_frame_handler_call(
-            &mut p,
-            BASE + 0x100,
-            BASE + 0x700,
-            BASE + 0x500,
-            flags,
-        );
+        let args =
+            setup_frame_handler_call(&mut p, BASE + 0x100, BASE + 0x700, BASE + 0x500, flags);
         let exception_before = p.read_bytes(TEST_EXCEPTION_RECORD, 0x98).unwrap();
         let thunk = p.thunk_for("crt", "__CxxFrameHandler3", true).unwrap();
 
-        assert_eq!(p.call_guest(thunk, &args).unwrap(), EXCEPTION_CONTINUE_SEARCH);
+        assert_eq!(
+            p.call_guest(thunk, &args).unwrap(),
+            EXCEPTION_CONTINUE_SEARCH
+        );
         assert_eq!(p.rd32(marker).unwrap(), 1);
         assert_eq!(
             p.read_bytes(TEST_ESTABLISHER - 8, object_bytes.len())

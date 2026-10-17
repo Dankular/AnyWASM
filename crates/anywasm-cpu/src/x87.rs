@@ -528,23 +528,54 @@ mod tests {
             Memory
         }
         fn fault<T>(addr: u64, access: Access) -> MemResult<T> {
-            Err(Fault { addr, access, protection: false, kind: FaultKind::GuestMemory })
+            Err(Fault {
+                addr,
+                access,
+                protection: false,
+                kind: FaultKind::GuestMemory,
+            })
         }
     }
     impl GuestMemory for Memory {
-        fn read_u8(&self, a: u64) -> MemResult<u8> { Self::fault(a, Access::Read) }
-        fn read_u16(&self, a: u64) -> MemResult<u16> { Self::fault(a, Access::Read) }
-        fn read_u32(&self, a: u64) -> MemResult<u32> { Self::fault(a, Access::Read) }
-        fn read_u64(&self, a: u64) -> MemResult<u64> { Self::fault(a, Access::Read) }
-        fn read_u128(&self, a: u64) -> MemResult<u128> { Self::fault(a, Access::Read) }
-        fn write_u8(&mut self, a: u64, _: u8) -> MemResult<()> { Self::fault(a, Access::Write) }
-        fn write_u16(&mut self, a: u64, _: u16) -> MemResult<()> { Self::fault(a, Access::Write) }
-        fn write_u32(&mut self, a: u64, _: u32) -> MemResult<()> { Self::fault(a, Access::Write) }
-        fn write_u64(&mut self, a: u64, _: u64) -> MemResult<()> { Self::fault(a, Access::Write) }
-        fn write_u128(&mut self, a: u64, _: u128) -> MemResult<()> { Self::fault(a, Access::Write) }
-        fn read_into(&self, a: u64, _: &mut [u8], access: Access) -> MemResult<()> { Self::fault(a, access) }
-        fn write_from(&mut self, a: u64, _: &[u8]) -> MemResult<()> { Self::fault(a, Access::Write) }
-        fn fetch(&self, a: u64, _: &mut [u8; 15]) -> MemResult<usize> { Self::fault(a, Access::Exec) }
+        fn read_u8(&self, a: u64) -> MemResult<u8> {
+            Self::fault(a, Access::Read)
+        }
+        fn read_u16(&self, a: u64) -> MemResult<u16> {
+            Self::fault(a, Access::Read)
+        }
+        fn read_u32(&self, a: u64) -> MemResult<u32> {
+            Self::fault(a, Access::Read)
+        }
+        fn read_u64(&self, a: u64) -> MemResult<u64> {
+            Self::fault(a, Access::Read)
+        }
+        fn read_u128(&self, a: u64) -> MemResult<u128> {
+            Self::fault(a, Access::Read)
+        }
+        fn write_u8(&mut self, a: u64, _: u8) -> MemResult<()> {
+            Self::fault(a, Access::Write)
+        }
+        fn write_u16(&mut self, a: u64, _: u16) -> MemResult<()> {
+            Self::fault(a, Access::Write)
+        }
+        fn write_u32(&mut self, a: u64, _: u32) -> MemResult<()> {
+            Self::fault(a, Access::Write)
+        }
+        fn write_u64(&mut self, a: u64, _: u64) -> MemResult<()> {
+            Self::fault(a, Access::Write)
+        }
+        fn write_u128(&mut self, a: u64, _: u128) -> MemResult<()> {
+            Self::fault(a, Access::Write)
+        }
+        fn read_into(&self, a: u64, _: &mut [u8], access: Access) -> MemResult<()> {
+            Self::fault(a, access)
+        }
+        fn write_from(&mut self, a: u64, _: &[u8]) -> MemResult<()> {
+            Self::fault(a, Access::Write)
+        }
+        fn fetch(&self, a: u64, _: &mut [u8; 15]) -> MemResult<usize> {
+            Self::fault(a, Access::Exec)
+        }
     }
 
     #[test]

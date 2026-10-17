@@ -24,6 +24,12 @@ struct ImportStatus {
 }
 
 #[derive(Default)]
+struct BundledImage {
+    names: BTreeSet<String>,
+    ordinals: BTreeSet<u16>,
+}
+
+#[derive(Default)]
 struct Report {
     machine: String,
     subsystem: String,
@@ -110,21 +116,13 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
         r.blockers
             .push(".NET managed executable (needs a CLR, not a native Win64 runtime)".into());
     }
-    let bundled: BTreeSet<String> = dir
-        .map(|d| {
-            std::fs::read_dir(d)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|e| e.file_name().to_str().map(|s| canonical_dll(s)))
-                .collect()
-        })
-        .unwrap_or_default();
+    let bundled = bundled_images(dir)?;
     let mut by_dll: BTreeMap<String, ImportStatus> = BTreeMap::new();
     for imp in pe.all_imports().map_err(|e| e.to_string())? {
         let canon = canonical_dll(&imp.dll);
         let group = hle::group_of(&canon);
-        let is_bundled = bundled.contains(&canon);
+        let bundled_image = bundled.get(&canon);
+        let is_bundled = bundled_image.is_some();
         let st = by_dll.entry(canon.clone()).or_insert_with(|| ImportStatus {
             dll: imp.dll.clone(),
             group,
@@ -143,12 +141,15 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
                 ImportName::Name { name, .. } => name.clone(),
                 ImportName::Ordinal(o) => format!("#{o}"),
             };
-            let ok = is_bundled
-                || group
+            let ok = if let Some(image) = bundled_image {
+                bundled_exported(image, &e.name)
+            } else {
+                group
                     .map(|g| {
                         hle::lookup(g, &name).is_some() || hle::data_symbol(g, &name).is_some()
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+            };
             if ok {
                 st.implemented.push(name);
             } else {
@@ -158,6 +159,62 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
     }
     r.imports = by_dll.into_values().collect();
     Ok(r)
+}
+
+fn bundled_images(dir: Option<&Path>) -> Result<BTreeMap<String, BundledImage>, String> {
+    let Some(dir) = dir else {
+        return Ok(BTreeMap::new());
+    };
+    fn collect_dlls(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        let mut entries = entries
+            .map(|entry| entry.map_err(|error| format!("{}: {error}", directory.display())))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_dlls(&path, output)?;
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+            {
+                output.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut dll_paths = Vec::new();
+    collect_dlls(dir, &mut dll_paths)?;
+    let mut images = BTreeMap::new();
+    for path in dll_paths {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut image = BundledImage::default();
+        if let Ok(pe) = Pe::parse(&bytes) {
+            if let Ok(exports) = pe.exports() {
+                for export in exports {
+                    if let Some(name) = export.name {
+                        image.names.insert(name);
+                    }
+                    image.ordinals.insert(export.ordinal);
+                }
+            }
+        }
+        images.entry(canonical_dll(file_name)).or_insert(image);
+    }
+    Ok(images)
+}
+
+fn bundled_exported(image: &BundledImage, name: &ImportName) -> bool {
+    match name {
+        ImportName::Name { name, .. } => image.names.contains(name),
+        ImportName::Ordinal(ordinal) => image.ordinals.contains(ordinal),
+    }
 }
 
 fn preflight_status(known_blockers: usize, missing_imports: usize) -> &'static str {
@@ -192,7 +249,11 @@ fn json_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_quote, preflight_status, supported_pe_machine};
+    use super::{
+        bundled_exported, json_quote, preflight_status, supported_pe_machine, BundledImage,
+    };
+    use anywasm_pe::ImportName;
+    use std::collections::BTreeSet;
 
     #[test]
     fn json_quote_escapes_quotes_backslashes_and_control_characters() {
@@ -216,6 +277,30 @@ mod tests {
         assert!(!supported_pe_machine(anywasm_pe::MACHINE_I386, true));
         assert!(!supported_pe_machine(anywasm_pe::MACHINE_AMD64, false));
         assert!(!supported_pe_machine(anywasm_pe::MACHINE_ARM64, true));
+    }
+
+    #[test]
+    fn bundled_dll_presence_does_not_cover_missing_name_or_ordinal_exports() {
+        let image = BundledImage {
+            names: ["Exported".to_owned()].into(),
+            ordinals: BTreeSet::from([7]),
+        };
+        assert!(bundled_exported(
+            &image,
+            &ImportName::Name {
+                hint: 0,
+                name: "Exported".into()
+            }
+        ));
+        assert!(!bundled_exported(
+            &image,
+            &ImportName::Name {
+                hint: 0,
+                name: "Missing".into()
+            }
+        ));
+        assert!(bundled_exported(&image, &ImportName::Ordinal(7)));
+        assert!(!bundled_exported(&image, &ImportName::Ordinal(8)));
     }
 }
 
@@ -441,7 +526,9 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             }
             "--args" => o.cmdline = Some(it.next().ok_or("--args needs a value")?.clone()),
             "--cwd" => o.cwd = Some(it.next().ok_or("--cwd needs a value")?.clone()),
-            "--hook" => o.hooks.push(it.next().ok_or("--hook needs a value")?.clone()),
+            "--hook" => o
+                .hooks
+                .push(it.next().ok_or("--hook needs a value")?.clone()),
             "--" => {
                 o.args = it.cloned().collect();
                 break;
@@ -582,6 +669,10 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             eprintln!("\nanywasm: stopped at unimplemented import {dll}!{name}");
             Ok(ExitCode::from(120))
         }
+        Stop::AbiUnimplemented { dll, name } => {
+            eprintln!("\nanywasm: stopped at {dll}!{name}; x86 ABI signature is not verified");
+            Ok(ExitCode::from(124))
+        }
         Stop::Crash(m) => {
             eprintln!("\nanywasm: guest crashed: {m}");
             Ok(ExitCode::from(121))
@@ -622,7 +713,9 @@ fn run(o: &Opts) -> Result<ExitCode, String> {
             Ok(ExitCode::from(1))
         }
         Stop::GuestCatch32(_) => {
-            eprintln!("\nanywasm: internal PE32 C++ catch transfer escaped its exception dispatcher");
+            eprintln!(
+                "\nanywasm: internal PE32 C++ catch transfer escaped its exception dispatcher"
+            );
             Ok(ExitCode::from(1))
         }
         Stop::GuestUnwind32(_) => {

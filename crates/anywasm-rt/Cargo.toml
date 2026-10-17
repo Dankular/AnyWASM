@@ -11,3 +11,4 @@ jit-test-api = ["anywasm-cpu/jit-test-api"]
 [dependencies]
 anywasm-cpu.workspace = true
 anywasm-pe.workspace = true
+md-5 = "0.11.0"

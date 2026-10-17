@@ -12,6 +12,8 @@ import { GpuExecutor } from './gpu.js';
 import { waitForPresentInterval } from './frame-pacing.js';
 import { SharedCpuCompletion, SharedCpuWorkerPool } from './shared-cpu-pool.js';
 import { InPlaceSharedCpuPool } from './shared-cpu-inplace-pool.js';
+import { createRemoteDirectoryFiles } from './direct-assets.js';
+import { encodeHostRegistrySnapshot } from './registry-snapshot.js';
 
 let w = null, exec = null, stopped = false, disposeRequested = false, wake = null, testMode = false, sharedCpuPool = null, sharedCpuRequested = false;
 let sharedNeedsCoordinatorTurn = false;
@@ -25,14 +27,85 @@ let sharedWorkerRetired = 0n;
 let sharedParallelBatches = 0;
 let sharedMaxConcurrentWorkerSlices = 0;
 let graphicsUnavailableReason = '';
+let surfacedGpuErrorCount = 0;
 const dec = new TextDecoder();
 const inPlaceCpuEnabled = new URL(self.location.href).searchParams.has('inPlaceCpu');
 const sharedCpuWorkersEnabled = inPlaceCpuEnabled || new URL(self.location.href).searchParams.has('sharedCpuWorkers');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const waitForInput = () => new Promise((r) => { wake = r; });
+async function readHostSystemParameters() {
+  try {
+    const response = await fetch(new URL('/__local/system-parameters', self.location.href));
+    if (!response.ok) return { available: false, reason: `host settings returned HTTP ${response.status}` };
+    const value = await response.json();
+    if (value?.available === true
+      && typeof value.cursorShadow === 'boolean'
+      && typeof value.mouseSonar === 'boolean'
+      && Number.isInteger(value.mouseTrails)
+      && value.mouseTrails >= 0
+      && Number.isInteger(value.wheelScrollLines)
+      && value.wheelScrollLines >= 0) return value;
+    return { available: false, reason: value?.reason || 'Windows cursor-shadow setting is unavailable' };
+  } catch (error) {
+    return { available: false, reason: error.message || String(error) };
+  }
+}
+async function readHostSims3Registry() {
+  try {
+    const response = await fetch(new URL('/__local/sims3/registry', self.location.href));
+    if (!response.ok) return { available: false, reason: `host registry returned HTTP ${response.status}` };
+    const value = await response.json();
+    if (value?.available === true && typeof value.installPath === 'string' && Array.isArray(value.keys)) return value;
+    return { available: false, reason: value?.reason || 'Windows Sims registry snapshot is unavailable' };
+  } catch (error) {
+    return { available: false, reason: error.message || String(error) };
+  }
+}
+
+function sameWindowsPath(left, right) {
+  const normalize = (value) => value.replaceAll('/', '\\').replace(/[\\]+$/, '').toLowerCase();
+  return typeof left === 'string' && typeof right === 'string' && normalize(left) === normalize(right);
+}
+
+function installHostRegistrySnapshot(runtime, snapshot) {
+  if (typeof runtime.x.aw_set_host_registry_snapshot !== 'function') {
+    throw new Error('runtime is missing the host registry snapshot entry point');
+  }
+  const bytes = encodeHostRegistrySnapshot(snapshot);
+  const pointer = runtime.x.aw_alloc(bytes.byteLength) >>> 0;
+  try {
+    new Uint8Array(runtime.x.memory.buffer, pointer, bytes.byteLength).set(bytes);
+    const result = runtime.x.aw_set_host_registry_snapshot(pointer, bytes.byteLength);
+    if (result !== 0) throw new Error(runtime.message() || `could not supply host registry snapshot (${result})`);
+  } finally {
+    runtime.x.aw_free(pointer, bytes.byteLength);
+  }
+}
+const waitForIdle = async (runtime) => {
+  // Keep the virtual Windows clock moving while GetMessage is idle. Polling at 250 ms also
+  // bounds input latency when the guest has no active user32 timer.
+  const timerDelay = runtime.nextTimerDelayMs();
+  const waitMs = Math.max(1, Math.min(timerDelay ?? 250, 250));
+  const startedAt = performance.now();
+  let timeout;
+  await new Promise((resolve) => {
+    let completed = false;
+    const finish = () => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      if (wake === finish) wake = null;
+      resolve();
+    };
+    wake = finish;
+    timeout = setTimeout(finish, waitMs);
+  });
+  const elapsed100ns = Math.max(0, Math.round((performance.now() - startedAt) * 10_000));
+  runtime.advanceTime100ns(BigInt(elapsed100ns));
+};
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
-async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, diagProgress }) {
+async function start({ wasm, bundle, directFiles, directSource, entryPath, assetUrl, assetPackage, canvas, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, traceImports, diagProgress }) {
+  const directLaunch = !!directFiles || !!directSource;
   stopped = false;
   disposeRequested = false;
   wake = null;
@@ -50,6 +123,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
   sharedWorkerRetired = 0n;
   sharedParallelBatches = 0;
   sharedMaxConcurrentWorkerSlices = 0;
+  surfacedGpuErrorCount = 0;
   exec?.device?.destroy();
   exec = null;
   graphicsUnavailableReason = canvas ? '' : 'OffscreenCanvas worker transfer is unsupported';
@@ -59,13 +133,96 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
     options.memory = new WebAssembly.Memory({ initial: 4096, maximum: 32768, shared: true });
   }
   w = await AnyWasm.create(wasm, options);
-  try { w.load(bundle); } catch (e) {
+  const hostSystemParameters = await readHostSystemParameters();
+  try {
+    let bootFiles = directFiles;
+    if (directSource) {
+      postMessage({ type: 'load-progress', message: `Scanning ${directSource.rootPath}…` });
+      const response = await fetch(directSource.manifestUrl);
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.error || `${directSource.rootPath}: could not scan local install (HTTP ${response.status})`);
+      }
+      const manifest = await response.json();
+      if (!Array.isArray(manifest.files) || !Array.isArray(manifest.directories)) {
+        throw new Error(`${directSource.rootPath}: local install manifest is invalid`);
+      }
+      bootFiles = createRemoteDirectoryFiles([...manifest.files, ...manifest.directories], directSource.fileUrl);
+      entryPath = directSource.entryPath || manifest.entryPath;
+    }
+    if (bootFiles) {
+      const inventoryLabel = directSource ? directSource.rootPath : 'selected folder';
+      postMessage({ type: 'load-progress', message: `Indexing ${bootFiles.length.toLocaleString()} files from ${inventoryLabel}…` });
+      await w.loadDirectory(entryPath, bootFiles, (progress) => {
+        if (progress.phase === 'boot') {
+          postMessage({
+            type: 'load-progress',
+            message: `Loading ${progress.path} into runtime memory (${progress.fileIndex}/${progress.totalFiles} boot files)…`,
+          });
+        } else {
+          postMessage({
+            type: 'asset-progress',
+            fetchedBytes: progress.fetchedBytes,
+            packageLength: Number(progress.packageLength),
+          });
+        }
+      });
+    } else {
+      w.load(bundle);
+    }
+    if (directSource) {
+      w.setVirtualRoot(directSource.rootPath);
+      postMessage({
+        type: 'out',
+        stream: 'stderr',
+        text: `[host filesystem] mounted ${directSource.rootPath} as the streamed install root\n`,
+      });
+    }
+    if (hostSystemParameters.available) {
+      if (typeof w.x.aw_set_host_system_parameters !== 'function') {
+        throw new Error('runtime is missing the host system-parameters entry point');
+      }
+      const rc = w.x.aw_set_host_system_parameters(
+        hostSystemParameters.cursorShadow ? 1 : 0,
+        hostSystemParameters.mouseTrails,
+        hostSystemParameters.mouseSonar ? 1 : 0,
+        hostSystemParameters.wheelScrollLines,
+      );
+      if (rc !== 0) throw new Error(w.message() || `could not supply host system parameters (${rc})`);
+    } else {
+      postMessage({
+        type: 'out',
+        stream: 'stderr',
+        text: `[host] ${hostSystemParameters.reason}; SystemParametersInfo queries will remain untranslated.\n`,
+      });
+    }
+    if (directSource) {
+      const hostRegistry = await readHostSims3Registry();
+      if (hostRegistry.available && sameWindowsPath(hostRegistry.installPath, directSource.rootPath)) {
+        installHostRegistrySnapshot(w, hostRegistry);
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: `[host registry] loaded ${hostRegistry.keys.length} keys from the matching 32-bit Sims registration (read-only snapshot)\n`,
+        });
+      } else {
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: `[host registry] ${hostRegistry.reason || `snapshot install path ${hostRegistry.installPath} does not match ${directSource.rootPath}`}; registry reads outside translated data will stop explicitly.\n`,
+        });
+      }
+    }
+  } catch (e) {
     postMessage({ type: 'status', status: Status.CRASHED, exitCode: -1, message: e.message, instructions: 0, mips: 0 });
     return;
   }
   if (traceGtaEventvol) w.x.aw_set_gta_eventvol_trace?.(1);
+  if (traceImports) w.x.aw_set_import_trace?.(1);
   bundle = null;
-  if (assetUrl) {
+  directFiles = null;
+  directSource = null;
+  if (assetUrl && !directLaunch) {
     postMessage({ type: 'load-progress', message: 'Loading game data index…' });
     let lastAssetProgress = 0;
     await w.attachAssets(assetUrl, ({ fetchedBytes, packageLength }) => {
@@ -421,6 +578,19 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
         terminalMessage = `Graphics unavailable: ${graphicsUnavailableReason || 'no renderer is available'}`;
       }
     }
+    if (exec && exec.stats.errors.length > surfacedGpuErrorCount) {
+      const errors = exec.stats.errors.slice(surfacedGpuErrorCount);
+      surfacedGpuErrorCount = exec.stats.errors.length;
+      const detail = errors.slice(0, 4).join(' | ');
+      const remainder = errors.length > 4 ? ` | and ${errors.length - 4} more renderer error(s)` : '';
+      const rendererFailure = `WebGPU translation failed: ${detail}${remainder}`;
+      if (status !== Status.CRASHED && status !== Status.UNIMPLEMENTED) {
+        status = Status.CRASHED;
+        terminalMessage = rendererFailure;
+      } else {
+        terminalMessage = [terminalMessage || w.message(), rendererFailure].filter(Boolean).join('\n');
+      }
+    }
     const o = w.takeStdout(); if (o.length) postMessage({ type: 'out', stream: 'stdout', text: dec.decode(o) });
     const e = w.takeStderr();
     if (e.length) {
@@ -532,7 +702,7 @@ async function start({ wasm, bundle, assetUrl, assetPackage, canvas, testMode: r
           trace: { rip: `0x${Number(w.x.aw_debug_rip?.() || 0).toString(16)}`, instructions: w.retiredInstructions(), ...traceGuestThreads() },
         });
       }
-      await waitForInput();
+      await waitForIdle(w);
     }
     else if (status === Status.RUNNING) await sleep(0);
   }

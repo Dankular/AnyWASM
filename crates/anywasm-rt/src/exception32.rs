@@ -2,7 +2,9 @@
 
 use std::collections::HashSet;
 
-use crate::process::{GuestSehTransfer32, GuestUnwind32, Process, Stop, TEB_ADDR};
+use crate::process::{
+    GuestSehTransfer32, GuestSehTransferKind32, GuestUnwind32, Process, Stop, TEB_ADDR,
+};
 use anywasm_cpu::cpu::{Cpu, CpuMode, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP};
 use anywasm_cpu::mem::{Access, PROT_X};
 use anywasm_cpu::{DecodeError, Exit};
@@ -13,6 +15,7 @@ const EXCEPTION_NESTED_EXCEPTION: u32 = 2;
 const EXCEPTION_COLLIDED_UNWIND: u32 = 3;
 const EXCEPTION_CONTINUE_EXECUTION_FILTER: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH_FILTER: i32 = 0;
+const EXCEPTION_EXECUTE_HANDLER_FILTER: i32 = 1;
 const EXCEPTION_NONCONTINUABLE: u32 = 1;
 const EXCEPTION_NESTED_CALL: u32 = 0x10;
 const EXCEPTION_UNWINDING: u32 = 0x2;
@@ -21,14 +24,17 @@ const EXCEPTION_TARGET_UNWIND: u32 = 0x20;
 const EXCEPTION_COLLIDED_UNWIND_FLAG: u32 = 0x40;
 const EXCEPTION_CHAIN_END: u32 = u32::MAX;
 const EH4_TOPMOST_TRY_LEVEL: u32 = u32::MAX - 1;
+const EH3_TOPMOST_TRY_LEVEL: u32 = u32::MAX;
 const EH4_NO_GS_COOKIE: u32 = u32::MAX - 1;
 const EH4_REGISTRATION_NODE_SIZE: u64 = 24;
 const EH4_SCOPE_TABLE_HEADER_SIZE: u64 = 16;
 const EH4_SCOPE_RECORD_SIZE: u64 = 12;
 const MAX_EH4_SCOPE_LEVELS: u32 = 65_536;
+const MAX_EH3_SCOPE_LEVELS: u32 = 65_536;
 const CONTEXT32_SIZE: u64 = 0x2cc;
 const EXCEPTION_RECORD32_SIZE: u64 = 80;
 const EXCEPTION_POINTERS32_SIZE: u64 = 8;
+const EH3_SCOPE_RECORD_SIZE: u64 = 12;
 const DISPATCHER_CONTEXT32_SIZE: u64 = 4;
 const CONTEXT32_FLAGS: u32 = 0x0001_0007; // CONTEXT_i386 | CONTROL | INTEGER | SEGMENTS
 const CONTEXT32_EDI: u64 = 0x9c;
@@ -94,14 +100,12 @@ pub(crate) fn rtl_unwind(p: &mut Process) -> Result<u64, Stop> {
     }
     p.wr32(exception_record + 4, flags)?;
 
-    let target_ip = if target_frame == 0
-        || target_frame == EXCEPTION_CHAIN_END as u64
-        || requested_ip == 0
-    {
-        return_ip as u64
-    } else {
-        requested_ip
-    };
+    let target_ip =
+        if target_frame == 0 || target_frame == EXCEPTION_CHAIN_END as u64 || requested_ip == 0 {
+            return_ip as u64
+        } else {
+            requested_ip
+        };
     if target_frame != 0
         && p.mem
             .prot_of(target_ip)
@@ -153,6 +157,241 @@ struct Eh4Registration32 {
     saved_esp: u64,
     scope_table: u64,
     try_level: u32,
+}
+
+/// MSVC 8's x86 `_except_handler3` registration routine.
+pub(crate) fn except_handler3(p: &mut Process) -> Result<u64, Stop> {
+    if p.cpu.mode != CpuMode::X86_32 {
+        return Err(Stop::Unimplemented {
+            dll: "crt".into(),
+            name: "_except_handler3 for non-PE32 process".into(),
+        });
+    }
+
+    let exception_record = p.arg(0) as u32 as u64;
+    let establisher_frame = p.arg(1) as u32 as u64;
+    let context_record = p.arg(2) as u32 as u64;
+    let dispatcher_context = p.arg(3) as u32 as u64;
+    if exception_record == 0
+        || establisher_frame == 0
+        || context_record == 0
+        || dispatcher_context == 0
+    {
+        return Err(Stop::Crash(
+            "_except_handler3 received a null required argument".into(),
+        ));
+    }
+
+    let stack_limit = p.rd32(TEB_ADDR + 8)? as u64;
+    let stack_base = p.rd32(TEB_ADDR + 4)? as u64;
+    let frame_start = establisher_frame
+        .checked_sub(8)
+        .ok_or_else(|| Stop::Crash("_except_handler3 frame precedes its saved-ESP slot".into()))?;
+    let frame_end = establisher_frame
+        .checked_add(16)
+        .ok_or_else(|| Stop::Crash("_except_handler3 frame range overflows".into()))?;
+    if stack_limit >= stack_base || frame_start < stack_limit || frame_end > stack_base {
+        return Err(Stop::Crash(format!(
+            "_except_handler3 registration frame {frame_start:#x}..{frame_end:#x} is outside TEB stack bounds {stack_limit:#x}..{stack_base:#x}"
+        )));
+    }
+
+    let exception_code = p.rd32(exception_record)?;
+    let exception_flags = p.rd32(exception_record + 4)?;
+    let scope_table = p.rd32(establisher_frame + 8)? as u64;
+    let mut level = p.rd32(establisher_frame + 12)?;
+    let active_level = level;
+    if scope_table == 0 || scope_table & 3 != 0 {
+        return Err(Stop::Crash(format!(
+            "_except_handler3 scope table {scope_table:#x} is null or misaligned"
+        )));
+    }
+    if scope_table >= stack_limit && scope_table < stack_base {
+        return Err(Stop::Crash(format!(
+            "_except_handler3 scope table {scope_table:#x} overlaps the active stack"
+        )));
+    }
+    if level != EH3_TOPMOST_TRY_LEVEL && level >= MAX_EH3_SCOPE_LEVELS {
+        return Err(Stop::Crash(format!(
+            "_except_handler3 try level {level} exceeds the supported bound"
+        )));
+    }
+
+    let is_unwinding = exception_flags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND) != 0;
+    if is_unwinding {
+        eh3_local_unwind_to(p, establisher_frame, scope_table, EH3_TOPMOST_TRY_LEVEL)?;
+        if p.trace_imports {
+            p.stderr.extend_from_slice(
+                format!(
+                    "[seh32] EH3 unwind frame={establisher_frame:#010x} scope={scope_table:#010x}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        return Ok(EXCEPTION_CONTINUE_SEARCH as u64);
+    }
+
+    let mut has_filter = false;
+    if level != EH3_TOPMOST_TRY_LEVEL {
+        for index in 0..=level {
+            let scope = eh3_scope_record(p, scope_table, index)?;
+            has_filter |= scope.filter != 0;
+        }
+    }
+    let saved_esp = if has_filter {
+        let saved_esp = p.rd32(frame_start)? as u64;
+        if saved_esp < stack_limit || saved_esp >= establisher_frame {
+            return Err(Stop::Crash(format!(
+                "_except_handler3 saved ESP {saved_esp:#x} is outside its valid frame range {stack_limit:#x}..{establisher_frame:#x}"
+            )));
+        }
+        saved_esp
+    } else {
+        0
+    };
+
+    let exception_pointers = crate::hle::kernel32::alloc_block(p, EXCEPTION_POINTERS32_SIZE, true);
+    p.wr32(exception_pointers, exception_record as u32)?;
+    p.wr32(exception_pointers + 4, context_record as u32)?;
+    p.wr32(establisher_frame - 4, exception_pointers as u32)?;
+
+    let frame_pointer = establisher_frame + 16;
+    let mut visited = HashSet::new();
+    while level != EH3_TOPMOST_TRY_LEVEL {
+        if !visited.insert(level) {
+            return Err(Stop::Crash(format!(
+                "_except_handler3 scope table contains an enclosing-level cycle at {level}"
+            )));
+        }
+        let scope = eh3_scope_record(p, scope_table, level)?;
+        if scope.filter != 0 {
+            let previous_ebp = p.cpu.gpr[RBP];
+            p.cpu.gpr[RBP] = frame_pointer;
+            let filter_result = p.call_guest(scope.filter as u64, &[]);
+            p.cpu.gpr[RBP] = previous_ebp;
+            let filter_result = filter_result? as u32 as i32;
+            if p.trace_imports {
+                p.stderr.extend_from_slice(
+                    format!(
+                        "[seh32] EH3 filter exception={exception_code:#010x} frame={establisher_frame:#010x} scope={level} result={filter_result}\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+            match filter_result.cmp(&0) {
+                std::cmp::Ordering::Less => {
+                    return Ok(EXCEPTION_CONTINUE_EXECUTION as u64);
+                }
+                std::cmp::Ordering::Greater => {
+                    if scope.handler == 0 {
+                        return Err(Stop::Crash(format!(
+                            "EH3 scope {level} accepted an exception but has no handler"
+                        )));
+                    }
+                    eh3_check_executable(p, scope.handler as u64, "exception handler")?;
+                    return Err(Stop::GuestSehTransfer32(GuestSehTransfer32 {
+                        target_frame: establisher_frame,
+                        target_ip: scope.handler as u64,
+                        kind: GuestSehTransferKind32::Eh3,
+                        scope_table,
+                        cookie_pointer: 0,
+                        cookie_check: 0,
+                        frame_pointer,
+                        saved_esp,
+                        active_level,
+                        selected_level: level,
+                        enclosing_level: scope.enclosing_level,
+                    }));
+                }
+                std::cmp::Ordering::Equal => level = scope.enclosing_level,
+            }
+        } else {
+            level = scope.enclosing_level;
+        }
+    }
+
+    Ok(EXCEPTION_CONTINUE_SEARCH as u64)
+}
+
+#[derive(Clone, Copy)]
+struct Eh3ScopeRecord32 {
+    enclosing_level: u32,
+    filter: u32,
+    handler: u32,
+}
+
+fn eh3_scope_record(p: &Process, scope_table: u64, level: u32) -> Result<Eh3ScopeRecord32, Stop> {
+    if level >= MAX_EH3_SCOPE_LEVELS {
+        return Err(Stop::Crash(format!(
+            "EH3 scope level {level} exceeds the supported bound"
+        )));
+    }
+    let record = scope_table
+        .checked_add(level as u64 * EH3_SCOPE_RECORD_SIZE)
+        .ok_or_else(|| Stop::Crash("EH3 scope record address overflows".into()))?;
+    let enclosing_level = p.rd32(record)?;
+    if enclosing_level != EH3_TOPMOST_TRY_LEVEL && enclosing_level >= level {
+        return Err(Stop::Crash(format!(
+            "EH3 scope {level} has invalid enclosing level {enclosing_level}"
+        )));
+    }
+    let scope = Eh3ScopeRecord32 {
+        enclosing_level,
+        filter: p.rd32(record + 4)?,
+        handler: p.rd32(record + 8)?,
+    };
+    if scope.filter != 0 {
+        eh3_check_executable(p, scope.filter as u64, "filter")?;
+    }
+    if scope.handler != 0 {
+        eh3_check_executable(p, scope.handler as u64, "handler")?;
+    }
+    Ok(scope)
+}
+
+fn eh3_check_executable(p: &Process, address: u64, what: &str) -> Result<(), Stop> {
+    if address == 0
+        || p.mem
+            .prot_of(address)
+            .is_none_or(|protection| protection & PROT_X == 0)
+    {
+        return Err(Stop::Crash(format!(
+            "EH3 {what} address {address:#x} is not executable"
+        )));
+    }
+    Ok(())
+}
+
+fn eh3_local_unwind_to(
+    p: &mut Process,
+    establisher_frame: u64,
+    scope_table: u64,
+    target_level: u32,
+) -> Result<(), Stop> {
+    let mut level = p.rd32(establisher_frame + 12)?;
+    let mut visited = HashSet::new();
+    while level != target_level {
+        if level == EH3_TOPMOST_TRY_LEVEL || !visited.insert(level) {
+            return Err(Stop::Crash(format!(
+                "EH3 local unwind cannot reach target level {target_level} from {level}"
+            )));
+        }
+        let scope = eh3_scope_record(p, scope_table, level)?;
+        p.wr32(establisher_frame + 12, scope.enclosing_level)?;
+        if scope.filter == 0 {
+            eh3_check_executable(p, scope.handler as u64, "termination handler")?;
+            let previous_ebp = p.cpu.gpr[RBP];
+            let previous_abnormal_termination = p.seh_abnormal_termination;
+            p.cpu.gpr[RBP] = establisher_frame + 16;
+            p.seh_abnormal_termination = true;
+            let result = p.call_guest(scope.handler as u64, &[]);
+            p.cpu.gpr[RBP] = previous_ebp;
+            p.seh_abnormal_termination = previous_abnormal_termination;
+            result?;
+        }
+        level = scope.enclosing_level;
+    }
+    Ok(())
 }
 
 /// MSVC's x86 EH4 helper used by the image-local `_except_handler4` thunk.
@@ -288,11 +527,13 @@ pub(crate) fn except_handler4_common(p: &mut Process) -> Result<u64, Stop> {
                 return Err(Stop::GuestSehTransfer32(GuestSehTransfer32 {
                     target_frame: establisher_frame,
                     target_ip: scope.handler as u64,
+                    kind: GuestSehTransferKind32::Eh4,
                     scope_table: registration.scope_table,
                     cookie_pointer,
                     cookie_check,
                     frame_pointer: registration.frame_pointer,
                     saved_esp: registration.saved_esp,
+                    active_level: registration.try_level,
                     selected_level: level,
                     enclosing_level: scope.enclosing_level,
                 }));
@@ -625,19 +866,44 @@ pub(crate) fn unhandled_exception_filter(p: &mut Process) -> Result<u64, Stop> {
     let exception_pointers = p.arg(0) as u32 as u64;
     let exception_record = p.rd32(exception_pointers)? as u64;
     let context_record = p.rd32(exception_pointers + 4)? as u64;
-    let flags = p.rd32(exception_record + 4)?;
-    let disposition = call_top_level_filter(p, exception_pointers)?;
+    let disposition = unhandled_exception_filter_disposition(p, exception_pointers)?;
     if disposition == EXCEPTION_CONTINUE_EXECUTION_FILTER {
-        if flags & EXCEPTION_NONCONTINUABLE != 0 {
-            return Err(Stop::Crash(format!(
-                "noncontinuable exception code={:#x} cannot continue execution",
-                p.rd32(exception_record)?
-            )));
-        }
         dispatch_vectored_continue_handlers(p, exception_record, context_record)?;
         restore_context(p, context_record, false)?;
     }
     Ok(disposition as u32 as u64)
+}
+
+/// Evaluate the OS top-level exception filter without applying its disposition to the active
+/// emulator context. CRT filter expressions call this API and return its disposition to the SEH
+/// dispatcher, which then performs the continue/handle/search transfer.
+pub(crate) fn unhandled_exception_filter_disposition(
+    p: &mut Process,
+    exception_pointers: u64,
+) -> Result<i32, Stop> {
+    let exception_record = p.rd32(exception_pointers)? as u64;
+    let _context_record = p.rd32(exception_pointers + 4)? as u64;
+    let flags = p.rd32(exception_record + 4)?;
+    let disposition = call_top_level_filter(p, exception_pointers)?;
+    if disposition == EXCEPTION_CONTINUE_EXECUTION_FILTER && flags & EXCEPTION_NONCONTINUABLE != 0 {
+        return Err(Stop::Crash(format!(
+            "noncontinuable exception code={:#x} cannot continue execution",
+            p.rd32(exception_record)?
+        )));
+    }
+
+    match disposition {
+        EXCEPTION_CONTINUE_EXECUTION_FILTER => Ok(disposition),
+        EXCEPTION_CONTINUE_SEARCH_FILTER | EXCEPTION_EXECUTE_HANDLER_FILTER => {
+            // With no debugger attached, Windows' UnhandledExceptionFilter resolves normal
+            // continue-search results through its process default and returns EXECUTE_HANDLER.
+            // Debugger attachment is not modeled by this runtime.
+            Ok(EXCEPTION_EXECUTE_HANDLER_FILTER)
+        }
+        value => Err(Stop::Crash(format!(
+            "top-level exception filter returned invalid disposition {value}"
+        ))),
+    }
 }
 
 fn dispatch_exception(
@@ -1052,12 +1318,7 @@ fn unwind_to_rtl32_inner(
             unwind.exception_record + 4,
             unwind_flags | EXCEPTION_EXIT_UNWIND,
         )?;
-        return dispatch_existing_exception(
-            p,
-            unwind.exception_record,
-            context_record,
-            false,
-        );
+        return dispatch_existing_exception(p, unwind.exception_record, context_record, false);
     }
 
     Err(Stop::Crash(
@@ -1090,10 +1351,7 @@ fn resume_rtl_unwind32(
     Ok(0)
 }
 
-pub(crate) fn complete_guest_unwind32(
-    p: &mut Process,
-    unwind: GuestUnwind32,
-) -> Result<(), Stop> {
+pub(crate) fn complete_guest_unwind32(p: &mut Process, unwind: GuestUnwind32) -> Result<(), Stop> {
     unwind_to_rtl32(p, unwind).map(|_| ())
 }
 
@@ -1417,6 +1675,45 @@ fn unwind_to_seh_transfer32(
             "PE32 SEH target frame {:#x} changed during unwind",
             target.registration
         )));
+    }
+    if transfer.kind == GuestSehTransferKind32::Eh3 {
+        if p.rd32(target.registration as u64 + 12)? != transfer.active_level {
+            return Err(Stop::Crash(format!(
+                "PE32 EH3 target frame {:#x} changed try level before transfer",
+                target.registration
+            )));
+        }
+        p.wr32(
+            exception_record + 4,
+            original_flags | EXCEPTION_UNWINDING | EXCEPTION_TARGET_UNWIND,
+        )?;
+        eh3_local_unwind_to(
+            p,
+            target.registration as u64,
+            transfer.scope_table,
+            transfer.selected_level,
+        )?;
+        p.wr32(target.registration as u64 + 12, transfer.enclosing_level)?;
+        let mut context = read_context(p, context_record)?;
+        context.gpr[RSP] = transfer.saved_esp;
+        context.gpr[RBP] = transfer.frame_pointer;
+        context.eip = transfer.target_ip as u32;
+        write_context(p, context_record, &context)?;
+        p.wr32(exception_record + 4, original_flags)?;
+        if p.trace_imports {
+            p.stderr.extend_from_slice(
+                format!(
+                    "[seh32] EH3 transfer frame={:#010x} ip={:#010x} esp={:#010x} scope_level={} enclosing={}\n",
+                    transfer.target_frame,
+                    transfer.target_ip,
+                    transfer.saved_esp,
+                    transfer.selected_level,
+                    transfer.enclosing_level
+                )
+                .as_bytes(),
+            );
+        }
+        return resume_exception(p, exception_record, context_record, skip_ret_on_resume);
     }
     let target_node = transfer.target_frame.checked_sub(8).ok_or_else(|| {
         Stop::Crash("PE32 EH4 target frame precedes its registration node".into())
@@ -1888,6 +2185,128 @@ mod tests {
         assert_eq!(process.cpu.gpr[RSP], RAISE_RSP + 20);
         assert_eq!(process.rd32(MARKER + 4).unwrap(), 0);
         assert!(process.skip_ret);
+    }
+
+    #[test]
+    fn pe32_except_handler3_runs_filter_and_reports_continue_execution() {
+        const FILTER: u64 = CODE + 0x200;
+        const SCOPE_TABLE: u64 = CODE + 0x300;
+        const EXCEPTION_RECORD: u64 = CODE + 0x400;
+        const CONTEXT_RECORD: u64 = CODE + 0x500;
+        const DISPATCHER_CONTEXT: u64 = CODE + 0x600;
+        const CALLER: u64 = CODE + 0x20;
+
+        let mut process = process_with_frame_handler();
+        process.wr32(FRAME - 8, (STACK + 0x80) as u32).unwrap();
+        process.wr32(FRAME + 8, SCOPE_TABLE as u32).unwrap();
+        process.wr32(FRAME + 12, 0).unwrap();
+        process.wr32(SCOPE_TABLE, u32::MAX).unwrap();
+        process.wr32(SCOPE_TABLE + 4, FILTER as u32).unwrap();
+        process.wr32(SCOPE_TABLE + 8, HANDLER as u32).unwrap();
+        process
+            .write_bytes(FILTER, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3])
+            .unwrap(); // return EXCEPTION_CONTINUE_EXECUTION_FILTER
+        write_exception_record(
+            &mut process,
+            EXCEPTION_RECORD,
+            0x406d_1388,
+            0,
+            CALLER as u32,
+            &[],
+        )
+        .unwrap();
+        let context = context_from_cpu(&process.cpu, CALLER as u32, RAISE_RSP as u32);
+        write_context(&mut process, CONTEXT_RECORD, &context).unwrap();
+        process.wr32(DISPATCHER_CONTEXT, FRAME as u32).unwrap();
+
+        let handler = process.thunk_for("crt", "_except_handler3", true).unwrap();
+        let result = process.call_guest(
+            handler,
+            &[EXCEPTION_RECORD, FRAME, CONTEXT_RECORD, DISPATCHER_CONTEXT],
+        );
+
+        assert_eq!(result, Ok(EXCEPTION_CONTINUE_EXECUTION as u64));
+        let exception_pointers = process.rd32(FRAME - 4).unwrap() as u64;
+        assert_ne!(exception_pointers, 0);
+        assert_eq!(
+            process.rd32(exception_pointers).unwrap(),
+            EXCEPTION_RECORD as u32
+        );
+        assert_eq!(
+            process.rd32(exception_pointers + 4).unwrap(),
+            CONTEXT_RECORD as u32
+        );
+    }
+
+    #[test]
+    fn pe32_except_handler3_transfers_to_accepted_scope_handler() {
+        const FILTER: u64 = CODE + 0x200;
+        const SCOPE_TABLE: u64 = CODE + 0x300;
+        const CALLER: u64 = CODE + 0x20;
+        const SAVED_ESP: u64 = STACK + 0x80;
+
+        let mut process = process_with_frame_handler();
+        process.wr32(FRAME - 8, SAVED_ESP as u32).unwrap();
+        process.wr32(FRAME + 8, SCOPE_TABLE as u32).unwrap();
+        process.wr32(FRAME + 12, 0).unwrap();
+        process.wr32(SCOPE_TABLE, u32::MAX).unwrap();
+        process.wr32(SCOPE_TABLE + 4, FILTER as u32).unwrap();
+        process.wr32(SCOPE_TABLE + 8, LANDING as u32).unwrap();
+        process
+            .write_bytes(FILTER, &[0xb8, 1, 0, 0, 0, 0xc3])
+            .unwrap(); // return EXCEPTION_EXECUTE_HANDLER_FILTER
+        let handler = process.thunk_for("crt", "_except_handler3", true).unwrap();
+        process.wr32(FRAME + 4, handler as u32).unwrap();
+
+        let result = dispatch_raised_exception(&mut process, 0xe123_4567, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.cpu.rip, LANDING);
+        assert_eq!(process.cpu.gpr[RSP], SAVED_ESP);
+        assert_eq!(process.cpu.gpr[RBP], FRAME + 16);
+        assert_eq!(process.rd32(FRAME + 12).unwrap(), EH3_TOPMOST_TRY_LEVEL);
+        assert!(process.skip_ret);
+    }
+
+    #[test]
+    fn pe32_except_handler3_unwinds_finally_scope_with_abnormal_termination_state() {
+        const FILTER: u64 = CODE + 0x200;
+        const FINALLY: u64 = CODE + 0x240;
+        const SCOPE_TABLE: u64 = CODE + 0x300;
+        const CALLER: u64 = CODE + 0x20;
+        const SAVED_ESP: u64 = STACK + 0x80;
+
+        let mut process = process_with_frame_handler();
+        process.wr32(FRAME - 8, SAVED_ESP as u32).unwrap();
+        process.wr32(FRAME + 8, SCOPE_TABLE as u32).unwrap();
+        process.wr32(FRAME + 12, 1).unwrap();
+        process.wr32(SCOPE_TABLE, u32::MAX).unwrap();
+        process.wr32(SCOPE_TABLE + 4, FILTER as u32).unwrap();
+        process.wr32(SCOPE_TABLE + 8, LANDING as u32).unwrap();
+        process.wr32(SCOPE_TABLE + 12, 0).unwrap();
+        process.wr32(SCOPE_TABLE + 16, 0).unwrap();
+        process.wr32(SCOPE_TABLE + 20, FINALLY as u32).unwrap();
+        process
+            .write_bytes(FILTER, &[0xb8, 1, 0, 0, 0, 0xc3])
+            .unwrap(); // return EXCEPTION_EXECUTE_HANDLER_FILTER
+        let abnormal_termination = process
+            .thunk_for("crt", "_abnormal_termination", true)
+            .unwrap();
+        let mut finally = vec![0xb8]; // call _abnormal_termination
+        finally.extend_from_slice(&(abnormal_termination as u32).to_le_bytes());
+        finally.extend_from_slice(&[0xff, 0xd0, 0xa3]);
+        finally.extend_from_slice(&(MARKER as u32).to_le_bytes());
+        finally.push(0xc3);
+        process.write_bytes(FINALLY, &finally).unwrap();
+        let handler = process.thunk_for("crt", "_except_handler3", true).unwrap();
+        process.wr32(FRAME + 4, handler as u32).unwrap();
+
+        let result = dispatch_raised_exception(&mut process, 0xe123_4567, 0, &[], CALLER);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(process.rd32(MARKER).unwrap(), 1);
+        assert_eq!(process.cpu.rip, LANDING);
+        assert_eq!(process.seh_abnormal_termination, false);
     }
 
     #[test]
@@ -2498,11 +2917,13 @@ mod tests {
         let transfer = GuestSehTransfer32 {
             target_frame: TARGET,
             target_ip: TARGET_IP,
+            kind: GuestSehTransferKind32::Eh4,
             scope_table: SCOPE_TABLE,
             cookie_pointer: COOKIE,
             cookie_check: COOKIE_CHECK,
             frame_pointer: FRAME_POINTER,
             saved_esp: SAVED_ESP,
+            active_level: EH4_TOPMOST_TRY_LEVEL,
             selected_level: EH4_TOPMOST_TRY_LEVEL,
             enclosing_level: EH4_TOPMOST_TRY_LEVEL,
         };

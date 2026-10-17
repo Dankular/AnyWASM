@@ -5,6 +5,10 @@ use super::gpu::{op, Pk};
 use super::*;
 use crate::process::*;
 
+const DXGI_ERROR_MORE_DATA: u64 = 0x887a_0003;
+const DXGI_MODE_FORMATS: [u32; 2] = [28, 87]; // RGBA8_UNORM and BGRA8_UNORM.
+const DXGI_OUTPUT_MODES: [(u32, u32); 4] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)];
+
 pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
         "CreateDXGIFactory" | "CreateDXGIFactory1" => |p| {
@@ -62,13 +66,6 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             p.wr64(out, o)?;
             Ok(S_OK)
         },
-        "MakeWindowAssociation"
-        | "SetFullscreenState"
-        | "ResizeTarget"
-        | "WaitForVBlank"
-        | "SetMaximumFrameLatency"
-        | "SetGPUThreadPriority"
-        | "SetResizeFlags" => |_| Ok(S_OK),
         "GetWindowAssociation" => |p| {
             let o = p.arg(1);
             p.wr64(o, 0)?;
@@ -84,7 +81,10 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             }
             Ok(S_OK)
         },
-        "IsCurrent" | "IsWindowedStereoEnabled" => |_| Ok(1),
+        // The virtual adapter list is immutable for this process lifetime.
+        "IsCurrent" => |_| Ok(1),
+        // The WebGPU-backed virtual output does not expose stereo presentation.
+        "IsWindowedStereoEnabled" => |_| Ok(0),
         "GetMaximumFrameLatency" => |p| {
             let o = p.arg(1);
             p.wr32(o, 3)?;
@@ -135,12 +135,7 @@ pub fn method(_iface: &str, m: &str) -> Option<HleFn> {
             |_| Ok(DXGI_ERROR_INVALID_CALL)
         }
         "GetDisplayModeList" => get_display_mode_list,
-        "FindClosestMatchingMode" => |p| {
-            let (want, out) = (p.arg(1), p.arg(2));
-            let b = p.read_bytes(want, 28)?;
-            p.write_bytes(out, &b)?;
-            Ok(S_OK)
-        },
+        "FindClosestMatchingMode" => find_closest_matching_mode,
         _ => return None,
     })
 }
@@ -187,17 +182,87 @@ fn get_adapter_desc1(p: &mut Process) -> R {
 fn get_display_mode_list(p: &mut Process) -> R {
     // (this, EnumFormat, Flags, UINT* pNumModes, DXGI_MODE_DESC* pDesc)
     let (fmt, count_p, desc_p) = (p.arg(1) as u32, p.arg(3), p.arg(4));
-    const MODES: [(u32, u32); 4] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)];
-    let have = p.rd32(count_p)? as usize;
-    if desc_p != 0 {
-        for (i, (w, h)) in MODES.iter().enumerate().take(have) {
-            let a = desc_p + 28 * i as u64;
-            for (k, v) in [*w, *h, 60, 1, fmt, 0, 0].iter().enumerate() {
-                p.wr32(a + 4 * k as u64, *v)?;
-            }
+    let flags = p.arg(2) as u32;
+    if count_p == 0 || flags & !0x3 != 0 {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    }
+    if !DXGI_MODE_FORMATS.contains(&fmt) {
+        p.wr32(count_p, 0)?;
+        return Ok(DXGI_ERROR_NOT_FOUND);
+    }
+
+    if desc_p == 0 {
+        p.wr32(count_p, DXGI_OUTPUT_MODES.len() as u32)?;
+        return Ok(S_OK);
+    }
+
+    let capacity = p.rd32(count_p)? as usize;
+    let written = capacity.min(DXGI_OUTPUT_MODES.len());
+    for (i, (w, h)) in DXGI_OUTPUT_MODES.iter().take(written).enumerate() {
+        let a = desc_p + 28 * i as u64;
+        for (k, v) in [*w, *h, 60, 1, fmt, 0, 0].iter().enumerate() {
+            p.wr32(a + 4 * k as u64, *v)?;
         }
     }
-    p.wr32(count_p, MODES.len() as u32)?;
+    p.wr32(count_p, written as u32)?;
+    Ok(if written < DXGI_OUTPUT_MODES.len() {
+        DXGI_ERROR_MORE_DATA
+    } else {
+        S_OK
+    })
+}
+
+fn find_closest_matching_mode(p: &mut Process) -> R {
+    // (this, const DXGI_MODE_DESC* pModeToMatch, DXGI_MODE_DESC* pClosestMatch,
+    //  IUnknown* pConcernedDevice)
+    let (want, out, concerned_device) = (p.arg(1), p.arg(2), p.arg(3));
+    if want == 0 || out == 0 {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    }
+    let mut requested = [0u32; 7];
+    for (i, value) in requested.iter_mut().enumerate() {
+        *value = p.rd32(want + i as u64 * 4)?;
+    }
+    let [width, height, refresh_num, refresh_den, requested_format, scanline, scaling] = requested;
+    if (width == 0) != (height == 0)
+        || (refresh_num == 0) != (refresh_den == 0)
+        || scanline > 3
+        || scaling > 2
+    {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    }
+    let format = if requested_format == 0 {
+        if concerned_device == 0 {
+            return Ok(DXGI_ERROR_INVALID_CALL);
+        }
+        if !matches!(kind_of(p, concerned_device), Some(Kind::Device)) {
+            return Ok(DXGI_ERROR_INVALID_CALL);
+        }
+        DXGI_MODE_FORMATS[0]
+    } else if DXGI_MODE_FORMATS.contains(&requested_format) {
+        requested_format
+    } else {
+        return Ok(DXGI_ERROR_NOT_FOUND);
+    };
+
+    let target_width = if width == 0 { 1920 } else { width };
+    let target_height = if height == 0 { 1080 } else { height };
+    let &(best_width, best_height) = DXGI_OUTPUT_MODES
+        .iter()
+        .min_by_key(|&&(mode_width, mode_height)| {
+            let dw = u64::from(mode_width.abs_diff(target_width));
+            let dh = u64::from(mode_height.abs_diff(target_height));
+            dw * dw + dh * dh
+        })
+        .expect("the virtual output advertises at least one mode");
+    let mut closest = [0u8; 28];
+    for (i, value) in [best_width, best_height, 60, 1, format, 0, 0]
+        .iter()
+        .enumerate()
+    {
+        closest[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    p.write_bytes(out, &closest)?;
     Ok(S_OK)
 }
 
@@ -205,7 +270,43 @@ fn get_display_mode_list(p: &mut Process) -> R {
 mod tests {
     use super::*;
     use crate::Vfs;
-    use anywasm_cpu::cpu::RCX;
+    use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+
+    fn set_mode_list_args(p: &mut Process, format: u32, flags: u32, count: u64, desc: u64) {
+        if p.cpu.gpr[RSP] == 0 {
+            let stack = p.alloc_virtual(0x1000, anywasm_cpu::mem::PROT_RW);
+            p.cpu.gpr[RSP] = stack + 0x800;
+        }
+        p.cpu.gpr[RCX] = 0x1000;
+        p.cpu.gpr[RDX] = format as u64;
+        p.cpu.gpr[R8] = flags as u64;
+        p.cpu.gpr[R9] = count;
+        p.wr64(p.cpu.gpr[RSP] + 40, desc).unwrap();
+    }
+
+    #[test]
+    fn immutable_output_queries_are_modeled_and_stateful_setters_unresolved() {
+        let mut p = Process::new(Vfs::new());
+        assert_eq!(method("IDXGIFactory", "IsCurrent").unwrap()(&mut p), Ok(1));
+        assert_eq!(
+            method("IDXGIOutput", "IsWindowedStereoEnabled").unwrap()(&mut p),
+            Ok(0)
+        );
+        for method_name in [
+            "MakeWindowAssociation",
+            "SetFullscreenState",
+            "ResizeTarget",
+            "WaitForVBlank",
+            "SetMaximumFrameLatency",
+            "SetGPUThreadPriority",
+            "SetResizeFlags",
+        ] {
+            assert!(
+                method("IDXGISwapChain", method_name).is_none(),
+                "{method_name} should remain visibly unsupported"
+            );
+        }
+    }
 
     #[test]
     fn swap_chain_frame_latency_wait_handle_is_stable_and_ready() {
@@ -229,6 +330,77 @@ mod tests {
             })
         ));
         assert_eq!(get_frame_latency_waitable_object(&mut p).unwrap(), first);
+    }
+
+    #[test]
+    fn display_mode_list_validates_inputs_and_obeys_count_capacity() {
+        let mut p = Process::new(Vfs::new());
+        let mem = p.alloc_virtual(0x1000, anywasm_cpu::mem::PROT_RW);
+        let count = mem;
+        let desc = mem + 16;
+
+        p.wr32(count, 0).unwrap();
+        set_mode_list_args(&mut p, 28, 0, count, 0);
+        assert_eq!(get_display_mode_list(&mut p), Ok(S_OK));
+        assert_eq!(p.rd32(count), Ok(4));
+
+        p.wr32(count, 2).unwrap();
+        set_mode_list_args(&mut p, 28, 0, count, desc);
+        assert_eq!(get_display_mode_list(&mut p), Ok(DXGI_ERROR_MORE_DATA));
+        assert_eq!(p.rd32(count), Ok(2));
+        assert_eq!(p.rd32(desc), Ok(1280));
+        assert_eq!(p.rd32(desc + 28), Ok(1600));
+
+        p.wr32(count, 4).unwrap();
+        set_mode_list_args(&mut p, 87, 0, count, desc);
+        assert_eq!(get_display_mode_list(&mut p), Ok(S_OK));
+        assert_eq!(p.rd32(count), Ok(4));
+        assert_eq!(p.rd32(desc + 16), Ok(87));
+
+        set_mode_list_args(&mut p, 87, 0x4, count, desc);
+        assert_eq!(get_display_mode_list(&mut p), Ok(DXGI_ERROR_INVALID_CALL));
+
+        set_mode_list_args(&mut p, 999, 0, count, 0);
+        assert_eq!(get_display_mode_list(&mut p), Ok(DXGI_ERROR_NOT_FOUND));
+    }
+
+    #[test]
+    fn find_closest_mode_returns_a_mode_from_the_advertised_set() {
+        let mut p = Process::new(Vfs::new());
+        let mem = p.alloc_virtual(0x1000, anywasm_cpu::mem::PROT_RW);
+        let requested = mem;
+        let closest = mem + 64;
+        for (i, value) in [1700u32, 950, 60, 1, 28, 0, 0].iter().enumerate() {
+            p.wr32(requested + i as u64 * 4, *value).unwrap();
+        }
+        p.cpu.gpr[RCX] = 0x1000;
+        p.cpu.gpr[RDX] = requested;
+        p.cpu.gpr[R8] = closest;
+        p.cpu.gpr[R9] = 0;
+
+        assert_eq!(
+            method("IDXGIOutput", "FindClosestMatchingMode").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        let actual = (0..7)
+            .map(|i| p.rd32(closest + i * 4).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![1600, 900, 60, 1, 28, 0, 0]);
+
+        p.wr32(requested + 16, 999).unwrap();
+        assert_eq!(
+            method("IDXGIOutput", "FindClosestMatchingMode").unwrap()(&mut p),
+            Ok(DXGI_ERROR_NOT_FOUND)
+        );
+
+        p.wr32(requested + 16, 0).unwrap();
+        let device = create(&mut p, "ID3D11Device", Kind::Device);
+        p.cpu.gpr[R9] = device;
+        assert_eq!(
+            method("IDXGIOutput", "FindClosestMatchingMode").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        assert_eq!(p.rd32(closest + 16), Ok(28));
     }
 
     #[test]

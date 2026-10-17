@@ -16,18 +16,9 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "RtlGrowFunctionTable" => rtl_grow_function_table,
         "RtlDeleteGrowableFunctionTable" => rtl_delete_growable_function_table,
         "RtlVerifyVersionInfo" => rtl_verify_version_info,
-        "RtlAllocateHeap" => |p| {
-            let n = p.arg(2);
-            Ok(kernel32::alloc_block(p, n, true))
-        },
-        "RtlFreeHeap" => |p| {
-            let a = p.arg(2);
-            Ok((a == 0 || kernel32::free_block(p, a)) as u64)
-        },
-        "RtlReAllocateHeap" => |p| {
-            let (fl, a, n) = (p.arg(1), p.arg(2), p.arg(3));
-            kernel32::realloc_block(p, a, n, fl | 8)
-        },
+        "RtlAllocateHeap" => rtl_allocate_heap,
+        "RtlFreeHeap" => rtl_free_heap,
+        "RtlReAllocateHeap" => rtl_reallocate_heap,
         "RtlGetVersion" => |p| {
             let a = p.arg(0);
             p.wr32(a + 4, 10)?;
@@ -36,10 +27,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr32(a + 16, 2)?;
             Ok(0)
         },
-        "RtlInitializeCriticalSection"
-        | "RtlEnterCriticalSection"
-        | "RtlLeaveCriticalSection"
-        | "RtlDeleteCriticalSection" => |_| Ok(0),
+        "RtlInitializeCriticalSection" => rtl_initialize_critical_section,
+        "RtlEnterCriticalSection" => rtl_enter_critical_section,
+        "RtlLeaveCriticalSection" => rtl_leave_critical_section,
+        "RtlDeleteCriticalSection" => rtl_delete_critical_section,
         "RtlInitUnicodeString" => |p| {
             let (d, s) = (p.arg(0), p.arg(1));
             let n = if s == 0 {
@@ -52,27 +43,215 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr64(d + 8, s)?;
             Ok(0)
         },
-        "NtClose" => |p| {
-            let h = p.arg(0);
-            p.handles.remove(&h);
-            Ok(0)
-        },
+        "NtClose" => nt_close,
         "NtTerminateProcess" => |p| {
+            let process = p.arg(0);
+            if process != 0 && process != u64::MAX && process != u32::MAX as u64 {
+                return Ok(0xC000_0008); // STATUS_INVALID_HANDLE
+            }
             let code = p.arg(1) as u32;
             p.finish_exit(code).map(|_| 0)
         },
-        "NtQueryPerformanceCounter" => |p| {
-            let a = p.arg(0);
-            let t = (p.cpu.icount + p.extra.sleep_adjust) / 10;
-            p.wr64(a, t)?;
-            Ok(0)
-        },
-        "RtlNtStatusToDosError" => |_| Ok(317),
+        "NtQueryPerformanceCounter" => nt_query_performance_counter,
+        "RtlNtStatusToDosError" => rtl_nt_status_to_dos_error,
         "RtlVirtualUnwind" => crate::exception::rtl_virtual_unwind,
         "RtlUnwind" => crate::exception32::rtl_unwind,
         "RtlUnwindEx" => crate::exception::rtl_unwind_ex,
         _ => return None,
     })
+}
+
+fn unsupported_ntdll_behavior(name: &str, detail: &str) -> Stop {
+    Stop::Unimplemented {
+        dll: "ntdll".into(),
+        name: format!("{name}: {detail}"),
+    }
+}
+
+fn rtl_allocate_heap(p: &mut Process) -> R {
+    let (heap, flags, size) = (p.arg(0), p.arg(1), p.arg(2));
+    if heap != p.heap.process_heap {
+        return Ok(0);
+    }
+    if flags & !0x0d != 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlAllocateHeap",
+            "unsupported heap flags",
+        ));
+    }
+    let allocation = kernel32::alloc_block(p, size, flags & 0x8 != 0);
+    if allocation == 0 && flags & 0x4 != 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlAllocateHeap",
+            "HEAP_GENERATE_EXCEPTIONS allocation failure is not translated",
+        ));
+    }
+    Ok(allocation)
+}
+
+fn rtl_free_heap(p: &mut Process) -> R {
+    let (heap, flags, allocation) = (p.arg(0), p.arg(1), p.arg(2));
+    if heap != p.heap.process_heap || allocation == 0 {
+        return Ok(0);
+    }
+    if flags & !0x1 != 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlFreeHeap",
+            "unsupported heap flags",
+        ));
+    }
+    Ok(kernel32::free_block(p, allocation) as u64)
+}
+
+fn rtl_reallocate_heap(p: &mut Process) -> R {
+    let (heap, flags, allocation, size) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3));
+    if heap != p.heap.process_heap {
+        return Ok(0);
+    }
+    if flags & !0x1d != 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlReAllocateHeap",
+            "unsupported heap flags",
+        ));
+    }
+    if flags & 0x10 != 0 && allocation != 0 {
+        let Some(old_size) = p.heap.size_of(allocation) else {
+            return Ok(0);
+        };
+        if size > old_size {
+            return Ok(0);
+        }
+    }
+    let result = kernel32::realloc_block(p, allocation, size, flags & 0x8);
+    if matches!(result, Ok(0)) && flags & 0x4 != 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlReAllocateHeap",
+            "HEAP_GENERATE_EXCEPTIONS allocation failure is not translated",
+        ));
+    }
+    result
+}
+
+fn rtl_initialize_critical_section(p: &mut Process) -> R {
+    let address = p.arg(0);
+    if address == 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlInitializeCriticalSection",
+            "null critical-section pointer",
+        ));
+    }
+    p.critical_sections.entry(address).or_default();
+    Ok(0) // STATUS_SUCCESS
+}
+
+fn rtl_enter_critical_section(p: &mut Process) -> R {
+    let address = p.arg(0);
+    let id = p.current_thread_id;
+    if p.try_acquire_critical(address, id) {
+        return Ok(0);
+    }
+    if p.nested != 0 {
+        return Err(unsupported_ntdll_behavior(
+            "RtlEnterCriticalSection",
+            "contended critical section from a nested synchronous guest callback cannot be scheduled",
+        ));
+    }
+    let waiters = &mut p.critical_sections.entry(address).or_default().waiters;
+    if !waiters.contains(&id) {
+        waiters.push_back(id);
+    }
+    p.block_current_thread(ThreadWait::CriticalAcquire { address });
+    Ok(0)
+}
+
+fn rtl_leave_critical_section(p: &mut Process) -> R {
+    let address = p.arg(0);
+    if !p.release_critical(address, p.current_thread_id) {
+        return Err(unsupported_ntdll_behavior(
+            "RtlLeaveCriticalSection",
+            "current thread does not own the critical section",
+        ));
+    }
+    Ok(0)
+}
+
+fn rtl_delete_critical_section(p: &mut Process) -> R {
+    let address = p.arg(0);
+    let Some(state) = p.critical_sections.get(&address) else {
+        return Err(unsupported_ntdll_behavior(
+            "RtlDeleteCriticalSection",
+            "critical section was not initialized",
+        ));
+    };
+    if state.owner.is_some() || !state.waiters.is_empty() {
+        return Err(unsupported_ntdll_behavior(
+            "RtlDeleteCriticalSection",
+            "critical section is still owned or has waiters",
+        ));
+    }
+    p.critical_sections.remove(&address);
+    Ok(0)
+}
+
+fn nt_close(p: &mut Process) -> R {
+    const STATUS_INVALID_HANDLE: u64 = 0xC000_0008;
+    Ok(if p.handles.remove(&p.arg(0)).is_some() {
+        0
+    } else {
+        STATUS_INVALID_HANDLE
+    })
+}
+
+fn nt_query_performance_counter(p: &mut Process) -> R {
+    const STATUS_ACCESS_VIOLATION: u64 = 0xC000_0005;
+    let counter = p.arg(0);
+    let frequency = p.arg(1);
+    if counter == 0 {
+        return Ok(STATUS_ACCESS_VIOLATION);
+    }
+    p.wr64(counter, kernel32::query_performance_counter_value(p))?;
+    if frequency != 0 {
+        p.wr64(frequency, kernel32::QUERY_PERFORMANCE_FREQUENCY)?;
+    }
+    Ok(0) // STATUS_SUCCESS
+}
+
+fn rtl_nt_status_to_dos_error(p: &mut Process) -> R {
+    let status = p.arg(0) as u32;
+    let error = match status {
+        0x0000_0000 => 0,           // STATUS_SUCCESS
+        0x0000_0102 => 1460,        // STATUS_TIMEOUT
+        0x0000_0103 => 997,         // STATUS_PENDING
+        0x4000_0000 => 698,         // STATUS_OBJECT_NAME_EXISTS
+        0x8000_0005 => 234,         // STATUS_BUFFER_OVERFLOW
+        0x8000_0006 => 18,          // STATUS_NO_MORE_FILES
+        0xc000_0002 => 1,           // STATUS_NOT_IMPLEMENTED
+        0xc000_0005 => 998,         // STATUS_ACCESS_VIOLATION
+        0xc000_0008 => 6,           // STATUS_INVALID_HANDLE
+        0xc000_000d => 87,          // STATUS_INVALID_PARAMETER
+        0xc000_000f => 2,           // STATUS_NO_SUCH_FILE
+        0xc000_0011 => 38,          // STATUS_END_OF_FILE
+        0xc000_0017 => 8,           // STATUS_NO_MEMORY
+        0xc000_0022 => 5,           // STATUS_ACCESS_DENIED
+        0xc000_0023 => 122,         // STATUS_BUFFER_TOO_SMALL
+        0xc000_0033 => 123,         // STATUS_OBJECT_NAME_INVALID
+        0xc000_0034 => 2,           // STATUS_OBJECT_NAME_NOT_FOUND
+        0xc000_0035 => 183,         // STATUS_OBJECT_NAME_COLLISION
+        0xc000_003a => 3,           // STATUS_OBJECT_PATH_NOT_FOUND
+        0xc000_003b => 161,         // STATUS_OBJECT_PATH_SYNTAX_BAD
+        0xc000_0043 => 32,          // STATUS_SHARING_VIOLATION
+        0xc000_007b => 193,         // STATUS_INVALID_IMAGE_FORMAT
+        0xc000_007f => 112,         // STATUS_DISK_FULL
+        0xc000_0094 => 0xc000_0094, // STATUS_INTEGER_DIVIDE_BY_ZERO (native passthrough)
+        0xc000_00a2 => 19,          // STATUS_MEDIA_WRITE_PROTECTED
+        0xc000_011f => 4,           // STATUS_TOO_MANY_OPENED_FILES
+        0xc000_0135 => 126,         // STATUS_DLL_NOT_FOUND
+        0xc000_0139 => 127,         // STATUS_ENTRYPOINT_NOT_FOUND
+        0xc000_0142 => 1114,        // STATUS_DLL_INIT_FAILED
+        0xc000_0059 => 1306,        // STATUS_REVISION_MISMATCH
+        _ => 317,                   // ERROR_MR_MID_NOT_FOUND, the documented fallback
+    };
+    Ok(error)
 }
 
 fn rtl_lookup_function_entry(p: &mut Process) -> R {
@@ -771,5 +950,168 @@ mod rtl_pc_to_file_header_tests {
         assert_eq!(process.rd64(CONTEXT + 0x98), Ok(GUEST_STACK + 40));
         assert_eq!(process.rd64(OUTPUT), Ok(UNWIND_INFO + 12));
         assert_eq!(process.rd64(OUTPUT + 8), Ok(GUEST_STACK));
+    }
+}
+
+#[cfg(test)]
+mod ntdll_api_behavior_tests {
+    use super::*;
+    use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+    const OUTPUT: u64 = 0x50000;
+
+    fn process() -> Process {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        assert!(process.mem.map(OUTPUT, PAGE_SIZE, PROT_RW));
+        process
+    }
+
+    #[test]
+    fn rtl_critical_section_calls_update_the_scheduler_lock_state() {
+        let mut process = process();
+        let address = OUTPUT + 0x100;
+        process.cpu.gpr[RCX] = address;
+        let initialize = lookup("RtlInitializeCriticalSection").unwrap();
+        let enter = lookup("RtlEnterCriticalSection").unwrap();
+        let leave = lookup("RtlLeaveCriticalSection").unwrap();
+        let delete = lookup("RtlDeleteCriticalSection").unwrap();
+
+        assert_eq!(initialize(&mut process), Ok(0));
+        assert_eq!(enter(&mut process), Ok(0));
+        assert_eq!(enter(&mut process), Ok(0));
+        let state = process.critical_sections.get(&address).unwrap();
+        assert_eq!(state.owner, Some(process.current_thread_id));
+        assert_eq!(state.recursion, 2);
+
+        assert_eq!(leave(&mut process), Ok(0));
+        assert_eq!(process.critical_sections[&address].recursion, 1);
+        assert_eq!(leave(&mut process), Ok(0));
+        assert_eq!(process.critical_sections[&address].owner, None);
+        assert_eq!(delete(&mut process), Ok(0));
+        assert!(!process.critical_sections.contains_key(&address));
+    }
+
+    #[test]
+    fn rtl_critical_section_reports_nested_contention_instead_of_faking_acquisition() {
+        let mut process = process();
+        let address = OUTPUT + 0x100;
+        process.critical_sections.entry(address).or_default().owner = Some(0x7777);
+        process.nested = 1;
+        process.cpu.gpr[RCX] = address;
+        let enter = lookup("RtlEnterCriticalSection").unwrap();
+
+        assert!(matches!(
+            enter(&mut process),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "ntdll" && name.contains("contended critical section")
+        ));
+        assert_eq!(process.critical_sections[&address].owner, Some(0x7777));
+    }
+
+    #[test]
+    fn nt_close_returns_invalid_handle_for_unknown_handles() {
+        let mut process = process();
+        let close = lookup("NtClose").unwrap();
+
+        process.handles.insert(0x1234, Handle::Other);
+        process.cpu.gpr[RCX] = 0x1234;
+        assert_eq!(close(&mut process), Ok(0));
+        assert!(!process.handles.contains_key(&0x1234));
+
+        process.cpu.gpr[RCX] = 0xdead;
+        assert_eq!(close(&mut process), Ok(0xC000_0008));
+    }
+
+    #[test]
+    fn nt_terminate_process_does_not_terminate_for_an_unmodeled_process_handle() {
+        let mut process = process();
+        process.cpu.gpr[RCX] = 0xdead;
+        process.cpu.gpr[RDX] = 9;
+        let terminate = lookup("NtTerminateProcess").unwrap();
+
+        assert_eq!(terminate(&mut process), Ok(0xC000_0008));
+        assert_eq!(process.exit_code, None);
+    }
+
+    #[test]
+    fn nt_query_performance_counter_writes_counter_and_optional_frequency() {
+        let mut process = process();
+        let counter = OUTPUT;
+        let frequency = OUTPUT + 8;
+        process.cpu.gpr[RCX] = counter;
+        process.cpu.gpr[RDX] = frequency;
+        let query = lookup("NtQueryPerformanceCounter").unwrap();
+
+        assert_eq!(query(&mut process), Ok(0));
+        assert_eq!(
+            process.rd64(counter),
+            Ok(kernel32::query_performance_counter_value(&process))
+        );
+        assert_eq!(
+            process.rd64(frequency),
+            Ok(kernel32::QUERY_PERFORMANCE_FREQUENCY)
+        );
+    }
+
+    #[test]
+    fn rtl_ntstatus_to_dos_error_translates_known_statuses_and_uses_documented_unknown_code() {
+        let mut process = process();
+        let convert = lookup("RtlNtStatusToDosError").unwrap();
+
+        process.cpu.gpr[RCX] = 0;
+        assert_eq!(convert(&mut process), Ok(0));
+        process.cpu.gpr[RCX] = 0xC000_000D;
+        assert_eq!(convert(&mut process), Ok(87));
+        process.cpu.gpr[RCX] = 0x4000_0000;
+        assert_eq!(convert(&mut process), Ok(698));
+        process.cpu.gpr[RCX] = 0xC000_0002;
+        assert_eq!(convert(&mut process), Ok(1));
+        process.cpu.gpr[RCX] = 0xC000_0094;
+        assert_eq!(convert(&mut process), Ok(0xC000_0094));
+        process.cpu.gpr[RCX] = 0xDEAD_BEEF;
+        assert_eq!(convert(&mut process), Ok(317));
+    }
+
+    #[test]
+    fn rtl_heap_calls_reject_non_process_heaps_and_do_not_force_reallocation_zeroing() {
+        let mut process = process();
+        let alloc = lookup("RtlAllocateHeap").unwrap();
+        let free = lookup("RtlFreeHeap").unwrap();
+        let realloc = lookup("RtlReAllocateHeap").unwrap();
+
+        process.cpu.gpr[RCX] = 0xdead;
+        process.cpu.gpr[RDX] = 0;
+        process.cpu.gpr[R8] = 32;
+        let bytes_before = process.heap.bytes_in_use;
+        assert_eq!(alloc(&mut process), Ok(0));
+        assert_eq!(process.heap.bytes_in_use, bytes_before);
+        assert_eq!(free(&mut process), Ok(0));
+
+        let heap = process.heap.process_heap;
+        process.cpu.gpr[RCX] = heap;
+        process.cpu.gpr[RDX] = 0;
+        process.cpu.gpr[R8] = 16;
+        let old = alloc(&mut process).unwrap();
+        process.write_bytes(old, &[0xAA; 16]).unwrap();
+
+        process.cpu.gpr[RCX] = heap;
+        process.cpu.gpr[RDX] = 0;
+        process.cpu.gpr[R8] = 64;
+        let recycled = alloc(&mut process).unwrap();
+        process.write_bytes(recycled, &[0xBB; 64]).unwrap();
+        process.cpu.gpr[RCX] = heap;
+        process.cpu.gpr[RDX] = 0;
+        process.cpu.gpr[R8] = recycled;
+        assert_eq!(free(&mut process), Ok(1));
+
+        process.cpu.gpr[RCX] = heap;
+        process.cpu.gpr[RDX] = 0;
+        process.cpu.gpr[R8] = old;
+        process.cpu.gpr[R9] = 64;
+        let grown = realloc(&mut process).unwrap();
+        assert_ne!(grown, 0);
+        assert_eq!(process.read_bytes(grown, 16).unwrap(), vec![0xAA; 16]);
+        assert_eq!(process.read_bytes(grown + 16, 48).unwrap(), vec![0xBB; 48]);
     }
 }

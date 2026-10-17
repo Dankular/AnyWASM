@@ -45,7 +45,7 @@
 <body>
 <main>
   <h1>AnyWASM</h1>
-  <p class="sub">Run a packaged Windows x64 program inside WebAssembly.</p>
+  <p class="sub">Run a packaged Windows x64 program or stream a supported local game install directly.</p>
 
   <div class="caps" id="caps"></div>
 
@@ -56,9 +56,11 @@
     <button id="demo-tri">Run D3D11 triangle</button>
     <button id="demo-tex">Run D3D11 textured quads</button>
     <button id="demo-gta">Run GTA: San Andreas</button>
+    <button id="demo-sims3">Run The Sims 3 from D:\The Sims 3</button>
     <button id="stop" disabled>Stop</button>
   </div>
   <p class="sub">The local GTA bundle keeps the compact 1.0 executable and general sound effects; radio, music, and dialogue banks are omitted to fit browser memory.</p>
+  <p class="sub">This runs D:\The Sims 3\Game\Bin\TS3W.exe and streams game data from that folder without a packed bundle.</p>
 
   <section id="package-manager" aria-labelledby="package-heading">
     <h2 id="package-heading">Package library</h2>

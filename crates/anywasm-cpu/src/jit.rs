@@ -488,7 +488,11 @@ fn safe_x86_32_instruction(instruction: JitInstruction) -> bool {
         | JitInstruction::Branch { .. } => true,
         JitInstruction::Call { stack_size: 4, .. }
         | JitInstruction::Return { stack_size: 4, .. } => true,
-        JitInstruction::CallRegister { register, stack_size: 4, .. } => register < 8,
+        JitInstruction::CallRegister {
+            register,
+            stack_size: 4,
+            ..
+        } => register < 8,
         JitInstruction::Mov(mov) if mov.dst < 8 => match mov.source {
             MovSource::Immediate(_) => true,
             MovSource::Register { index, zero_extend } => index < 8 && zero_extend,
@@ -1126,9 +1130,7 @@ fn emit_module(start: u64, instructions: &[JitInstruction], mode: CpuMode) -> Ve
                 uleb(RIP_LOCAL, &mut code);
             }
             JitInstruction::Call {
-                target,
-                stack_size,
-                ..
+                target, stack_size, ..
             } => {
                 emit_call_stack_store(rip, *stack_size, mode, &mut code);
                 rip_after = wrap_ip(mode, *target);
@@ -2880,10 +2882,8 @@ mod tests {
     fn emits_x86_32_scaled_lea_in_the_gta_scanner() {
         // These are the two scaled address calculations immediately after the scanner's
         // digit-classification test at gta_sa.exe+0x8291b0.
-        let lea_accumulator =
-            decode_mode(&[0x8d, 0x04, 0xbf], 0x8291b0, CpuMode::X86_32).unwrap();
-        let lea_digit =
-            decode_mode(&[0x8d, 0x7c, 0x43, 0xd0], 0x8291b3, CpuMode::X86_32).unwrap();
+        let lea_accumulator = decode_mode(&[0x8d, 0x04, 0xbf], 0x8291b0, CpuMode::X86_32).unwrap();
+        let lea_digit = decode_mode(&[0x8d, 0x7c, 0x43, 0xd0], 0x8291b3, CpuMode::X86_32).unwrap();
         assert_eq!(lea_accumulator.op, Op::Lea);
         assert_eq!(lea_accumulator.osz, 4);
         assert_eq!(lea_digit.op, Op::Lea);

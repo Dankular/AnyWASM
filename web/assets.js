@@ -100,6 +100,7 @@ export class AssetRangeCache {
   constructor(url, packageLength, {
     maxBytes = ASSET_CACHE_LIMIT,
     fetcher = fetch,
+    readRange = null,
     onProgress = () => {},
     fileRanges = [],
     maxConcurrentFetches = 4,
@@ -118,9 +119,19 @@ export class AssetRangeCache {
       throw new RangeError('asset read-ahead must be between 0 and 16 chunks');
     }
     this.fetcher = fetcher;
+    if (readRange !== null && typeof readRange !== 'function') {
+      throw new TypeError('asset range source must be a function');
+    }
+    this.readRange = readRange;
     this.onProgress = onProgress;
     this.fileRanges = fileRanges;
     this.cache = new Map();
+    this.directCache = new Map();
+    this.directCacheBytes = 0;
+    this.directInflight = new Map();
+    this.directQueue = [];
+    this.activeDirectReads = 0;
+    this.nextDirectOrder = 0;
     this.inflight = new Map();
     this.queue = [];
     this.nextQueueOrder = 0;
@@ -138,6 +149,12 @@ export class AssetRangeCache {
     const end = start + BigInt(length);
     if (start < 0n || end > this.packageLength) throw new RangeError('asset read is outside the package');
     if (length === 0) return;
+    if (this.readRange) {
+      if (length > this.maxBytes) throw new RangeError('guest asset read exceeds the cache capacity');
+      await this.#ensureDirectRange(start, length);
+      this.lastRead = { end, fileRange: this.#findFileRange(start) };
+      return;
+    }
     const first = start / BigInt(ASSET_CHUNK_SIZE);
     const last = (end - 1n) / BigInt(ASSET_CHUNK_SIZE);
     if (last - first + 1n > BigInt(Math.floor(this.maxBytes / ASSET_CHUNK_SIZE))) {
@@ -166,6 +183,12 @@ export class AssetRangeCache {
     }
     if (length === 0) return true;
     const end = start + BigInt(length);
+    if (this.readRange) {
+      const bytes = this.#touchDirectRange(start, length);
+      if (!bytes) return false;
+      destination.set(bytes);
+      return true;
+    }
     const first = start / BigInt(ASSET_CHUNK_SIZE);
     const last = (end - 1n) / BigInt(ASSET_CHUNK_SIZE);
     for (let chunk = first; chunk <= last; chunk++) {
@@ -192,6 +215,71 @@ export class AssetRangeCache {
       this.cache.set(chunk, bytes);
     }
     return bytes;
+  }
+
+  #touchDirectRange(start, length) {
+    const key = `${start}:${length}`;
+    const bytes = this.directCache.get(key);
+    if (bytes) {
+      this.directCache.delete(key);
+      this.directCache.set(key, bytes);
+    }
+    return bytes;
+  }
+
+  #ensureDirectRange(start, length) {
+    const key = `${start}:${length}`;
+    const cached = this.#touchDirectRange(start, length);
+    if (cached) return Promise.resolve(cached);
+    const existing = this.directInflight.get(key);
+    if (existing) return existing;
+
+    let resolveRequest;
+    let rejectRequest;
+    const promise = new Promise((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+    this.directInflight.set(key, promise);
+    this.directQueue.push({ key, start, length, order: this.nextDirectOrder++, resolve: resolveRequest, reject: rejectRequest });
+    this.#pumpDirectQueue();
+    return promise;
+  }
+
+  #pumpDirectQueue() {
+    while (this.activeDirectReads < this.maxConcurrentFetches && this.directQueue.length) {
+      const item = this.directQueue.shift();
+      this.activeDirectReads++;
+      Promise.resolve()
+        .then(() => this.readRange(item.start, item.length))
+        .then((bytes) => {
+          if (!(bytes instanceof Uint8Array) || bytes.byteLength !== item.length) {
+            const received = bytes?.byteLength ?? 'non-byte result';
+            throw new Error(`asset source returned ${received} bytes for a ${item.length}-byte range`);
+          }
+          if (bytes.byteLength > this.maxBytes) throw new Error('asset cache limit is smaller than one direct range');
+          if (!this.directCache.has(item.key)) {
+            this.directCache.set(item.key, bytes);
+            this.directCacheBytes += bytes.byteLength;
+            this.fetchedBytes += bytes.byteLength;
+            this.onProgress({ fetchedBytes: this.fetchedBytes, cacheBytes: this.directCacheBytes, packageLength: this.packageLength });
+            while (this.directCacheBytes > this.maxBytes || this.directCache.size > 4096) {
+              const oldest = this.directCache.keys().next().value;
+              const evicted = this.directCache.get(oldest);
+              this.directCache.delete(oldest);
+              this.directCacheBytes -= evicted.byteLength;
+            }
+          }
+          return this.directCache.get(item.key);
+        })
+        .then(item.resolve, item.reject)
+        .finally(() => {
+          this.directInflight.delete(item.key);
+          this.activeDirectReads--;
+          this.#pumpDirectQueue();
+        })
+        .catch(() => {});
+    }
   }
 
   #findFileRange(offset) {

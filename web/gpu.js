@@ -64,6 +64,11 @@ const TEX_CHANNELS = {
   85: 'rgb', 86: 'rgba', 87: 'rgba', 88: 'rgb', 90: 'rgba', 91: 'rgba', 92: 'rgb', 93: 'rgb',
   94: 'rgb', 95: 'rgb', 96: 'rgb', 97: 'rgba', 98: 'rgba', 99: 'rgba', 115: 'rgba',
 };
+function texChannels(dxgi) {
+  const channels = TEX_CHANNELS[dxgi];
+  if (!channels) throw new Error(`DXGI view channel layout ${dxgi} is not translated`);
+  return channels;
+}
 // DXGI packed BGR formats use the first named component in the least-significant bits.
 // RGBA16_FLOAT is the portable rendering/sampling backing; conversion back to the packed DXGI
 // texel happens only at the guest-visible staging boundary.
@@ -246,6 +251,11 @@ function dualSourceFragmentWgsl(wgsl) {
 }
 const ADDRESS = { 1: 'repeat', 2: 'mirror-repeat', 3: 'clamp-to-edge', 4: 'clamp-to-edge', 5: 'clamp-to-edge' };
 const TOPOLOGY = { 1: 'point-list', 2: 'line-list', 3: 'line-strip', 4: 'triangle-list', 5: 'triangle-strip' };
+function requireEnum(table, value, label) {
+  const translated = table[value];
+  if (translated === undefined) throw new Error(`${label} value ${value} is not translated`);
+  return translated;
+}
 
 function splitWgslArguments(text) {
   const args = [];
@@ -311,7 +321,7 @@ function borderSampleLevelWgsl(textureName, textureType, samplerIndex, addressMo
   const minLod = settings?.lodMinClamp || 0;
   const maxLod = settings?.lodMaxClamp ?? 32;
   const floatLiteral = (value) => Number.isInteger(value) ? `${value}.0` : String(value);
-  const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+  const channels = texChannels(textureFormat);
   const formattedBorderColor = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
     ? borderColor[index]
     : index === 3 ? 1 : 0);
@@ -495,7 +505,7 @@ function anisotropicBorderSampleWgsl(sampleName, textureName, textureType, sampl
       || comparison !== depthTexture || (!comparison && textureType.component !== 'f32')) return null;
   const maxAnisotropy = Math.max(1, Math.min(16, settings?.maxAnisotropy || 1));
   if (maxAnisotropy <= 1) return null;
-  const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+  const channels = texChannels(textureFormat);
   const borderValues = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
     ? borderColor[index]
     : index === 3 ? 1 : 0);
@@ -563,7 +573,7 @@ function borderGatherWgsl(textureName, textureType, samplerIndex, addressModes, 
       || (!comparison && textureType.component !== 'f32')) return null;
 
   const name = `border_gather_${textureName}_${samplerIndex}`;
-  const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+  const channels = texChannels(textureFormat);
   const formattedBorderColor = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
     ? borderColor[index]
     : index === 3 ? 1 : 0);
@@ -824,7 +834,7 @@ function samplerAddressSampleWgsl(wgsl, samplerAddressModes, samplerBorderColors
         }).filter(Boolean).join(' || ');
         if (outside) {
           const borderColor = samplerBorderColors.get(samplerIndex) || [0, 0, 0, 0];
-          const channels = TEX_CHANNELS[textureFormat] || 'rgba';
+          const channels = texChannels(textureFormat);
           const borderValues = ['r', 'g', 'b', 'a'].map((channel, index) => channels.includes(channel)
             ? borderColor[index]
             : index === 3 ? 1 : 0);
@@ -884,6 +894,30 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 @fragment fn fs(v: VOut) -> @location(0) vec4<f32> { return textureSampleLevel(src, smp, v.uv, 0.0); }
 `;
 
+const GAMMA_BLIT_WGSL = `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@group(0) @binding(2) var gamma: texture_2d<f32>;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
+  var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  var o: VOut;
+  o.pos = vec4(p[i], 0.0, 1.0);
+  o.uv = vec2((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5);
+  return o;
+}
+@fragment fn fs(v: VOut) -> @location(0) vec4<f32> {
+  let color = textureSampleLevel(src, smp, v.uv, 0.0);
+  let r = i32(round(clamp(color.r, 0.0, 1.0) * 255.0));
+  let g = i32(round(clamp(color.g, 0.0, 1.0) * 255.0));
+  let b = i32(round(clamp(color.b, 0.0, 1.0) * 255.0));
+  return vec4<f32>(textureLoad(gamma, vec2<i32>(r, 0), 0).r,
+                   textureLoad(gamma, vec2<i32>(g, 1), 0).r,
+                   textureLoad(gamma, vec2<i32>(b, 2), 0).r,
+                   color.a);
+}
+`;
+
 export class GpuExecutor {
   /**
    * @param {OffscreenCanvas|HTMLCanvasElement} canvas
@@ -899,6 +933,9 @@ export class GpuExecutor {
   }
 
   reset() {
+    this.gammaTex?.destroy?.();
+    this.gammaTex = null;
+    this.gammaView = null;
     this.res = new Map();      // id -> {kind:'buffer'|'texture', gpu, ...}
     this.views = new Map();    // id -> view description
     this.shaders = new Map();
@@ -972,6 +1009,18 @@ export class GpuExecutor {
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blitBGL] }),
       vertex: { module: mod, entryPoint: 'vs' }, fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.canvasFormat }] }, primitive: { topology: 'triangle-list' },
     });
+    this.gammaBlitBGL = this.device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    ] });
+    const gammaMod = this.device.createShaderModule({ code: GAMMA_BLIT_WGSL });
+    this.gammaBlit = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.gammaBlitBGL] }),
+      vertex: { module: gammaMod, entryPoint: 'vs' },
+      fragment: { module: gammaMod, entryPoint: 'fs', targets: [{ format: this.canvasFormat }] },
+      primitive: { topology: 'triangle-list' },
+    });
     this.blitSampler = this.device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.defaultSampler = this.device.createSampler({});
     this.dummyTex = this.device.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -1020,19 +1069,40 @@ export class GpuExecutor {
     if (dxgi === 53 && (bind & 0x40)) return 'depth16unorm';
     if ((dxgi === 56 || dxgi === 58) && this.features?.has('float32-filterable')) return 'r32float';
     let f = TEX[dxgi];
-    if (!f) { this.log(`unsupported DXGI format ${dxgi}, using rgba8unorm`); f = 'rgba8unorm'; }
-    if (f.startsWith('bc') && !this.features.has('texture-compression-bc')) { this.log('BC texture requested but unsupported; substituting rgba8unorm'); return 'rgba8unorm'; }
-    if (f === 'depth32float-stencil8' && !this.features.has('depth32float-stencil8')) return 'depth24plus-stencil8';
+    if (!f) throw new Error(`unsupported DXGI format 0x${dxgi.toString(16)}`);
+    if (f.startsWith('bc') && !this.features?.has('texture-compression-bc')) {
+      throw new Error(`DXGI format ${dxgi} requires WebGPU feature texture-compression-bc`);
+    }
+    if (f === 'depth32float-stencil8' && !this.features?.has('depth32float-stencil8')) {
+      throw new Error(`DXGI format ${dxgi} requires WebGPU feature depth32float-stencil8`);
+    }
     return f;
+  }
+
+  vertexFormat(dxgi) {
+    const format = VTX[dxgi];
+    if (!format) throw new Error(`unsupported DXGI vertex format 0x${dxgi.toString(16)}`);
+    return format;
   }
 
   // ── command dispatch ─────────────────────────────────────────────────────
   /** Execute a command stream (Uint8Array). */
   execute(buf) {
+    const firstError = this.stats.errors.length;
     let p = 0;
     const dvAll = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    while (p + 8 <= buf.length) {
+    while (p < buf.length) {
+      const headerBytes = buf.length - p;
+      if (headerBytes < 8) {
+        this.stats.errors.push(`truncated GPU command header at offset ${p}: ${headerBytes} bytes; expected 8`);
+        break;
+      }
       const op = dvAll.getUint32(p, true), len = dvAll.getUint32(p + 4, true);
+      const payloadBytes = buf.length - p - 8;
+      if (len > payloadBytes) {
+        this.stats.errors.push(`truncated GPU command ${op} at offset ${p}: declared payload ${len} bytes, only ${payloadBytes} remain`);
+        break;
+      }
       const dv = new DataView(buf.buffer, buf.byteOffset + p + 8, len);
       const bytes = buf.subarray(p + 8, p + 8 + len);
       const started = this.profile ? performance.now() : 0;
@@ -1043,6 +1113,7 @@ export class GpuExecutor {
     const flushStarted = this.profile ? performance.now() : 0;
     this.flush();
     if (this.profile) this.recordProfile('FLUSH', performance.now() - flushStarted, 0);
+    return this.stats.errors.slice(firstError);
   }
 
   /** CPU-side (JavaScript) time spent issuing each command, when constructed with `profile: true`. */
@@ -1177,11 +1248,18 @@ export class GpuExecutor {
       case OP.RESOLVE_TEXTURE: this.resolveTexture(u(0), u(1), u(2), u(3), u(4)); break;
       case OP.SWAPCHAIN: this.createSwapchain(u(0), u(2), u(3), u(4), u(5)); break;
       case OP.RESIZE_SWAPCHAIN: this.resizeSwapchain(u(0), u(1), u(2), u(3), u(4)); break;
-      case OP.PRESENT: this.present(u(0), u(1), bytes.byteLength >= 12 ? u(2) : 1); break;
+      case OP.PRESENT: {
+        const gammaBytes = bytes.byteLength === 1548 ? bytes.subarray(12) : null;
+        if (bytes.byteLength > 12 && bytes.byteLength !== 1548) {
+          throw new Error(`PRESENT gamma ramp payload has ${bytes.byteLength - 12} bytes; expected 1536`);
+        }
+        this.present(u(0), u(1), bytes.byteLength >= 12 ? u(2) : 1, gammaBytes);
+        break;
+      }
       case OP.GENERATE_MIPS: this.generateMips(u(0)); break;
       case OP.RELEASE: this.release(u(0)); break;
       case OP.DISPATCH: this.dispatchCompute(u(0), u(1), u(2)); break;
-      default: this.log(`unknown opcode ${op}`);
+      default: throw new Error(`unsupported GPU opcode ${op}`);
     }
   }
 
@@ -1238,15 +1316,13 @@ export class GpuExecutor {
     if (!dst || !src || dst.kind !== 'texture' || src.kind !== 'texture'
       || src.samples <= 1 || dst.samples !== 1 || src.dimension !== '2d' || dst.dimension !== '2d'
       || src.format !== dst.format || (dxgiFormat && dxgiFormat !== src.dxgi) || isDepth(src.format)) {
-      this.log(`ResolveSubresource skipped: source ${srcId} and destination ${dstId} are incompatible`);
-      return;
+      throw new Error(`ResolveSubresource is not translated for source ${srcId} and destination ${dstId}`);
     }
     const srcMip = srcSub % src.mips, srcSlice = Math.floor(srcSub / src.mips);
     const dstMip = dstSub % dst.mips, dstSlice = Math.floor(dstSub / dst.mips);
     if (src.width >> srcMip !== dst.width >> dstMip || src.height >> srcMip !== dst.height >> dstMip
       || srcSlice >= src.array || dstSlice >= dst.array) {
-      this.log(`ResolveSubresource skipped: source ${srcId} and destination ${dstId} extents differ`);
-      return;
+      throw new Error(`ResolveSubresource extents differ for source ${srcId} and destination ${dstId}`);
     }
     this.endPass();
     this.invalidateNormalized16Raw(dst);
@@ -1369,12 +1445,14 @@ export class GpuExecutor {
     const lin = (bit) => ((filter >> bit) & 1 ? 'linear' : 'nearest');
     const d = {
       minFilter: lin(4), magFilter: lin(2), mipmapFilter: lin(0),
-      addressModeU: ADDRESS[au] || 'repeat', addressModeV: ADDRESS[av] || 'repeat', addressModeW: ADDRESS[aw] || 'repeat',
+      addressModeU: requireEnum(ADDRESS, au, 'D3D texture address mode'),
+      addressModeV: requireEnum(ADDRESS, av, 'D3D texture address mode'),
+      addressModeW: requireEnum(ADDRESS, aw, 'D3D texture address mode'),
       lodMinClamp: Math.max(0, minLod), lodMaxClamp: Math.min(32, Math.max(maxLod, minLod)),
     };
     const borderColor = [0, 1, 2, 3].map((channel) => dv.getFloat32(28 + channel * 4, true));
     if (isAniso) { d.minFilter = d.magFilter = d.mipmapFilter = 'linear'; d.maxAnisotropy = Math.max(1, Math.min(16, aniso)); }
-    if (comparison) d.compare = CMP[cmp] || 'always';
+    if (comparison) d.compare = requireEnum(CMP, cmp, 'D3D texture comparison function');
     const sampling = {
       minFilter: d.minFilter, magFilter: d.magFilter, mipmapFilter: d.mipmapFilter,
       mipBias: bias, lodMinClamp: d.lodMinClamp, lodMaxClamp: d.lodMaxClamp,
@@ -1440,8 +1518,8 @@ export class GpuExecutor {
     const source = shader.wgsl || shader.fixedFunction?.source;
     if (!source) return shader;
     const transformed = samplerAddressSampleWgsl(source, samplerAddressModes, samplerBorderColors, samplerSettings, textureFormats);
-    for (const message of transformed.unsupported) {
-      this.log(`sampler addressing unsupported: ${message}`);
+    if (transformed.unsupported.length) {
+      throw new Error(`sampler addressing is not translated: ${transformed.unsupported.join('; ')}`);
     }
     if (!transformed.changed) return shader;
     variant = {
@@ -1459,8 +1537,7 @@ export class GpuExecutor {
     if (variant) return variant;
     const wgsl = dualSourceFragmentWgsl(shader.wgsl);
     if (!wgsl) {
-      this.log('draw skipped: dual-source blending requires SV_Target0 and SV_Target1 outputs');
-      return null;
+      throw new Error('dual-source blending requires translated SV_Target0 and SV_Target1 outputs');
     }
     variant = { ...shader, wgsl, module: this.device.createShaderModule({ code: wgsl }) };
     this.dualSourceShaderVariants.set(shader, variant);
@@ -1476,10 +1553,7 @@ export class GpuExecutor {
       return;
     }
     if (![0x42, 0x44, 0x142, 0x144, 0x152].includes(fvf)) {
-      this.st.shader[0] = 0;
-      this.st.shader[1] = 0;
-      this.st.layout = 0;
-      this.log(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
+      throw new Error(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
     const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}/${colorOp1}/${colorArg01}/${colorArg11}/${colorArg21}/${alphaOp1}/${alphaArg01}/${alphaArg11}/${alphaArg21}`;
@@ -1660,7 +1734,8 @@ export class GpuExecutor {
       1: 'false', 2: 'outputColor.a < REFERENCE', 3: 'outputColor.a == REFERENCE',
       4: 'outputColor.a <= REFERENCE', 5: 'outputColor.a > REFERENCE',
       6: 'outputColor.a != REFERENCE', 7: 'outputColor.a >= REFERENCE', 8: 'true',
-    }[alphaFunc] || 'true';
+    }[alphaFunc];
+    if (compare === undefined) throw new Error(`D3D9 alpha comparison function ${alphaFunc} is not translated`);
     const referenceValue = (alphaRef & 0xff) / 255;
     const reference = referenceValue.toFixed(9);
     const key = `${psId}/${alphaFunc}/${alphaRef & 0xff}`;
@@ -1668,8 +1743,7 @@ export class GpuExecutor {
     if (variant) return variant;
     const statement = `return ${ps.fixedFunction.output};`;
     if (!ps.fixedFunction.source.includes(statement)) {
-      this.log('D3D9 alpha test skipped: fixed-function pixel shader output was not found');
-      return ps;
+      throw new Error('D3D9 alpha test translation could not locate the fixed-function pixel output');
     }
     const expression = compare.replaceAll('REFERENCE', reference);
     const replacement = `let outputColor = ${ps.fixedFunction.output};\n          if (!(${expression})) { discard; }\n          return outputColor;`;
@@ -1681,30 +1755,39 @@ export class GpuExecutor {
 
   viewFormat(dxgi, tex) {
     const f = dxgi ? this.texFormat(dxgi, tex.bind) : tex.format;
-    return f === tex.format || f === SRGB_PAIR[tex.format] || f === UNSRGB[tex.format] ? f : tex.format;
+    if (f === tex.format || f === SRGB_PAIR[tex.format] || f === UNSRGB[tex.format]) return f;
+    throw new Error(`DXGI view format ${dxgi} is incompatible with translated resource format ${tex.dxgi}`);
   }
 
   getView(id) {
     const v = this.views.get(id);
-    if (!v) return null;
+    if (!v) {
+      if (id === 0) return null;
+      throw new Error(`view ${id} has no translated descriptor`);
+    }
     if (v.cache) return v.cache;
     const tex = this.res.get(v.resource);
-    if (!tex) return null;
+    if (!tex) throw new Error(`view ${id} refers to untranslated resource ${v.resource}`);
     if (tex.kind === 'buffer') {
       const raw = (v.slice & 1) !== 0 || (tex.misc & 0x20) !== 0;
       const structured = (tex.misc & 0x40) !== 0;
       const stride = raw ? 4 : structured ? tex.stride : v.format ? BYTES(this.texFormat(v.format, tex.bind)) : 0;
       const offset = v.mip * stride;
       const size = Math.min(v.mips * stride, tex.d3dSize - offset);
-      if (!stride || offset < 0 || offset % 4 !== 0 || size <= 0 || size % 4 !== 0) return null;
+      if (!stride || offset < 0 || offset % 4 !== 0 || size <= 0 || size % 4 !== 0) {
+        throw new Error(`buffer view ${id} has an unsupported range`);
+      }
       v.cache = { buffer: tex.gpu, bufferResource: tex, offset, size, dim: 'buffer', format: v.format };
       return v.cache;
     }
-    if (tex.kind !== 'texture') return null;
+    if (tex.kind !== 'texture') throw new Error(`view ${id} resource kind ${tex.kind} is not translated`);
+    if (v.kind === 2 && v.dim === 7) {
+      throw new Error('multisampled array SRV dimension 7 is not translated');
+    }
     const layerTexture = tex.multisampledLayers
       ? tex.multisampledLayers[v.slice]
       : tex.gpu;
-    if (!layerTexture) return null;
+    if (!layerTexture) throw new Error(`view ${id} selects an unavailable texture layer`);
     const sourceFormat = this.viewFormat(v.format, tex);
     const depthOnly = hasStencil(sourceFormat) && v.kind === 2;
     const format = depthOnly ? depthAspectFormat(sourceFormat) : sourceFormat;
@@ -1741,7 +1824,7 @@ export class GpuExecutor {
   // ── clears ───────────────────────────────────────────────────────────────
   clearRtv(id, color) {
     const v = this.getView(id);
-    if (!v) return;
+    if (!v) throw new Error(`ClearRenderTargetView has no translated view ${id}`);
     this.invalidateNormalized16Raw(v.tex);
     this.endPass();
     const pass = this.encoder().beginRenderPass({ colorAttachments: [{ view: v.view, loadOp: 'clear', storeOp: 'store', clearValue: { r: color[0], g: color[1], b: color[2], a: color[3] } }] });
@@ -1751,7 +1834,7 @@ export class GpuExecutor {
 
   clearDsv(id, flags, depth, stencil) {
     const v = this.getView(id);
-    if (!v) return;
+    if (!v) throw new Error(`ClearDepthStencilView has no translated view ${id}`);
     this.endPass();
     const a = { view: v.view };
     a.depthLoadOp = flags & 1 ? 'clear' : 'load'; a.depthStoreOp = 'store'; a.depthClearValue = depth;
@@ -1763,9 +1846,9 @@ export class GpuExecutor {
 
   clearUav(id, isFloat, uintValues, floatValues) {
     const desc = this.views.get(id);
-    if (!desc || desc.kind !== 3) return;
+    if (!desc || desc.kind !== 3) throw new Error(`ClearUnorderedAccessView has no translated UAV descriptor for view ${id}`);
     const view = this.getView(id);
-    if (!view) { this.log(`clear UAV skipped: view ${id} is unavailable`); return; }
+    if (!view) throw new Error(`clear UAV cannot translate unavailable view ${id}`);
 
     if (view.dim === 'buffer') {
       const rawOrStructured = (desc.slice & 1) !== 0 || (view.bufferResource.misc & (0x20 | 0x40)) !== 0;
@@ -1775,23 +1858,22 @@ export class GpuExecutor {
         this.clearUavBuffer(view, pattern);
         return;
       }
-      if (rawOrStructured || !desc.format) { this.log(`clear UAV skipped: buffer view ${id} has no supported typed format`); return; }
+      if (rawOrStructured || !desc.format) throw new Error(`clear UAV cannot translate typed buffer view ${id}`);
       const pattern = uavClearPattern(desc.format, isFloat, uintValues, floatValues);
-      if (!pattern) { this.log(`clear UAV skipped: unsupported buffer format ${desc.format}`); return; }
+      if (!pattern) throw new Error(`clear UAV does not translate buffer format ${desc.format}`);
       this.clearUavBuffer(view, pattern);
       return;
     }
 
     const pattern = uavClearPattern(desc.format, isFloat, uintValues, floatValues);
-    if (!pattern) { this.log(`clear UAV skipped: unsupported texture format ${desc.format}`); return; }
+    if (!pattern) throw new Error(`clear UAV does not translate texture format ${desc.format}`);
     this.clearUavTexture(view, desc, pattern);
   }
 
   clearUavBuffer(view, pattern) {
     const byteCount = view.size;
     if (byteCount <= 0 || byteCount % pattern.byteLength !== 0 || view.offset % 4 !== 0) {
-      this.log('clear UAV skipped: buffer view range is not aligned to its element format');
-      return;
+      throw new Error('clear UAV buffer range is not aligned to its translated element format');
     }
     this.flush();
     const chunkSize = Math.max(pattern.byteLength, Math.floor((1 << 20) / pattern.byteLength) * pattern.byteLength);
@@ -1805,7 +1887,7 @@ export class GpuExecutor {
 
   clearUavTexture(view, desc, pattern) {
     const { tex } = view;
-    if (!tex || tex.samples !== 1) { this.log('clear UAV skipped: multisampled textures are unsupported'); return; }
+    if (!tex || tex.samples !== 1) throw new Error('clear UAV does not translate multisampled textures');
     const mip = desc.mip;
     const width = Math.max(1, tex.width >> mip), height = Math.max(1, tex.height >> mip);
     let firstSlice = 0, sliceCount = 1;
@@ -1979,8 +2061,7 @@ export class GpuExecutor {
     }
     if (groups[3].size) {
       const registers = [...groups[3].keys()].map((reg) => `u${reg}`).join(', ');
-      this.log(`draw skipped: graphics UAV binding is unsupported (${registers})`);
-      return;
+      throw new Error(`graphics UAV binding is not translated (${registers})`);
     }
     const layoutEntries = [[], [], [], []];
     const resolved = [[], [], [], []];
@@ -2022,8 +2103,7 @@ export class GpuExecutor {
       if (bufferDeclaration) {
         const prepared = view?.dim === 'buffer' && this.prepareStorageBufferView(view, false);
         if (!prepared) {
-          this.log(`draw skipped: buffer SRV t${reg} is unavailable or has an unsupported range`);
-          return;
+          throw new Error(`buffer SRV t${reg} is unavailable or has an untranslated range`);
         }
         layoutEntries[1].push({ binding: reg, visibility: vis, buffer: { type: bufferDeclaration.access === 'read' ? 'read-only-storage' : 'storage' } });
         resolved[1].push({ binding: reg, resource: prepared.resource });
@@ -2054,8 +2134,7 @@ export class GpuExecutor {
       if (e.cls !== 1 || e.step <= 1) continue;
       const prior = stepRates.get(e.slot);
       if (prior !== undefined && prior !== e.step) {
-        this.log(`draw skipped: input slot ${e.slot} has conflicting instance step rates`);
-        return;
+        throw new Error(`input slot ${e.slot} has conflicting translated instance step rates`);
       }
       stepRates.set(e.slot, e.step);
     }
@@ -2068,7 +2147,7 @@ export class GpuExecutor {
       const stepRate = stepRates.get(slot) || 1;
       if (stepRate > 1) {
         gpu = this.expandInstanceBuffer(resource, binding.offset, binding.stride, stepRate, firstInstance + instances);
-        if (!gpu) return;
+        if (!gpu) throw new Error(`instance buffer expansion failed for input slot ${slot}`);
         offset = 0;
       }
       boundVertexBuffers.set(slot, { gpu, offset });
@@ -2084,7 +2163,7 @@ export class GpuExecutor {
       this.pipelines.set(key, pipe);
       this.stats.pipelines++;
     }
-    if (!pipe) return;
+    if (!pipe) throw new Error('graphics pipeline creation did not produce a translated pipeline');
 
     this.ensurePass(att);
     const pass = this.pass;
@@ -2137,8 +2216,7 @@ export class GpuExecutor {
       const indexBytes = st.ib.format === 42 ? 4 : 2;
       const start = st.ib.offset + first * indexBytes;
       if (!buffer?.shadow || start + count * indexBytes > buffer.shadow.length) {
-        this.log('wireframe draw skipped: index data is not available on the CPU');
-        return null;
+        throw new Error('wireframe draw needs index data that is unavailable to the WebGPU translator');
       }
       const view = new DataView(buffer.shadow.buffer, buffer.shadow.byteOffset, buffer.shadow.byteLength);
       for (let i = 0; i < count; i++) {
@@ -2150,8 +2228,7 @@ export class GpuExecutor {
         }
         const index = raw + baseVertex;
         if (index < 0 || index > 0xffffffff) {
-          this.log('wireframe draw skipped: base vertex produces an invalid index');
-          return null;
+          throw new Error('wireframe draw base vertex produces an invalid index');
         }
         source.push(index);
       }
@@ -2194,16 +2271,14 @@ export class GpuExecutor {
       const indexBytes = st.ib.format === 42 ? 4 : 2;
       const start = st.ib.offset + first * indexBytes;
       if (!buffer?.shadow || start + count * indexBytes > buffer.shadow.length) {
-        this.log('triangle-fan draw skipped: index data is not available on the CPU');
-        return null;
+        throw new Error('triangle-fan draw needs index data that is unavailable to the WebGPU translator');
       }
       const view = new DataView(buffer.shadow.buffer, buffer.shadow.byteOffset, buffer.shadow.byteLength);
       for (let i = 0; i < count; i++) {
         const raw = indexBytes === 4 ? view.getUint32(start + i * indexBytes, true) : view.getUint16(start + i * indexBytes, true);
         const index = raw + baseVertex;
         if (index < 0 || index > 0xffffffff) {
-          this.log('triangle-fan draw skipped: base vertex produces an invalid index');
-          return null;
+          throw new Error('triangle-fan draw base vertex produces an invalid index');
         }
         source.push(index);
       }
@@ -2217,8 +2292,7 @@ export class GpuExecutor {
 
   expandInstanceBuffer(source, sourceOffset, stride, stepRate, requiredInstances) {
     if (stride <= 0 || stride % 4 !== 0 || sourceOffset % 4 !== 0 || requiredInstances <= 0) {
-      this.log('draw skipped: instance step-rate expansion requires aligned nonempty vertex data');
-      return null;
+      throw new Error('instance step-rate expansion requires aligned nonempty vertex data');
     }
     const strideWords = stride / 4;
     const outputWords = requiredInstances * strideWords;
@@ -2235,8 +2309,10 @@ export class GpuExecutor {
     );
     if (!Number.isSafeInteger(outputWords) || outputWords <= 0 || outputBytes > this.device.limits.maxStorageBufferBindingSize
         || outputBytes > this.device.limits.maxBufferSize || sourceOffsetWords >= sourceWords) {
-      this.log('draw skipped: instance step-rate expansion exceeds WebGPU buffer limits');
-      return null;
+      throw new Error('instance step-rate expansion exceeds translated WebGPU buffer limits');
+    }
+    if (sourceRequiredWords > sourceWords) {
+      throw new Error('instance step-rate expansion would read beyond the translated vertex buffer');
     }
     if (!this.instanceExpansionPipeline) {
       const module = this.device.createShaderModule({ code: `
@@ -2320,8 +2396,7 @@ export class GpuExecutor {
     const st = this.st;
     let shader = this.shaders.get(st.shader[2]);
     if (!shader || shader.stage !== 2) {
-      this.log(`compute dispatch skipped: compute shader ${st.shader[2]} is unavailable`);
-      return;
+      throw new Error(`compute shader ${st.shader[2]} is unavailable for translation`);
     }
 
     const textureUavs = shader.descriptors.filter((d) => d.type === 1 && !shader.storageBuffers?.[3]?.[d.register + 1]);
@@ -2359,8 +2434,7 @@ export class GpuExecutor {
       if (bufferDeclaration) {
         const prepared = view?.dim === 'buffer' && this.prepareStorageBufferView(view, false);
         if (!prepared) {
-          this.log(`compute dispatch skipped: buffer SRV t${reg} is unavailable or has an unsupported range`);
-          return;
+          throw new Error(`compute buffer SRV t${reg} is unavailable or has an untranslated range`);
         }
         layoutEntries[1].push({ binding: reg, visibility: GPUShaderStage.COMPUTE, buffer: { type: bufferDeclaration.access === 'read' ? 'read-only-storage' : 'storage' } });
         resolved[1].push({ binding: reg, resource: prepared.resource });
@@ -2386,8 +2460,7 @@ export class GpuExecutor {
       if (bufferDeclaration) {
         const prepared = view?.dim === 'buffer' && this.prepareStorageBufferView(view, bufferDeclaration.access === 'read_write');
         if (!prepared) {
-          this.log(`compute dispatch skipped: buffer UAV u${reg} is unavailable or has an unsupported range`);
-          return;
+          throw new Error(`compute buffer UAV u${reg} is unavailable or has an untranslated range`);
         }
         layoutEntries[3].push({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: bufferDeclaration.access === 'read' ? 'read-only-storage' : 'storage' } });
         resolved[3].push({ binding, resource: prepared.resource });
@@ -2395,8 +2468,7 @@ export class GpuExecutor {
         continue;
       }
       if (!declaration || !view || declaration.format !== view.format || declaration.dimension !== view.dim) {
-        this.log(`compute dispatch skipped: UAV u${reg} declaration=${JSON.stringify(declaration || null)} view=${JSON.stringify(view && { format: view.format, dimension: view.dim })}`);
-        return;
+        throw new Error(`compute UAV u${reg} declaration or translated view dimension is unsupported`);
       }
       layoutEntries[3].push({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: {
         access: declaration.access,
@@ -2476,7 +2548,7 @@ export class GpuExecutor {
     const bySlot = new Map();
     layoutDesc.forEach((e, i) => {
       if (!bySlot.has(e.slot)) bySlot.set(e.slot, { arrayStride: strides[i] || 16, stepMode: e.cls === 1 ? 'instance' : 'vertex', attributes: [] });
-      bySlot.get(e.slot).attributes.push({ shaderLocation: e.location, offset: e.offset, format: VTX[e.format] || 'float32x4' });
+      bySlot.get(e.slot).attributes.push({ shaderLocation: e.location, offset: e.offset, format: this.vertexFormat(e.format) });
     });
     const maxSlot = Math.max(-1, ...bySlot.keys());
     const buffers = [];
@@ -2503,8 +2575,8 @@ export class GpuExecutor {
           const srcAlpha = separate ? (d3d9States.get(207) ?? 2) : src;
           const dstAlpha = separate ? (d3d9States.get(208) ?? 1) : dst;
           const opAlpha = separate ? (d3d9States.get(209) ?? 1) : op;
-          const factor = (n) => BLEND_FACTOR[n] || 'one';
-          const operation = (n) => BLEND_OP[n] || 'add';
+          const factor = (n) => requireEnum(BLEND_FACTOR, n, 'D3D9 blend factor');
+          const operation = (n) => requireEnum(BLEND_OP, n, 'D3D9 blend operation');
           const color = { srcFactor: factor(src), dstFactor: factor(dst), operation: operation(op) };
           const alpha = { srcFactor: factor(srcAlpha), dstFactor: factor(dstAlpha), operation: operation(opAlpha) };
           for (const channel of [color, alpha]) if (channel.operation === 'min' || channel.operation === 'max') { channel.srcFactor = 'one'; channel.dstFactor = 'one'; }
@@ -2513,9 +2585,9 @@ export class GpuExecutor {
       } else if (blend) {
         const o = 8 + 32 * (blend.getUint32(4, true) ? i : 0);
         if (blend.getUint32(o, true)) {
-          const fac = (n) => BLEND_FACTOR[n] || 'one';
-          const color = { srcFactor: fac(blend.getUint32(o + 4, true)), dstFactor: fac(blend.getUint32(o + 8, true)), operation: BLEND_OP[blend.getUint32(o + 12, true)] || 'add' };
-          const alpha = { srcFactor: fac(blend.getUint32(o + 16, true)), dstFactor: fac(blend.getUint32(o + 20, true)), operation: BLEND_OP[blend.getUint32(o + 24, true)] || 'add' };
+          const fac = (n) => requireEnum(BLEND_FACTOR, n, 'D3D11 blend factor');
+          const color = { srcFactor: fac(blend.getUint32(o + 4, true)), dstFactor: fac(blend.getUint32(o + 8, true)), operation: requireEnum(BLEND_OP, blend.getUint32(o + 12, true), 'D3D11 blend operation') };
+          const alpha = { srcFactor: fac(blend.getUint32(o + 16, true)), dstFactor: fac(blend.getUint32(o + 20, true)), operation: requireEnum(BLEND_OP, blend.getUint32(o + 24, true), 'D3D11 blend operation') };
           for (const c2 of [color, alpha]) if (c2.operation === 'min' || c2.operation === 'max') { c2.srcFactor = 'one'; c2.dstFactor = 'one'; }
           t.blend = { color, alpha };
         }
@@ -2527,7 +2599,7 @@ export class GpuExecutor {
     const desc = {
       layout: pl,
       vertex: { module: vs.module, entryPoint: vs.entry, buffers },
-      primitive: { topology: TOPOLOGY[topology] || 'triangle-list' },
+      primitive: { topology: requireEnum(TOPOLOGY, topology, 'D3D11 primitive topology') },
     };
     const sampleCount = att.colors.find(Boolean)?.tex.samples || att.depth?.tex.samples || 1;
     desc.multisample = {
@@ -2539,11 +2611,9 @@ export class GpuExecutor {
       let fragmentShader = ps;
       if (usesDualSourceBlend) {
         if (targets.length !== 1) {
-          this.log('draw skipped: dual-source blending requires exactly one render target');
-          return null;
+          throw new Error('dual-source blending requires exactly one translated render target');
         }
         fragmentShader = this.dualSourceShaderVariant(ps);
-        if (!fragmentShader) return null;
       }
       desc.fragment = { module: fragmentShader.module, entryPoint: fragmentShader.entry, targets };
     }
@@ -2558,8 +2628,10 @@ export class GpuExecutor {
         desc.primitive.frontFace = cull === 2 ? 'cw' : 'ccw';
       }
     } else if (r) {
-      desc.primitive.cullMode = ({ 1: 'none', 2: 'front', 3: 'back' })[r.getUint32(4, true)] || 'back';
-      desc.primitive.frontFace = r.getUint32(8, true) ? 'ccw' : 'cw';
+      desc.primitive.cullMode = requireEnum({ 1: 'none', 2: 'front', 3: 'back' }, r.getUint32(4, true), 'D3D11 cull mode');
+      const frontCounterClockwise = r.getUint32(8, true);
+      if (frontCounterClockwise > 1) throw new Error(`D3D11 front-counter-clockwise value ${frontCounterClockwise} is invalid`);
+      desc.primitive.frontFace = frontCounterClockwise ? 'ccw' : 'cw';
     } else { desc.primitive.cullMode = 'back'; desc.primitive.frontFace = 'cw'; }
     const dsd = this.depths.get(st.depth.id);
     if (att.depth) {
@@ -2574,10 +2646,15 @@ export class GpuExecutor {
         ? (st.d3d9RenderStates.get(23) ?? 2)
         : dsd ? dsd.getUint32(8, true) : 2;
       d.depthWriteEnabled = !!(enable && write);
-      d.depthCompare = enable ? CMP[compare] || 'less' : 'always';
+      d.depthCompare = enable ? requireEnum(CMP, compare, 'D3D depth comparison') : 'always';
       if (r) { d.depthBias = r.getInt32(12, true); d.depthBiasSlopeScale = r.getFloat32(20, true); d.depthBiasClamp = r.getFloat32(16, true); }
       if (dsd && dsd.getUint32(12, true) && hasStencil(fmt)) {
-        const face = (o) => ({ failOp: STENCIL_OP[dsd.getUint32(o, true)] || 'keep', depthFailOp: STENCIL_OP[dsd.getUint32(o + 4, true)] || 'keep', passOp: STENCIL_OP[dsd.getUint32(o + 8, true)] || 'keep', compare: CMP[dsd.getUint32(o + 12, true)] || 'always' });
+        const face = (o) => ({
+          failOp: requireEnum(STENCIL_OP, dsd.getUint32(o, true), 'D3D stencil operation'),
+          depthFailOp: requireEnum(STENCIL_OP, dsd.getUint32(o + 4, true), 'D3D stencil operation'),
+          passOp: requireEnum(STENCIL_OP, dsd.getUint32(o + 8, true), 'D3D stencil operation'),
+          compare: requireEnum(CMP, dsd.getUint32(o + 12, true), 'D3D stencil comparison'),
+        });
         d.stencilFront = face(20); d.stencilBack = face(36);
         d.stencilReadMask = dsd.getUint8(16); d.stencilWriteMask = dsd.getUint8(17);
       }
@@ -2763,11 +2840,14 @@ export class GpuExecutor {
   generateMips(viewId) {
     const v = this.views.get(viewId);
     const tex = v && this.res.get(v.resource);
-    if (!tex || tex.mips < 2) return;
+    if (!tex) throw new Error(`GenerateMips view ${viewId} does not refer to a translated resource`);
+    if (tex.mips < 2) return;
     this.endPass();
     this.invalidateNormalized16Raw(tex);
     // Simple box-filter chain using the blit pipeline (colour textures only).
-    if (isDepth(tex.format) || BLOCK(tex.format)) return;
+    if (isDepth(tex.format) || BLOCK(tex.format)) {
+      throw new Error(`GenerateMips does not translate ${tex.format} depth or compressed textures`);
+    }
     if (tex.dimension === '3d') {
       this.generateMips3d(tex);
       return;
@@ -2794,8 +2874,7 @@ export class GpuExecutor {
 
   generateMips3d(tex) {
     if (tex.format !== 'rgba8unorm' && tex.format !== 'r32float') {
-      this.log(`GenerateMips skipped: 3D ${tex.format} storage textures are unsupported`);
-      return;
+      throw new Error(`GenerateMips does not translate 3D ${tex.format} storage textures`);
     }
     if (!this.mip3dPipelines) this.mip3dPipelines = new Map();
     let pipe = this.mip3dPipelines.get(tex.format);
@@ -2859,21 +2938,65 @@ export class GpuExecutor {
     this.createSwapchain(id, texId, w, h, dxgi);
   }
 
-  present(scId, texId, syncInterval = 1) {
+  present(scId, texId, syncInterval = 1, gammaRamp = null) {
     this.lastPresentSyncInterval = Math.min(syncInterval >>> 0, 4);
     const t = this.res.get(texId);
-    if (!t) return;
+    if (!t) throw new Error(`backbuffer resource ${texId} is not translated`);
+    if (t.swapchain !== scId) {
+      throw new Error(`backbuffer resource ${texId} does not belong to translated swap chain ${scId}`);
+    }
     this.endPass();
     if (this.noPresent) { this.flush(); this.stats.presents++; return; } // test mode: leave the canvas untouched
     const target = this.ctx.getCurrentTexture();
     const src = t.gpu.createView({ format: UNSRGB[t.format] || t.format });
     const pass = this.encoder().beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    pass.setPipeline(this.blit);
-    pass.setBindGroup(0, this.device.createBindGroup({ layout: this.blitBGL, entries: [{ binding: 0, resource: src }, { binding: 1, resource: this.blitSampler }] }));
+    if (gammaRamp) {
+      this.updateGammaRampTexture(gammaRamp);
+      pass.setPipeline(this.gammaBlit);
+      pass.setBindGroup(0, this.device.createBindGroup({
+        layout: this.gammaBlitBGL,
+        entries: [
+          { binding: 0, resource: src },
+          { binding: 1, resource: this.blitSampler },
+          { binding: 2, resource: this.gammaView },
+        ],
+      }));
+    } else {
+      pass.setPipeline(this.blit);
+      pass.setBindGroup(0, this.device.createBindGroup({ layout: this.blitBGL, entries: [{ binding: 0, resource: src }, { binding: 1, resource: this.blitSampler }] }));
+    }
     pass.draw(3);
     pass.end();
     this.flush();
     this.stats.presents++;
+  }
+
+  updateGammaRampTexture(rampBytes) {
+    if (rampBytes.byteLength !== 1536) throw new Error(`D3D9 gamma ramp has ${rampBytes.byteLength} bytes; expected 1536`);
+    if (!this.gammaTex) {
+      this.gammaTex = this.device.createTexture({
+        size: { width: 256, height: 3 },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      this.gammaView = this.gammaTex.createView();
+    }
+    const input = new DataView(rampBytes.buffer, rampBytes.byteOffset, rampBytes.byteLength);
+    const upload = new Uint8Array(256 * 3 * 4);
+    for (let channel = 0; channel < 3; channel++) {
+      for (let entry = 0; entry < 256; entry++) {
+        const value = input.getUint16((channel * 256 + entry) * 2, true);
+        const offset = (channel * 256 + entry) * 4;
+        upload[offset] = Math.round(value * 255 / 65535);
+        upload[offset + 3] = 255;
+      }
+    }
+    this.device.queue.writeTexture(
+      { texture: this.gammaTex },
+      upload,
+      { bytesPerRow: 256 * 4, rowsPerImage: 3 },
+      { width: 256, height: 3 },
+    );
   }
 
   /** Read the most recent back buffer as tightly packed RGBA8 (for tests/screenshots). */

@@ -25,7 +25,12 @@ unsafe impl Sync for FrameStore {}
 
 impl FrameStore {
     pub const fn new() -> Self {
-        FrameStore { ptr: None, len: 0, capacity: 0, moves: 0 }
+        FrameStore {
+            ptr: None,
+            len: 0,
+            capacity: 0,
+            moves: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -47,7 +52,8 @@ impl FrameStore {
     }
 
     pub fn as_ptr(&self) -> *const u8 {
-        self.ptr.map_or(ALIGN as *const u8, |p| p.as_ptr().cast_const())
+        self.ptr
+            .map_or(ALIGN as *const u8, |p| p.as_ptr().cast_const())
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
@@ -61,7 +67,9 @@ impl FrameStore {
         }
         if new_len > self.len {
             // SAFETY: new_len <= capacity and the allocation is valid for `capacity` bytes.
-            unsafe { std::ptr::write_bytes(self.as_mut_ptr().add(self.len), value, new_len - self.len) };
+            unsafe {
+                std::ptr::write_bytes(self.as_mut_ptr().add(self.len), value, new_len - self.len)
+            };
         }
         self.len = new_len;
     }
@@ -69,7 +77,9 @@ impl FrameStore {
     fn grow_to(&mut self, needed: usize) {
         let mut capacity = self.capacity.max(64 * ALIGN);
         while capacity < needed {
-            capacity = capacity.checked_mul(2).expect("frame store capacity overflow");
+            capacity = capacity
+                .checked_mul(2)
+                .expect("frame store capacity overflow");
         }
         let new_layout = Layout::from_size_align(capacity, ALIGN).expect("frame store layout");
         // SAFETY: layouts are non-zero sized with a valid power-of-two alignment; `realloc` is
@@ -81,13 +91,18 @@ impl FrameStore {
                     let old_layout = Layout::from_size_align(self.capacity, ALIGN).unwrap();
                     let moved = realloc(old.as_ptr(), old_layout, capacity);
                     if !moved.is_null() {
-                        std::ptr::write_bytes(moved.add(self.capacity), 0, capacity - self.capacity);
+                        std::ptr::write_bytes(
+                            moved.add(self.capacity),
+                            0,
+                            capacity - self.capacity,
+                        );
                     }
                     moved
                 }
             }
         };
-        let new_ptr = NonNull::new(new_ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(new_layout));
+        let new_ptr =
+            NonNull::new(new_ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(new_layout));
         if self.ptr != Some(new_ptr) {
             self.moves = self.moves.wrapping_add(1);
         }
@@ -106,7 +121,12 @@ impl Drop for FrameStore {
     fn drop(&mut self) {
         if let Some(ptr) = self.ptr {
             // SAFETY: allocated with exactly this layout in `grow_to`.
-            unsafe { dealloc(ptr.as_ptr(), Layout::from_size_align(self.capacity, ALIGN).unwrap()) };
+            unsafe {
+                dealloc(
+                    ptr.as_ptr(),
+                    Layout::from_size_align(self.capacity, ALIGN).unwrap(),
+                )
+            };
         }
     }
 }

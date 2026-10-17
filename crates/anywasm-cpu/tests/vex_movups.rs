@@ -884,8 +884,11 @@ fn target_blsi_decodes_destination_from_vvvv_and_source_from_modrm_rm() {
     assert_eq!(instruction.ops[1], Opnd::Gpr(0));
 
     assert!(decode(&[0xc4, 0xe2, 0x6c, 0xf3, 0xd8], 0x1000).is_err()); // L=1
-    // /2 is BLSMSK (decoded since the BMI1 family was completed); /1 is BLSR.
-    assert_eq!(decode(&[0xc4, 0xe2, 0x68, 0xf3, 0xd0], 0x1000).unwrap().op, Op::Blsmsk);
+                                                                       // /2 is BLSMSK (decoded since the BMI1 family was completed); /1 is BLSR.
+    assert_eq!(
+        decode(&[0xc4, 0xe2, 0x68, 0xf3, 0xd0], 0x1000).unwrap().op,
+        Op::Blsmsk
+    );
 }
 
 #[test]

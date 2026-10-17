@@ -766,7 +766,11 @@ impl Memory {
     /// offset every worker can use directly; it changes only when the store grows and moves,
     /// which also bumps [`Self::shared_mapping_generation`].
     pub fn frame_store_region(&self) -> (usize, usize, usize) {
-        (self.frames.as_ptr() as usize, self.frames.len(), self.frames.capacity())
+        (
+            self.frames.as_ptr() as usize,
+            self.frames.len(),
+            self.frames.capacity(),
+        )
     }
 
     /// Write one sorted [`MappingEntry`] per mapped page whose `frame_offset` points straight at
@@ -795,7 +799,8 @@ impl Memory {
                     if slot & PRESENT == 0 {
                         continue;
                     }
-                    let frame = u32::try_from(slot >> 32).map_err(|_| SharedSnapshotError::AddressOverflow)?;
+                    let frame = u32::try_from(slot >> 32)
+                        .map_err(|_| SharedSnapshotError::AddressOverflow)?;
                     let frame_offset = frame
                         .checked_mul(GUEST_PAGE_SIZE)
                         .and_then(|bytes| region_base.checked_add(bytes))
@@ -829,11 +834,16 @@ impl Memory {
     pub fn note_shared_worker_writes(&mut self, frames: &[u32]) -> usize {
         let mut executable = 0;
         for &frame in frames {
-            let Some(&page) = self.frame_pages.get(frame as usize) else { continue };
+            let Some(&page) = self.frame_pages.get(frame as usize) else {
+                continue;
+            };
             if page == u64::MAX {
                 continue;
             }
-            if self.slot(page).is_some_and(|s| (s >> 1) & PROT_X as u64 != 0) {
+            if self
+                .slot(page)
+                .is_some_and(|s| (s >> 1) & PROT_X as u64 != 0)
+            {
                 executable += 1;
             }
         }
@@ -1097,7 +1107,10 @@ mod tests {
         assert!(capacity >= used);
 
         let mut mappings = [MappingEntry::default(); 3];
-        assert_eq!(m.export_shared_mappings_in_place(0x4_0000, &mut mappings), Ok(3));
+        assert_eq!(
+            m.export_shared_mappings_in_place(0x4_0000, &mut mappings),
+            Ok(3)
+        );
         let pages: Vec<u64> = mappings.iter().map(|e| e.guest_page).collect();
         assert_eq!(pages, vec![0x10, 0x30, 0x31], "sorted by guest page");
         // The data page frame was allocated first (frame 0), the code page third (frame 2).
@@ -1109,15 +1122,33 @@ mod tests {
         assert_eq!(m.frame_store_bytes()[..16], [0x5a; 16]);
 
         let mut short = [MappingEntry::default(); 2];
-        assert_eq!(m.export_shared_mappings_in_place(0x4_0000, &mut short), Err(SharedSnapshotError::BufferTooSmall));
-        assert_eq!(m.export_shared_mappings_in_place(0x4_0001, &mut mappings), Err(SharedSnapshotError::AddressOverflow));
+        assert_eq!(
+            m.export_shared_mappings_in_place(0x4_0000, &mut short),
+            Err(SharedSnapshotError::BufferTooSmall)
+        );
+        assert_eq!(
+            m.export_shared_mappings_in_place(0x4_0001, &mut mappings),
+            Err(SharedSnapshotError::AddressOverflow)
+        );
 
         let epoch = m.code_epoch;
-        assert_eq!(m.note_shared_worker_writes(&[0, 1]), 0, "data-only writes keep translations");
+        assert_eq!(
+            m.note_shared_worker_writes(&[0, 1]),
+            0,
+            "data-only writes keep translations"
+        );
         assert_eq!(m.code_epoch, epoch);
-        assert_eq!(m.note_shared_worker_writes(&[2]), 1, "frame 2 backs the code page");
+        assert_eq!(
+            m.note_shared_worker_writes(&[2]),
+            1,
+            "frame 2 backs the code page"
+        );
         assert_eq!(m.code_epoch, epoch + 1);
-        assert_eq!(m.note_shared_worker_writes(&[99]), 0, "unknown frames are ignored");
+        assert_eq!(
+            m.note_shared_worker_writes(&[99]),
+            0,
+            "unknown frames are ignored"
+        );
     }
 
     #[test]
@@ -1135,7 +1166,10 @@ mod tests {
             }
             last = m.shared_mapping_generation();
         }
-        assert!(relocated >= 1, "2000 pages must outgrow the initial capacity");
+        assert!(
+            relocated >= 1,
+            "2000 pages must outgrow the initial capacity"
+        );
         assert!(last != 0);
     }
 

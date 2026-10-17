@@ -4,6 +4,25 @@ use std::collections::{HashMap, HashSet};
 const ASSET_HEADER_LEN: usize = 24;
 const MAX_ASSET_READ_LEN: usize = 64 * 1024 * 1024 - 256 * 1024;
 
+fn read_index<const N: usize>(bytes: &[u8], cursor: &mut usize) -> Option<[u8; N]> {
+    let end = (*cursor).checked_add(N)?;
+    let value = bytes.get(*cursor..end)?.try_into().ok()?;
+    *cursor = end;
+    Some(value)
+}
+
+fn read_index_u16(bytes: &[u8], cursor: &mut usize) -> Option<u16> {
+    Some(u16::from_le_bytes(read_index(bytes, cursor)?))
+}
+
+fn read_index_u32(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
+    Some(u32::from_le_bytes(read_index(bytes, cursor)?))
+}
+
+fn read_index_i64(bytes: &[u8], cursor: &mut usize) -> Option<i64> {
+    Some(i64::from_le_bytes(read_index(bytes, cursor)?))
+}
+
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "anywasm")]
 extern "C" {
@@ -16,12 +35,35 @@ pub struct Vfs {
     assets: HashMap<String, AssetFile>,
     directories: HashSet<String>,
     attributes: HashMap<String, u32>,
+    file_metadata: HashMap<String, FileMetadata>,
+    root_alias: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AssetFile {
     package_offset: u64,
     len: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileMetadata {
+    pub accessed: Option<i64>,
+    pub modified: Option<i64>,
+    pub created: Option<i64>,
+    pub mode: Option<u32>,
+    pub link_count: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStatus {
+    pub size: u64,
+    pub is_directory: bool,
+    pub accessed: Option<i64>,
+    pub modified: Option<i64>,
+    pub created: Option<i64>,
+    /// POSIX permission and file-type bits copied from the source filesystem.
+    pub mode: Option<u32>,
+    pub link_count: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +78,13 @@ pub enum AssetReadError {
 pub enum CreateDirError {
     AlreadyExists,
     PathNotFound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveDirError {
+    NotFound,
+    NotEmpty,
+    AccessDenied,
 }
 
 fn without_device_prefix(path: &str) -> String {
@@ -166,23 +215,72 @@ impl Vfs {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Mount a drive-qualified host installation path onto the VFS root.
+    pub fn set_root_alias(&mut self, root: &str) -> Result<(), String> {
+        let root = without_device_prefix(root).replace('/', "\\");
+        if root.as_bytes().get(1) != Some(&b':') || root.as_bytes().get(2) != Some(&b'\\') {
+            return Err(format!(
+                "VFS root alias must be an absolute drive path: {root:?}"
+            ));
+        }
+        let root = norm(&root);
+        if root.is_empty() {
+            return Err("VFS root alias cannot be a drive root".to_owned());
+        }
+        self.root_alias = Some(root);
+        Ok(())
+    }
+
+    /// Normalize a path and map the mounted host installation prefix to the VFS root.
+    pub fn normalize_path(&self, path: &str) -> String {
+        let path = norm(path);
+        let Some(root) = &self.root_alias else {
+            return path;
+        };
+        if path == *root {
+            return String::new();
+        }
+        path.strip_prefix(&format!("{root}\\"))
+            .unwrap_or(&path)
+            .to_owned()
+    }
+
     pub fn insert(&mut self, path: &str, data: Vec<u8>) {
-        self.files.insert(norm(path), data);
+        self.files.insert(self.normalize_path(path), data);
     }
     pub fn get(&self, path: &str) -> Option<&Vec<u8>> {
-        self.files.get(&norm(path))
+        self.files.get(&self.normalize_path(path))
     }
     pub fn get_mut(&mut self, path: &str) -> Option<&mut Vec<u8>> {
-        self.files.get_mut(&norm(path))
+        let path = self.normalize_path(path);
+        self.files.get_mut(&path)
     }
     pub fn exists(&self, path: &str) -> bool {
-        let path = norm(path);
+        let path = self.normalize_path(path);
         self.files.contains_key(&path) || self.assets.contains_key(&path)
+    }
+
+    /// Whether a path already has mutable guest bytes in the local VFS overlay.
+    pub fn has_local_file(&self, path: &str) -> bool {
+        self.files.contains_key(&self.normalize_path(path))
+    }
+
+    /// Whether a directory contains files backed by streamed host assets rather than
+    /// the mutable in-memory guest overlay.
+    pub fn has_streamed_assets_below(&self, path: &str) -> bool {
+        let path = self.normalize_path(path);
+        let prefix = if path.is_empty() {
+            String::new()
+        } else {
+            format!("{path}\\")
+        };
+        self.assets.keys().any(|asset| asset.starts_with(&prefix))
     }
 
     /// Return stored attributes or the VFS default for a file or directory.
     pub fn file_attributes(&self, path: &str) -> Option<u32> {
-        let path = norm(path);
+        let path = self.normalize_path(path);
         if let Some(attributes) = self.attributes.get(&path) {
             return Some(*attributes);
         }
@@ -197,7 +295,8 @@ impl Vfs {
 
     /// Store attributes for a path that the caller has already resolved as existing.
     pub fn set_file_attributes(&mut self, path: &str, attributes: u32) {
-        self.attributes.insert(norm(path), attributes);
+        let path = self.normalize_path(path);
+        self.attributes.insert(path, attributes);
     }
 
     pub fn is_readonly(&self, path: &str) -> bool {
@@ -207,13 +306,15 @@ impl Vfs {
                 .is_some_and(|attributes| attributes & 0x1 != 0)
     }
 
-    /// Register the fixed header and index prefix of an `AGP1` range package.
+    /// Register an `AGP1` or metadata-carrying `AGP2` range index.
     /// Payload bytes stay in the host and are read through the browser import.
     pub fn register_asset_index(&mut self, bytes: &[u8]) -> Result<(), String> {
         let bad = |why: &str| format!("corrupt asset package index: {why}");
-        if bytes.get(..4) != Some(b"AGP1") {
-            return Err(bad("bad magic"));
-        }
+        let with_metadata = match bytes.get(..4) {
+            Some(b"AGP1") => false,
+            Some(b"AGP2") => true,
+            _ => return Err(bad("unsupported magic")),
+        };
         if bytes.len() < ASSET_HEADER_LEN {
             return Err(bad("truncated header"));
         }
@@ -236,6 +337,8 @@ impl Vfs {
             return Err(bad("entry count cannot fit in index"));
         }
         let mut parsed = HashMap::with_capacity(entry_count);
+        let mut parsed_metadata = HashMap::with_capacity(entry_count);
+        let mut parsed_directories = HashSet::new();
         let mut seen = HashSet::with_capacity(entry_count);
         for _ in 0..entry_count {
             let name_len = u16::from_le_bytes(
@@ -287,39 +390,115 @@ impl Vfs {
                     .unwrap(),
             );
             cursor += 8;
+            let (metadata, is_directory) = if with_metadata {
+                let accessed = read_index_i64(bytes, &mut cursor)
+                    .ok_or_else(|| bad("truncated access time"))?;
+                let modified = read_index_i64(bytes, &mut cursor)
+                    .ok_or_else(|| bad("truncated write time"))?;
+                let created = read_index_i64(bytes, &mut cursor)
+                    .ok_or_else(|| bad("truncated creation time"))?;
+                let mode =
+                    read_index_u32(bytes, &mut cursor).ok_or_else(|| bad("truncated mode"))?;
+                let link_count = read_index_u16(bytes, &mut cursor)
+                    .ok_or_else(|| bad("truncated link count"))?;
+                let kind = *bytes
+                    .get(cursor)
+                    .ok_or_else(|| bad("truncated entry kind"))?;
+                cursor += 1;
+                let metadata = FileMetadata {
+                    accessed: (accessed != i64::MIN).then_some(accessed),
+                    modified: (modified != i64::MIN).then_some(modified),
+                    created: (created != i64::MIN).then_some(created),
+                    mode: (mode != u32::MAX).then_some(mode),
+                    link_count: (link_count != u16::MAX).then_some(link_count),
+                };
+                let is_directory = match kind {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(bad("unknown entry kind")),
+                };
+                (metadata, is_directory)
+            } else {
+                (FileMetadata::default(), false)
+            };
             let end = package_offset
                 .checked_add(len)
                 .ok_or_else(|| bad("file range overflow"))?;
             if package_offset < index_end as u64 || end > package_len {
                 return Err(bad("file range is outside the package data region"));
             }
-            parsed.insert(
-                path,
-                AssetFile {
-                    package_offset,
-                    len,
-                },
-            );
+            if is_directory {
+                if len != 0 {
+                    return Err(bad("directory entry has a nonzero length"));
+                }
+                parsed_directories.insert(path.clone());
+            } else {
+                parsed.insert(
+                    path.clone(),
+                    AssetFile {
+                        package_offset,
+                        len,
+                    },
+                );
+            }
+            parsed_metadata.insert(path, metadata);
         }
         if cursor != index_end {
             return Err(bad("entry count does not match index length"));
         }
         self.assets = parsed;
+        self.file_metadata = parsed_metadata;
+        self.directories.extend(parsed_directories);
         Ok(())
     }
 
     /// Return a file's logical size, including files whose bytes live in a remote package.
     pub fn file_len(&self, path: &str) -> Option<u64> {
-        let path = norm(path);
+        let path = self.normalize_path(path);
         self.files
             .get(&path)
             .map(|data| data.len() as u64)
             .or_else(|| self.assets.get(&path).map(|asset| asset.len))
     }
 
+    /// Return file or directory metadata when the VFS knows the path exists.
+    /// Time and permission fields remain absent when the source index did not provide them.
+    pub fn file_status(&self, path: &str) -> Option<FileStatus> {
+        let normalized = self.normalize_path(path);
+        let file_len = self
+            .files
+            .get(&normalized)
+            .map(|data| data.len() as u64)
+            .or_else(|| self.assets.get(&normalized).map(|asset| asset.len));
+        let is_directory = file_len.is_none() && self.is_dir(&normalized);
+        if file_len.is_none() && !is_directory {
+            return None;
+        }
+        let metadata = self
+            .file_metadata
+            .get(&normalized)
+            .copied()
+            .unwrap_or_default();
+        Some(FileStatus {
+            size: file_len.unwrap_or(0),
+            is_directory,
+            accessed: metadata.accessed,
+            modified: metadata.modified,
+            created: metadata.created,
+            mode: metadata.mode,
+            link_count: metadata.link_count,
+        })
+    }
+
+    /// Attach host or guest filesystem metadata to an existing file or directory.
+    pub fn set_file_metadata(&mut self, path: &str, metadata: FileMetadata) {
+        let path = self.normalize_path(path);
+        self.file_metadata.insert(path, metadata);
+    }
+
     /// Translate a remote file-relative range into its absolute package range.
     pub fn asset_location(&self, path: &str, offset: u64, len: usize) -> Option<(u64, usize)> {
-        let asset = self.assets.get(&norm(path))?;
+        let asset = self.assets.get(&self.normalize_path(path))?;
         if offset >= asset.len {
             return Some((asset.package_offset.checked_add(asset.len)?, 0));
         }
@@ -334,7 +513,7 @@ impl Vfs {
         offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, AssetReadError> {
-        let path = norm(path);
+        let path = self.normalize_path(path);
         if let Some(data) = self.files.get(&path) {
             let Ok(start) = usize::try_from(offset) else {
                 return Ok(Vec::new());
@@ -375,7 +554,7 @@ impl Vfs {
 
     /// Directories are inferred from file prefixes and tracked when created explicitly.
     pub fn is_dir(&self, path: &str) -> bool {
-        let dir = norm(path);
+        let dir = self.normalize_path(path);
         if dir.is_empty() {
             return true;
         }
@@ -394,7 +573,7 @@ impl Vfs {
         if path.is_empty() {
             return Err(CreateDirError::PathNotFound);
         }
-        let dir = norm(path);
+        let dir = self.normalize_path(path);
         if dir.is_empty() || self.exists(path) || self.is_dir(path) {
             return Err(CreateDirError::AlreadyExists);
         }
@@ -405,8 +584,33 @@ impl Vfs {
         self.directories.insert(dir);
         Ok(())
     }
+
+    /// Remove an empty, non-root guest directory from the virtual namespace.
+    pub fn remove_dir(&mut self, path: &str) -> Result<(), RemoveDirError> {
+        let dir = self.normalize_path(path);
+        if dir.is_empty() {
+            return Err(RemoveDirError::AccessDenied);
+        }
+        if self.files.contains_key(&dir) || self.assets.contains_key(&dir) {
+            return Err(RemoveDirError::NotFound);
+        }
+        if !self.is_dir(&dir) {
+            return Err(RemoveDirError::NotFound);
+        }
+        if !self.directory_entries(&dir).is_empty() || self.has_streamed_assets_below(&dir) {
+            return Err(RemoveDirError::NotEmpty);
+        }
+        if !self.directories.remove(&dir) {
+            // An inferred directory cannot be empty; this protects against removing a namespace
+            // that is still supplied by immutable package data.
+            return Err(RemoveDirError::AccessDenied);
+        }
+        self.attributes.remove(&dir);
+        self.file_metadata.remove(&dir);
+        Ok(())
+    }
     pub fn remove(&mut self, path: &str) -> bool {
-        let path = norm(path);
+        let path = self.normalize_path(path);
         if self.is_readonly(&path) {
             return false;
         }
@@ -432,6 +636,55 @@ impl Vfs {
                 .filter(|path| !self.files.contains_key(*path)),
         )
     }
+
+    /// List immediate file and directory children using the indexed VFS namespace.
+    pub fn directory_entries(&self, path: &str) -> Vec<(String, bool, u64)> {
+        let directory = self.normalize_path(path);
+        let prefix = if directory.is_empty() {
+            String::new()
+        } else {
+            format!("{directory}\\")
+        };
+        let mut entries: HashMap<String, (bool, u64)> = HashMap::new();
+
+        for file in self.paths() {
+            let Some(relative) = file.strip_prefix(&prefix) else {
+                continue;
+            };
+            if relative.is_empty() {
+                continue;
+            }
+            if let Some((child, _)) = relative.split_once('\\') {
+                entries.entry(child.to_owned()).or_insert((true, 0));
+            } else {
+                entries.insert(
+                    relative.to_owned(),
+                    (false, self.file_len(file).unwrap_or(0)),
+                );
+            }
+        }
+
+        for explicit in &self.directories {
+            let Some(relative) = explicit.strip_prefix(&prefix) else {
+                continue;
+            };
+            if relative.is_empty() {
+                continue;
+            }
+            let name = relative
+                .split_once('\\')
+                .map_or(relative, |(child, _)| child);
+            entries.entry(name.to_owned()).or_insert((true, 0));
+        }
+
+        let mut entries: Vec<_> = entries
+            .into_iter()
+            .map(|(name, (is_directory, size))| (name, is_directory, size))
+            .collect();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries
+    }
+
     /// Find a file by bare file name anywhere in the VFS (DLL search fallback).
     pub fn find_by_name(&self, name: &str) -> Option<&String> {
         let n = norm(name);
@@ -462,6 +715,46 @@ mod tests {
         }
         for (_, data) in files {
             out.extend_from_slice(data);
+        }
+        out
+    }
+
+    fn metadata_asset_package(entries: &[(&str, &[u8], bool, i64, i64, i64, u32, u16)]) -> Vec<u8> {
+        let index_len: usize = entries
+            .iter()
+            .map(|(name, ..)| 2 + name.len() + 16 + 31)
+            .sum();
+        let data_start = 24 + index_len;
+        let payload_len = entries
+            .iter()
+            .filter(|(_, _, is_directory, ..)| !*is_directory)
+            .map(|(_, data, ..)| data.len())
+            .sum::<usize>();
+        let package_len = data_start + payload_len;
+        let mut out = b"AGP2".to_vec();
+        out.extend((entries.len() as u32).to_le_bytes());
+        out.extend((index_len as u64).to_le_bytes());
+        out.extend((package_len as u64).to_le_bytes());
+        let mut offset = data_start;
+        for (name, data, is_directory, accessed, modified, created, mode, link_count) in entries {
+            out.extend((name.len() as u16).to_le_bytes());
+            out.extend(name.as_bytes());
+            out.extend((offset as u64).to_le_bytes());
+            out.extend((if *is_directory { 0 } else { data.len() } as u64).to_le_bytes());
+            out.extend(accessed.to_le_bytes());
+            out.extend(modified.to_le_bytes());
+            out.extend(created.to_le_bytes());
+            out.extend(mode.to_le_bytes());
+            out.extend(link_count.to_le_bytes());
+            out.push(u8::from(*is_directory));
+            if !*is_directory {
+                offset += data.len();
+            }
+        }
+        for (_, data, is_directory, ..) in entries {
+            if !*is_directory {
+                out.extend_from_slice(data);
+            }
         }
         out
     }
@@ -536,6 +829,29 @@ mod tests {
     }
 
     #[test]
+    fn removes_only_empty_non_root_guest_directories() {
+        use super::RemoveDirError;
+
+        let mut vfs = Vfs::new();
+        vfs.insert("games\\data\\level.bin", vec![1]);
+        vfs.create_dir("games\\empty").unwrap();
+        vfs.create_dir("games\\parent").unwrap();
+        vfs.create_dir("games\\parent\\empty").unwrap();
+
+        assert_eq!(vfs.remove_dir(""), Err(RemoveDirError::AccessDenied));
+        assert_eq!(vfs.remove_dir("missing"), Err(RemoveDirError::NotFound));
+        assert_eq!(vfs.remove_dir("games\\data"), Err(RemoveDirError::NotEmpty));
+        assert_eq!(
+            vfs.remove_dir("games\\data\\level.bin"),
+            Err(RemoveDirError::NotFound)
+        );
+        assert_eq!(vfs.remove_dir("games\\empty"), Ok(()));
+        assert!(!vfs.is_dir("games\\empty"));
+        assert_eq!(vfs.remove_dir("games\\parent\\empty"), Ok(()));
+        assert!(vfs.is_dir("games\\parent"));
+    }
+
+    #[test]
     fn indexed_assets_expose_paths_and_lengths_without_loading_payload() {
         let package = asset_package(&[
             ("data\\handling.cfg", &[4, 5]),
@@ -555,6 +871,116 @@ mod tests {
         assert_eq!(
             vfs.asset_location("models/gta3.img", 1, 10),
             Some((data_start + 3, 2))
+        );
+    }
+
+    #[test]
+    fn metadata_index_preserves_file_and_directory_timestamps_and_modes() {
+        let package = metadata_asset_package(&[
+            (
+                "GameData\\Shared",
+                &[],
+                true,
+                1_600_000_000,
+                1_700_000_000,
+                1_500_000_000,
+                0o040755,
+                1,
+            ),
+            (
+                "GameData\\Shared\\asset.bin",
+                &[1, 2, 3],
+                false,
+                1_600_000_001,
+                1_700_000_001,
+                1_500_000_001,
+                0o100444,
+                2,
+            ),
+        ]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+        vfs.set_root_alias(r"D:\The Sims 3").unwrap();
+
+        assert_eq!(
+            vfs.file_status(r"D:\The Sims 3\GameData\Shared\asset.bin"),
+            Some(super::FileStatus {
+                size: 3,
+                is_directory: false,
+                accessed: Some(1_600_000_001),
+                modified: Some(1_700_000_001),
+                created: Some(1_500_000_001),
+                mode: Some(0o100444),
+                link_count: Some(2),
+            })
+        );
+        assert_eq!(
+            vfs.file_status(r"D:\The Sims 3\GameData\Shared"),
+            Some(super::FileStatus {
+                size: 0,
+                is_directory: true,
+                accessed: Some(1_600_000_000),
+                modified: Some(1_700_000_000),
+                created: Some(1_500_000_000),
+                mode: Some(0o040755),
+                link_count: Some(1),
+            })
+        );
+    }
+
+    #[test]
+    fn absolute_host_install_paths_resolve_through_the_direct_root_mount() {
+        let package = asset_package(&[
+            (r"Game\Bin\TS3W.exe", &[0x4d, 0x5a]),
+            (r"GameData\Win32\Resource.cfg", b"Priority 500\n"),
+        ]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+        vfs.set_root_alias(r"D:\The Sims 3\").unwrap();
+
+        let file = r"D:\The Sims 3\GameData\Win32\Resource.cfg";
+        let directory = r"D:\The Sims 3\GameData\Win32";
+        assert_eq!(vfs.normalize_path(file), r"gamedata\win32\resource.cfg");
+        assert!(vfs.exists(file));
+        assert_eq!(vfs.file_len(file), Some(b"Priority 500\n".len() as u64));
+        assert!(vfs.is_dir(directory));
+        assert_eq!(vfs.file_attributes(directory), Some(0x10));
+        assert!(!vfs.exists(r"D:\The Sims 30\GameData\Win32\Resource.cfg"));
+    }
+
+    #[test]
+    fn directory_entries_include_immediate_files_and_synthesized_subdirectories() {
+        let package = asset_package(&[
+            (r"GameData\Shared\Packages\FullBuild0.package", &[1, 2, 3]),
+            (r"GameData\Shared\Resource.cfg", &[4]),
+        ]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+        vfs.set_root_alias(r"D:\The Sims 3").unwrap();
+        vfs.create_dir(r"D:\The Sims 3\GameData\Shared\Empty")
+            .unwrap();
+
+        assert_eq!(
+            vfs.directory_entries(r"D:\The Sims 3\GameData\Shared"),
+            vec![
+                ("empty".to_owned(), true, 0),
+                ("packages".to_owned(), true, 0),
+                ("resource.cfg".to_owned(), false, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_root_mount_requires_an_absolute_drive_path() {
+        let mut vfs = Vfs::new();
+        assert!(vfs.set_root_alias(r"Game\Bin").is_err());
+        assert!(vfs.set_root_alias(r"\\server\share\game").is_err());
+        assert_eq!(
+            vfs.normalize_path(r"D:\The Sims 3\file.dat"),
+            r"d:\the sims 3\file.dat"
         );
     }
 
@@ -600,5 +1026,17 @@ mod tests {
         assert!(Vfs::new()
             .register_asset_index(&package[..index_end])
             .is_err());
+    }
+
+    #[test]
+    fn streamed_asset_coverage_is_detected_for_watched_directories() {
+        let package = asset_package(&[(r"Game\Bin\TS3W.exe", &[1, 2, 3])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+
+        assert!(vfs.has_streamed_assets_below(r"C:\Game\Bin"));
+        assert!(!vfs.has_streamed_assets_below(r"C:\Game\BinOther"));
+        assert!(vfs.has_streamed_assets_below(r"C:\"));
     }
 }

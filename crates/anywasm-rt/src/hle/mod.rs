@@ -8,6 +8,7 @@ pub mod com;
 pub mod crt;
 pub mod d3d11;
 pub mod d3d9;
+pub mod dbghelp;
 pub mod ddraw;
 pub mod directinput8;
 pub mod dsound;
@@ -15,6 +16,7 @@ pub mod dxgi;
 pub mod gdi;
 pub mod gpu;
 pub mod heap;
+pub mod imm32;
 pub mod kernel32;
 pub mod ntdll;
 pub mod ole32;
@@ -22,6 +24,7 @@ pub mod printf;
 pub mod shell32;
 pub mod shlwapi;
 pub mod user32;
+pub mod version;
 pub mod vtables;
 
 use crate::process::{HleFn, Process, Stop};
@@ -30,6 +33,13 @@ use std::collections::HashMap;
 /// Private state of the host libraries.
 #[derive(Default)]
 pub struct Extra {
+    pub advapi32: advapi32::AdvapiState,
+    pub imm32: imm32::ImmState,
+    pub version: version::VersionState,
+    /// Process-local byte-range locks made through kernel32 LockFile.
+    pub file_range_locks: Vec<kernel32::FileRangeLock>,
+    /// Desired access captured by CreateFile for validating file-lock calls.
+    pub file_access: HashMap<u64, u32>,
     pub cmdline_a: u64,
     pub cmdline_w: u64,
     pub env_w: u64,
@@ -38,22 +48,35 @@ pub struct Extra {
     pub data_cells: HashMap<String, u64>,
     pub data_next: u64,
     pub sleep_adjust: u64,
+    /// Per guest-thread execution-state flags; only the documented ES_CONTINUOUS reset is modeled.
+    pub thread_execution_states: HashMap<u32, u32>,
     pub ddraw_mode: Option<(u32, u32, u32)>,
     pub argv: u64,
+    pub wargv: u64,
     pub argc: u32,
+    pub env_a: u64,
+    pub initial_env_a: u64,
+    pub initial_env_w: u64,
+    pub program_a: u64,
+    pub program_w: u64,
     pub errno_cell: u64,
     pub rand_state: u32,
     pub strtok_ptr: u64,
+    /// `_localtime64`'s CRT `tm` result buffer, indexed by guest thread ID.
+    pub localtime_buffers: HashMap<u32, u64>,
     pub locale_cell: u64,
     pub ctype_table: u64,
     pub exit_hooks: Vec<u64>,
     pub onexit_table: Vec<u64>,
     pub cpp_exception_cells: HashMap<u32, (u64, u64)>,
     pub purecall_handler: u64,
+    pub invalid_parameter_handler: u64,
+    pub abort_behavior_flags: Option<u32>,
     pub tmp_a: u64,
     pub win: user32::WinState,
     pub gpu: gpu::GpuStream,
     pub com: com::ComState,
+    pub dbghelp: dbghelp::DbgHelpState,
 }
 
 /// Map a canonical (lower-case, no ".dll") library name to a host library group.
@@ -99,8 +122,11 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         "dxgi" => Some("dxgi"),
         "gdi32" => Some("gdi32"),
         "advapi32" => Some("advapi32"),
+        "dbghelp" => Some("dbghelp"),
         "shell32" => Some("shell32"),
         "ole32" => Some("ole32"),
+        "version" => Some("version"),
+        "imm32" => Some("imm32"),
         _ => None,
     }
 }
@@ -113,8 +139,11 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "ntdll" => ntdll::lookup(name).or_else(|| crt::lookup(name)),
         "msvcp" => crt::lookup(name),
         "ole32" => ole32::lookup(name),
+        "version" => version::lookup(name),
+        "imm32" => imm32::lookup(name),
         "crt" => crt::lookup(name),
         "advapi32" => advapi32::lookup(name),
+        "dbghelp" => dbghelp::lookup(name),
         "user32" => user32::lookup(name),
         "gdi32" => gdi::lookup(name),
         "shell32" => shell32::lookup(name),

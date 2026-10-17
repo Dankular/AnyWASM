@@ -15,6 +15,30 @@ const DDPIXELFORMAT_OFFSET: u64 = 72;
 const DESKTOP_MODE: (u32, u32, u32) = (1920, 1080, 32);
 const AVAILABLE_VIDEO_MEMORY: u32 = 512 * 1024 * 1024;
 
+macro_rules! unimplemented_method {
+    ($function:ident, $name:literal) => {
+        fn $function(_p: &mut Process) -> R {
+            Err(Stop::Unimplemented {
+                dll: "ddraw".into(),
+                name: format!("{} (DirectDraw operation is not modeled)", $name),
+            })
+        }
+    };
+}
+
+unimplemented_method!(unimplemented_compact, "IDirectDraw7::Compact");
+unimplemented_method!(unimplemented_flip_to_gdi, "IDirectDraw7::FlipToGDISurface");
+unimplemented_method!(unimplemented_initialize, "IDirectDraw7::Initialize");
+unimplemented_method!(
+    unimplemented_set_cooperative_level,
+    "IDirectDraw7::SetCooperativeLevel"
+);
+unimplemented_method!(
+    unimplemented_wait_for_vblank,
+    "IDirectDraw7::WaitForVerticalBlank"
+);
+unimplemented_method!(unimplemented_start_mode_test, "IDirectDraw7::StartModeTest");
+
 pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
         "DirectDrawCreateEx" => create_ex,
@@ -27,14 +51,13 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         return None;
     }
     Some(match name {
-        "Compact"
-        | "FlipToGDISurface"
-        | "Initialize"
-        | "SetCooperativeLevel"
-        | "WaitForVerticalBlank"
-        | "RestoreAllSurfaces"
-        | "TestCooperativeLevel"
-        | "StartModeTest" => |_| Ok(S_OK),
+        "Compact" => unimplemented_compact,
+        "FlipToGDISurface" => unimplemented_flip_to_gdi,
+        "Initialize" => unimplemented_initialize,
+        "SetCooperativeLevel" => unimplemented_set_cooperative_level,
+        "WaitForVerticalBlank" => unimplemented_wait_for_vblank,
+        "StartModeTest" => unimplemented_start_mode_test,
+        "RestoreAllSurfaces" | "TestCooperativeLevel" => |_| Ok(S_OK),
         "RestoreDisplayMode" => restore_display_mode,
         "SetDisplayMode" => set_display_mode,
         "GetCaps" => get_caps,
@@ -212,6 +235,28 @@ fn get_available_vidmem(p: &mut Process) -> R {
         p.wr32(free, AVAILABLE_VIDEO_MEMORY)?;
     }
     Ok(S_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operations_without_directdraw_translation_report_coverage_gaps() {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        for method_name in [
+            "SetCooperativeLevel",
+            "WaitForVerticalBlank",
+            "FlipToGDISurface",
+        ] {
+            let result = method("IDirectDraw7", method_name).unwrap()(&mut process);
+            assert!(matches!(
+                result,
+                Err(Stop::Unimplemented { ref dll, ref name })
+                    if dll == "ddraw" && name.contains(method_name)
+            ));
+        }
+    }
 }
 
 fn get_surface_from_dc(p: &mut Process) -> R {

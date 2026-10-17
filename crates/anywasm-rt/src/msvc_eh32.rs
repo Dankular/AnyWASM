@@ -689,9 +689,7 @@ fn unwind_state_map(
                     Stop::GuestUnwind(_)
                     | Stop::GuestUnwind32(_)
                     | Stop::GuestCatch32(_)
-                    | Stop::GuestSehTransfer32(_) => {
-                        crate::msvc_eh::std_terminate(p).map(|_| ())
-                    }
+                    | Stop::GuestSehTransfer32(_) => crate::msvc_eh::std_terminate(p).map(|_| ()),
                     other => Err(other),
                 };
             }

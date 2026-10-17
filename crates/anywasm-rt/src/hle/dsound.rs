@@ -9,13 +9,88 @@ use crate::process::Process;
 
 const E_INVALIDARG: u64 = 0x8007_0057;
 const E_NOINTERFACE: u64 = 0x8000_4002;
-const E_NOTIMPL: u64 = 0x8000_4001;
 const DSBUFFERDESC_SIZE: u32 = 36;
 const DSBCAPS_SIZE: u32 = 20;
 const MAX_SOUND_BUFFER: u32 = 16 * 1024 * 1024;
 pub const DSBCAPS_PRIMARYBUFFER: u32 = 0x1;
 pub const DSBCAPS_CTRL3D: u32 = 0x10;
 const IID_IDIRECTSOUND3DLISTENER: &str = "279afa84-4981-11ce-a521-0020af0be560";
+
+macro_rules! unimplemented_method {
+    ($function:ident, $name:literal) => {
+        fn $function(_p: &mut Process) -> R {
+            Err(Stop::Unimplemented {
+                dll: "dsound".into(),
+                name: format!("{} (DirectSound operation is not modeled)", $name),
+            })
+        }
+    };
+}
+
+unimplemented_method!(
+    unimplemented_set_cooperative_level,
+    "IDirectSound8::SetCooperativeLevel"
+);
+unimplemented_method!(unimplemented_compact, "IDirectSound8::Compact");
+unimplemented_method!(
+    unimplemented_set_speaker_config,
+    "IDirectSound8::SetSpeakerConfig"
+);
+unimplemented_method!(unimplemented_sound_initialize, "IDirectSound8::Initialize");
+unimplemented_method!(
+    unimplemented_buffer_initialize,
+    "IDirectSoundBuffer8::Initialize"
+);
+unimplemented_method!(
+    unimplemented_set_current_position,
+    "IDirectSoundBuffer8::SetCurrentPosition"
+);
+unimplemented_method!(unimplemented_set_format, "IDirectSoundBuffer8::SetFormat");
+unimplemented_method!(unimplemented_set_volume, "IDirectSoundBuffer8::SetVolume");
+unimplemented_method!(unimplemented_set_pan, "IDirectSoundBuffer8::SetPan");
+unimplemented_method!(
+    unimplemented_set_frequency,
+    "IDirectSoundBuffer8::SetFrequency"
+);
+unimplemented_method!(unimplemented_stop, "IDirectSoundBuffer8::Stop");
+unimplemented_method!(unimplemented_unlock, "IDirectSoundBuffer8::Unlock");
+unimplemented_method!(unimplemented_set_fx, "IDirectSoundBuffer8::SetFX");
+unimplemented_method!(
+    unimplemented_acquire_resources,
+    "IDirectSoundBuffer8::AcquireResources"
+);
+unimplemented_method!(
+    unimplemented_listener_set_all_parameters,
+    "IDirectSound3DListener::SetAllParameters"
+);
+unimplemented_method!(
+    unimplemented_listener_set_distance_factor,
+    "IDirectSound3DListener::SetDistanceFactor"
+);
+unimplemented_method!(
+    unimplemented_listener_set_doppler_factor,
+    "IDirectSound3DListener::SetDopplerFactor"
+);
+unimplemented_method!(
+    unimplemented_listener_set_orientation,
+    "IDirectSound3DListener::SetOrientation"
+);
+unimplemented_method!(
+    unimplemented_listener_set_position,
+    "IDirectSound3DListener::SetPosition"
+);
+unimplemented_method!(
+    unimplemented_listener_set_rolloff_factor,
+    "IDirectSound3DListener::SetRolloffFactor"
+);
+unimplemented_method!(
+    unimplemented_listener_set_velocity,
+    "IDirectSound3DListener::SetVelocity"
+);
+unimplemented_method!(
+    unimplemented_listener_commit,
+    "IDirectSound3DListener::CommitDeferredSettings"
+);
 
 const LISTENER_METHODS: &[&str] = &[
     "QueryInterface",
@@ -60,10 +135,10 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSound8", "DuplicateSoundBuffer") => duplicate_sound_buffer,
         ("IDirectSound8", "GetSpeakerConfig") => get_speaker_config,
         ("IDirectSound8", "VerifyCertification") => verify_certification,
-        ("IDirectSound8", "SetCooperativeLevel")
-        | ("IDirectSound8", "Compact")
-        | ("IDirectSound8", "SetSpeakerConfig")
-        | ("IDirectSound8", "Initialize") => |_| Ok(S_OK),
+        ("IDirectSound8", "SetCooperativeLevel") => unimplemented_set_cooperative_level,
+        ("IDirectSound8", "Compact") => unimplemented_compact,
+        ("IDirectSound8", "SetSpeakerConfig") => unimplemented_set_speaker_config,
+        ("IDirectSound8", "Initialize") => unimplemented_sound_initialize,
         ("IDirectSoundBuffer8", "GetCaps") => get_buffer_caps,
         ("IDirectSoundBuffer8", "GetCurrentPosition") => get_current_position,
         ("IDirectSoundBuffer8", "GetFormat") => get_format,
@@ -73,8 +148,8 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSoundBuffer8", "GetStatus") => get_status,
         ("IDirectSoundBuffer8", "Lock") => lock_buffer,
         ("IDirectSoundBuffer8", "GetObjectInPath") => get_object_in_path,
-        ("IDirectSoundBuffer8", "SetFX") => set_fx,
-        ("IDirectSoundBuffer8", "AcquireResources") => acquire_resources,
+        ("IDirectSoundBuffer8", "SetFX") => unimplemented_set_fx,
+        ("IDirectSoundBuffer8", "AcquireResources") => unimplemented_acquire_resources,
         ("IDirectSound3DListener", "GetAllParameters") => get_listener_parameters,
         ("IDirectSound3DListener", "GetDistanceFactor") => get_listener_distance_factor,
         ("IDirectSound3DListener", "GetDopplerFactor") => get_listener_doppler_factor,
@@ -82,23 +157,25 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSound3DListener", "GetPosition") => get_listener_position,
         ("IDirectSound3DListener", "GetRolloffFactor") => get_listener_rolloff_factor,
         ("IDirectSound3DListener", "GetVelocity") => get_listener_velocity,
-        ("IDirectSound3DListener", "SetAllParameters")
-        | ("IDirectSound3DListener", "SetDistanceFactor")
-        | ("IDirectSound3DListener", "SetDopplerFactor")
-        | ("IDirectSound3DListener", "SetOrientation")
-        | ("IDirectSound3DListener", "SetPosition")
-        | ("IDirectSound3DListener", "SetRolloffFactor")
-        | ("IDirectSound3DListener", "SetVelocity")
-        | ("IDirectSound3DListener", "CommitDeferredSettings") => |_| Ok(S_OK),
-        ("IDirectSoundBuffer8", "Initialize")
-        | ("IDirectSoundBuffer8", "SetCurrentPosition")
-        | ("IDirectSoundBuffer8", "SetFormat")
-        | ("IDirectSoundBuffer8", "SetVolume")
-        | ("IDirectSoundBuffer8", "SetPan")
-        | ("IDirectSoundBuffer8", "SetFrequency")
-        | ("IDirectSoundBuffer8", "Stop")
-        | ("IDirectSoundBuffer8", "Unlock")
-        | ("IDirectSoundBuffer8", "Restore") => |_| Ok(S_OK),
+        ("IDirectSound3DListener", "SetAllParameters") => unimplemented_listener_set_all_parameters,
+        ("IDirectSound3DListener", "SetDistanceFactor") => {
+            unimplemented_listener_set_distance_factor
+        }
+        ("IDirectSound3DListener", "SetDopplerFactor") => unimplemented_listener_set_doppler_factor,
+        ("IDirectSound3DListener", "SetOrientation") => unimplemented_listener_set_orientation,
+        ("IDirectSound3DListener", "SetPosition") => unimplemented_listener_set_position,
+        ("IDirectSound3DListener", "SetRolloffFactor") => unimplemented_listener_set_rolloff_factor,
+        ("IDirectSound3DListener", "SetVelocity") => unimplemented_listener_set_velocity,
+        ("IDirectSound3DListener", "CommitDeferredSettings") => unimplemented_listener_commit,
+        ("IDirectSoundBuffer8", "Initialize") => unimplemented_buffer_initialize,
+        ("IDirectSoundBuffer8", "SetCurrentPosition") => unimplemented_set_current_position,
+        ("IDirectSoundBuffer8", "SetFormat") => unimplemented_set_format,
+        ("IDirectSoundBuffer8", "SetVolume") => unimplemented_set_volume,
+        ("IDirectSoundBuffer8", "SetPan") => unimplemented_set_pan,
+        ("IDirectSoundBuffer8", "SetFrequency") => unimplemented_set_frequency,
+        ("IDirectSoundBuffer8", "Stop") => unimplemented_stop,
+        ("IDirectSoundBuffer8", "Unlock") => unimplemented_unlock,
+        ("IDirectSoundBuffer8", "Restore") => |_| Ok(S_OK),
         ("IDirectSoundBuffer8", "Play") => playback_not_implemented,
         _ => return None,
     })
@@ -126,6 +203,20 @@ fn create_sound_buffer(p: &mut Process) -> R {
     }
     let caps = p.rd32(desc + 4)?;
     let size = p.rd32(desc + 8)?.clamp(1, MAX_SOUND_BUFFER);
+    let reserved = p.rd32(desc + 12)?;
+    let format = p.rd32(desc + 16)?;
+    if reserved != 0 {
+        p.wrptr(out, 0)?;
+        return Ok(E_INVALIDARG);
+    }
+    if caps != 0 || format != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "dsound".into(),
+            name: format!(
+                "IDirectSound8::CreateSoundBuffer flags={caps:#x} wave_format={format:#x}"
+            ),
+        });
+    }
     let memory = super::kernel32::alloc_block(p, size as u64, true);
     let buffer = com::create(
         p,
@@ -358,28 +449,11 @@ fn get_object_in_path(p: &mut Process) -> R {
     Ok(E_NOINTERFACE)
 }
 
-fn set_fx(p: &mut Process) -> R {
-    let (count, results) = (p.arg(1) as usize, p.arg(3));
-    if results != 0 && count <= 256 {
-        for i in 0..count {
-            p.wr32(results + (i * 4) as u64, 0)?;
-        }
-    }
-    Ok(S_OK)
-}
-
-fn acquire_resources(p: &mut Process) -> R {
-    let (count, results) = (p.arg(2) as usize, p.arg(3));
-    if results != 0 && count <= 256 {
-        for i in 0..count {
-            p.wr32(results + (i * 4) as u64, 0)?;
-        }
-    }
-    Ok(S_OK)
-}
-
 fn playback_not_implemented(_p: &mut Process) -> R {
-    Ok(E_NOTIMPL)
+    Err(Stop::Unimplemented {
+        dll: "dsound".into(),
+        name: "IDirectSoundBuffer8::Play (no audio output backend)".into(),
+    })
 }
 
 #[cfg(test)]
@@ -387,10 +461,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn playback_reports_not_implemented_without_an_audio_backend() {
+    fn playback_reports_a_coverage_gap_without_an_audio_backend() {
         let mut process = Process::new(crate::vfs::Vfs::new());
         let play = method("IDirectSoundBuffer8", "Play").unwrap();
 
-        assert_eq!(play(&mut process).unwrap(), 0x8000_4001);
+        assert!(matches!(
+            play(&mut process),
+            Err(Stop::Unimplemented { ref dll, ref name })
+                if dll == "dsound" && name.contains("Play")
+        ));
+    }
+
+    #[test]
+    fn unmodeled_sound_setters_report_coverage_gaps() {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        for method_name in ["SetVolume", "SetPan", "SetFrequency", "SetFormat"] {
+            let result = method("IDirectSoundBuffer8", method_name).unwrap()(&mut process);
+            assert!(matches!(
+                result,
+                Err(Stop::Unimplemented { ref dll, ref name })
+                    if dll == "dsound" && name.contains(method_name)
+            ));
+        }
     }
 }

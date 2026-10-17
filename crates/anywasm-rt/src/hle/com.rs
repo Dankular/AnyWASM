@@ -187,6 +187,8 @@ pub struct ResInfo {
     pub stride: u32,
     /// Last known CPU-side contents (buffers; textures with CPU access).
     pub shadow: Vec<u8>,
+    /// D3D9 render target surfaces may be locked only when CreateRenderTarget requested it.
+    pub d3d9_lockable: bool,
     /// Guest scratch memory handed out by Map, and the write intent to flush on Unmap.
     pub map_addr: u64,
     pub map_write: bool,
@@ -218,6 +220,8 @@ pub struct ComState {
     pub d3d9_viewports: HashMap<u64, [u32; 6]>,
     /// Current Direct3D 9 scissor rectangle per device, stored as four RECT words.
     pub d3d9_scissor_rects: HashMap<u64, [u32; 4]>,
+    /// Last guest-supplied Direct3D 9 RGB gamma ramp per device (three 256-entry WORD tables).
+    pub d3d9_gamma_ramps: HashMap<u64, Vec<u8>>,
     /// Direct3D 9 stream zero binding `(buffer, stride, offset)` per device.
     pub d3d9_stream0: HashMap<u64, (u64, u32, u32)>,
     /// Direct3D 9 index buffer binding per device.
@@ -654,6 +658,7 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
         if matches!(&o.kind, Kind::Direct3DDevice9 { .. }) {
             p.extra.com.d3d9_viewports.remove(&this);
             p.extra.com.d3d9_scissor_rects.remove(&this);
+            p.extra.com.d3d9_gamma_ramps.remove(&this);
             let bound = p
                 .extra
                 .com
@@ -755,8 +760,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         }
         "GetDevice" => get_device,
         "GetPrivateData" => |_| Ok(DXGI_ERROR_NOT_FOUND),
-        "SetPrivateData" | "SetPrivateDataInterface" | "SetEvictionPriority" => |_| Ok(S_OK),
-        "GetEvictionPriority" => |_| Ok(0x8000_0000),
+        "SetPrivateData" => set_private_data_unimplemented,
+        "SetPrivateDataInterface" => set_private_data_interface_unimplemented,
+        "SetEvictionPriority" => set_eviction_priority_unimplemented,
+        // Resource eviction priority starts at zero. Setting it is surfaced as
+        // unimplemented above, so this getter only reports the actual default.
+        "GetEvictionPriority" => |_| Ok(0),
         _ => {
             return d3d9::method(iface, m)
                 .or_else(|| d3d11::method(iface, m))
@@ -765,6 +774,27 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                 .or_else(|| dsound::method(iface, m))
                 .or_else(|| directinput8::method(iface, m))
         }
+    })
+}
+
+fn set_private_data_unimplemented(_p: &mut Process) -> Result<u64, Stop> {
+    Err(Stop::Unimplemented {
+        dll: "com".into(),
+        name: "SetPrivateData (COM private data storage is not modeled)".into(),
+    })
+}
+
+fn set_private_data_interface_unimplemented(_p: &mut Process) -> Result<u64, Stop> {
+    Err(Stop::Unimplemented {
+        dll: "com".into(),
+        name: "SetPrivateDataInterface (COM private interface storage is not modeled)".into(),
+    })
+}
+
+fn set_eviction_priority_unimplemented(_p: &mut Process) -> Result<u64, Stop> {
+    Err(Stop::Unimplemented {
+        dll: "com".into(),
+        name: "SetEvictionPriority (resource eviction policy is not modeled)".into(),
     })
 }
 
@@ -813,6 +843,19 @@ mod tests {
                 0,
                 "vtable slot {slot}"
             );
+        }
+    }
+
+    #[test]
+    fn private_data_setters_report_missing_storage_instead_of_claiming_success() {
+        let mut p = Process::new(Vfs::new());
+        for method_name in ["SetPrivateData", "SetPrivateDataInterface"] {
+            let result = lookup(&format!("ID3D11DeviceChild::{method_name}")).unwrap()(&mut p);
+            assert!(matches!(
+                result,
+                Err(Stop::Unimplemented { ref dll, ref name })
+                    if dll == "com" && name.contains(method_name)
+            ));
         }
     }
 }

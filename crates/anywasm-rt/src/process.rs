@@ -24,6 +24,8 @@ pub const LDR_ADDR: u64 = 0x7ffd_0000;
 pub const STACK_TOP: u64 = 0x7f00_0000;
 pub const HLE_MODULE_BASE: u64 = 0x6000_0000;
 pub const THREAD_QUANTUM: u64 = 10_000;
+pub const VIRTUAL_USER_NAME: &str = "AnyWASM";
+pub const VIRTUAL_USER_PROFILE: &str = "C:\\Users\\AnyWASM";
 const CALLBACK_BUDGET_EXHAUSTED: &str =
     "synchronous guest callback exhausted the run budget; its continuation cannot be resumed";
 
@@ -67,6 +69,28 @@ fn trace_guest_instruction(cpu: &Cpu, mem: &Memory) -> String {
     }
 }
 
+fn read_guest_utf16(mem: &Memory, pointer: u64, max_units: usize) -> String {
+    if pointer == 0 {
+        return "<null>".to_string();
+    }
+    let mut units = Vec::new();
+    for index in 0..max_units {
+        let Some(address) = (index as u64)
+            .checked_mul(2)
+            .and_then(|offset| pointer.checked_add(offset))
+        else {
+            return "<unreadable: address overflow>".to_string();
+        };
+        match mem.read_u16(address) {
+            Ok(0) => return String::from_utf16_lossy(&units),
+            Ok(unit) => units.push(unit),
+            Err(_) if units.is_empty() => return "<unreadable>".to_string(),
+            Err(_) => break,
+        }
+    }
+    String::from_utf16_lossy(&units)
+}
+
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "anywasm")]
 extern "C" {
@@ -98,13 +122,21 @@ pub struct GuestCatch32 {
 pub struct GuestSehTransfer32 {
     pub(crate) target_frame: u64,
     pub(crate) target_ip: u64,
+    pub(crate) kind: GuestSehTransferKind32,
     pub(crate) scope_table: u64,
     pub(crate) cookie_pointer: u64,
     pub(crate) cookie_check: u64,
     pub(crate) frame_pointer: u64,
     pub(crate) saved_esp: u64,
+    pub(crate) active_level: u32,
     pub(crate) selected_level: u32,
     pub(crate) enclosing_level: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuestSehTransferKind32 {
+    Eh3,
+    Eh4,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +156,8 @@ pub enum Stop {
     Exit(u32),
     /// The guest called an import that has no implementation.
     Unimplemented { dll: String, name: String },
+    /// An HLE handler exists, but its x86 stack-cleanup ABI has not been verified.
+    AbiUnimplemented { dll: String, name: String },
     /// Unrecoverable guest fault or unsupported instruction.
     Crash(String),
     /// The step budget was exhausted; call `run` again to continue.
@@ -222,6 +256,18 @@ pub struct CriticalSectionState {
     pub waiters: VecDeque<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SystemParameters {
+    /// Host's Windows cursor-shadow setting. `None` means the host did not supply the value.
+    pub cursor_shadow: Option<bool>,
+    /// Host's Windows mouse-trail count. `None` means the host did not supply the value.
+    pub mouse_trails: Option<u32>,
+    /// Host's Windows Mouse Sonar accessibility setting.
+    pub mouse_sonar: Option<bool>,
+    /// Host's number of vertical wheel-scroll lines.
+    pub wheel_scroll_lines: Option<u32>,
+}
+
 pub type RunResult = Stop;
 pub type HleFn = fn(&mut Process) -> Result<u64, Stop>;
 
@@ -302,6 +348,13 @@ pub enum Handle {
         signaled: bool,
         manual: bool,
     },
+    ChangeNotification {
+        path: String,
+        subtree: bool,
+        filter: u32,
+        signaled: bool,
+        changed_after_signal: bool,
+    },
     Mutex {
         owner: Option<u32>,
         recursion: u32,
@@ -316,15 +369,96 @@ pub enum Handle {
         parameter: u64,
         exit_code: Option<u32>,
         suspended: bool,
+        inheritable: bool,
+    },
+    Process {
+        id: u32,
+        inheritable: bool,
     },
     Module(u64),
     Other,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RegistryKeyMetadata {
+    pub class_name: String,
+    pub security_descriptor_size: Option<u32>,
+    pub last_write_filetime: Option<u64>,
+}
+
+/// A process-local CryptoAPI provider context created with CryptAcquireContextA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CryptoProviderState {
+    pub provider_type: u32,
+    pub provider_name: String,
+    pub container: Option<String>,
+    pub flags: u32,
+}
+
+/// Incremental CryptoAPI hash state. Digest bytes are computed from this input on demand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CryptoHashState {
+    pub provider: u64,
+    pub algorithm: u32,
+    pub data: Vec<u8>,
+    pub finalized: bool,
+}
+
+/// RC4 stream state for an active CryptoAPI key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rc4State {
+    permutation: [u8; 256],
+    i: u8,
+    j: u8,
+}
+
+impl Rc4State {
+    pub fn new(key: &[u8]) -> Option<Self> {
+        if key.is_empty() {
+            return None;
+        }
+        let mut permutation = core::array::from_fn(|index| index as u8);
+        let mut j = 0u8;
+        for i in 0..256usize {
+            j = j
+                .wrapping_add(permutation[i])
+                .wrapping_add(key[i % key.len()]);
+            permutation.swap(i, j as usize);
+        }
+        Some(Self {
+            permutation,
+            i: 0,
+            j: 0,
+        })
+    }
+
+    pub fn apply(&mut self, bytes: &mut [u8]) {
+        for byte in bytes {
+            self.i = self.i.wrapping_add(1);
+            self.j = self.j.wrapping_add(self.permutation[self.i as usize]);
+            self.permutation.swap(self.i as usize, self.j as usize);
+            let index =
+                self.permutation[self.i as usize].wrapping_add(self.permutation[self.j as usize]);
+            *byte ^= self.permutation[index as usize];
+        }
+    }
+}
+
+/// CryptoAPI symmetric key state backed by a translated cipher implementation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CryptoKeyState {
+    pub provider: u64,
+    pub algorithm: u32,
+    pub key_material: Vec<u8>,
+    pub exportable: bool,
+    pub rc4: Option<Rc4State>,
 }
 
 #[derive(Clone, Debug)]
 pub struct FindEntry {
     pub name: String,
     pub size: u64,
+    pub attributes: u32,
 }
 
 pub struct Process {
@@ -347,30 +481,65 @@ pub struct Process {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub stdin: VecDeque<u8>,
+    /// Process standard device handles; they may be redirected through SetStdHandle.
+    pub std_handles: [u64; 3],
+    /// Process error-mode flags set by SetErrorMode.
+    pub error_mode: u32,
+    /// Registered console control callbacks in Windows' last-registered-first order.
+    pub console_ctrl_handlers: Vec<u64>,
+    pub ignore_ctrl_c: bool,
     pending_input_events: VecDeque<(u32, i64, i64, i64)>,
     pub handles: HashMap<u64, Handle>,
     pub next_handle: u64,
+    /// CryptoAPI provider contexts are separate from kernel handles and use the same ID space.
+    pub crypto_providers: HashMap<u64, CryptoProviderState>,
+    /// CryptoAPI hashes are separate from kernel handles and use the same ID space.
+    pub crypto_hashes: HashMap<u64, CryptoHashState>,
+    /// CryptoAPI keys are separate from kernel handles and use the same ID space.
+    pub crypto_keys: HashMap<u64, CryptoKeyState>,
     /// Process-local virtual registry key paths, indexed by guest handles.
     pub registry_key_paths: HashMap<u64, String>,
+    /// Access mask granted to each process-local registry handle.
+    pub registry_key_access: HashMap<u64, u32>,
     /// Keys created by guest calls during this process lifetime.
     pub registry_paths: HashSet<String>,
     /// Volatile registry values indexed by normalized key path and value name.
     pub registry_values: HashMap<(String, String), (u32, Vec<u8>)>,
+    /// Host snapshot values retain native UTF-16 registry storage for W APIs.
+    pub registry_host_values: HashSet<(String, String)>,
+    /// Exact paths present in the host's read-only registry snapshot.
+    pub registry_host_paths: HashSet<String>,
+    /// Child names in host registry enumeration order, indexed by normalized parent path.
+    pub registry_children: HashMap<String, Vec<String>>,
+    /// Registry class and last-write metadata from the host snapshot.
+    pub registry_key_metadata: HashMap<String, RegistryKeyMetadata>,
     pub heap: crate::hle::heap::Heap,
     pub vmem: BTreeMap<u64, (u64, u8)>,
     pub vmem_next: u64,
     pub cmdline: String,
     pub image_path: String,
     pub current_directory: String,
+    /// MSVC CRT application type: 0 unknown, 1 console, 2 GUI.
+    pub crt_app_type: u32,
     pub env: Vec<(String, String)>,
+    /// Process environment at image load, before guest CRT or Win32 mutations.
+    pub initial_env: Option<Vec<(String, String)>>,
     pub tls_next: u32,
     pub fls_next: u32,
     static_tls_next: u32,
     static_tls_templates: Vec<StaticTlsTemplate>,
     pub fls: HashMap<u32, u64>,
     pub tls_slots: HashMap<u32, u64>,
+    /// Per-thread COM apartment initialization counts and model (true = STA).
+    pub com_init: HashMap<u32, (u32, bool)>,
     pub current_thread_id: u32,
     pub next_thread_id: u32,
+    pub system_parameters: SystemParameters,
+    pub process_priority_class: u32,
+    /// Base Win32 priority for each thread object. Missing entries use normal priority (0).
+    pub thread_priorities: HashMap<u32, i32>,
+    /// Preferred logical processor for each thread. Missing entries use processor 0.
+    pub thread_ideal_processors: HashMap<u32, u32>,
     current_teb_base: u64,
     /// Guest function entries replaced by host implementations (see `install_native_hooks`).
     pub native_hooks: Vec<(u64, String)>,
@@ -382,6 +551,8 @@ pub struct Process {
     pub(crate) active_cpp_unwind_frames: Vec<(u32, u64)>,
     pub current_thread_is_guest: bool,
     pub current_thread_state: ThreadState,
+    pub thread_suspend_counts: HashMap<u32, u32>,
+    suspended_thread_states: HashMap<u32, ThreadState>,
     pub current_wait_order: u64,
     pub current_thread_saved: bool,
     pub guest_threads: HashMap<u32, GuestThread>,
@@ -401,6 +572,7 @@ pub struct Process {
     pub exit_code: Option<u32>,
     pub rng: u64,
     pub trace_imports: bool,
+    pub(crate) seh_abnormal_termination: bool,
     pub trace_modules_only: bool,
     pub trace_gta_eventvol: bool,
     trace_particle_txd: bool,
@@ -424,53 +596,64 @@ fn align_up(v: u64, a: u64) -> u64 {
 
 /// Number of stack argument bytes removed by an x86 Win32 callee. CRT and Vorbis C APIs use
 /// caller cleanup. Keep this table explicit so an unknown signature cannot silently corrupt ESP.
-fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
+fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
     if group == "crt" && name == "_CxxThrowException" {
-        return 8;
+        return Some(8);
+    }
+    if group == "crt" && matches!(name, "_wcsnicmp" | "wcsnicmp") {
+        return Some(0);
+    }
+    if group == "msvcp" && name == "?uncaught_exception@std@@YA_NXZ" {
+        // std::uncaught_exception is a free __cdecl function in the Sims 3 MSVC runtime.
+        return Some(0);
     }
     if group == "com" {
         // COM methods use stdcall on x86, with `this` included in the callee-popped
         // argument list. Keep the shared IUnknown entries here; graphics and input
         // interfaces have additional signatures below.
         if name.ends_with("::QueryInterface") {
-            return 12;
+            return Some(12);
         }
         if name.ends_with("::AddRef") || name.ends_with("::Release") {
-            return 4;
+            return Some(4);
         }
         match name {
             // DirectDraw7::GetAvailableVidMem(this, caps, total, free)
-            "IDirectDraw7::GetAvailableVidMem" => return 16,
+            "IDirectDraw7::GetAvailableVidMem" => return Some(16),
             // DirectSound8::GetCaps(this, caps)
-            "IDirectSound8::GetCaps" => return 8,
+            "IDirectSound8::GetCaps" => return Some(8),
             _ => {}
         }
         if let Some(bytes) = hle::directinput8::stdcall_stack_bytes(name) {
-            return bytes;
+            return Some(bytes);
         }
         if let Some(bytes) = hle::d3d9::stdcall_stack_bytes(name) {
-            return bytes;
+            return Some(bytes);
         }
     }
     if group == "crt" || group == "vorbisfile" || name == "wsprintfA" {
-        return 0;
+        return Some(0);
     }
     if group == "kernel32" && name == "IsBadCodePtr" {
-        return 4;
+        return Some(4);
     }
     if group == "kernel32" {
         match name {
-            "FindResourceA" | "FindResourceW" => return 12,
-            "FindResourceExA" | "FindResourceExW" => return 16,
-            "SizeofResource" => return 8,
+            // GetProductInfo(version, service pack, product output) uses five Win32 stack args.
+            "GetProductInfo" => return Some(20),
+            // IsWow64Process(process handle, BOOL output) uses two Win32 stack args.
+            "IsWow64Process" | "SetThreadIdealProcessor" => return Some(8),
+            "FindResourceA" | "FindResourceW" => return Some(12),
+            "FindResourceExA" | "FindResourceExW" => return Some(16),
+            "SizeofResource" => return Some(8),
             _ => {}
         }
     }
     if group == "user32" && matches!(name, "CharUpperA" | "CharLowerA") {
-        return 4;
+        return Some(4);
     }
     if group == "user32" && matches!(name, "CharUpperBuffA" | "CharLowerBuffA") {
-        return 8;
+        return Some(8);
     }
     if group == "user32" {
         let args = match name {
@@ -519,6 +702,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             | "DefWindowProcA"
             | "MapWindowPoints"
             | "SystemParametersInfoA"
+            | "SystemParametersInfoW"
             | "LoadStringA"
             | "KeybdEvent"
             | "keybd_event" => Some(4),
@@ -531,10 +715,11 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             _ => None,
         };
         if let Some(args) = args {
-            return args * 4;
+            return Some(args * 4);
         }
     }
     let signatures: &[(&[&str], u64)] = match group {
+        "ntdll" => &[(&["RtlUnwind"], 4)],
         "kernel32" => &[
             (
                 &[
@@ -546,6 +731,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "GetCurrentThreadId",
                     "GetUserDefaultLCID",
                     "GetCurrentProcessId",
+                    "GetLogicalDrives",
                     "GetSystemDefaultLCID",
                     "GetEnvironmentStrings",
                     "GetEnvironmentStringsW",
@@ -569,6 +755,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "CloseHandle",
                     "LocalFree",
                     "GetThreadPriority",
+                    "GetPriorityClass",
                     "Sleep",
                     "SetLastError",
                     "DeleteFileA",
@@ -649,6 +836,8 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "GetLogicalDriveStringsA",
                     "EnumSystemLocalesA",
                     "GetCurrentDirectoryA",
+                    "GetComputerNameW",
+                    "SystemTimeToFileTime",
                     "lstrcpyA",
                     "FindFirstFileA",
                     "FindNextFileA",
@@ -657,6 +846,8 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "TlsSetValue",
                     "FlsSetValue",
                     "SetThreadPriority",
+                    "SetPriorityClass",
+                    "SleepEx",
                     "LocalAlloc",
                     "GlobalAlloc",
                     "GetConsoleMode",
@@ -683,34 +874,42 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "VirtualQuery",
                     "ReleaseSemaphore",
                     "CreateMutexA",
+                    "CreateMutexW",
+                    "InterlockedCompareExchange",
                     "GetModuleFileNameA",
                     "GetModuleFileNameW",
+                    "GetEnvironmentVariableA",
+                    "GetEnvironmentVariableW",
+                    "WaitForSingleObjectEx",
                     "VirtualFree",
                     "HeapCreate",
                     "HeapSize",
                     "HeapFree",
                     "SizeofResource",
                     "HeapAlloc",
+                    "GetComputerNameExA",
+                    "GetLongPathNameW",
+                    "GetFileAttributesExW",
                 ],
                 3,
             ),
             (
                 &[
                     "VirtualProtect",
-                    "WaitForSingleObjectEx",
                     "CreateSemaphoreA",
                     "CreateEventA",
                     "SetFilePointer",
                     "GetLocaleInfoA",
                     "GetLocaleInfoW",
-                    "GetEnvironmentVariableA",
-                    "GetEnvironmentVariableW",
                     "VirtualAlloc",
                     "HeapReAlloc",
                     "GetFullPathNameA",
                     "GetOverlappedResult",
+                    "GetDiskFreeSpaceExA",
+                    "GetDiskFreeSpaceExW",
                     "GetPrivateProfileIntA",
                     "GetPrivateProfileIntW",
+                    "GetStringTypeW",
                     "RtlUnwind",
                     "RaiseException",
                 ],
@@ -719,7 +918,6 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             (
                 &[
                     "GetStringTypeA",
-                    "GetStringTypeW",
                     "ReadFile",
                     "WriteFile",
                     "WriteConsoleW",
@@ -746,7 +944,14 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                 6,
             ),
             (&["CreateFileA", "CreateFileW"], 7),
-            (&["WideCharToMultiByte", "GetVolumeInformationA"], 8),
+            (
+                &[
+                    "WideCharToMultiByte",
+                    "GetVolumeInformationA",
+                    "GetVolumeInformationW",
+                ],
+                8,
+            ),
         ],
         "advapi32" => &[
             (&["RegCloseKey"], 1),
@@ -758,7 +963,6 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
         "user32" => &[
             (
                 &[
-                    "ReleaseCapture",
                     "PostQuitMessage",
                     "SetCursor",
                     "ShowCursor",
@@ -771,7 +975,6 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                     "SetFocus",
                     "GetMenu",
                     "GetKeyboardLayout",
-                    "SetCursorPos",
                     "UnhookWindowsHookEx",
                     "RegisterWindowMessageA",
                     "RegisterWindowMessageW",
@@ -800,6 +1003,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
                 ],
                 2,
             ),
+            (&["KillTimer"], 2),
             (&["AdjustWindowRect"], 3),
             (
                 &[
@@ -825,15 +1029,32 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
             (&["CoInitializeEx"], 2),
             (&["CoInitialize"], 1),
             (&["CoUninitialize"], 0),
+            (&["CoTaskMemAlloc", "CoTaskMemFree", "CoCreateGuid"], 1),
+            (&["CoTaskMemRealloc", "IIDFromString"], 2),
+            (&["StringFromGUID2"], 3),
         ],
         "d3d9" => &[(&["Direct3DCreate9"], 1)],
         "dinput8" => &[(&["DirectInput8Create"], 5)],
         "ddraw" => &[(&["DirectDrawCreateEx"], 4)],
         "dsound" => &[(&["#11"], 3)],
-        "gdi32" => &[(&["DeleteObject"], 1)],
+        "gdi32" => &[
+            (
+                &[
+                    "DeleteObject",
+                    "CreateSolidBrush",
+                    "CreateCompatibleDC",
+                    "DeleteDC",
+                ],
+                1,
+            ),
+            (&["CreateDCA", "CreateICA", "CreateDCW", "CreateICW"], 4),
+            (&["CreateBitmap"], 5),
+            (&["CreateDIBSection"], 6),
+        ],
         "winmm" => &[
             (&["timeBeginPeriod", "timeEndPeriod"], 1),
             (&["timeGetDevCaps"], 2),
+            (&["timeGetTime"], 0),
         ],
         "com" => &[
             (
@@ -993,15 +1214,32 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> u64 {
         ],
         _ => &[],
     };
-    let args = signatures
+    signatures
         .iter()
-        .find_map(|(names, count)| names.contains(&name).then_some(*count))
-        .unwrap_or(0);
-    args * 4
+        .find_map(|(names, count)| names.contains(&name).then_some(*count * 4))
+        .or_else(|| crate::x86_abi_generated::cleanup_bytes(group, name))
+}
+
+fn x86_abi_cleanup_bytes(group: &str, name: &str) -> Result<u64, Stop> {
+    stdcall_stack_bytes(group, name).ok_or_else(|| Stop::AbiUnimplemented {
+        dll: group.to_string(),
+        name: name.to_string(),
+    })
 }
 
 impl Process {
-    pub fn new(vfs: Vfs) -> Self {
+    pub fn new(mut vfs: Vfs) -> Self {
+        // The virtual Windows account has the same profile folders on every
+        // host. These are writable VFS directories, not paths into the host OS.
+        for directory in [
+            "C:\\Users",
+            VIRTUAL_USER_PROFILE,
+            "C:\\Users\\AnyWASM\\Documents",
+        ] {
+            if !vfs.is_dir(directory) {
+                let _ = vfs.create_dir(directory);
+            }
+        }
         let mut mem = Memory::new();
         mem.map(THUNK_BASE, THUNK_BYTES, PROT_RWX);
         // Fill thunk space with INT3 so a stray jump into it is caught.
@@ -1027,33 +1265,56 @@ impl Process {
             stdout: Vec::new(),
             stderr: Vec::new(),
             stdin: VecDeque::new(),
+            std_handles: [0x10, 0x14, 0x18],
+            error_mode: 0,
+            console_ctrl_handlers: Vec::new(),
+            ignore_ctrl_c: false,
             pending_input_events: VecDeque::new(),
             handles: HashMap::new(),
             next_handle: 0x100,
+            crypto_providers: HashMap::new(),
+            crypto_hashes: HashMap::new(),
+            crypto_keys: HashMap::new(),
             registry_key_paths: HashMap::new(),
+            registry_key_access: HashMap::new(),
             registry_paths: HashSet::new(),
             registry_values: HashMap::new(),
+            registry_host_values: HashSet::new(),
+            registry_host_paths: HashSet::new(),
+            registry_children: HashMap::new(),
+            registry_key_metadata: HashMap::new(),
             heap: crate::hle::heap::Heap::new(),
             vmem: BTreeMap::new(),
             vmem_next: 0x2_0000_0000,
             cmdline: String::new(),
             image_path: String::new(),
             current_directory: "C:\\".into(),
+            crt_app_type: 0,
             env: vec![
                 ("SystemRoot".into(), "C:\\Windows".into()),
                 ("TEMP".into(), "C:\\Temp".into()),
                 ("PATH".into(), "C:\\Windows\\System32".into()),
+                ("USERPROFILE".into(), VIRTUAL_USER_PROFILE.into()),
+                ("HOMEDRIVE".into(), "C:".into()),
+                ("HOMEPATH".into(), "\\Users\\AnyWASM".into()),
+                ("USERNAME".into(), VIRTUAL_USER_NAME.into()),
                 ("COMPUTERNAME".into(), "ANYWASM".into()),
                 ("OS".into(), "Windows_NT".into()),
             ],
+            initial_env: None,
             tls_next: 0,
             fls_next: 0,
             static_tls_next: 0,
             static_tls_templates: Vec::new(),
             fls: HashMap::new(),
             tls_slots: HashMap::new(),
+            com_init: HashMap::new(),
             current_thread_id: 0x1004,
             next_thread_id: 0x1008,
+            system_parameters: SystemParameters::default(),
+            process_priority_class: 0x20,
+            thread_priorities: HashMap::new(),
+            thread_ideal_processors: HashMap::new(),
             current_teb_base: TEB_ADDR,
             native_hooks: Vec::new(),
             guest_exception_depths: HashMap::new(),
@@ -1061,6 +1322,8 @@ impl Process {
             active_cpp_unwind_frames: Vec::new(),
             current_thread_is_guest: false,
             current_thread_state: ThreadState::Running,
+            thread_suspend_counts: HashMap::new(),
+            suspended_thread_states: HashMap::new(),
             current_wait_order: 0,
             current_thread_saved: false,
             guest_threads: HashMap::new(),
@@ -1080,6 +1343,7 @@ impl Process {
             exit_code: None,
             rng: 0x2545_F491_4F6C_DD1D,
             trace_imports: false,
+            seh_abnormal_termination: false,
             trace_modules_only: false,
             trace_gta_eventvol: false,
             trace_particle_txd: false,
@@ -1255,9 +1519,9 @@ impl Process {
             .mem
             .read_vec(TEB_ADDR, page_size as usize)
             .map_err(|error| Stop::Crash(format!("read coordinator TEB: {error:?}")))?;
-        let teb_base = self
-            .try_alloc_virtual(page_size, PROT_RW)
-            .ok_or_else(|| Stop::Crash("guest allocation failed while allocating thread TEB".into()))?;
+        let teb_base = self.try_alloc_virtual(page_size, PROT_RW).ok_or_else(|| {
+            Stop::Crash("guest allocation failed while allocating thread TEB".into())
+        })?;
         let process_id = self.rd64(TEB_ADDR + 0x40)?;
         bytes[0x00..0x08].copy_from_slice(&u64::MAX.to_le_bytes());
         bytes[0x08..0x10].copy_from_slice(&stack_base.to_le_bytes());
@@ -1297,9 +1561,11 @@ impl Process {
             // The initial thread's TEB lives in the HLE alias itself. Before another thread's TEB
             // is loaded over the alias, give the initial thread its own backing page; otherwise its
             // TLS vector, last error and exception state would be overwritten and never restored.
-            let backing = self
-                .try_alloc_virtual(0x1000, PROT_RW)
-                .ok_or_else(|| Stop::Crash("guest allocation failed while allocating main-thread TEB backing".into()))?;
+            let backing = self.try_alloc_virtual(0x1000, PROT_RW).ok_or_else(|| {
+                Stop::Crash(
+                    "guest allocation failed while allocating main-thread TEB backing".into(),
+                )
+            })?;
             self.current_teb_base = backing;
         }
         self.copy_teb_page(TEB_ADDR, self.current_teb_base)?;
@@ -1324,9 +1590,9 @@ impl Process {
         parameter: u64,
         suspended: bool,
     ) -> Result<(), Stop> {
-        let stack_limit = self
-            .try_alloc_virtual(0x10000, PROT_RW)
-            .ok_or_else(|| Stop::Crash("guest allocation failed while allocating thread stack".into()))?;
+        let stack_limit = self.try_alloc_virtual(0x10000, PROT_RW).ok_or_else(|| {
+            Stop::Crash("guest allocation failed while allocating thread stack".into())
+        })?;
         let stack_base = stack_limit + 0x10000;
         let stack_pointer = stack_base
             - if self.cpu.mode == CpuMode::X86_64 {
@@ -1347,12 +1613,8 @@ impl Process {
             cpu.gs_base = TEB_ADDR;
         }
         let teb_tls_vector = self.build_static_tls_vector()?;
-        let teb_base = self.allocate_guest_thread_teb(
-            id,
-            stack_base,
-            stack_limit,
-            teb_tls_vector,
-        )?;
+        let teb_base =
+            self.allocate_guest_thread_teb(id, stack_base, stack_limit, teb_tls_vector)?;
         let state = if suspended {
             ThreadState::Suspended
         } else {
@@ -1375,6 +1637,11 @@ impl Process {
                 wait_order: 0,
             },
         );
+        if suspended {
+            self.thread_suspend_counts.insert(id, 1);
+            self.suspended_thread_states.insert(id, ThreadState::Ready);
+        }
+        self.thread_priorities.entry(id).or_insert(0);
         if !suspended {
             self.ready_threads.push_back(id);
         }
@@ -1382,15 +1649,99 @@ impl Process {
     }
 
     pub fn resume_guest_thread(&mut self, id: u32) -> bool {
-        let Some(thread) = self.guest_threads.get_mut(&id) else {
-            return false;
+        self.resume_thread(id).is_some_and(|previous| previous != 0)
+    }
+
+    pub fn suspend_thread(&mut self, id: u32) -> Option<u32> {
+        let is_current = !self.current_thread_saved && self.current_thread_id == id;
+        let state = if is_current {
+            &mut self.current_thread_state
+        } else {
+            &mut self.guest_threads.get_mut(&id)?.state
         };
-        if thread.state != ThreadState::Suspended {
+        if matches!(state, ThreadState::Exited(_)) {
+            return None;
+        }
+        let previous = self.thread_suspend_counts.get(&id).copied().unwrap_or(0);
+        if previous >= 127 {
+            return None;
+        }
+        if previous == 0 {
+            self.suspended_thread_states.insert(id, state.clone());
+            *state = ThreadState::Suspended;
+            self.ready_threads.retain(|ready_id| *ready_id != id);
+        }
+        self.thread_suspend_counts.insert(id, previous + 1);
+        self.schedule_requested = true;
+        Some(previous)
+    }
+
+    /// Resume one suspend count and return the count that was in effect before the call.
+    pub fn resume_thread(&mut self, id: u32) -> Option<u32> {
+        let is_current = !self.current_thread_saved && self.current_thread_id == id;
+        let state = if is_current {
+            &mut self.current_thread_state
+        } else {
+            &mut self.guest_threads.get_mut(&id)?.state
+        };
+        if matches!(state, ThreadState::Exited(_)) {
+            return None;
+        }
+        let previous = self.thread_suspend_counts.get(&id).copied().unwrap_or(0);
+        if previous == 0 {
+            return Some(0);
+        }
+        if previous > 1 {
+            self.thread_suspend_counts.insert(id, previous - 1);
+            return Some(previous);
+        }
+        self.thread_suspend_counts.remove(&id);
+        let state = self
+            .suspended_thread_states
+            .remove(&id)
+            .unwrap_or(ThreadState::Ready);
+        if is_current {
+            self.current_thread_state = state;
+        } else {
+            let thread = self.guest_threads.get_mut(&id)?;
+            thread.state = state;
+            if thread.state == ThreadState::Ready {
+                self.ready_threads.push_back(id);
+            }
+        }
+        self.schedule_requested = true;
+        self.refresh_waiters();
+        Some(previous)
+    }
+
+    pub fn terminate_guest_thread(&mut self, id: u32, code: u32) -> bool {
+        if !self.guest_threads.contains_key(&id)
+            || matches!(
+                self.guest_threads.get(&id).map(|thread| &thread.state),
+                Some(ThreadState::Exited(_))
+            )
+        {
             return false;
         }
-        thread.state = ThreadState::Ready;
-        self.ready_threads.push_back(id);
+        self.guest_threads.get_mut(&id).unwrap().state = ThreadState::Exited(code);
+        self.ready_threads.retain(|ready_id| *ready_id != id);
+        self.thread_suspend_counts.remove(&id);
+        self.suspended_thread_states.remove(&id);
+        self.shared_cpu_quantum_used.remove(&id);
+        for handle in self.handles.values_mut() {
+            if let Handle::Thread {
+                id: handle_id,
+                exit_code,
+                ..
+            } = handle
+            {
+                if *handle_id == id {
+                    *exit_code = Some(code);
+                }
+            }
+        }
         self.schedule_requested = true;
+        self.refresh_waiters();
         true
     }
 
@@ -1591,10 +1942,8 @@ impl Process {
             let serviced_ready = self.current_thread_state == ThreadState::Ready;
             self.save_current_thread()?;
             if serviced_ready {
-                self.shared_cpu_quantum_used.insert(
-                    serviced_id,
-                    serviced_quantum.min(THREAD_QUANTUM),
-                );
+                self.shared_cpu_quantum_used
+                    .insert(serviced_id, serviced_quantum.min(THREAD_QUANTUM));
             }
         }
 
@@ -1701,7 +2050,7 @@ impl Process {
         Ok(())
     }
 
-    /// Save the current continuation and select the next FIFO-ready guest thread.
+    /// Save the current continuation and select the highest-priority ready guest thread.
     pub fn schedule_thread(&mut self) -> Result<bool, Stop> {
         self.schedule_requested = false;
         if self.current_thread_state == ThreadState::Running {
@@ -1709,17 +2058,34 @@ impl Process {
         }
         self.save_current_thread()?;
         self.quantum_used = 0;
+        let mut ready = Vec::new();
+        let mut seen = HashSet::new();
         while let Some(id) = self.ready_threads.pop_front() {
-            if self
-                .guest_threads
-                .get(&id)
-                .is_some_and(|thread| thread.state == ThreadState::Ready)
+            if seen.insert(id)
+                && self
+                    .guest_threads
+                    .get(&id)
+                    .is_some_and(|thread| thread.state == ThreadState::Ready)
             {
-                self.restore_thread(id)?;
-                return Ok(true);
+                ready.push(id);
             }
         }
-        Ok(false)
+        let Some(mut selected) = ready.first().copied() else {
+            return Ok(false);
+        };
+        let mut selected_priority = self.thread_priorities.get(&selected).copied().unwrap_or(0);
+        for &id in ready.iter().skip(1) {
+            let priority = self.thread_priorities.get(&id).copied().unwrap_or(0);
+            // Strict comparison preserves FIFO order when priorities are equal.
+            if priority > selected_priority {
+                selected = id;
+                selected_priority = priority;
+            }
+        }
+        self.ready_threads
+            .extend(ready.into_iter().filter(|&id| id != selected));
+        self.restore_thread(selected)?;
+        Ok(true)
     }
 
     /// Advance deterministic time to the next deadline when no guest thread is runnable.
@@ -1760,6 +2126,8 @@ impl Process {
     pub fn exit_current_guest_thread(&mut self, code: u32) {
         let id = self.current_thread_id;
         self.shared_cpu_quantum_used.remove(&id);
+        self.thread_suspend_counts.remove(&id);
+        self.suspended_thread_states.remove(&id);
         self.current_thread_state = ThreadState::Exited(code);
         for handle in self.handles.values_mut() {
             if let Handle::Thread {
@@ -1857,6 +2225,7 @@ impl Process {
     fn handle_is_signaled(&self, handle: u64, id: u32) -> Option<bool> {
         match self.handles.get(&handle)? {
             Handle::Event { signaled, .. } => Some(*signaled),
+            Handle::ChangeNotification { signaled, .. } => Some(*signaled),
             Handle::Mutex { owner, .. } => Some(owner.is_none() || *owner == Some(id)),
             Handle::Semaphore { count, .. } => Some(*count != 0),
             Handle::Thread { exit_code, .. } => Some(exit_code.is_some()),
@@ -1875,6 +2244,7 @@ impl Process {
                     *signaled = false;
                 }
             }
+            Handle::ChangeNotification { .. } => {}
             Handle::Mutex { owner, recursion } => {
                 if *owner == Some(id) {
                     *recursion = recursion.saturating_add(1);
@@ -1932,6 +2302,55 @@ impl Process {
             }
         }
         Ok(None)
+    }
+
+    /// Record a change visible to the guest VFS and wake matching directory watchers.
+    /// The path must identify the changed file or directory and `filter` uses the
+    /// FILE_NOTIFY_CHANGE_* bit values from Win32.
+    pub fn notify_vfs_change(&mut self, path: &str, filter: u32) {
+        if filter == 0 {
+            return;
+        }
+        let changed_path = self.vfs.normalize_path(path);
+        let mut matched = false;
+        for handle in self.handles.values_mut() {
+            let Handle::ChangeNotification {
+                path,
+                subtree,
+                filter: watch_filter,
+                signaled,
+                changed_after_signal,
+            } = handle
+            else {
+                continue;
+            };
+            if *watch_filter & filter == 0 {
+                continue;
+            }
+            let relative = if path.is_empty() {
+                changed_path.as_str()
+            } else {
+                let Some(relative) = changed_path
+                    .strip_prefix(path.as_str())
+                    .and_then(|tail| tail.strip_prefix('\\'))
+                else {
+                    continue;
+                };
+                relative
+            };
+            if relative.is_empty() || (!*subtree && relative.contains('\\')) {
+                continue;
+            }
+            if *signaled {
+                *changed_after_signal = true;
+            } else {
+                *signaled = true;
+            }
+            matched = true;
+        }
+        if matched {
+            self.refresh_waiters();
+        }
     }
 
     pub fn wake_condition(&mut self, condition: u64, all: bool) {
@@ -2093,6 +2512,27 @@ impl Process {
         id
     }
 
+    pub fn new_crypto_provider(&mut self, provider: CryptoProviderState) -> u64 {
+        let id = self.next_handle;
+        self.next_handle += 4;
+        self.crypto_providers.insert(id, provider);
+        id
+    }
+
+    pub fn new_crypto_hash(&mut self, hash: CryptoHashState) -> u64 {
+        let id = self.next_handle;
+        self.next_handle += 4;
+        self.crypto_hashes.insert(id, hash);
+        id
+    }
+
+    pub fn new_crypto_key(&mut self, key: CryptoKeyState) -> u64 {
+        let id = self.next_handle;
+        self.next_handle += 4;
+        self.crypto_keys.insert(id, key);
+        id
+    }
+
     pub fn next_rand(&mut self) -> u64 {
         let mut x = self.rng;
         x ^= x >> 12;
@@ -2150,9 +2590,9 @@ impl Process {
             return Err("native hooks are only supported for x64 images".into());
         }
         for spec in specs {
-            let (target, host) = spec
-                .split_once('=')
-                .ok_or_else(|| format!("hook `{spec}`: expected <module>+<rva>[:<bytes>]=<group>!<name>"))?;
+            let (target, host) = spec.split_once('=').ok_or_else(|| {
+                format!("hook `{spec}`: expected <module>+<rva>[:<bytes>]=<group>!<name>")
+            })?;
             let (location, expect) = match target.split_once(':') {
                 Some((l, e)) => (l, Some(e)),
                 None => (target, None),
@@ -2179,7 +2619,9 @@ impl Process {
                 .ok_or_else(|| format!("hook `{spec}`: module `{module}` is not loaded"))?;
             let m = &self.modules[index];
             if m.hle_group.is_some() || rva >= m.size {
-                return Err(format!("hook `{spec}`: rva {rva:#x} is outside module `{module}`"));
+                return Err(format!(
+                    "hook `{spec}`: rva {rva:#x} is outside module `{module}`"
+                ));
             }
             let address = m.base + rva;
             if let Some(expect) = expect {
@@ -2202,7 +2644,11 @@ impl Process {
             }
             // The 12-byte stub must not spill into the next function. Leaf functions often have no
             // `.pdata` entry, so this can only be checked when the image records the function.
-            if let Some(f) = m.runtime_functions.iter().find(|f| f.begin_address as u64 == rva) {
+            if let Some(f) = m
+                .runtime_functions
+                .iter()
+                .find(|f| f.begin_address as u64 == rva)
+            {
                 let len = f.end_address.saturating_sub(f.begin_address);
                 if len < 12 {
                     return Err(format!(
@@ -2210,9 +2656,9 @@ impl Process {
                     ));
                 }
             }
-            let thunk = self
-                .thunk_for(group, name, false)
-                .ok_or_else(|| format!("hook `{spec}`: host function {group}!{name} is not implemented"))?;
+            let thunk = self.thunk_for(group, name, false).ok_or_else(|| {
+                format!("hook `{spec}`: host function {group}!{name} is not implemented")
+            })?;
             // mov rax, imm64 ; jmp rax
             let mut stub = vec![0x48, 0xb8];
             stub.extend_from_slice(&thunk.to_le_bytes());
@@ -2265,6 +2711,7 @@ impl Process {
 
     /// Load the main executable (and, transitively, bundled DLLs) and prepare to run.
     pub fn load_exe(&mut self, path: &str, cmdline: Option<&str>) -> Result<(), String> {
+        self.initial_env = Some(self.env.clone());
         let data = self
             .vfs
             .get(path)
@@ -2933,7 +3380,9 @@ impl Process {
             let block = self
                 .try_alloc_virtual(align_up(template.total_size.max(16), 0x1000), PROT_RW)
                 .ok_or_else(|| {
-                    Stop::Crash("guest allocation failed while allocating per-thread TLS block".into())
+                    Stop::Crash(
+                        "guest allocation failed while allocating per-thread TLS block".into(),
+                    )
                 })?;
             if !template.data.is_empty() {
                 self.mem
@@ -3060,6 +3509,16 @@ impl Process {
 
     /// Call a guest function with integer args and run until it returns. Re-entrant.
     pub fn call_guest(&mut self, addr: u64, args: &[u64]) -> Result<u64, Stop> {
+        if self.trace_imports && !self.trace_modules_only {
+            let args = args
+                .iter()
+                .map(|value| format!("{value:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.stderr.extend_from_slice(
+                format!("[guest-call] enter target={addr:#x} args=[{args}]\n").as_bytes(),
+            );
+        }
         let saved = self.cpu.clone();
         if self.cpu.mode == CpuMode::X86_32 {
             let sp = (self.cpu.gpr[RSP].wrapping_sub((args.len() as u64 + 1) * 4)) & !3;
@@ -3077,6 +3536,11 @@ impl Process {
                 return Err(Stop::GuestExceptionTransfer);
             }
             let ret = self.cpu.gpr[RAX] as u32 as u64;
+            if r.is_ok() && self.trace_imports && !self.trace_modules_only {
+                self.stderr.extend_from_slice(
+                    format!("[guest-call] return target={addr:#x} result={ret:#x}\n").as_bytes(),
+                );
+            }
             let keep_exit = self.exit_code;
             self.cpu = saved;
             return match r {
@@ -3110,6 +3574,11 @@ impl Process {
             return Err(Stop::GuestExceptionTransfer);
         }
         let ret = self.cpu.gpr[RAX];
+        if r.is_ok() && self.trace_imports && !self.trace_modules_only {
+            self.stderr.extend_from_slice(
+                format!("[guest-call] return target={addr:#x} result={ret:#x}\n").as_bytes(),
+            );
+        }
         // Preserve nothing from the callee except the return value.
         let keep_exit = self.exit_code;
         self.cpu = saved;
@@ -3667,6 +4136,169 @@ impl Process {
             let mut executed = 0;
             while executed < max_instructions {
                 let current_rip = self.cpu.rip as u32 as u64;
+                if current_rip == 0x0058_87e0 {
+                    let stack = self.cpu.gpr[RSP] as u32 as u64;
+                    let caller = self.mem.read_u32(stack).unwrap_or(0);
+                    let code = self.mem.read_u32(stack + 4).unwrap_or(0);
+                    self.stderr.extend_from_slice(
+                        format!("[guest-error-code] caller={caller:#x} value={code}\n").as_bytes(),
+                    );
+                }
+                if matches!(current_rip, 0x00ec_bb34 | 0x00ec_bb3e | 0x00ec_bb60) {
+                    let stack = self.cpu.gpr[RSP] as u32 as u64;
+                    let words = (0..16)
+                        .map(|index| {
+                            format!("{:#x}", self.mem.read_u32(stack + index * 4).unwrap_or(0))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let (start, end) = if current_rip == 0x00ec_bb34 {
+                        (0, 0)
+                    } else {
+                        (
+                            self.mem.read_u32(stack + 0x44).unwrap_or(0) as u64,
+                            self.mem.read_u32(stack + 0x4c).unwrap_or(0) as u64,
+                        )
+                    };
+                    let text = if start != 0 {
+                        let mut units = Vec::new();
+                        for index in 0..128 {
+                            let Ok(unit) = self.mem.read_u16(start + index * 2) else {
+                                break;
+                            };
+                            if unit == 0 {
+                                break;
+                            }
+                            units.push(unit);
+                        }
+                        String::from_utf16_lossy(&units)
+                    } else {
+                        String::new()
+                    };
+                    self.stderr.extend_from_slice(
+                        format!(
+                            "[sims-startup-trace] rip={current_rip:#x} eax={:#x} ecx={:#x} esi={:#x} ebp={:#x} stack=[{words}] out={start:#x}..{end:#x} text={text:?}\n",
+                            self.cpu.gpr[RAX] as u32,
+                            self.cpu.gpr[RCX] as u32,
+                            self.cpu.gpr[RSI] as u32,
+                            self.cpu.gpr[RBP] as u32,
+                        )
+                        .as_bytes(),
+                    );
+                }
+                if matches!(
+                    current_rip,
+                    0x00ec_bb07 | 0x00ec_bb0e | 0x00ec_bb13 | 0x00ec_bb20
+                ) {
+                    let object = self.cpu.gpr[RCX] as u32 as u64;
+                    let words = (0..8)
+                        .map(|index| {
+                            self.mem
+                                .read_u32(object + index * 4)
+                                .map(|value| format!("{value:#x}"))
+                                .unwrap_or_else(|_| "<unreadable>".to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let result = self.cpu.gpr[RAX] as u32 as u64;
+                    let raw = if matches!(current_rip, 0x00ec_bb20) && result != 0 {
+                        self.mem
+                            .read_vec(result, 32)
+                            .map(|bytes| {
+                                bytes
+                                    .iter()
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            })
+                            .unwrap_or_else(|_| "<unreadable>".to_string())
+                    } else {
+                        String::new()
+                    };
+                    let text = if matches!(current_rip, 0x00ec_bb20) && result != 0 {
+                        match self.mem.read_u16(result) {
+                            Err(_) => "<unreadable>".to_string(),
+                            Ok(0) => String::new(),
+                            Ok(first) => {
+                                let mut units = vec![first];
+                                for index in 1..64 {
+                                    let Ok(unit) = self.mem.read_u16(result + index * 2) else {
+                                        break;
+                                    };
+                                    if unit == 0 {
+                                        break;
+                                    }
+                                    units.push(unit);
+                                }
+                                String::from_utf16_lossy(&units)
+                            }
+                        }
+                    } else {
+                        String::new()
+                    };
+                    self.stderr.extend_from_slice(
+                        format!(
+                            "[sims-service-trace] rip={current_rip:#x} eax={result:#x} ecx={object:#x} esi={:#x} object_words=[{words}] result_raw={raw} result_text={text:?}\n",
+                            self.cpu.gpr[RSI] as u32,
+                        )
+                        .as_bytes(),
+                    );
+                }
+                if matches!(
+                    current_rip,
+                    0x005a_e197 | 0x005a_e1ca | 0x005a_e233 | 0x005a_e281 | 0x005a_e2a8
+                ) {
+                    let service = self.cpu.gpr[RSI] as u32 as u64;
+                    let cache = self.mem.read_u32(service + 0x10).unwrap_or(0);
+                    let cache_object = cache as u64;
+                    let vtable = self.mem.read_u32(cache_object).unwrap_or(0) as u64;
+                    let vtable_methods = (0..8)
+                        .map(|index| {
+                            self.mem
+                                .read_u32(vtable + index * 4)
+                                .map(|value| format!("{value:#x}"))
+                                .unwrap_or_else(|_| "<unreadable>".to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let cache_words = (0..8)
+                        .map(|index| {
+                            self.mem
+                                .read_u32(cache_object + index * 4)
+                                .map(|value| format!("{value:#x}"))
+                                .unwrap_or_else(|_| "<unreadable>".to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let stack_words = (0..4)
+                        .map(|index| {
+                            self.mem
+                                .read_u32(self.cpu.gpr[RSP] + index * 4)
+                                .map(|value| format!("{value:#x}"))
+                                .unwrap_or_else(|_| "<unreadable>".to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let (path_ptr, path_text) = if current_rip == 0x005a_e197 {
+                        let pointer = self.cpu.gpr[RAX] as u32 as u64;
+                        (pointer, read_guest_utf16(&self.mem, pointer, 260))
+                    } else if current_rip == 0x005a_e1ca || current_rip == 0x005a_e2a8 {
+                        let pointer =
+                            self.cpu.gpr[RSP].wrapping_add(0x14).min(u32::MAX as u64) as u32 as u64;
+                        (pointer, read_guest_utf16(&self.mem, pointer, 260))
+                    } else {
+                        (0, String::new())
+                    };
+                    self.stderr.extend_from_slice(
+                        format!(
+                            "[sims-cache-open-trace] rip={current_rip:#x} eax={:#x} ecx={:#x} service={service:#x} status={:#x} cache={cache:#x} cache_words=[{cache_words}] vtable_methods=[{vtable_methods}] stack=[{stack_words}] path_ptr={path_ptr:#x} path={path_text:?}\n",
+                            self.cpu.gpr[RAX] as u32,
+                            self.cpu.gpr[RCX] as u32,
+                            self.mem.read_u32(service + 4).unwrap_or(0),
+                        )
+                        .as_bytes(),
+                    );
+                }
                 if self.trace_modules_only
                     && self.cpu.mode == CpuMode::X86_32
                     && ((0x4cc5c0..=0x4cc949).contains(&current_rip)
@@ -4158,6 +4790,11 @@ impl Process {
                 name,
             });
         };
+        let x86_cleanup_bytes = if x86_frame.is_some() {
+            x86_abi_cleanup_bytes(group, &name)?
+        } else {
+            0
+        };
         self.skip_ret = false;
         let d3d9_output = if group == "com" {
             match name.as_str() {
@@ -4211,6 +4848,11 @@ impl Process {
         } else {
             f(self)?
         };
+        if self.trace_imports && !self.trace_modules_only {
+            self.stderr.extend_from_slice(
+                format!("[import-result] {group}!{name} result={ret:#x}\n").as_bytes(),
+            );
+        }
         if self.trace_modules_only
             && group == "com"
             && (name.starts_with("IDirect3D9::")
@@ -4236,7 +4878,7 @@ impl Process {
         if let Some((saved_cpu, sp, ra)) = x86_frame {
             self.cpu = saved_cpu;
             self.cpu.gpr[RAX] = ret as u32 as u64;
-            self.cpu.gpr[RSP] = sp + 4 + stdcall_stack_bytes(group, &name);
+            self.cpu.gpr[RSP] = sp + 4 + x86_cleanup_bytes;
             self.cpu.rip = ra as u32 as u64;
             return Ok(());
         }
@@ -4372,7 +5014,8 @@ impl Process {
                 }
                 Err(Stop::GuestCatch32(_)) => {
                     return Stop::Crash(
-                        "PE32 C++ catch transfer escaped its active guest exception dispatcher".into(),
+                        "PE32 C++ catch transfer escaped its active guest exception dispatcher"
+                            .into(),
                     )
                 }
                 Err(Stop::GuestSehTransfer32(_)) => {
@@ -5159,23 +5802,165 @@ mod scheduler_tests {
     }
 
     #[test]
-    fn x86_stdcall_signatures_remove_argument_bytes_for_spin_count_and_tls_set() {
+    fn x86_stdcall_signatures_remove_exact_argument_bytes() {
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "WaitForSingleObjectEx"),
+            Some(12)
+        );
         assert_eq!(
             stdcall_stack_bytes("kernel32", "InitializeCriticalSectionAndSpinCount"),
-            8
+            Some(8)
         );
         assert_eq!(
             stdcall_stack_bytes("kernel32", "AddVectoredExceptionHandler"),
-            8
+            Some(8)
         );
         assert_eq!(
             stdcall_stack_bytes("kernel32", "RemoveVectoredExceptionHandler"),
-            4
+            Some(4)
         );
-        assert_eq!(stdcall_stack_bytes("kernel32", "InitializeSListHead"), 4);
-        assert_eq!(stdcall_stack_bytes("kernel32", "TlsSetValue"), 8);
-        assert_eq!(stdcall_stack_bytes("kernel32", "GetCurrentThreadId"), 0);
-        assert_eq!(stdcall_stack_bytes("kernel32", "GetVersionExA"), 4);
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "InitializeSListHead"),
+            Some(4)
+        );
+        assert_eq!(stdcall_stack_bytes("kernel32", "TlsSetValue"), Some(8));
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetCurrentThreadId"),
+            Some(0)
+        );
+        assert_eq!(stdcall_stack_bytes("ntdll", "RtlUnwind"), Some(16));
+        assert_eq!(
+            x86_abi_cleanup_bytes("crt", "_XcptFilter"),
+            Ok(0),
+            "_XcptFilter is __cdecl and leaves its two x86 arguments to the caller"
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("crt", "_except_handler3"),
+            Ok(0),
+            "_except_handler3 is __cdecl and leaves its four x86 arguments to the caller"
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("crt", "wcschr"),
+            Ok(0),
+            "wcschr is __cdecl and leaves its two x86 arguments to the caller"
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("crt", "_wcsnicmp"),
+            Ok(0),
+            "_wcsnicmp is __cdecl and leaves its three x86 arguments to the caller"
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("crt", "swscanf"),
+            Ok(0),
+            "swscanf is __cdecl and leaves its arguments to the caller"
+        );
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetVersionExA"), Some(4));
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetProductInfo"), Some(20));
+        assert_eq!(stdcall_stack_bytes("kernel32", "IsWow64Process"), Some(8));
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "SetThreadIdealProcessor"),
+            Some(8)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetEnvironmentVariableA"),
+            Some(12)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetEnvironmentVariableW"),
+            Some(12)
+        );
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetLogicalDrives"), Some(0));
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetComputerNameW"), Some(8));
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetComputerNameExA"),
+            Some(12)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetVolumeInformationW"),
+            Some(32)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetDiskFreeSpaceExW"),
+            Some(16)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetLongPathNameW"),
+            Some(12)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "SystemTimeToFileTime"),
+            Some(8)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetFileAttributesExW"),
+            Some(12)
+        );
+        assert_eq!(stdcall_stack_bytes("kernel32", "GlobalSize"), Some(4));
+        // windows-sys-derived entries round each narrow x86 parameter to a full stack slot.
+        assert_eq!(
+            stdcall_stack_bytes("advapi32", "AllocateAndInitializeSid"),
+            Some(44)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "GetFileAttributesExW"),
+            Some(12)
+        );
+        assert_eq!(stdcall_stack_bytes("ole32", "CoTaskMemAlloc"), Some(4));
+        assert_eq!(stdcall_stack_bytes("ole32", "CoTaskMemRealloc"), Some(8));
+        assert_eq!(stdcall_stack_bytes("ole32", "CoTaskMemFree"), Some(4));
+        assert_eq!(stdcall_stack_bytes("ole32", "CoCreateGuid"), Some(4));
+        assert_eq!(stdcall_stack_bytes("ole32", "IIDFromString"), Some(8));
+        assert_eq!(stdcall_stack_bytes("ole32", "StringFromGUID2"), Some(12));
+        assert_eq!(stdcall_stack_bytes("gdi32", "CreateDCA"), Some(16));
+        assert_eq!(stdcall_stack_bytes("gdi32", "CreateBitmap"), Some(20));
+        assert_eq!(stdcall_stack_bytes("gdi32", "CreateDIBSection"), Some(24));
+        assert_eq!(stdcall_stack_bytes("winmm", "timeGetTime"), Some(0));
+        assert_eq!(stdcall_stack_bytes("kernel32", "GetPriorityClass"), Some(4));
+        assert_eq!(stdcall_stack_bytes("kernel32", "SetPriorityClass"), Some(8));
+        assert_eq!(stdcall_stack_bytes("kernel32", "SleepEx"), Some(8));
+        assert_eq!(stdcall_stack_bytes("kernel32", "CreateMutexA"), Some(12));
+        assert_eq!(stdcall_stack_bytes("kernel32", "CreateMutexW"), Some(12));
+        assert_eq!(
+            stdcall_stack_bytes("kernel32", "InterlockedCompareExchange"),
+            Some(12)
+        );
+        assert_eq!(stdcall_stack_bytes("kernel32", "__not_a_real_import"), None);
+        assert_eq!(
+            x86_abi_cleanup_bytes("kernel32", "__not_a_real_import"),
+            Err(Stop::AbiUnimplemented {
+                dll: "kernel32".into(),
+                name: "__not_a_real_import".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn target_import_cleanup_matches_real_x86_signatures() {
+        assert_eq!(x86_abi_cleanup_bytes("kernel32", "GetStringTypeA"), Ok(20));
+        assert_eq!(x86_abi_cleanup_bytes("kernel32", "GetStringTypeW"), Ok(16));
+        assert_eq!(x86_abi_cleanup_bytes("user32", "ReleaseCapture"), Ok(0));
+        assert_eq!(x86_abi_cleanup_bytes("user32", "SetCursorPos"), Ok(8));
+        assert_eq!(
+            x86_abi_cleanup_bytes("user32", "SystemParametersInfoA"),
+            Ok(16)
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("user32", "SystemParametersInfoW"),
+            Ok(16)
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("advapi32", "RegQueryInfoKeyA"),
+            Ok(48)
+        );
+        assert_eq!(x86_abi_cleanup_bytes("advapi32", "RegEnumKeyExA"), Ok(32));
+        assert_eq!(
+            x86_abi_cleanup_bytes("advapi32", "RegQueryValueExW"),
+            Ok(24)
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("msvcp", "?uncaught_exception@std@@YA_NXZ"),
+            Ok(0)
+        );
     }
 
     #[test]
@@ -5371,7 +6156,31 @@ mod scheduler_tests {
         assert!(trace.contains(
             "[import] kernel32!TlsGetValue args=[0x7] caller=0x140001234 module=fixture.dll+0x1234"
         ));
+        assert!(trace.contains("[import-result] kernel32!TlsGetValue result=0x777"));
         assert_eq!(process.cpu.gpr[RAX], 0x777);
+    }
+
+    #[test]
+    fn trace_imports_include_guest_callback_results() {
+        let mut process = process_with_teb();
+        let code = 0x20_000;
+        let stack = 0x7eff_fff0;
+        assert!(process.mem.map(code, 0x1000, PROT_RWX));
+        assert!(process.mem.map(0x7eff_f000, 0x1000, PROT_RW));
+        process
+            .mem
+            .write_force(code, &[0xb8, 0x78, 0x56, 0x34, 0x12, 0xc3])
+            .unwrap();
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.gpr[RSP] = stack;
+        process.trace_imports = true;
+
+        let result = process.call_guest(code, &[]).unwrap();
+
+        assert_eq!(result, 0x1234_5678);
+        let trace = String::from_utf8(process.stderr).unwrap();
+        assert!(trace.contains("[guest-call] enter target=0x20000 args=[]"));
+        assert!(trace.contains("[guest-call] return target=0x20000 result=0x12345678"));
     }
 
     #[test]
@@ -5385,7 +6194,10 @@ mod scheduler_tests {
 
         assert_eq!(thread.cpu.gpr[RSP], thread.stack_base - 0x28);
         assert_eq!(thread.cpu.gpr[RSP] & 0xf, 8);
-        assert_eq!(process.rd64(thread.cpu.gpr[RSP]).unwrap(), THREAD_RETURN_MAGIC);
+        assert_eq!(
+            process.rd64(thread.cpu.gpr[RSP]).unwrap(),
+            THREAD_RETURN_MAGIC
+        );
         assert!(thread.cpu.gpr[RSP] + 0x28 <= thread.stack_base);
         assert_eq!(thread.cpu.gpr[RCX], 0x77);
     }
@@ -5430,6 +6242,36 @@ mod scheduler_tests {
             0x8877_6655_4433_2211_00ff_eedd_ccbb_aa99
         );
         assert_eq!(process.tls_slots.get(&9), Some(&0xbbbb));
+    }
+
+    #[test]
+    fn scheduler_selects_higher_priority_ready_thread_before_older_ready_thread() {
+        let mut process = process_with_teb();
+        let first = 0x1008;
+        let higher_priority = 0x100c;
+        process
+            .create_guest_thread(first, 0x2000, 0, false)
+            .unwrap();
+        process
+            .create_guest_thread(higher_priority, 0x2000, 0, false)
+            .unwrap();
+        let handle = process.new_handle(Handle::Thread {
+            id: higher_priority,
+            start: 0x2000,
+            parameter: 0,
+            exit_code: None,
+            suspended: false,
+            inheritable: false,
+        });
+        process.cpu.gpr[RCX] = handle;
+        process.cpu.gpr[RDX] = 15;
+        let set_priority = crate::hle::kernel32::lookup("SetThreadPriority")
+            .expect("SetThreadPriority should be translated");
+        assert_eq!(set_priority(&mut process), Ok(1));
+
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        assert_eq!(process.current_thread_id, higher_priority);
     }
 
     #[test]
@@ -5702,6 +6544,38 @@ mod scheduler_tests {
                 signaled: false,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn guest_vfs_change_readies_a_thread_blocked_on_a_matching_directory_watch() {
+        let mut process = process_with_teb();
+        let watch = process.new_handle(Handle::ChangeNotification {
+            path: "game\\bin".into(),
+            subtree: true,
+            filter: 0x01,
+            signaled: false,
+            changed_after_signal: false,
+        });
+        process
+            .create_guest_thread(0x1008, 0x2000, 0, false)
+            .unwrap();
+        process.request_thread_yield();
+        assert!(process.schedule_thread().unwrap());
+        process.block_current_thread(ThreadWait::Handle {
+            handle: watch,
+            deadline: None,
+        });
+        assert!(process.schedule_thread().unwrap());
+        assert!(matches!(
+            process.guest_threads.get(&0x1008).unwrap().state,
+            ThreadState::Blocked(_)
+        ));
+
+        process.notify_vfs_change(r"C:\Game\Bin\created.dat", 0x01);
+        assert!(matches!(
+            process.guest_threads.get(&0x1008).unwrap().state,
+            ThreadState::Ready
         ));
     }
 

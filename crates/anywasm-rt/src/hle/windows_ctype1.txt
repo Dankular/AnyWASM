@@ -1,0 +1,6 @@
+source=kernel32!GetStringTypeW(CT_CTYPE1)
+code_units=65536
+bytes=131072
+os_version=10.0.22631.0
+culture=en-GB
+sha256=d73e89197fb0887ef01edb692ba8b884ae1bb5220be0ae909da18990a7669b33

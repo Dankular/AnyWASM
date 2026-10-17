@@ -119,7 +119,11 @@ impl GpuStream {
         self.buf.extend(&head);
         let start = self.buf.len();
         self.buf.resize(rollback + 8 + padded, 0);
-        if let Err(error) = mem.read_into(address, &mut self.buf[start..start + len], anywasm_cpu::Access::Read) {
+        if let Err(error) = mem.read_into(
+            address,
+            &mut self.buf[start..start + len],
+            anywasm_cpu::Access::Read,
+        ) {
             self.buf.truncate(rollback);
             return Err(format!("read fault {address:#x}+{len}: {error:?}"));
         }

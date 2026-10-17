@@ -10,12 +10,14 @@
 //! unimplemented import, 3 guest crash, 4 a frame was presented (drain the GPU stream, then call
 //! again), 5 the guest is idle waiting for window input (push input, then call again). Details via `aw_message_*` and `aw_exit_code`.
 
-use anywasm_rt::{Bundle, Process, Stop};
+use anywasm_rt::{hle::user32, Bundle, Process, Stop};
 mod shared_context;
 mod shared_snapshot;
 
 struct State {
     p: Process,
+    staged_entry: Option<String>,
+    loaded: bool,
     message: Vec<u8>,
     exit_code: i32,
     stdout: Vec<u8>,
@@ -26,6 +28,40 @@ struct State {
 
 static mut STATE: Option<State> = None;
 const DEBUG_RSP_INDEX: usize = 4;
+
+fn new_state(p: Process, staged_entry: Option<String>, loaded: bool, message: Vec<u8>) -> State {
+    State {
+        p,
+        staged_entry,
+        loaded,
+        message,
+        exit_code: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        gpu: Vec::new(),
+        pending_stop: None,
+    }
+}
+
+fn validate_staged_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains(':')
+        || path.contains('\0')
+    {
+        return Err(format!(
+            "staged path must be nonempty and relative: {path:?}"
+        ));
+    }
+    if path
+        .split(['/', '\\'])
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(format!("staged path contains an unsafe component: {path}"));
+    }
+    Ok(())
+}
 
 #[allow(static_mut_refs)]
 fn state() -> Option<&'static mut State> {
@@ -75,27 +111,150 @@ pub unsafe extern "C" fn aw_load(ptr: *const u8, len: usize) -> i32 {
     });
     match res {
         Ok(p) => {
-            STATE = Some(State {
-                p,
-                message: Vec::new(),
-                exit_code: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                gpu: Vec::new(),
-                pending_stop: None,
-            });
+            STATE = Some(new_state(p, None, true, Vec::new()));
             0
         }
         Err(e) => {
-            STATE = Some(State {
-                p: Process::new(anywasm_rt::Vfs::new()),
-                message: e.into_bytes(),
-                exit_code: 0,
-                stdout: vec![],
-                stderr: vec![],
-                gpu: vec![],
-                pending_stop: None,
-            });
+            STATE = Some(new_state(
+                Process::new(anywasm_rt::Vfs::new()),
+                None,
+                false,
+                e.into_bytes(),
+            ));
+            1
+        }
+    }
+}
+
+/// Begin a direct-folder load and register its in-memory `AGP1` index before PE imports resolve.
+/// Returns 0 on success and 1 on failure (see `aw_message_*`).
+///
+/// # Safety
+/// Both pointers must refer to their stated readable byte ranges.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_load_begin(
+    entry_ptr: *const u8,
+    entry_len: usize,
+    index_ptr: *const u8,
+    index_len: usize,
+) -> i32 {
+    let result = (|| {
+        if entry_ptr.is_null() || index_ptr.is_null() {
+            return Err("direct load received a null entry or index buffer".to_string());
+        }
+        let entry_bytes = std::slice::from_raw_parts(entry_ptr, entry_len);
+        let entry = std::str::from_utf8(entry_bytes)
+            .map_err(|_| "direct entry path is not UTF-8".to_string())?
+            .to_string();
+        validate_staged_path(&entry)?;
+        let index = std::slice::from_raw_parts(index_ptr, index_len);
+        let mut p = Process::new(anywasm_rt::Vfs::new());
+        p.vfs.register_asset_index(index)?;
+        Ok((entry, p))
+    })();
+
+    match result {
+        Ok((entry, p)) => {
+            STATE = Some(new_state(p, Some(entry), false, Vec::new()));
+            0
+        }
+        Err(error) => {
+            STATE = Some(new_state(
+                Process::new(anywasm_rt::Vfs::new()),
+                None,
+                false,
+                error.into_bytes(),
+            ));
+            1
+        }
+    }
+}
+
+/// Add one local boot image (the selected EXE or a guest DLL) during a staged direct load.
+/// Returns 0 on success and 1 on failure (see `aw_message_*`).
+///
+/// # Safety
+/// `path_ptr` and `data_ptr` must refer to their stated readable byte ranges.
+#[no_mangle]
+pub unsafe extern "C" fn aw_load_add_file(
+    path_ptr: *const u8,
+    path_len: usize,
+    data_ptr: *const u8,
+    data_len: usize,
+) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if s.loaded || s.staged_entry.is_none() {
+        s.message = b"direct load is not accepting boot files".to_vec();
+        return 1;
+    }
+    if path_ptr.is_null() || (data_ptr.is_null() && data_len != 0) {
+        s.message = b"direct load received a null path or file buffer".to_vec();
+        return 1;
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len);
+    let path = match std::str::from_utf8(path_bytes) {
+        Ok(path) => path,
+        Err(_) => {
+            s.message = b"direct boot file path is not UTF-8".to_vec();
+            return 1;
+        }
+    };
+    if let Err(error) = validate_staged_path(path) {
+        s.message = error.into_bytes();
+        return 1;
+    }
+    if s.p.vfs.has_local_file(path) {
+        s.message = format!("duplicate staged boot file path: {path}").into_bytes();
+        return 1;
+    }
+    let data = if data_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(data_ptr, data_len).to_vec()
+    };
+    s.p.vfs.insert(path, data);
+    s.message.clear();
+    0
+}
+
+/// Finish a staged direct load by mapping the selected EXE and resolving its imports.
+/// Returns 0 on success and 1 on failure (see `aw_message_*`).
+#[no_mangle]
+pub extern "C" fn aw_load_finish() -> i32 {
+    let Some(s) = state() else { return 1 };
+    if s.loaded {
+        s.message = b"process is already loaded".to_vec();
+        return 1;
+    }
+    let Some(entry) = s.staged_entry.clone() else {
+        s.message = b"direct load has not been started".to_vec();
+        return 1;
+    };
+    let cwd = entry
+        .rfind(['/', '\\'])
+        .map(|separator| &entry[..separator])
+        .unwrap_or("");
+    let cwd = if cwd.is_empty() {
+        "C:\\".to_string()
+    } else {
+        anywasm_rt::vfs::absolute(cwd, "C:\\")
+    };
+    if !s.p.vfs.is_dir(&cwd) {
+        s.message =
+            format!("direct current directory is not present in its VFS: {cwd}").into_bytes();
+        return 1;
+    }
+    s.p.current_directory = cwd;
+    match s.p.load_exe(&entry, None) {
+        Ok(()) => {
+            s.staged_entry = None;
+            s.loaded = true;
+            s.message.clear();
+            0
+        }
+        Err(error) => {
+            s.message = error.into_bytes();
             1
         }
     }
@@ -121,9 +280,51 @@ pub unsafe extern "C" fn aw_assets_attach(ptr: *const u8, len: usize) -> i32 {
     }
 }
 
+/// Mount a drive-qualified host install path onto the direct folder VFS root.
+///
+/// # Safety
+/// `ptr` must point to `len` readable UTF-8 bytes.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_set_vfs_root_alias(ptr: *const u8, len: usize) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if ptr.is_null() {
+        s.message = b"VFS root alias received a null path".to_vec();
+        return 1;
+    }
+    let root = match std::str::from_utf8(std::slice::from_raw_parts(ptr, len)) {
+        Ok(root) => root.trim_end_matches(['\\', '/']),
+        Err(_) => {
+            s.message = b"VFS root alias is not UTF-8".to_vec();
+            return 1;
+        }
+    };
+    let current_suffix =
+        s.p.current_directory
+            .strip_prefix("C:\\")
+            .or_else(|| s.p.current_directory.strip_prefix("c:\\"))
+            .unwrap_or("")
+            .to_owned();
+    if let Err(error) = s.p.vfs.set_root_alias(root) {
+        s.message = error.into_bytes();
+        return 1;
+    }
+    s.p.current_directory = if current_suffix.is_empty() {
+        root.to_owned()
+    } else {
+        format!("{root}\\{current_suffix}")
+    };
+    s.message.clear();
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn aw_run(steps: u64) -> i32 {
     let Some(s) = state() else { return 3 };
+    if !s.loaded {
+        s.message = b"process load has not been finished".to_vec();
+        return 3;
+    }
     if let Some(stop) = s.pending_stop.take() {
         s.stdout.extend(s.p.take_stdout());
         s.stderr.extend(s.p.take_stderr());
@@ -132,6 +333,13 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             Stop::Unimplemented { dll, name } => {
                 s.message =
                     format!("unimplemented import {dll}!{name} from input callback").into_bytes();
+                2
+            }
+            Stop::AbiUnimplemented { dll, name } => {
+                s.message = format!(
+                    "x86 ABI signature not verified for import {dll}!{name} from input callback"
+                )
+                .into_bytes();
                 2
             }
             Stop::Crash(message) => {
@@ -160,6 +368,11 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             s.message = format!("unimplemented import {dll}!{name}").into_bytes();
             2
         }
+        Stop::AbiUnimplemented { dll, name } => {
+            s.message =
+                format!("x86 ABI signature not verified for import {dll}!{name}").into_bytes();
+            2
+        }
         Stop::Crash(m) => {
             s.message = m.into_bytes();
             3
@@ -180,7 +393,8 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
             3
         }
         Stop::GuestCatch32(_) => {
-            s.message = b"internal PE32 C++ catch transfer escaped its exception dispatcher".to_vec();
+            s.message =
+                b"internal PE32 C++ catch transfer escaped its exception dispatcher".to_vec();
             3
         }
         Stop::GuestUnwind32(_) => {
@@ -209,6 +423,69 @@ pub extern "C" fn aw_jit_set_min_prefix(min_prefix: u32) {
 pub extern "C" fn aw_set_gta_eventvol_trace(enabled: u32) {
     if let Some(s) = state() {
         s.p.trace_gta_eventvol = enabled != 0;
+    }
+}
+
+/// Enable import call and argument tracing for browser diagnostics.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn aw_set_import_trace(enabled: u32) {
+    if let Some(s) = state() {
+        s.p.trace_imports = enabled != 0;
+        s.p.trace_modules_only = false;
+    }
+}
+
+/// Supply native host settings used by the translated SystemParametersInfo actions.
+/// Returns 0 after a process is loaded, or 1 when no loaded process can receive the value.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn aw_set_host_system_parameters(
+    cursor_shadow: u32,
+    mouse_trails: u32,
+    mouse_sonar: u32,
+    wheel_scroll_lines: u32,
+) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if !s.loaded {
+        s.message = b"host system parameters arrived before process load completed".to_vec();
+        return 1;
+    }
+    s.p.system_parameters.cursor_shadow = Some(cursor_shadow != 0);
+    s.p.system_parameters.mouse_trails = Some(mouse_trails);
+    s.p.system_parameters.mouse_sonar = Some(mouse_sonar != 0);
+    s.p.system_parameters.wheel_scroll_lines = Some(wheel_scroll_lines);
+    s.message.clear();
+    0
+}
+
+/// Install a scoped, read-only Windows Sims registry snapshot after process load.
+/// Returns 0 on success; invalid snapshots leave the process registry unchanged.
+///
+/// # Safety
+/// `ptr` must reference `len` readable bytes allocated by `aw_alloc`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_set_host_registry_snapshot(ptr: *const u8, len: usize) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if !s.loaded {
+        s.message = b"host registry snapshot arrived before process load completed".to_vec();
+        return 1;
+    }
+    if ptr.is_null() || len == 0 || len > 32 * 1024 * 1024 {
+        s.message = b"host registry snapshot has an invalid buffer".to_vec();
+        return 1;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    match anywasm_rt::registry::load_host_snapshot(&mut s.p, bytes) {
+        Ok(()) => {
+            s.message.clear();
+            0
+        }
+        Err(error) => {
+            s.message = format!("host registry snapshot rejected: {error}").into_bytes();
+            1
+        }
     }
 }
 
@@ -601,12 +878,20 @@ pub extern "C" fn aw_input(kind: u32, a: i64, b: i64, c: i64) {
     }
 }
 
-/// Advance guest time by host elapsed 100 ns ticks after a yielded browser frame.
+/// Advance guest time by host elapsed 100 ns ticks after a yielded frame or idle wait.
 #[no_mangle]
 pub extern "C" fn aw_advance_time_100ns(ticks: u64) {
     if let Some(s) = state() {
         s.p.advance_time_100ns(ticks);
     }
+}
+
+/// Milliseconds until the current guest thread's next user32 timer, or u32::MAX if none exists.
+#[no_mangle]
+pub extern "C" fn aw_next_timer_delay_ms() -> u32 {
+    state()
+        .and_then(|s| user32::next_timer_delay_ms(&s.p))
+        .unwrap_or(u32::MAX)
 }
 
 /// Queue bytes for the guest's stdin.

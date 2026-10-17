@@ -5,7 +5,6 @@ use crate::process::{Process, Stop};
 
 const S_OK: u64 = 0;
 const S_FALSE: u64 = 1;
-const E_NOTIMPL: u64 = 0x8000_4001;
 const E_NOINTERFACE: u64 = 0x8000_4002;
 const E_POINTER: u64 = 0x8000_4003;
 const E_INVALIDARG: u64 = 0x8007_0057;
@@ -21,6 +20,75 @@ const IID_DIRECTINPUT8_A: &str = "bf798030-483a-4da2-aa99-5d64ed369700";
 const IID_DIRECTINPUT8_W: &str = "bf798031-483a-4da2-aa99-5d64ed369700";
 const IID_DIRECTINPUTDEVICE8_A: &str = "54d41080-dc15-4833-a41b-748f73a38179";
 const IID_DIRECTINPUTDEVICE8_W: &str = "54d41081-dc15-4833-a41b-748f73a38179";
+
+macro_rules! unimplemented_method {
+    ($function:ident, $name:literal) => {
+        fn $function(_p: &mut Process) -> R {
+            Err(Stop::Unimplemented {
+                dll: "dinput8".into(),
+                name: format!("{} (DirectInput operation is not modeled)", $name),
+            })
+        }
+    };
+}
+
+unimplemented_method!(
+    unimplemented_run_control_panel,
+    "IDirectInput8::RunControlPanel"
+);
+unimplemented_method!(
+    unimplemented_enum_objects,
+    "IDirectInputDevice8::EnumObjects"
+);
+unimplemented_method!(
+    unimplemented_set_event_notification,
+    "IDirectInputDevice8::SetEventNotification"
+);
+unimplemented_method!(
+    unimplemented_force_feedback,
+    "IDirectInputDevice8::SendForceFeedbackCommand"
+);
+unimplemented_method!(
+    unimplemented_enum_effects,
+    "IDirectInputDevice8::EnumEffects"
+);
+unimplemented_method!(
+    unimplemented_enum_created_effects,
+    "IDirectInputDevice8::EnumCreatedEffectObjects"
+);
+unimplemented_method!(
+    unimplemented_enum_effects_in_file,
+    "IDirectInputDevice8::EnumEffectsInFile"
+);
+unimplemented_method!(
+    unimplemented_build_action_map,
+    "IDirectInputDevice8::BuildActionMap"
+);
+unimplemented_method!(
+    unimplemented_set_action_map,
+    "IDirectInputDevice8::SetActionMap"
+);
+unimplemented_method!(
+    unimplemented_enum_semantics,
+    "IDirectInput8::EnumDevicesBySemantics"
+);
+unimplemented_method!(
+    unimplemented_configure_devices,
+    "IDirectInput8::ConfigureDevices"
+);
+unimplemented_method!(
+    unimplemented_create_effect,
+    "IDirectInputDevice8::CreateEffect"
+);
+unimplemented_method!(
+    unimplemented_get_effect_info,
+    "IDirectInputDevice8::GetEffectInfo"
+);
+unimplemented_method!(unimplemented_escape, "IDirectInputDevice8::Escape");
+unimplemented_method!(
+    unimplemented_write_effect_file,
+    "IDirectInputDevice8::WriteEffectToFile"
+);
 
 const DIRECTINPUT8_METHODS: &[&str] = &[
     "QueryInterface",
@@ -161,12 +229,13 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         "CreateDevice" if !device_iface => create_device,
         "EnumDevices" if !device_iface => enum_devices,
         "GetDeviceStatus" if !device_iface => get_device_status,
-        "RunControlPanel" => |_| Ok(S_OK),
+        "RunControlPanel" => unimplemented_run_control_panel,
         "Initialize" if !device_iface => initialize,
         "FindDevice" if !device_iface => find_device,
-        "EnumDevicesBySemantics" | "ConfigureDevices" if !device_iface => |_| Ok(E_NOTIMPL),
+        "EnumDevicesBySemantics" if !device_iface => unimplemented_enum_semantics,
+        "ConfigureDevices" if !device_iface => unimplemented_configure_devices,
         "GetCapabilities" if device_iface => get_capabilities,
-        "EnumObjects" if device_iface => |_| Ok(S_OK),
+        "EnumObjects" if device_iface => unimplemented_enum_objects,
         "GetProperty" if device_iface => get_property,
         "SetProperty" if device_iface => set_property,
         "Acquire" if device_iface => acquire,
@@ -174,21 +243,23 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         "GetDeviceState" if device_iface => get_device_state,
         "GetDeviceData" if device_iface => get_device_data,
         "SetDataFormat" if device_iface => set_data_format,
-        "SetEventNotification" if device_iface => |_| Ok(S_OK),
+        "SetEventNotification" if device_iface => unimplemented_set_event_notification,
         "SetCooperativeLevel" if device_iface => set_cooperative_level,
         "GetDeviceInfo" if device_iface => get_device_info,
         "GetForceFeedbackState" if device_iface => get_force_feedback_state,
-        "SendForceFeedbackCommand" if device_iface => |_| Ok(S_OK),
+        "SendForceFeedbackCommand" if device_iface => unimplemented_force_feedback,
         "Poll" if device_iface => poll,
         "SendDeviceData" if device_iface => send_device_data,
-        "EnumEffects" | "EnumCreatedEffectObjects" | "EnumEffectsInFile" if device_iface => {
-            |_| Ok(S_OK)
-        }
-        "BuildActionMap" | "SetActionMap" if device_iface => |_| Ok(S_OK),
+        "EnumEffects" if device_iface => unimplemented_enum_effects,
+        "EnumCreatedEffectObjects" if device_iface => unimplemented_enum_created_effects,
+        "EnumEffectsInFile" if device_iface => unimplemented_enum_effects_in_file,
+        "BuildActionMap" if device_iface => unimplemented_build_action_map,
+        "SetActionMap" if device_iface => unimplemented_set_action_map,
         "GetImageInfo" if device_iface => |_| Ok(S_FALSE),
-        "CreateEffect" | "GetEffectInfo" | "Escape" | "WriteEffectToFile" if device_iface => {
-            |_| Ok(E_NOTIMPL)
-        }
+        "CreateEffect" if device_iface => unimplemented_create_effect,
+        "GetEffectInfo" if device_iface => unimplemented_get_effect_info,
+        "Escape" if device_iface => unimplemented_escape,
+        "WriteEffectToFile" if device_iface => unimplemented_write_effect_file,
         _ => return None,
     })
 }
@@ -673,5 +744,18 @@ mod tests {
         let set_property = method("IDirectInputDevice8A", "SetProperty").unwrap();
 
         assert_eq!(set_property(&mut process).unwrap(), E_NOINTERFACE);
+    }
+
+    #[test]
+    fn input_operations_without_state_or_callbacks_report_coverage_gaps() {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        for method_name in ["EnumObjects", "SetEventNotification", "BuildActionMap"] {
+            let result = method("IDirectInputDevice8A", method_name).unwrap()(&mut process);
+            assert!(matches!(
+                result,
+                Err(Stop::Unimplemented { ref dll, ref name })
+                    if dll == "dinput8" && name.contains(method_name)
+            ));
+        }
     }
 }

@@ -12,7 +12,9 @@ pub mod hle;
 mod msvc_eh;
 mod msvc_eh32;
 pub mod process;
+pub mod registry;
 pub mod vfs;
+mod x86_abi_generated;
 
 pub use anywasm_cpu::SharedSnapshotError;
 pub use bundle::Bundle;

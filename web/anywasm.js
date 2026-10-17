@@ -2,6 +2,7 @@
 // Works unchanged in browsers (main thread or worker) and Node >= 18.
 import { fillCryptoRandom } from './entropy.js';
 import { AssetRangeCache, fetchAssetIndex, sha256Hex } from './assets.js';
+import { createDirectoryAssetIndex, DirectoryAssetSource, inspectDirectory, normalizeDirectoryPath } from './direct-assets.js';
 
 export const Status = Object.freeze({ RUNNING: 0, EXITED: 1, UNIMPLEMENTED: 2, CRASHED: 3, FRAME: 4, IDLE: 5 });
 
@@ -487,7 +488,7 @@ export class AnyWasm {
           return 0n;
         },
         read_asset_range(packageOffset, length, destination) {
-          if (!hostIo.assetCache) throw new Error('guest requested package bytes before an AGP asset package was attached');
+          if (!hostIo.assetCache) throw new Error('guest requested asset bytes before an asset source was attached');
           const n = Number(length);
           const dst = Number(destination) >>> 0;
           const output = new Uint8Array(instance.exports.memory.buffer, dst, n);
@@ -540,6 +541,101 @@ export class AnyWasm {
     this.x.aw_free(ptr, n);
     if (rc !== 0) throw new Error(this.message() || 'failed to load bundle');
     this.x.aw_jit_set_min_prefix?.(this.jitMinPrefix);
+  }
+
+  /** Stage and load an executable directly from a browser-selected folder. */
+  async loadDirectory(entryPath, files, onProgress = () => {}) {
+    for (const name of ['aw_load_begin', 'aw_load_add_file', 'aw_load_finish']) {
+      if (typeof this.x[name] !== 'function') throw new Error(`WASM runtime is missing ${name}; rebuild it`);
+    }
+    const inventory = inspectDirectory(files);
+    const entry = normalizeDirectoryPath(entryPath);
+    if (!inventory.executables.includes(entry)) {
+      throw new Error(`selected entry point is not an executable in this folder: ${entry}`);
+    }
+    const dllPaths = [...inventory.filesByPath.keys()]
+      .filter((path) => !inventory.filesByPath.get(path)?.isDirectory && path.toLowerCase().endsWith('.dll'))
+      .sort();
+    const bootPaths = [entry, ...dllPaths];
+    const index = createDirectoryAssetIndex(files, bootPaths);
+    const source = new DirectoryAssetSource(index);
+    this.hostIo.assetUrl = null;
+    this.hostIo.assetCache = new AssetRangeCache(null, index.packageLength, {
+      onProgress,
+      fileRanges: index.fileRanges,
+      readRange: (start, length) => source.readRange(start, length),
+    });
+
+    const entryBytes = new TextEncoder().encode(entry);
+    const indexPtr = this.x.aw_alloc(index.bytes.byteLength) >>> 0;
+    let entryPtr = null;
+    try {
+      entryPtr = this.x.aw_alloc(entryBytes.byteLength) >>> 0;
+      new Uint8Array(this.x.memory.buffer, indexPtr, index.bytes.byteLength).set(index.bytes);
+      new Uint8Array(this.x.memory.buffer, entryPtr, entryBytes.byteLength).set(entryBytes);
+      const rc = this.x.aw_load_begin(entryPtr, entryBytes.byteLength, indexPtr, index.bytes.byteLength);
+      if (rc !== 0) throw new Error(this.message() || 'failed to begin direct folder load');
+    } finally {
+      if (entryPtr !== null) this.x.aw_free(entryPtr, entryBytes.byteLength);
+      this.x.aw_free(indexPtr, index.bytes.byteLength);
+    }
+
+    const bootFiles = bootPaths.map((path) => ({ path, file: index.filesByPath.get(path) }));
+    const totalBytes = bootFiles.reduce((total, item) => total + item.file.size, 0);
+    let loadedBytes = 0;
+    for (let i = 0; i < bootFiles.length; i++) {
+      const { path, file } = bootFiles[i];
+      onProgress({ phase: 'boot', path, loadedBytes, totalBytes, fileIndex: i, totalFiles: bootFiles.length });
+      let data;
+      try {
+        data = new Uint8Array(await file.arrayBuffer());
+      } catch (error) {
+        throw new Error(`failed to read boot file ${path}: ${error?.message || error}`);
+      }
+      if (data.byteLength !== file.size) {
+        throw new Error(`short read for boot file ${path}: received ${data.byteLength} of ${file.size} bytes`);
+      }
+      const pathBytes = new TextEncoder().encode(path);
+      const pathPtr = this.x.aw_alloc(pathBytes.byteLength) >>> 0;
+      let dataPtr = null;
+      try {
+        dataPtr = this.x.aw_alloc(data.byteLength) >>> 0;
+        new Uint8Array(this.x.memory.buffer, pathPtr, pathBytes.byteLength).set(pathBytes);
+        new Uint8Array(this.x.memory.buffer, dataPtr, data.byteLength).set(data);
+        const rc = this.x.aw_load_add_file(pathPtr, pathBytes.byteLength, dataPtr, data.byteLength);
+        if (rc !== 0) throw new Error(this.message() || `failed to load boot file ${path}`);
+      } finally {
+        if (dataPtr !== null) this.x.aw_free(dataPtr, data.byteLength);
+        this.x.aw_free(pathPtr, pathBytes.byteLength);
+      }
+      loadedBytes += data.byteLength;
+      onProgress({ phase: 'boot', path, loadedBytes, totalBytes, fileIndex: i + 1, totalFiles: bootFiles.length });
+    }
+
+    const finishRc = this.x.aw_load_finish();
+    if (finishRc !== 0) throw new Error(this.message() || 'failed to finish direct folder load');
+    this.x.aw_jit_set_min_prefix?.(this.jitMinPrefix);
+    return {
+      packageLength: index.packageLength,
+      indexBytes: index.bytes.byteLength,
+      bootFiles: bootFiles.length,
+      assetFiles: index.fileRanges.length,
+    };
+  }
+
+  setVirtualRoot(rootPath) {
+    if (typeof this.x.aw_set_vfs_root_alias !== 'function') {
+      throw new Error('WASM runtime is missing aw_set_vfs_root_alias; rebuild it');
+    }
+    const bytes = new TextEncoder().encode(rootPath);
+    const ptr = this.x.aw_alloc(bytes.byteLength) >>> 0;
+    try {
+      new Uint8Array(this.x.memory.buffer, ptr, bytes.byteLength).set(bytes);
+      const rc = this.x.aw_set_vfs_root_alias(ptr, bytes.byteLength);
+      if (rc !== 0) throw new Error(this.message() || `could not mount direct folder root ${rootPath}`);
+    } finally {
+      this.x.aw_free(ptr, bytes.byteLength);
+    }
   }
 
   /** Number of guest pages in the current quiescent process snapshot. */
@@ -1062,13 +1158,21 @@ export class AnyWasm {
     if (this.callbackSuspended) this.pendingHostEvents.push(event);
     else event();
   }
-  /** Add host elapsed time in 100 ns ticks to the guest clock after a frame yield. */
+  /** Add host elapsed time in 100 ns ticks to the guest clock after a frame or idle wait. */
   advanceTime100ns(ticks) {
     if (typeof ticks !== 'bigint' || ticks < 0n) throw new RangeError('ticks must be a nonnegative BigInt');
     if (typeof this.x.aw_advance_time_100ns !== 'function') {
       throw new Error('WASM runtime is missing aw_advance_time_100ns; rebuild the runtime');
     }
     this.x.aw_advance_time_100ns(ticks);
+  }
+  /** Delay to the next guest user32 timer, or null when no active timer exists. */
+  nextTimerDelayMs() {
+    if (typeof this.x.aw_next_timer_delay_ms !== 'function') {
+      throw new Error('WASM runtime is missing aw_next_timer_delay_ms; rebuild the runtime');
+    }
+    const delay = this.x.aw_next_timer_delay_ms() >>> 0;
+    return delay === 0xffff_ffff ? null : delay;
   }
   takeStdout() { return this._take(this.x.aw_stdout_ptr, this.x.aw_stdout_len, this.x.aw_stdout_clear); }
   takeStderr() { return this._take(this.x.aw_stderr_ptr, this.x.aw_stderr_len, this.x.aw_stderr_clear); }

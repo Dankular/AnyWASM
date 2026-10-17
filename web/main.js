@@ -48,7 +48,7 @@ function failLoading(label, message) {
   $('stop').disabled = true;
 }
 
-async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
+async function run(bundleBytes, label, assetUrl = null, assetPackage = null, directFolder = null) {
   const reuseWorker = !!worker && stat.dataset.status !== undefined;
   if (worker && !reuseWorker) worker.postMessage({ type: 'dispose' });
   term.textContent = '';
@@ -162,12 +162,22 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null) {
   };
   const testMode = new URLSearchParams(location.search).has('test');
   const traceGtaEventvol = new URLSearchParams(location.search).has('traceGtaEventvol');
+  const traceImports = new URLSearchParams(location.search).has('traceImports');
   const diagProgress = new URLSearchParams(location.search).has('diagProgress');
   const jitMinPrefixValue = new URLSearchParams(location.search).get('jitMinPrefix');
   showLoading('Starting guest program…');
-  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, assetPackage, testMode, traceGtaEventvol, diagProgress };
+  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, assetPackage, testMode, traceGtaEventvol, traceImports, diagProgress };
+  if (directFolder) {
+    if (directFolder.files) {
+      message.directFiles = directFolder.files;
+      message.entryPath = directFolder.entryPath;
+    } else {
+      message.directSource = directFolder;
+    }
+  }
   message.jitMinPrefix = jitMinPrefixValue === null ? 65 : Number(jitMinPrefixValue);
-  const transfer = [wasm, bundleBytes.buffer];
+  const transfer = [wasm];
+  if (bundleBytes) transfer.push(bundleBytes.buffer);
   if (off) {
     message.canvas = off;
     transfer.push(off);
@@ -241,6 +251,16 @@ $('demo-crt').addEventListener('click', () => demo('crt_test'));
 $('demo-tri').addEventListener('click', () => demo('d3d11_triangle'));
 $('demo-tex').addEventListener('click', () => demo('d3d11_textured'));
 $('demo-gta').addEventListener('click', () => demo('gta_sa'));
+$('demo-sims3').addEventListener('click', () => {
+  const entryPath = 'Game\\Bin\\TS3W.exe';
+  const directSource = {
+    rootPath: 'D:\\The Sims 3',
+    manifestUrl: new URL('/__local/sims3/manifest', location.origin).href,
+    fileUrl: new URL('/__local/sims3/file', location.origin).href,
+    entryPath,
+  };
+  void run(null, 'D:\\The Sims 3\\Game\\Bin\\TS3W.exe', null, null, directSource);
+});
 $('stop').addEventListener('click', () => { worker?.postMessage({ type: 'stop' }); });
 
 const packageManager = new PackageManager(new URL('./catalog.json', import.meta.url).href);

@@ -350,9 +350,11 @@ pub unsafe extern "C" fn aw_shared_snapshot_import_dirty(
 pub unsafe extern "C" fn aw_shared_frames_info(out: *mut u32) -> i32 {
     let Some(s) = super::state() else { return 1 };
     let (address, used, capacity) = s.p.mem.frame_store_region();
-    let (Ok(address), Ok(used), Ok(capacity)) =
-        (u32::try_from(address), u32::try_from(used), u32::try_from(capacity))
-    else {
+    let (Ok(address), Ok(used), Ok(capacity)) = (
+        u32::try_from(address),
+        u32::try_from(used),
+        u32::try_from(capacity),
+    ) else {
         s.message = b"frame store does not fit a 32-bit address space".to_vec();
         return 3;
     };
@@ -392,7 +394,11 @@ pub unsafe extern "C" fn aw_shared_export_mappings_in_place(
     };
     let capacity = mapping_capacity_bytes / MAPPING_ENTRY_BYTES;
     let mappings = std::slice::from_raw_parts_mut(mappings_ptr.cast::<MappingEntry>(), capacity);
-    match s.p.mem.export_shared_mappings_in_place(region_base, mappings) {
+    match s
+        .p
+        .mem
+        .export_shared_mappings_in_place(region_base, mappings)
+    {
         Ok(count) => {
             s.message.clear();
             count as i64

@@ -279,13 +279,12 @@ fn active_exception_dispatcher_frame(
         ));
     }
     let establisher = p.rd64(*dispatcher_context + DISPATCHER_ESTABLISHER_FRAME)?;
-    let resumed_scope_index = if *exception_record != 0
-        && p.rd32(*exception_record + 4)? & EXCEPTION_UNWINDING != 0
-    {
-        Some(p.rd32(*dispatcher_context + DISPATCHER_SCOPE_INDEX)?)
-    } else {
-        None
-    };
+    let resumed_scope_index =
+        if *exception_record != 0 && p.rd32(*exception_record + 4)? & EXCEPTION_UNWINDING != 0 {
+            Some(p.rd32(*dispatcher_context + DISPATCHER_SCOPE_INDEX)?)
+        } else {
+            None
+        };
     Ok(Some(ExceptionFrame {
         control_pc: p.rd64(*dispatcher_context + DISPATCHER_CONTROL_PC)?,
         image_base: p.rd64(*dispatcher_context + DISPATCHER_IMAGE_BASE)?,
@@ -379,11 +378,7 @@ fn dispatch_context_exception_inner(
                     "search left guest stack after {frame_number} frames (pc={control_pc:#x}, rsp={last_rsp:#x})"
                 ),
             );
-            return finish_nested_exception_transfer(
-                p,
-                result,
-                crossed_handler_callback_boundary,
-            );
+            return finish_nested_exception_transfer(p, result, crossed_handler_callback_boundary);
         }
         let Some((module_base, function_entry)) = lookup_frame(p, control_pc)? else {
             let result = dispatch_unhandled_exception(
@@ -395,11 +390,7 @@ fn dispatch_context_exception_inner(
                 skip_ret_on_resume,
                 format!("search reached non-module PC {control_pc:#x} after {frame_number} frames"),
             );
-            return finish_nested_exception_transfer(
-                p,
-                result,
-                crossed_handler_callback_boundary,
-            );
+            return finish_nested_exception_transfer(p, result, crossed_handler_callback_boundary);
         };
         let frame_context = context.clone();
         let mut caller_context = frame_context.clone();
@@ -549,12 +540,8 @@ fn dispatch_context_exception_inner(
                             "noncontinuable exception code={code:#x} cannot continue execution"
                         )));
                     }
-                    let result = resume_exception(
-                        p,
-                        exception_record,
-                        context_record,
-                        skip_ret_on_resume,
-                    );
+                    let result =
+                        resume_exception(p, exception_record, context_record, skip_ret_on_resume);
                     return finish_nested_exception_transfer(
                         p,
                         result,
@@ -619,11 +606,7 @@ fn dispatch_context_exception_inner(
                 skip_ret_on_resume,
                 format!("search exhausted the guest stack after {frame_number} frames"),
             );
-            return finish_nested_exception_transfer(
-                p,
-                result,
-                crossed_handler_callback_boundary,
-            );
+            return finish_nested_exception_transfer(p, result, crossed_handler_callback_boundary);
         }
         context = caller_context;
         control_pc = next_pc;
@@ -1207,8 +1190,7 @@ fn complete_guest_unwind(
             let next_frame = &frames[index + 1];
             if caller_context.rip != crate::process::RET_MAGIC
                 && (caller_context.rip != next_frame.context.rip
-                || caller_context.gpr[RSP] != next_frame.context.gpr[RSP]
-                )
+                    || caller_context.gpr[RSP] != next_frame.context.gpr[RSP])
             {
                 return Err(Stop::Crash(format!(
                     "RtlUnwindEx frame walk diverged after {:#x}: next=({:#x},{:#x}), searched=({:#x},{:#x})",

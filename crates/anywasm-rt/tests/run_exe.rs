@@ -479,15 +479,22 @@ fn rectangle_helpers_update_signed_coordinates_and_intersections() {
 }
 
 #[test]
-fn shell_drag_accept_files_is_available_for_windows() {
+fn shell_drag_accept_files_is_unimplemented_until_drop_messages_are_delivered() {
     let (stop, out, _, p) = run("dragaccept_test.exe");
     assert_eq!(
         stop,
-        Stop::Exit(0),
+        Stop::Unimplemented {
+            dll: "shell32".into(),
+            name: "DragAcceptFiles".into()
+        },
         "stdout: {out:?}; unimplemented: {:?}",
         p.unimplemented_log
     );
     assert!(out.is_empty());
+    assert_eq!(
+        p.unimplemented_log,
+        vec![("shell32".into(), "DragAcceptFiles".into())]
+    );
 }
 
 #[test]
@@ -616,11 +623,22 @@ fn unimplemented_imports_are_reported_by_name() {
 }
 
 #[test]
-fn d3dprobe_runs_through_d3d11_and_user32() {
-    // Formerly stopped at the first missing import; now D3D11CreateDevice and MessageBoxA are implemented.
-    let (stop, _, err, _) = run("d3dprobe.exe");
-    assert_eq!(stop, Stop::Exit(0));
-    assert!(err.contains("[MessageBox] probe: ok"), "{err:?}");
+fn d3dprobe_runs_d3d11_then_exposes_the_untranslated_messagebox() {
+    let (stop, _, err, process) = run("d3dprobe.exe");
+    assert!(matches!(
+        stop,
+        Stop::Unimplemented { ref dll, ref name }
+            if dll == "user32" && name.contains("MessageBoxA")
+    ));
+    assert_ne!(
+        process.extra.com.device, 0,
+        "D3D11 device creation did not run"
+    );
+    assert_ne!(
+        process.extra.com.context, 0,
+        "D3D11 context creation did not run"
+    );
+    assert!(!err.contains("[MessageBox]"), "dialog was faked: {err:?}");
 }
 
 fn run_with(name: &str, cmdline: &str) -> (Stop, String, String, Process) {
@@ -707,7 +725,10 @@ fn native_hooks_match_guest_routines_and_cut_instruction_count() {
         "my_vsscanf=crt!vsscanf",
     ]);
     assert!(matches!(stop, Stop::Exit(0)), "{stop:?}");
-    assert_eq!(hooked_out, expected, "hooked run must match the independent expectation");
+    assert_eq!(
+        hooked_out, expected,
+        "hooked run must match the independent expectation"
+    );
     assert_eq!(hooked.native_hooks.len(), 5);
     assert!(
         hooked.cpu.icount * 4 < plain.cpu.icount,
@@ -715,7 +736,10 @@ fn native_hooks_match_guest_routines_and_cut_instruction_count() {
         hooked.cpu.icount,
         plain.cpu.icount
     );
-    eprintln!("native hooks: {} -> {} guest instructions", plain.cpu.icount, hooked.cpu.icount);
+    eprintln!(
+        "native hooks: {} -> {} guest instructions",
+        plain.cpu.icount, hooked.cpu.icount
+    );
 }
 
 #[test]
@@ -724,12 +748,15 @@ fn native_hooks_fail_loudly_on_bad_specs() {
     vfs.insert("hookme.exe", fixture("hookme.exe"));
     let mut p = Process::new(vfs);
     p.load_exe("hookme.exe", None).unwrap();
-    let err = |spec: &str, p: &mut Process| p.install_native_hooks(&[spec.to_string()]).unwrap_err();
+    let err =
+        |spec: &str, p: &mut Process| p.install_native_hooks(&[spec.to_string()]).unwrap_err();
     assert!(err("hookme.exe+0x1000=crt!no_such_function", &mut p).contains("not implemented"));
     assert!(err("missing.exe+0x1000=crt!strlen", &mut p).contains("not loaded"));
     assert!(err("hookme.exe+0x1000", &mut p).contains("expected"));
     assert!(err("hookme.exe+0xffffff=crt!strlen", &mut p).contains("outside"));
     // my_strlen starts with `mov rax,-1` (48 c7 c0 ff ff ff ff); a wrong prologue must be refused.
     assert!(err("hookme.exe+0x1000:deadbeef=crt!strlen", &mut p).contains("not the function"));
-    assert!(p.install_native_hooks(&["hookme.exe+0x1000:48c7c0ffffffff=crt!strlen".into()]).is_ok());
+    assert!(p
+        .install_native_hooks(&["hookme.exe+0x1000:48c7c0ffffffff=crt!strlen".into()])
+        .is_ok());
 }

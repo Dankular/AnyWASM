@@ -12,10 +12,12 @@ const E_NOTIMPL: u64 = 0x8000_4001;
 const E_POINTER: u64 = 0x8000_4003;
 const E_INVALIDARG: u64 = 0x8007_0057;
 const E_OUTOFMEMORY: u64 = 0x8007_000e;
+const E_FAIL: u64 = 0x8000_4005;
 const D3DERR_INVALIDCALL: u64 = 0x8876_086c;
 const D3DERR_NOTAVAILABLE: u64 = 0x8876_086a;
 const D3DERR_NOTFOUND: u64 = 0x8876_0866;
 const D3DERR_MOREDATA: u64 = 0x8876_0867;
+const D3D9_GAMMA_RAMP_BYTES: usize = 256 * 3 * 2;
 
 const IID_D3D9: &str = "81bdcbca-64d4-426d-ae8d-ad0147f4275c";
 const IID_D3D9_DEVICE: &str = "d0223b96-bf7a-43fd-92bd-a43b0d82b9eb";
@@ -371,6 +373,8 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
             "IDirect3DDevice9",
             "GetDisplayMode" | "GetSwapChain" | "GetRenderTarget" | "GetTexture",
         ) => 3,
+        ("IDirect3DDevice9", "GetGammaRamp") => 3,
+        ("IDirect3DDevice9", "SetGammaRamp") => 4,
         (
             "IDirect3DDevice9",
             "GetCreationParameters"
@@ -382,8 +386,10 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ) => 2,
         ("IDirect3DDevice9", "GetStreamSource") => 5,
         ("IDirect3DDevice9", "GetBackBuffer") => 5,
+        ("IDirect3DDevice9", "CreateRenderTarget") => 9,
         ("IDirect3DDevice9", "CreateDepthStencilSurface") => 9,
         ("IDirect3DDevice9", "CreateTexture") => 9,
+        ("IDirect3DDevice9", "CreateQuery") => 3,
         ("IDirect3DDevice9", "GetDepthStencilSurface" | "SetDepthStencilSurface") => 2,
         ("IDirect3DDevice9", "CreateVertexBuffer" | "CreateIndexBuffer") => 7,
         ("IDirect3DDevice9", "CreateVertexDeclaration") => 3,
@@ -469,36 +475,36 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
 
 pub fn method(iface: &str, method: &str) -> Option<HleFn> {
     Some(match (iface, method) {
-        ("IDirect3D9", "RegisterSoftwareDevice") => |_| Ok(S_OK),
+        // The virtual Direct3D runtime exposes exactly one adapter.
         ("IDirect3D9", "GetAdapterCount") => |_| Ok(1),
         ("IDirect3D9", "GetAdapterIdentifier") => get_adapter_identifier,
         ("IDirect3D9", "GetAdapterModeCount") => get_adapter_mode_count,
         ("IDirect3D9", "EnumAdapterModes") => enum_adapter_modes,
         ("IDirect3D9", "GetAdapterDisplayMode") => get_adapter_display_mode,
-        (
-            "IDirect3D9",
-            "CheckDeviceType"
-            | "CheckDeviceFormat"
-            | "CheckDepthStencilMatch"
-            | "CheckDeviceFormatConversion",
-        ) => check_device,
+        ("IDirect3D9", "CheckDeviceType") => check_device_type,
+        ("IDirect3D9", "CheckDeviceFormat") => check_device_format,
+        ("IDirect3D9", "CheckDepthStencilMatch") => check_depth_stencil_match,
+        ("IDirect3D9", "CheckDeviceFormatConversion") => check_device_format_conversion,
         ("IDirect3D9", "CheckDeviceMultiSampleType") => check_multisample,
         ("IDirect3D9", "GetDeviceCaps") => get_device_caps,
+        // The WebGPU adapter is headless and has no Win32 monitor handle.
         ("IDirect3D9", "GetAdapterMonitor") => |_| Ok(0),
         ("IDirect3D9", "CreateDevice") => create_device,
         ("IDirect3DDevice9", "TestCooperativeLevel") => |_| Ok(S_OK),
-        ("IDirect3DDevice9", "GetAvailableTextureMem") => |_| Ok(512 * 1024 * 1024),
-        ("IDirect3DDevice9", "EvictManagedResources") => |_| Ok(S_OK),
         ("IDirect3DDevice9", "GetDirect3D") => get_direct3d,
         ("IDirect3DDevice9", "GetDeviceCaps") => get_device_caps_device,
         ("IDirect3DDevice9", "GetDisplayMode") => get_display_mode,
         ("IDirect3DDevice9", "GetCreationParameters") => get_creation_parameters,
+        // Device creation always installs one virtual presentation chain.
         ("IDirect3DDevice9", "GetNumberOfSwapChains") => |_| Ok(1),
-        ("IDirect3DDevice9", "Reset") => |_| Ok(S_OK),
+        ("IDirect3DDevice9", "SetGammaRamp") => set_gamma_ramp,
+        ("IDirect3DDevice9", "GetGammaRamp") => get_gamma_ramp,
         ("IDirect3DDevice9", "Present") => present,
         ("IDirect3DDevice9", "GetBackBuffer") => get_backbuffer,
+        ("IDirect3DDevice9", "CreateRenderTarget") => create_render_target,
         ("IDirect3DDevice9", "CreateDepthStencilSurface") => create_depth_stencil_surface,
         ("IDirect3DDevice9", "CreateTexture") => create_texture9,
+        ("IDirect3DDevice9", "CreateQuery") => create_query9,
         ("IDirect3DDevice9", "GetDepthStencilSurface") => get_depth_stencil_surface,
         ("IDirect3DDevice9", "GetStreamSource") => get_stream_source,
         ("IDirect3DDevice9", "GetIndices") => get_indices,
@@ -534,10 +540,6 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "SetSamplerState") => set_sampler_state,
         ("IDirect3DDevice9", "GetTextureStageState") => get_texture_stage_state,
         ("IDirect3DDevice9", "SetTextureStageState") => set_texture_stage_state,
-        (
-            "IDirect3DDevice9",
-            "SetTransform" | "SetVertexShaderConstantF" | "SetPixelShaderConstantF",
-        ) => |_| Ok(S_OK),
         ("IDirect3DDevice9", "DrawPrimitive") => draw_primitive,
         ("IDirect3DDevice9", "DrawPrimitiveUP") => draw_primitive_up,
         ("IDirect3DDevice9", "DrawIndexedPrimitive") => draw_indexed_primitive,
@@ -547,24 +549,15 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DSurface9", "LockRect") => surface_lock_rect,
         ("IDirect3DSurface9", "UnlockRect") => surface_unlock_rect,
         ("IDirect3DSurface9", "GetDC") => |_| Ok(E_NOTIMPL),
-        ("IDirect3DSurface9", "ReleaseDC") => |_| Ok(S_OK),
         ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetDevice") => resource_get_device,
-        (
-            "IDirect3DBaseTexture9" | "IDirect3DTexture9",
-            "SetPriority" | "PreLoad" | "SetAutoGenFilterType" | "GenerateMipSubLevels",
-        ) => |_| Ok(S_OK),
-        (
-            "IDirect3DBaseTexture9" | "IDirect3DTexture9",
-            "GetPriority" | "GetLOD" | "GetAutoGenFilterType",
-        ) => |_| Ok(0),
-        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "SetLOD") => |_| Ok(0),
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "PreLoad") => |_| Ok(S_OK), // Resource creation immediately installs the GPU-side texture.
+        ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetPriority" | "GetLOD") => |_| Ok(0), // No setter is exposed; these report the real default values.
         ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetLevelCount") => texture_level_count,
         ("IDirect3DBaseTexture9" | "IDirect3DTexture9", "GetType") => get_resource_type,
         ("IDirect3DTexture9", "GetLevelDesc") => texture_get_level_desc,
         ("IDirect3DTexture9", "GetSurfaceLevel") => texture_get_surface_level,
         ("IDirect3DTexture9", "LockRect") => texture_lock_rect,
         ("IDirect3DTexture9", "UnlockRect") => texture_unlock_rect,
-        ("IDirect3DTexture9", "AddDirtyRect") => |_| Ok(S_OK),
         (
             "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9",
             "GetDevice",
@@ -573,14 +566,13 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DVertexDeclaration9", "GetDeclaration") => declaration_get_elements,
         ("IDirect3DVertexShader9" | "IDirect3DPixelShader9", "GetDevice") => shader9_get_device,
         ("IDirect3DVertexShader9" | "IDirect3DPixelShader9", "GetFunction") => shader9_get_function,
-        (
-            "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9",
-            "SetPriority" | "PreLoad",
-        ) => |_| Ok(S_OK),
+        ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "PreLoad") => {
+            |_| Ok(S_OK)
+        } // Resource creation immediately installs the GPU-side object.
         (
             "IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9",
             "GetPriority",
-        ) => |_| Ok(0),
+        ) => |_| Ok(0), // No setter is exposed; D3D resources begin at priority zero.
         ("IDirect3DResource9" | "IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetType") => {
             get_resource_type
         }
@@ -595,8 +587,145 @@ fn direct3d_create9(_p: &mut Process) -> R {
     Ok(com::create(_p, "IDirect3D9", com::Kind::Direct3D9))
 }
 
-fn check_device(_p: &mut Process) -> R {
+fn create_query9(p: &mut Process) -> R {
+    let (device, query_type, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if out == 0 {
+        // D3D9 defines a null ppQuery as a support probe. No IDirect3DQuery9 type is
+        // translated yet, so report the capability as unavailable instead of claiming success.
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    Err(Stop::Unimplemented {
+        dll: "com".into(),
+        name: format!(
+            "IDirect3DDevice9::CreateQuery(Type={query_type}, ppQuery={out:#x}; IDirect3DQuery9 object methods are not translated)"
+        ),
+    })
+}
+
+const D3DDEVTYPE_HAL: u32 = 1;
+const D3DRTYPE_SURFACE: u32 = 1;
+const D3DRTYPE_TEXTURE: u32 = 3;
+const D3DRTYPE_VERTEXBUFFER: u32 = 6;
+const D3DRTYPE_INDEXBUFFER: u32 = 7;
+const D3DUSAGE_RENDERTARGET: u32 = 0x1;
+const D3DUSAGE_DEPTHSTENCIL: u32 = 0x2;
+const D3DUSAGE_WRITEONLY: u32 = 0x8;
+
+fn check_device_type(p: &mut Process) -> R {
+    let (adapter, device_type, adapter_format, backbuffer_format, windowed) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+    );
+    if adapter != 0 || device_type != D3DDEVTYPE_HAL || windowed > 1 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if adapter_modes(adapter_format).is_empty() {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    // D3DFMT_UNKNOWN is valid only for windowed presentation and selects the desktop mode.
+    let backbuffer_format = if backbuffer_format == 0 && windowed != 0 {
+        22
+    } else {
+        backbuffer_format
+    };
+    if !d3d9_backbuffer_format(backbuffer_format) {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    if windowed == 0 && backbuffer_format != adapter_format {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
     Ok(S_OK)
+}
+
+fn check_device_format(p: &mut Process) -> R {
+    let (adapter, device_type, adapter_format, usage, resource_type, format) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+        p.arg(6) as u32,
+    );
+    if adapter != 0 || device_type != D3DDEVTYPE_HAL {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if adapter_modes(adapter_format).is_empty() {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+
+    let supported = match (resource_type, usage) {
+        (D3DRTYPE_TEXTURE, 0) => d3d9_texture_format(format),
+        (D3DRTYPE_SURFACE, D3DUSAGE_RENDERTARGET) => d3d9_render_target_format(format),
+        (D3DRTYPE_SURFACE, D3DUSAGE_DEPTHSTENCIL) => d3d9_depth_format(format),
+        (D3DRTYPE_VERTEXBUFFER, 0 | D3DUSAGE_WRITEONLY) => format == 100,
+        (D3DRTYPE_INDEXBUFFER, 0 | D3DUSAGE_WRITEONLY) => matches!(format, 101 | 102),
+        _ => false,
+    };
+    Ok(if supported { S_OK } else { D3DERR_NOTAVAILABLE })
+}
+
+fn check_depth_stencil_match(p: &mut Process) -> R {
+    let (adapter, device_type, adapter_format, render_target_format, depth_format) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+    );
+    if adapter != 0 || device_type != D3DDEVTYPE_HAL {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    if adapter_modes(adapter_format).is_empty() {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    Ok(
+        if d3d9_backbuffer_format(render_target_format) && d3d9_depth_format(depth_format) {
+            S_OK
+        } else {
+            D3DERR_NOTAVAILABLE
+        },
+    )
+}
+
+fn check_device_format_conversion(p: &mut Process) -> R {
+    let (adapter, device_type, source_format, target_format) = (
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+    );
+    if adapter != 0 || device_type != D3DDEVTYPE_HAL {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    // StretchRect, the operation this probe gates, has no translated implementation.
+    // Do not claim support for conversion pairs that the runtime cannot execute.
+    let _ = (source_format, target_format);
+    Ok(D3DERR_NOTAVAILABLE)
+}
+
+fn d3d9_backbuffer_format(format: u32) -> bool {
+    matches!(format, 20 | 21 | 22 | 23 | 32) && dxgi_format(format).is_some()
+}
+
+fn d3d9_render_target_format(format: u32) -> bool {
+    matches!(format, 20 | 21 | 22 | 32) && dxgi_format(format).is_some()
+}
+
+fn d3d9_depth_format(format: u32) -> bool {
+    matches!(format, 71 | 75 | 77 | 80)
+}
+
+fn d3d9_texture_format(format: u32) -> bool {
+    dxgi_format(format).is_some() && !d3d9_depth_format(format)
 }
 
 fn check_multisample(p: &mut Process) -> R {
@@ -771,8 +900,8 @@ fn get_device_caps_device(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
-fn dxgi_format(d3d: u32) -> u32 {
-    match d3d {
+fn dxgi_format(d3d: u32) -> Option<u32> {
+    Some(match d3d {
         20 => 87,                        // 24-bit D3D9 RGB is expanded to BGRA8.
         21 => 87,                        // A8R8G8B8 -> B8G8R8A8_UNORM
         22 => 88,                        // X8R8G8B8 -> B8G8R8X8_UNORM
@@ -788,8 +917,8 @@ fn dxgi_format(d3d: u32) -> u32 {
         75 => 45,                        // D3DFMT_D24S8 -> DXGI_FORMAT_D24_UNORM_S8_UINT
         77 => 46,                        // D3DFMT_D24X8 -> DXGI_FORMAT_R24_UNORM_X8_TYPELESS
         80 => 55,                        // D3DFMT_D16 -> DXGI_FORMAT_D16_UNORM
-        _ => 87,
-    }
+        _ => return None,
+    })
 }
 
 fn texture_mip_dim(base: u32, level: u32) -> u32 {
@@ -844,7 +973,9 @@ fn create_texture9(p: &mut Process) -> R {
     {
         return Ok(D3DERR_INVALIDCALL);
     }
-    let format = dxgi_format(d3d_format);
+    let Some(format) = dxgi_format(d3d_format) else {
+        return Ok(D3DERR_NOTAVAILABLE);
+    };
     let levels = if requested_levels == 0 {
         32 - width.max(height).leading_zeros()
     } else {
@@ -1226,6 +1357,11 @@ fn lock_texture_level(
         return Ok(D3DERR_INVALIDCALL);
     }
     let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    let gpu_owned = info.bind & (0x20 | 0x40) != 0;
+    if gpu_owned && (!info.d3d9_lockable || flags & 0x2000 != 0) {
+        // GPU-owned contents require an explicitly lockable D3D9 render target and real readback.
+        return Ok(D3DERR_INVALIDCALL);
+    }
     if info.map_addr != 0 {
         return Ok(D3DERR_INVALIDCALL);
     }
@@ -1258,12 +1394,28 @@ fn lock_texture_level(
     if size == 0 {
         return Ok(D3DERR_INVALIDCALL);
     }
+    let offset = texture_level_offset(&info, mip);
+    let readback = if gpu_owned {
+        let mut bytes = vec![0; size as usize];
+        let commands = std::mem::take(&mut p.extra.gpu.buf);
+        match super::d3d11::request_gpu_readback(&commands, id, mip, &mut bytes) {
+            1 => Some(bytes),
+            0 => {
+                p.extra.gpu.buf = commands;
+                return Ok(E_NOTIMPL);
+            }
+            _ => return Ok(E_FAIL),
+        }
+    } else {
+        None
+    };
     let base = super::kernel32::alloc_block(p, size as u64, true);
     if base == 0 {
         return Ok(E_OUTOFMEMORY);
     }
-    let offset = texture_level_offset(&info, mip);
-    if flags & 0x2000 == 0 && !info.shadow.is_empty() {
+    if let Some(bytes) = readback {
+        p.write_bytes(base, &bytes)?;
+    } else if flags & 0x2000 == 0 && !info.shadow.is_empty() {
         let start = offset as usize;
         let end = start.saturating_add(size as usize).min(info.shadow.len());
         if end > start {
@@ -1373,12 +1525,23 @@ fn create_device(p: &mut Process) -> R {
     p.wrptr(out, 0)?;
     let width = p.rd32(params)?;
     let height = p.rd32(params + 4)?;
-    let format = p.rd32(params + 8)?;
+    let requested_format = p.rd32(params + 8)?;
     let buffers = p.rd32(params + 12)?.max(1);
     let multisample = p.rd32(params + 16)?;
     let windowed = p.rd32(params + 32)? != 0;
     let auto_depth = p.rd32(params + 36)? != 0;
     let auto_depth_format = p.rd32(params + 40)?;
+    let requested_format = if requested_format == 0 {
+        if !windowed {
+            return Ok(D3DERR_INVALIDCALL);
+        }
+        22 // D3DFMT_UNKNOWN selects the virtual desktop format in windowed mode.
+    } else {
+        requested_format
+    };
+    let Some(format) = dxgi_format(requested_format) else {
+        return Ok(D3DERR_NOTAVAILABLE);
+    };
     let hwnd = if p.rd32(params + 28)? != 0 {
         p.rd32(params + 28)? as u64
     } else {
@@ -1405,7 +1568,6 @@ fn create_device(p: &mut Process) -> R {
         .unwrap_or((640, 480));
     let width = if width == 0 { window_width } else { width };
     let height = if height == 0 { window_height } else { height };
-    let format = dxgi_format(format);
     let swapchain = dxgi::make_swap_chain(p, hwnd, width, height, format, buffers);
     let (backbuffer, sc_id) = match com::kind_of(p, swapchain) {
         Some(com::Kind::SwapChain { id, backbuffer }) => (backbuffer, id),
@@ -1731,6 +1893,120 @@ fn create_depth_stencil_surface(p: &mut Process) -> R {
     if surface == 0 {
         return Ok(D3DERR_NOTAVAILABLE);
     }
+    p.wrptr(out, surface)?;
+    Ok(S_OK)
+}
+
+fn create_render_target(p: &mut Process) -> R {
+    let (device, width, height, d3d_format, multisample, quality, lockable, out, shared_handle) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+        p.arg(4) as u32,
+        p.arg(5) as u32,
+        p.arg(6) as u32,
+        p.arg(7),
+        p.arg(8),
+    );
+    if out == 0 {
+        return Ok(E_POINTER);
+    }
+    p.wrptr(out, 0)?;
+    if width == 0
+        || height == 0
+        || width > 8192
+        || height > 8192
+        || !matches!(
+            com::kind_of(p, device),
+            Some(com::Kind::Direct3DDevice9 { .. })
+        )
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+
+    // WebGPU supports readback for single-sample color surfaces. Multisampling and shared handles
+    // still have no compatible resource contract in this backend.
+    if multisample != 0 || quality != 0 || shared_handle != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    if !matches!(d3d_format, 20 | 21 | 22 | 32) {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let Some(format) = dxgi_format(d3d_format) else {
+        return Ok(D3DERR_NOTAVAILABLE);
+    };
+    let (_, _, _, _, size) = texture_level_layout(width, height, format);
+    if size == 0 || size > 64 * 1024 * 1024 {
+        return Ok(E_OUTOFMEMORY);
+    }
+
+    let texture_id = com::new_res(
+        p,
+        com::ResInfo {
+            width,
+            height,
+            mips: 1,
+            array: 1,
+            format,
+            samples: 1,
+            usage: 1,   // D3DUSAGE_RENDERTARGET
+            bind: 0x20, // D3D11_BIND_RENDER_TARGET
+            size,
+            d3d9_lockable: lockable != 0,
+            ..Default::default()
+        },
+    );
+    p.extra.gpu.emit(
+        op::CREATE_TEXTURE2D,
+        Pk::new()
+            .u32(texture_id)
+            .u32(width)
+            .u32(height)
+            .u32(1)
+            .u32(1)
+            .u32(format)
+            .u32(0x20)
+            .u32(0)
+            .u32(1)
+            .u32(0),
+    );
+    let view_id = p.extra.gpu.new_id();
+    p.extra.gpu.emit(
+        op::CREATE_VIEW,
+        Pk::new()
+            .u32(view_id)
+            .u32(0) // RTV
+            .u32(texture_id)
+            .u32(format)
+            .u32(4) // TEXTURE2D
+            .u32(0)
+            .u32(1)
+            .u32(0)
+            .u32(1),
+    );
+    let rtv = com::create(
+        p,
+        "ID3D11RenderTargetView",
+        com::Kind::View {
+            vk: com::ViewKind::Rtv,
+            id: view_id,
+            resource: texture_id,
+        },
+    );
+    let surface = com::create(
+        p,
+        "IDirect3DSurface9",
+        com::Kind::Direct3DSurface9 {
+            device,
+            texture_id,
+            level: 0,
+            rtv,
+            width,
+            height,
+            format: d3d_format,
+        },
+    );
     p.wrptr(out, surface)?;
     Ok(S_OK)
 }
@@ -2404,7 +2680,8 @@ fn get_render_target(p: &mut Process) -> R {
 }
 
 fn present(p: &mut Process) -> R {
-    let Some((_, swapchain, backbuffer, ..)) = device_state(p, p.arg(0)) else {
+    let device = p.arg(0);
+    let Some((_, swapchain, backbuffer, ..)) = device_state(p, device) else {
         return Ok(D3DERR_INVALIDCALL);
     };
     let (sc_id, tex_id) = match (com::kind_of(p, swapchain), com::kind_of(p, backbuffer)) {
@@ -2414,11 +2691,78 @@ fn present(p: &mut Process) -> R {
         _ => return Ok(D3DERR_INVALIDCALL),
     };
     // D3D9's default presentation interval waits for one vertical blank.
-    p.extra
-        .gpu
-        .emit(op::PRESENT, Pk::new().u32(sc_id).u32(tex_id).u32(1));
+    let mut command = Pk::new().u32(sc_id).u32(tex_id).u32(1);
+    if let Some(ramp) = p.extra.com.d3d9_gamma_ramps.get(&device) {
+        command = command.bytes(ramp);
+    }
+    p.extra.gpu.emit(op::PRESENT, command);
     p.yield_request = Some(Stop::Frame);
     Ok(S_OK)
+}
+
+fn gamma_identity() -> Vec<u8> {
+    let mut ramp = Vec::with_capacity(D3D9_GAMMA_RAMP_BYTES);
+    for _channel in 0..3 {
+        for entry in 0..256u16 {
+            ramp.extend((entry * 257).to_le_bytes());
+        }
+    }
+    ramp
+}
+
+fn set_gamma_ramp(p: &mut Process) -> R {
+    let (device, swapchain, flags, ramp_ptr) =
+        (p.arg(0), p.arg(1) as u32, p.arg(2) as u32, p.arg(3));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Err(Stop::Unimplemented {
+            dll: "com".into(),
+            name: "IDirect3DDevice9::SetGammaRamp on an invalid device".into(),
+        });
+    }
+    if swapchain != 0 || flags > 1 || ramp_ptr == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "com".into(),
+            name: format!(
+                "IDirect3DDevice9::SetGammaRamp(swapchain={swapchain}, flags={flags}, ramp={ramp_ptr:#x})"
+            ),
+        });
+    }
+    let ramp = p.read_bytes(ramp_ptr, D3D9_GAMMA_RAMP_BYTES)?;
+    p.extra.com.d3d9_gamma_ramps.insert(device, ramp);
+    // SetGammaRamp is a void COM method; the observable effect is retained for presentation.
+    Ok(0)
+}
+
+fn get_gamma_ramp(p: &mut Process) -> R {
+    let (device, swapchain, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Err(Stop::Unimplemented {
+            dll: "com".into(),
+            name: "IDirect3DDevice9::GetGammaRamp on an invalid device".into(),
+        });
+    }
+    if swapchain != 0 || out == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "com".into(),
+            name: format!("IDirect3DDevice9::GetGammaRamp(swapchain={swapchain}, ramp={out:#x})"),
+        });
+    }
+    let ramp = p
+        .extra
+        .com
+        .d3d9_gamma_ramps
+        .get(&device)
+        .cloned()
+        .unwrap_or_else(gamma_identity);
+    p.write_bytes(out, &ramp)?;
+    // GetGammaRamp is a void COM method.
+    Ok(0)
 }
 
 fn clear(p: &mut Process) -> R {
@@ -2431,6 +2775,21 @@ fn clear(p: &mut Process) -> R {
     );
     let Some(rtv) = current_render_target(p, device) else {
         return Ok(D3DERR_INVALIDCALL);
+    };
+    let dsv = if flags & (2 | 4) != 0 {
+        let Some(id) = p
+            .extra
+            .com
+            .d3d9_depth_surfaces
+            .get(&device)
+            .copied()
+            .and_then(|surface| depth_view_id(p, surface))
+        else {
+            return Ok(D3DERR_INVALIDCALL);
+        };
+        Some(id)
+    } else {
+        None
     };
     if flags & 1 != 0 {
         let id = match com::kind_of(p, rtv) {
@@ -2448,21 +2807,12 @@ fn clear(p: &mut Process) -> R {
                 .f32(a as f32 / 255.0),
         );
     }
-    if flags & (2 | 4) != 0 {
-        let dsv = p
-            .extra
-            .com
-            .d3d9_depth_surfaces
-            .get(&device)
-            .copied()
-            .and_then(|surface| depth_view_id(p, surface));
-        if let Some(id) = dsv {
-            let clear_flags = ((flags & 2 != 0) as u32) | (((flags & 4 != 0) as u32) << 1);
-            p.extra.gpu.emit(
-                op::CLEAR_DSV,
-                Pk::new().u32(id).u32(clear_flags).f32(depth).u32(stencil),
-            );
-        }
+    if let Some(id) = dsv {
+        let clear_flags = ((flags & 2 != 0) as u32) | (((flags & 4 != 0) as u32) << 1);
+        p.extra.gpu.emit(
+            op::CLEAR_DSV,
+            Pk::new().u32(id).u32(clear_flags).f32(depth).u32(stencil),
+        );
     }
     Ok(S_OK)
 }
@@ -3174,6 +3524,499 @@ mod tests {
     use anywasm_cpu::cpu::RSP;
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
     use anywasm_cpu::CpuMode;
+
+    #[test]
+    fn unmodeled_d3d9_state_changes_and_measurements_remain_unresolved() {
+        for method_name in [
+            "RegisterSoftwareDevice",
+            "GetAvailableTextureMem",
+            "EvictManagedResources",
+            "Reset",
+            "SetTransform",
+            "SetVertexShaderConstantF",
+            "SetPixelShaderConstantF",
+            "SetPriority",
+            "SetLOD",
+            "SetAutoGenFilterType",
+            "GetAutoGenFilterType",
+            "GenerateMipSubLevels",
+            "AddDirtyRect",
+            "ReleaseDC",
+        ] {
+            let iface = match method_name {
+                "RegisterSoftwareDevice" => "IDirect3D9",
+                "GetAvailableTextureMem"
+                | "EvictManagedResources"
+                | "Reset"
+                | "SetTransform"
+                | "SetVertexShaderConstantF"
+                | "SetPixelShaderConstantF" => "IDirect3DDevice9",
+                "SetPriority" => "IDirect3DResource9",
+                "SetLOD"
+                | "SetAutoGenFilterType"
+                | "GetAutoGenFilterType"
+                | "GenerateMipSubLevels" => "IDirect3DBaseTexture9",
+                "AddDirtyRect" => "IDirect3DTexture9",
+                "ReleaseDC" => "IDirect3DSurface9",
+                _ => unreachable!(),
+            };
+            assert!(
+                method(iface, method_name).is_none(),
+                "{iface}::{method_name} should be visibly unsupported"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_adapter_and_swap_chain_queries_match_the_virtual_model() {
+        let mut p = Process::new(Vfs::new());
+        assert_eq!(
+            method("IDirect3D9", "GetAdapterCount").unwrap()(&mut p),
+            Ok(1)
+        );
+        assert_eq!(
+            method("IDirect3D9", "GetAdapterMonitor").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(
+            method("IDirect3DDevice9", "GetNumberOfSwapChains").unwrap()(&mut p),
+            Ok(1)
+        );
+        assert_eq!(
+            method("IDirect3DBaseTexture9", "GetPriority").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(
+            method("IDirect3DBaseTexture9", "GetLOD").unwrap()(&mut p),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn d3d9_capability_probes_accept_translated_formats_and_reject_unsupported_combinations() {
+        const STACK: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        p.cpu.gpr[RSP] = STACK;
+
+        let call = |p: &mut Process, name: &str, args: &[u32]| {
+            for (index, value) in args.iter().copied().enumerate() {
+                p.wr32(STACK + 4 + index as u64 * 4, value).unwrap();
+            }
+            method("IDirect3D9", name).unwrap()(p).unwrap()
+        };
+
+        // Windowed mode can convert the X8R8G8B8 desktop format to A8R8G8B8.
+        assert_eq!(call(&mut p, "CheckDeviceType", &[0, 0, 1, 22, 21, 1]), S_OK);
+        assert_eq!(
+            call(&mut p, "CheckDeviceType", &[0, 0, 1, 22, 21, 0]),
+            D3DERR_NOTAVAILABLE
+        );
+        assert_eq!(
+            call(&mut p, "CheckDeviceType", &[0, 1, 1, 22, 22, 1]),
+            D3DERR_INVALIDCALL
+        );
+        assert_eq!(
+            call(&mut p, "CheckDeviceType", &[0, 0, 1, 22, 0xdead, 1]),
+            D3DERR_NOTAVAILABLE
+        );
+
+        // The translated texture path supports DXT1; render-target use does not.
+        assert_eq!(
+            call(
+                &mut p,
+                "CheckDeviceFormat",
+                &[0, 0, 1, 22, 0, 3, 0x3154_5844]
+            ),
+            S_OK
+        );
+        assert_eq!(
+            call(
+                &mut p,
+                "CheckDeviceFormat",
+                &[0, 0, 1, 22, 1, 3, 0x3154_5844]
+            ),
+            D3DERR_NOTAVAILABLE
+        );
+        assert_eq!(
+            call(&mut p, "CheckDeviceFormat", &[0, 0, 1, 22, 0, 3, 0xdead]),
+            D3DERR_NOTAVAILABLE
+        );
+        assert_eq!(
+            call(&mut p, "CheckDeviceFormat", &[0, 0, 1, 22, 2, 1, 75]),
+            S_OK
+        );
+
+        assert_eq!(
+            call(&mut p, "CheckDepthStencilMatch", &[0, 0, 1, 22, 22, 75]),
+            S_OK
+        );
+        assert_eq!(
+            call(&mut p, "CheckDepthStencilMatch", &[0, 0, 1, 22, 22, 21]),
+            D3DERR_NOTAVAILABLE
+        );
+
+        // StretchRect/format conversion has no translated execution path.
+        assert_eq!(
+            call(&mut p, "CheckDeviceFormatConversion", &[0, 0, 1, 21, 22]),
+            D3DERR_NOTAVAILABLE
+        );
+    }
+
+    #[test]
+    fn create_texture_rejects_untranslated_formats_without_creating_bgra8() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 64,
+                height: 64,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(OUT, 0xfeed_face).unwrap();
+        for (offset, value) in [
+            (4, device as u32),
+            (8, 4),
+            (12, 4),
+            (16, 1),
+            (20, 0),
+            (24, 0xdead), // untranslated D3DFORMAT
+            (28, 1),
+            (32, OUT as u32),
+            (36, 0),
+        ] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+
+        assert_eq!(
+            method("IDirect3DDevice9", "CreateTexture").unwrap()(&mut p),
+            Ok(D3DERR_NOTAVAILABLE)
+        );
+        assert_eq!(p.rd32(OUT).unwrap(), 0);
+        assert!(p.extra.com.res.is_empty());
+        assert!(p.extra.gpu.buf.is_empty());
+    }
+
+    #[test]
+    fn clear_rejects_depth_and_stencil_flags_without_a_bound_depth_surface() {
+        const STACK: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let texture_id = com::new_res(
+            &mut p,
+            com::ResInfo {
+                width: 64,
+                height: 64,
+                format: 87,
+                bind: 0x20,
+                ..Default::default()
+            },
+        );
+        let rtv = com::create(
+            &mut p,
+            "ID3D11RenderTargetView",
+            com::Kind::View {
+                vk: com::ViewKind::Rtv,
+                id: 1,
+                resource: texture_id,
+            },
+        );
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv,
+                current_rtv: rtv,
+                window: 0,
+                width: 64,
+                height: 64,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+
+        for flags in [2, 4, 3] {
+            for (index, value) in [device as u32, 0, 0, flags, 0xff00_0000, 1.0f32.to_bits(), 0]
+                .into_iter()
+                .enumerate()
+            {
+                p.wr32(STACK + 4 + index as u64 * 4, value).unwrap();
+            }
+            assert_eq!(
+                method("IDirect3DDevice9", "Clear").unwrap()(&mut p),
+                Ok(D3DERR_INVALIDCALL)
+            );
+            assert!(p.extra.gpu.buf.is_empty());
+        }
+
+        // A color-only clear remains supported without a depth surface.
+        p.wr32(STACK + 16, 1).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "Clear").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        assert_eq!(gpu::decode(&p.extra.gpu.buf).len(), 1);
+        assert_eq!(gpu::decode(&p.extra.gpu.buf)[0].0, op::CLEAR_RTV);
+    }
+
+    #[test]
+    fn create_query_probe_reports_unavailable_and_object_creation_stays_visible() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        let create_query = method("IDirect3DDevice9", "CreateQuery")
+            .expect("CreateQuery must translate the support-probe path");
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::CreateQuery"),
+            Some(12)
+        );
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK + 4, device as u32).unwrap();
+        p.wr32(STACK + 8, 8).unwrap(); // D3DQUERYTYPE_EVENT
+        p.wr32(STACK + 12, 0).unwrap(); // NULL ppQuery: ask whether the type is supported
+        assert_eq!(create_query(&mut p).unwrap(), D3DERR_NOTAVAILABLE);
+
+        p.wr32(OUT, 0xfeed_face).unwrap();
+        p.wr32(STACK + 12, OUT as u32).unwrap();
+        assert!(matches!(
+            create_query(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "com" && name.contains("IDirect3DQuery9 object methods are not translated")
+        ));
+        assert_eq!(p.rd32(OUT).unwrap(), 0xfeed_face);
+    }
+
+    #[test]
+    fn create_render_target_tracks_gpu_surface_and_accepts_lockable_surfaces() {
+        const STACK: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        const LOCKED_RECT: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, OUT, LOCKED_RECT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        let create_target = method("IDirect3DDevice9", "CreateRenderTarget")
+            .expect("CreateRenderTarget must translate renderable surfaces");
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::CreateRenderTarget"),
+            Some(36)
+        );
+        p.cpu.gpr[RSP] = STACK;
+
+        let write_args = |p: &mut Process, args: &[u32]| {
+            for (index, value) in args.iter().copied().enumerate() {
+                p.wr32(STACK + 4 + index as u64 * 4, value).unwrap();
+            }
+        };
+        write_args(&mut p, &[device as u32, 4, 4, 22, 0, 0, 0, OUT as u32, 0]);
+        assert_eq!(create_target(&mut p).unwrap(), S_OK);
+        let surface = p.rd32(OUT).unwrap() as u64;
+        let Some(com::Kind::Direct3DSurface9 {
+            device: surface_device,
+            texture_id,
+            width,
+            height,
+            format,
+            rtv,
+            ..
+        }) = com::kind_of(&p, surface)
+        else {
+            panic!("CreateRenderTarget must return a Direct3D surface");
+        };
+        assert_eq!(surface_device, device);
+        assert_eq!((width, height, format), (4, 4, 22));
+        assert!(matches!(
+            com::kind_of(&p, rtv),
+            Some(com::Kind::View {
+                vk: com::ViewKind::Rtv,
+                resource,
+                ..
+            }) if resource == texture_id
+        ));
+        let resource = p.extra.com.res.get(&texture_id).unwrap();
+        assert_eq!(
+            (resource.width, resource.height, resource.format),
+            (4, 4, 88)
+        );
+        assert_eq!((resource.usage, resource.bind), (1, 0x20));
+        assert_eq!(
+            gpu::decode(&p.extra.gpu.buf)
+                .iter()
+                .map(|(opcode, _)| *opcode)
+                .collect::<Vec<_>>(),
+            [op::CREATE_TEXTURE2D, op::CREATE_VIEW]
+        );
+
+        write_args(&mut p, &[surface as u32, OUT as u32, 0, 0]);
+        assert_eq!(
+            method("IDirect3DSurface9", "LockRect").unwrap()(&mut p).unwrap(),
+            D3DERR_INVALIDCALL
+        );
+
+        write_args(&mut p, &[device as u32, 4, 4, 22, 0, 0, 1, OUT as u32, 0]);
+        assert_eq!(create_target(&mut p).unwrap(), S_OK);
+        let lockable_surface = p.rd32(OUT).unwrap();
+        assert_ne!(lockable_surface, 0);
+
+        p.wr32(LOCKED_RECT, 0xaaaa_aaaa).unwrap();
+        p.wr32(LOCKED_RECT + 4, 0xbbbb_bbbb).unwrap();
+        write_args(&mut p, &[lockable_surface, LOCKED_RECT as u32, 0, 0]);
+        assert_eq!(
+            method("IDirect3DSurface9", "LockRect").unwrap()(&mut p).unwrap(),
+            E_NOTIMPL
+        );
+        assert_eq!(p.rd32(LOCKED_RECT).unwrap(), 0xaaaa_aaaa);
+        assert_eq!(p.rd32(LOCKED_RECT + 4).unwrap(), 0xbbbb_bbbb);
+    }
+
+    #[test]
+    fn gamma_ramp_roundtrips_and_is_attached_to_the_presented_frame() {
+        const STACK: u64 = 0x10000;
+        const RAMP: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        for address in [STACK, RAMP] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+
+        let texture_id = com::new_res(
+            &mut p,
+            com::ResInfo {
+                width: 4,
+                height: 4,
+                format: 88,
+                bind: 0x28,
+                ..Default::default()
+            },
+        );
+        let backbuffer = com::create(
+            &mut p,
+            "ID3D11Texture2D",
+            com::Kind::Texture2D { id: texture_id },
+        );
+        let swapchain = com::create(
+            &mut p,
+            "IDXGISwapChain1",
+            com::Kind::SwapChain {
+                id: 0x55,
+                backbuffer,
+            },
+        );
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain,
+                backbuffer,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 4,
+                height: 4,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        let write_args = |p: &mut Process, args: &[u32]| {
+            for (index, value) in args.iter().copied().enumerate() {
+                p.wr32(STACK + 4 + index as u64 * 4, value).unwrap();
+            }
+        };
+
+        let mut expected = Vec::with_capacity(256 * 3 * 2);
+        for channel in 0..3u32 {
+            for entry in 0..256u32 {
+                let value = ((entry * 257 + channel * 4093) & 0xffff) as u16;
+                expected.extend(value.to_le_bytes());
+            }
+        }
+        p.write_bytes(RAMP, &expected).unwrap();
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::SetGammaRamp"),
+            Some(16)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::GetGammaRamp"),
+            Some(12)
+        );
+        write_args(&mut p, &[device as u32, 0, 0, RAMP as u32]);
+        assert_eq!(
+            method("IDirect3DDevice9", "SetGammaRamp").unwrap()(&mut p).unwrap(),
+            0
+        );
+        write_args(&mut p, &[device as u32, 0, RAMP as u32]);
+        assert_eq!(
+            method("IDirect3DDevice9", "GetGammaRamp").unwrap()(&mut p).unwrap(),
+            0
+        );
+        assert_eq!(p.read_bytes(RAMP, expected.len()).unwrap(), expected);
+
+        write_args(&mut p, &[device as u32, 0, 0, 0, 0]);
+        assert_eq!(
+            method("IDirect3DDevice9", "Present").unwrap()(&mut p).unwrap(),
+            S_OK
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, op::PRESENT);
+        assert_eq!(&commands[0].1[12..], expected.as_slice());
+    }
 
     #[test]
     fn get_scissor_rect_tracks_updates_and_resets_with_render_target() {
@@ -4156,7 +4999,10 @@ mod tests {
                 "operation {value} at stage {stage}, state {state}"
             );
             assert_eq!(p.extra.gpu.buf, gpu_before_unsupported);
-            assert_eq!(p.extra.com.d3d9_texture_stage_states, states_before_unsupported);
+            assert_eq!(
+                p.extra.com.d3d9_texture_stage_states,
+                states_before_unsupported
+            );
         }
     }
 

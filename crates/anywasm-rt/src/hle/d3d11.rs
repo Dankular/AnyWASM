@@ -24,7 +24,12 @@ extern "C" {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn request_gpu_readback(commands: &[u8], id: u32, sub: u32, destination: &mut [u8]) -> i32 {
+pub(super) fn request_gpu_readback(
+    commands: &[u8],
+    id: u32,
+    sub: u32,
+    destination: &mut [u8],
+) -> i32 {
     // SAFETY: the imported host function only reads `commands` and writes exactly `destination`.
     unsafe {
         gpu_readback(
@@ -39,7 +44,12 @@ fn request_gpu_readback(commands: &[u8], id: u32, sub: u32, destination: &mut [u
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn request_gpu_readback(_commands: &[u8], _id: u32, _sub: u32, _destination: &mut [u8]) -> i32 {
+pub(super) fn request_gpu_readback(
+    _commands: &[u8],
+    _id: u32,
+    _sub: u32,
+    _destination: &mut [u8],
+) -> i32 {
     0
 }
 
@@ -55,6 +65,13 @@ const D3D_FEATURE_LEVEL_11_0: u32 = 0xb000;
 const D3D_FEATURE_LEVEL_11_1: u32 = 0xb100;
 const D3D11_QUERY_EVENT: u32 = 0;
 const D3D11_QUERY_TYPE_COUNT: u32 = 16;
+const D3D11_USAGE_DYNAMIC: u32 = 2;
+const D3D11_USAGE_STAGING: u32 = 3;
+const D3D11_BIND_VERTEX_BUFFER: u32 = 0x1;
+const D3D11_BIND_INDEX_BUFFER: u32 = 0x2;
+const D3D11_BIND_CONSTANT_BUFFER: u32 = 0x4;
+const D3D11_CPU_ACCESS_WRITE: u32 = 0x1_0000;
+const D3D11_CPU_ACCESS_READ: u32 = 0x2_0000;
 const DXGI_FORMAT_UNKNOWN: u32 = 0;
 const DXGI_FORMAT_R32_FLOAT: u32 = 41;
 const DXGI_FORMAT_R32_UINT: u32 = 42;
@@ -243,13 +260,24 @@ fn requested_feature_level(p: &Process) -> Result<Option<u32>, Stop> {
 }
 
 fn clear_unordered_access_view(p: &mut Process, float_values: bool) -> R {
+    let view_ptr = p.arg(1);
     let Some(Kind::View {
         vk: ViewKind::Uav,
         id,
         ..
     }) = kind_of(p, p.arg(1))
     else {
-        return Ok(0);
+        let name = if float_values {
+            "ClearUnorderedAccessViewFloat"
+        } else {
+            "ClearUnorderedAccessViewUint"
+        };
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!(
+                "{name} argument {view_ptr:#x} is not translated as an unordered-access view"
+            ),
+        });
     };
     let values = p.arg(2);
     let mut command = Pk::new().u32(id).u32(u32::from(float_values));
@@ -268,45 +296,61 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "GetParent" => get_parent,
         "GetResource" => |p| {
             let (this, out) = (p.arg(0), p.arg(1));
-            if let Some(Kind::View { resource, .. }) = kind_of(p, this) {
-                let obj = p
-                    .extra
-                    .com
-                    .objs
-                    .iter()
-                    .find(|(_, o)| {
-                        o.kind.host_id() == Some(resource)
-                            && matches!(
-                                o.kind,
-                                Kind::Buffer { .. }
-                                    | Kind::Texture1D { .. }
-                                    | Kind::Texture2D { .. }
-                                    | Kind::Texture3D { .. }
-                            )
-                    })
-                    .map(|(k, _)| *k);
-                if let Some(o) = obj {
-                    p.extra.com.objs.get_mut(&o).map(|x| x.refs += 1);
-                    p.wr64(out, o)?;
-                    return Ok(0);
-                }
-            }
-            p.wr64(out, 0)?;
+            let Some(Kind::View { resource, .. }) = kind_of(p, this) else {
+                return Err(Stop::Unimplemented {
+                    dll: "d3d11".into(),
+                    name: format!("GetResource is not translated for COM object {this:#x}"),
+                });
+            };
+            let obj = p
+                .extra
+                .com
+                .objs
+                .iter()
+                .find(|(_, o)| {
+                    o.kind.host_id() == Some(resource)
+                        && matches!(
+                            o.kind,
+                            Kind::Buffer { .. }
+                                | Kind::Texture1D { .. }
+                                | Kind::Texture2D { .. }
+                                | Kind::Texture3D { .. }
+                        )
+                })
+                .map(|(k, _)| *k)
+                .ok_or_else(|| Stop::Unimplemented {
+                    dll: "d3d11".into(),
+                    name: format!(
+                        "GetResource cannot find translated resource {resource} for view {this:#x}"
+                    ),
+                })?;
+            p.extra.com.objs.get_mut(&obj).map(|x| x.refs += 1);
+            p.wr64(out, obj)?;
             Ok(0)
         },
         "GetType" => |p| {
             let o = p.arg(1);
             let this = p.arg(0);
-            let kind = kind_of(p, this);
-            if matches!(kind, Some(Kind::Context)) {
+            let Some(kind) = kind_of(p, this) else {
+                return Err(Stop::Unimplemented {
+                    dll: "d3d11".into(),
+                    name: format!("GetType is not translated for COM object {this:#x}"),
+                });
+            };
+            if matches!(kind, Kind::Context) {
                 return Ok(u64::from(p.extra.com.deferred_contexts.contains_key(&this)));
             }
             let dimension = match kind {
-                Some(Kind::Buffer { .. }) => 1,
-                Some(Kind::Texture1D { .. }) => 2,
-                Some(Kind::Texture2D { .. }) => 3,
-                Some(Kind::Texture3D { .. }) => 4,
-                _ => 0,
+                Kind::Buffer { .. } => 1,
+                Kind::Texture1D { .. } => 2,
+                Kind::Texture2D { .. } => 3,
+                Kind::Texture3D { .. } => 4,
+                _ => {
+                    return Err(Stop::Unimplemented {
+                        dll: "d3d11".into(),
+                        name: format!("GetType is not translated for COM object {this:#x}"),
+                    });
+                }
             };
             p.wr32(o, dimension)?;
             Ok(0)
@@ -366,7 +410,6 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         "CheckFeatureSupport" => check_feature_support,
         "GetFeatureLevel" => |_| Ok(D3D_FEATURE_LEVEL_11_0 as u64),
-        "GetCreationFlags" => |_| Ok(0),
         "GetContextFlags" => |p| match kind_of(p, p.arg(0)) {
             Some(Kind::CommandList { flags, .. }) => Ok(flags as u64),
             Some(Kind::Context) => Ok(p
@@ -375,11 +418,16 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
                 .deferred_contexts
                 .get(&p.arg(0))
                 .map_or(0, |context| context.flags) as u64),
-            _ => Ok(0),
+            _ => Err(Stop::Unimplemented {
+                dll: "d3d11".into(),
+                name: format!(
+                    "GetContextFlags is not translated for COM object {:#x}",
+                    p.arg(0)
+                ),
+            }),
         },
+        // Device removal/loss is not modeled by the virtual GPU lifecycle.
         "GetDeviceRemovedReason" => |_| Ok(S_OK),
-        "SetExceptionMode" => |_| Ok(S_OK),
-        "GetExceptionMode" => |_| Ok(0),
         "ClearState" => |p| {
             if let Some(state) = p.extra.com.deferred_contexts.get_mut(&p.arg(0)) {
                 state.bound_rtv.clear();
@@ -393,13 +441,13 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         },
         // ── ID3D11DeviceContext: pipeline state ──
         "IASetInputLayout" => |p| {
-            let id = obj_id(p, p.arg(1));
+            let id = obj_id(p, p.arg(1))?;
             p.extra.gpu.emit(op::SET_INPUT_LAYOUT, Pk::new().u32(id));
             Ok(0)
         },
         "IASetVertexBuffers" => ia_set_vertex_buffers,
         "IASetIndexBuffer" => |p| {
-            let (b, f, o) = (obj_id(p, p.arg(1)), p.arg(2) as u32, p.arg(3) as u32);
+            let (b, f, o) = (obj_id(p, p.arg(1))?, p.arg(2) as u32, p.arg(3) as u32);
             p.extra
                 .gpu
                 .emit(op::SET_INDEX_BUFFER, Pk::new().u32(b).u32(f).u32(o));
@@ -428,7 +476,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "CSSetUnorderedAccessViews" => set_uavs,
         "OMSetRenderTargets" => om_set_render_targets,
         "OMSetBlendState" => |p| {
-            let (b, f, mask) = (obj_id(p, p.arg(1)), p.arg(2), p.arg(3) as u32);
+            let (b, f, mask) = (obj_id(p, p.arg(1))?, p.arg(2), p.arg(3) as u32);
             let mut pk = Pk::new().u32(b);
             for i in 0..4 {
                 pk = pk.f32(if f != 0 {
@@ -441,12 +489,12 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             Ok(0)
         },
         "OMSetDepthStencilState" => |p| {
-            let (d, r) = (obj_id(p, p.arg(1)), p.arg(2) as u32);
+            let (d, r) = (obj_id(p, p.arg(1))?, p.arg(2) as u32);
             p.extra.gpu.emit(op::SET_DEPTH, Pk::new().u32(d).u32(r));
             Ok(0)
         },
         "RSSetState" => |p| {
-            let id = obj_id(p, p.arg(1));
+            let id = obj_id(p, p.arg(1))?;
             p.extra.gpu.emit(op::SET_RASTER, Pk::new().u32(id));
             Ok(0)
         },
@@ -515,7 +563,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             Ok(0)
         },
         "ClearRenderTargetView" => |p| {
-            let (v, c) = (obj_id(p, p.arg(1)), p.arg(2));
+            let (v, c) = (obj_id(p, p.arg(1))?, p.arg(2));
             let mut pk = Pk::new().u32(v);
             for i in 0..4 {
                 pk = pk.u32(p.rd32(c + 4 * i)?);
@@ -526,7 +574,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
         "ClearUnorderedAccessViewFloat" => |p| clear_unordered_access_view(p, true),
         "ClearUnorderedAccessViewUint" => |p| clear_unordered_access_view(p, false),
         "ClearDepthStencilView" => |p| {
-            let (v, flags) = (obj_id(p, p.arg(1)), p.arg(2) as u32);
+            let (v, flags) = (obj_id(p, p.arg(1))?, p.arg(2) as u32);
             let depth = f32::from_bits(p.cpu.xmm[3] as u32);
             let stencil = p.arg(4) as u32 & 0xff;
             p.extra.gpu.emit(
@@ -536,7 +584,7 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             Ok(0)
         },
         "GenerateMips" => |p| {
-            let v = obj_id(p, p.arg(1));
+            let v = obj_id(p, p.arg(1))?;
             p.extra.gpu.emit(op::GENERATE_MIPS, Pk::new().u32(v));
             Ok(0)
         },
@@ -559,13 +607,17 @@ pub fn method(iface: &str, m: &str) -> Option<HleFn> {
             }
             Ok(0)
         },
-        "Begin" => |_| Ok(0), // D3D11_QUERY_EVENT is End-only; other query types are rejected.
+        "Begin" => |_| Ok(0), // Begin has no effect for the only supported query type: EVENT.
         "End" => set_query_complete,
         "GetData" => get_query_data,
         "ResolveSubresource" => resolve_subresource,
         "FinishCommandList" => finish_command_list,
         "ExecuteCommandList" => execute_command_list,
-        "Flush" | "SetPredication" | "DiscardResource" | "DiscardView" => |_| Ok(0),
+        // Commands are serialized for the browser executor, so Flush needs no extra operation.
+        "Flush" => |_| Ok(0),
+        // A discard makes the old resource contents undefined. Leaving those bytes in place is
+        // one permitted undefined result; applications must not rely on their previous values.
+        "DiscardResource" | "DiscardView" => |_| Ok(0),
         "OMGetRenderTargets" => |p| {
             let (n, rtvs, dsv) = (p.arg(1) as usize, p.arg(2), p.arg(3));
             let (bound, bound_dsv) = p
@@ -639,10 +691,16 @@ fn finish_command_list(p: &mut Process) -> R {
 fn execute_command_list(p: &mut Process) -> R {
     let (context, list, restore) = (p.arg(0), p.arg(1), p.arg(2) != 0);
     if p.extra.com.deferred_contexts.contains_key(&context) {
-        return Ok(0);
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: "ExecuteCommandList is not translated for a deferred context".into(),
+        });
     }
     let Some(Kind::CommandList { commands, .. }) = kind_of(p, list) else {
-        return Ok(0);
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("ExecuteCommandList command list {list:#x} is not translated"),
+        });
     };
     if restore {
         p.extra.gpu.emit(op::PUSH_STATE, Pk::new());
@@ -778,9 +836,33 @@ fn check_feature_support(p: &mut Process) -> R {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Host id of the COM object at `ptr` (0 for null / unknown).
-fn obj_id(p: &Process, ptr: u64) -> u32 {
-    kind_of(p, ptr).and_then(|k| k.host_id()).unwrap_or(0)
+/// Host id of a translated GPU-backed COM object (0 only for a valid null binding).
+fn obj_id(p: &Process, ptr: u64) -> Result<u32, Stop> {
+    if ptr == 0 {
+        return Ok(0);
+    }
+    let Some(kind) = kind_of(p, ptr) else {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("COM object {ptr:#x} is not a translated COM object"),
+        });
+    };
+    kind.host_id().ok_or_else(|| Stop::Unimplemented {
+        dll: "d3d11".into(),
+        name: format!("COM object {ptr:#x} has no translated GPU object id"),
+    })
+}
+
+fn resource_info(p: &Process, id: u32, operation: &str) -> Result<ResInfo, Stop> {
+    p.extra
+        .com
+        .res
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("{operation} resource {id} has no translated state"),
+        })
 }
 
 /// (block width, block height, bytes per block) for a DXGI_FORMAT.
@@ -816,7 +898,7 @@ fn rows(format: u32, height: u32) -> u32 {
 }
 
 fn set_shader(p: &mut Process, stage: u32) -> R {
-    let id = obj_id(p, p.arg(1));
+    let id = obj_id(p, p.arg(1))?;
     p.extra
         .gpu
         .emit(op::SET_SHADER, Pk::new().u32(stage).u32(id));
@@ -828,7 +910,7 @@ fn set_slots(p: &mut Process, opcode: u32, stage: u32) -> R {
     let mut pk = Pk::new().u32(stage).u32(start).u32(n);
     for i in 0..n as u64 {
         let ptr = if arr != 0 { p.rd64(arr + 8 * i)? } else { 0 };
-        pk = pk.u32(obj_id(p, ptr));
+        pk = pk.u32(obj_id(p, ptr)?);
     }
     p.extra.gpu.emit(opcode, pk);
     Ok(0)
@@ -861,7 +943,7 @@ fn set_slots1(p: &mut Process, stage: u32) -> R {
             0
         };
         pk = pk
-            .u32(obj_id(p, buffer))
+            .u32(obj_id(p, buffer)?)
             .u32(first_constant)
             .u32(num_constants);
     }
@@ -884,7 +966,7 @@ fn set_uavs(p: &mut Process) -> R {
         } else {
             u32::MAX
         };
-        pk = pk.u32(obj_id(p, view)).u32(initial_count);
+        pk = pk.u32(obj_id(p, view)?).u32(initial_count);
     }
     p.extra.gpu.emit(op::SET_UAVS, pk);
     Ok(0)
@@ -914,7 +996,7 @@ fn ia_set_vertex_buffers(p: &mut Process) -> R {
                 0
             },
         );
-        pk = pk.u32(obj_id(p, ptr)).u32(s).u32(o);
+        pk = pk.u32(obj_id(p, ptr)?).u32(s).u32(o);
     }
     p.extra.gpu.emit(op::SET_VERTEX_BUFFERS, pk);
     Ok(0)
@@ -927,7 +1009,7 @@ fn om_set_render_targets(p: &mut Process) -> R {
     for i in 0..n as u64 {
         let ptr = if rtvs != 0 { p.rd64(rtvs + 8 * i)? } else { 0 };
         bound.push(ptr);
-        pk = pk.u32(obj_id(p, ptr));
+        pk = pk.u32(obj_id(p, ptr)?);
     }
     if let Some(state) = p.extra.com.deferred_contexts.get_mut(&p.arg(0)) {
         state.bound_rtv = bound;
@@ -936,9 +1018,8 @@ fn om_set_render_targets(p: &mut Process) -> R {
         p.extra.com.bound_rtv = bound;
         p.extra.com.bound_dsv = dsv;
     }
-    p.extra
-        .gpu
-        .emit(op::SET_RENDER_TARGETS, pk.u32(obj_id(p, dsv)));
+    let dsv_id = obj_id(p, dsv)?;
+    p.extra.gpu.emit(op::SET_RENDER_TARGETS, pk.u32(dsv_id));
     Ok(0)
 }
 
@@ -1095,15 +1176,15 @@ fn create_texture1d(p: &mut Process) -> R {
                     .gpu
                     .emit_guest_payload(
                         op::TEXTURE_WRITE,
-                    Pk::new()
-                        .u32(id)
-                        .u32(mip)
-                        .u32(slice)
-                        .u32(0)
-                        .u32(0)
-                        .u32(mw)
-                        .u32(1)
-                        .u32(pitch)
+                        Pk::new()
+                            .u32(id)
+                            .u32(mip)
+                            .u32(slice)
+                            .u32(0)
+                            .u32(0)
+                            .u32(mw)
+                            .u32(1)
+                            .u32(pitch)
                             .u32(len as u32),
                         &p.mem,
                         data,
@@ -1228,15 +1309,15 @@ fn create_texture2d(p: &mut Process) -> R {
                     .gpu
                     .emit_guest_payload(
                         op::TEXTURE_WRITE,
-                    Pk::new()
-                        .u32(id)
-                        .u32(mip)
-                        .u32(slice)
-                        .u32(0)
-                        .u32(0)
-                        .u32(mw)
-                        .u32(mh)
-                        .u32(pitch)
+                        Pk::new()
+                            .u32(id)
+                            .u32(mip)
+                            .u32(slice)
+                            .u32(0)
+                            .u32(0)
+                            .u32(mw)
+                            .u32(mh)
+                            .u32(pitch)
                             .u32(len as u32),
                         &p.mem,
                         data,
@@ -1382,7 +1463,7 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
     let Some(rid) = kind_of(p, res).and_then(|k| k.host_id()) else {
         return Ok(E_INVALIDARG);
     };
-    let info = p.extra.com.res.get(&rid).cloned().unwrap_or_default();
+    let info = resource_info(p, rid, "CreateView")?;
     let default_dim = if info.is_buffer {
         1
     } else if info.is_3d {
@@ -1455,6 +1536,15 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 c = p.rd32(desc + 16)?; // FirstArraySlice
                 d = p.rd32(desc + 20)?; // ArraySize
             }
+            (ViewKind::Srv, 7) => {
+                b = 1; // Multisampled views contain no mip levels.
+                c = p.rd32(desc + 8)?; // FirstArraySlice
+                d = p.rd32(desc + 12)?; // ArraySize
+            }
+            (ViewKind::Srv, 9) => {
+                a = p.rd32(desc + 8)?; // MostDetailedMip
+                b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
+            }
             (ViewKind::Srv, 10) => {
                 a = p.rd32(desc + 8)?; // MostDetailedMip
                 b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
@@ -1480,6 +1570,17 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 a = p.rd32(desc + 8)?; // MostDetailedMip
                 b = p.rd32(desc + 12)?; // MipLevels (-1 = all)
             }
+            (ViewKind::Srv, 6) | (ViewKind::Rtv, 6) | (ViewKind::Dsv, 5) => {
+                b = 1; // Multisampled, non-array views have one subresource.
+            }
+            (ViewKind::Rtv, 1) | (ViewKind::Uav, 1) => {
+                a = p.rd32(desc + 8)?; // FirstElement
+                b = p.rd32(desc + 12)?; // NumElements
+                if vk == ViewKind::Uav {
+                    c = p.rd32(desc + 16)?; // Flags
+                    d = 0;
+                }
+            }
             (ViewKind::Rtv, 2) | (ViewKind::Rtv, 4) | (ViewKind::Dsv, 1) | (ViewKind::Dsv, 3) => {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
@@ -1488,17 +1589,16 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 a = p.rd32(desc + 8)?; // MipSlice
                 b = 1;
             }
-            (ViewKind::Uav, 1) => {
-                a = p.rd32(desc + 8)?; // FirstElement
-                b = p.rd32(desc + 12)?; // NumElements
-                c = p.rd32(desc + 16)?; // Flags
-                d = 0;
-            }
             (ViewKind::Rtv, 3) | (ViewKind::Rtv, 5) | (ViewKind::Dsv, 2) | (ViewKind::Dsv, 4) => {
                 a = p.rd32(desc + 8)?;
                 b = 1;
                 c = p.rd32(desc + 12)?;
                 d = p.rd32(desc + 16)?;
+            }
+            (ViewKind::Rtv, 7) | (ViewKind::Dsv, 6) => {
+                b = 1; // Multisampled array views have one mip.
+                c = p.rd32(desc + 8)?; // FirstArraySlice
+                d = p.rd32(desc + 12)?; // ArraySize
             }
             (ViewKind::Uav, 3) | (ViewKind::Uav, 5) => {
                 a = p.rd32(desc + 8)?; // MipSlice
@@ -1512,7 +1612,18 @@ fn create_view(p: &mut Process, vk: ViewKind) -> R {
                 c = p.rd32(desc + 12)?; // FirstWSlice
                 d = p.rd32(desc + 16)?; // WSize
             }
-            _ => {}
+            _ => {
+                let view_type = match vk {
+                    ViewKind::Srv => "shader-resource",
+                    ViewKind::Rtv => "render-target",
+                    ViewKind::Dsv => "depth-stencil",
+                    ViewKind::Uav => "unordered-access",
+                };
+                return Err(Stop::Unimplemented {
+                    dll: "d3d11".into(),
+                    name: format!("Create{view_type}View dimension {dim} is not translated"),
+                });
+            }
         }
     }
     if b == u32::MAX {
@@ -1708,10 +1819,14 @@ fn create_state(p: &mut Process, opcode: u32, size: usize, iface: &'static str) 
 }
 
 fn copy_resource(p: &mut Process, dst: u64, src: u64) -> Result<(), Stop> {
-    let (d, s) = (obj_id(p, dst), obj_id(p, src));
-    if d == 0 || s == 0 {
-        return Ok(());
+    if dst == 0 || src == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: "CopyResource requires translated non-null source and destination resources"
+                .into(),
+        });
     }
+    let (d, s) = (obj_id(p, dst)?, obj_id(p, src)?);
     // Keep CPU shadows coherent for buffer -> buffer copies (staging readback of CPU-written data).
     if let (Some(sh), true) = (
         p.extra.com.res.get(&s).map(|r| r.shadow.clone()),
@@ -1739,7 +1854,14 @@ fn copy_subresource_region(p: &mut Process) -> R {
         p.arg(7) as u32,
         p.arg(8),
     );
-    let (d, s) = (obj_id(p, dst), obj_id(p, src));
+    if dst == 0 || src == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: "CopySubresourceRegion requires translated non-null source and destination resources"
+                .into(),
+        });
+    }
+    let (d, s) = (obj_id(p, dst)?, obj_id(p, src)?);
     let mut pk = Pk::new()
         .u32(d)
         .u32(dsub)
@@ -1764,32 +1886,104 @@ fn copy_subresource_region(p: &mut Process) -> R {
 }
 
 fn resolve_subresource(p: &mut Process) -> R {
-    let (dst, dst_sub, src, src_sub, format) = (
-        obj_id(p, p.arg(1)),
+    let (dst_ptr, dst_sub, src_ptr, src_sub, format) = (
+        p.arg(1),
         p.arg(2) as u32,
-        obj_id(p, p.arg(3)),
+        p.arg(3),
         p.arg(4) as u32,
         p.arg(5) as u32,
     );
-    let dst_info = p.extra.com.res.get(&dst);
-    let src_info = p.extra.com.res.get(&src);
-    if let (Some(dst_info), Some(src_info)) = (dst_info, src_info) {
-        if src_info.samples > 1
-            && dst_info.samples == 1
-            && src_info.format == format
-            && dst_info.format == format
-        {
-            p.extra.gpu.emit(
-                op::RESOLVE_TEXTURE,
-                Pk::new()
-                    .u32(dst)
-                    .u32(dst_sub)
-                    .u32(src)
-                    .u32(src_sub)
-                    .u32(format),
-            );
-        }
+    if dst_ptr == 0 || src_ptr == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: "ResolveSubresource requires translated non-null source and destination textures"
+                .into(),
+        });
     }
+    let (dst, src) = (obj_id(p, dst_ptr)?, obj_id(p, src_ptr)?);
+    let dst_info = p
+        .extra
+        .com
+        .res
+        .get(&dst)
+        .cloned()
+        .ok_or_else(|| Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("ResolveSubresource destination resource {dst} is not translated"),
+        })?;
+    let src_info = p
+        .extra
+        .com
+        .res
+        .get(&src)
+        .cloned()
+        .ok_or_else(|| Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("ResolveSubresource source resource {src} is not translated"),
+        })?;
+    if src_info.samples != 4 || dst_info.samples != 1 {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!(
+                "ResolveSubresource sample counts {} -> {} are not translated",
+                src_info.samples, dst_info.samples
+            ),
+        });
+    }
+    if src_info.is_buffer
+        || dst_info.is_buffer
+        || src_info.is_1d
+        || dst_info.is_1d
+        || src_info.is_3d
+        || dst_info.is_3d
+        || src_info.format != format
+        || dst_info.format != format
+        || !supports_4x_multisample_render_target(format)
+    {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!(
+                "ResolveSubresource format {format} or resource dimensions are not translated"
+            ),
+        });
+    }
+    let src_subresources = src_info.mips.checked_mul(src_info.array);
+    let dst_subresources = dst_info.mips.checked_mul(dst_info.array);
+    if src_info.mips == 0
+        || src_info.array == 0
+        || dst_info.mips == 0
+        || dst_info.array == 0
+        || src_subresources.is_none_or(|count| src_sub >= count)
+        || dst_subresources.is_none_or(|count| dst_sub >= count)
+    {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!(
+                "ResolveSubresource subresources {src_sub} -> {dst_sub} are outside translated resources"
+            ),
+        });
+    }
+    let (src_mip, src_slice) = (src_sub % src_info.mips, src_sub / src_info.mips);
+    let (dst_mip, dst_slice) = (dst_sub % dst_info.mips, dst_sub / dst_info.mips);
+    if src_slice >= src_info.array
+        || dst_slice >= dst_info.array
+        || mip_dim(src_info.width, src_mip) != mip_dim(dst_info.width, dst_mip)
+        || mip_dim(src_info.height, src_mip) != mip_dim(dst_info.height, dst_mip)
+    {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: "ResolveSubresource source and destination extents are not translated".into(),
+        });
+    }
+    p.extra.gpu.emit(
+        op::RESOLVE_TEXTURE,
+        Pk::new()
+            .u32(dst)
+            .u32(dst_sub)
+            .u32(src)
+            .u32(src_sub)
+            .u32(format),
+    );
     Ok(0)
 }
 
@@ -1804,11 +1998,16 @@ fn update_subresource(p: &mut Process) -> R {
         p.arg(6) as u32,
     );
     let Some(kind) = kind_of(p, res) else {
-        return Ok(0);
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!(
+                "UpdateSubresource destination {res:#x} is not a translated buffer or texture"
+            ),
+        });
     };
     match kind {
         Kind::Buffer { id } => {
-            let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let info = resource_info(p, id, "UpdateSubresource")?;
             let (left, right) = if bx != 0 {
                 (p.rd32(bx)?, p.rd32(bx + 12)?)
             } else {
@@ -1827,7 +2026,7 @@ fn update_subresource(p: &mut Process) -> R {
             );
         }
         Kind::Texture1D { id } | Kind::Texture2D { id } => {
-            let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let info = resource_info(p, id, "UpdateSubresource")?;
             let (mip, slice) = (sub % info.mips.max(1), sub / info.mips.max(1));
             let (mw, mh) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
             let (x, y, w, h) = if bx != 0 {
@@ -1847,30 +2046,28 @@ fn update_subresource(p: &mut Process) -> R {
             };
             let nrows = rows(info.format, h);
             let len = (pitch * nrows) as usize;
-            let range = p
-                .extra
+            p.extra
                 .gpu
                 .emit_guest_payload(
                     op::TEXTURE_WRITE,
-                Pk::new()
-                    .u32(id)
-                    .u32(mip)
-                    .u32(slice)
-                    .u32(x)
-                    .u32(y)
-                    .u32(w)
-                    .u32(h)
-                    .u32(pitch)
+                    Pk::new()
+                        .u32(id)
+                        .u32(mip)
+                        .u32(slice)
+                        .u32(x)
+                        .u32(y)
+                        .u32(w)
+                        .u32(h)
+                        .u32(pitch)
                         .u32(len as u32),
                     &p.mem,
                     src,
                     len,
                 )
                 .map_err(Stop::Crash)?;
-            let bytes = &p.extra.gpu.buf[range];
         }
         Kind::Texture3D { id } => {
-            let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let info = resource_info(p, id, "UpdateSubresource")?;
             let mip = sub % info.mips.max(1);
             let (mw, mh, md) = (
                 mip_dim(info.width, mip),
@@ -1916,7 +2113,12 @@ fn update_subresource(p: &mut Process) -> R {
                 );
             }
         }
-        _ => {}
+        _ => {
+            return Err(Stop::Unimplemented {
+                dll: "d3d11".into(),
+                name: "UpdateSubresource destination is not a translated buffer or texture".into(),
+            });
+        }
     }
     Ok(0)
 }
@@ -1929,19 +2131,70 @@ fn map_with_readback(
     p: &mut Process,
     request_readback: impl FnOnce(&[u8], u32, u32, &mut [u8]) -> i32,
 ) -> R {
+    map_with_services(p, request_readback, |p, size, zero| {
+        kernel32::alloc_block(p, size, zero)
+    })
+}
+
+fn map_with_services(
+    p: &mut Process,
+    request_readback: impl FnOnce(&[u8], u32, u32, &mut [u8]) -> i32,
+    mut allocate: impl FnMut(&mut Process, u64, bool) -> u64,
+) -> R {
     // (this, pResource, Subresource, MapType, MapFlags, D3D11_MAPPED_SUBRESOURCE*)
     let (res, sub, ty, out) = (p.arg(1), p.arg(2) as u32, p.arg(3) as u32, p.arg(5));
     let Some(id) = obj_id_opt(p, res) else {
         return Ok(E_INVALIDARG);
     };
-    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+    let Some(info) = p.extra.com.res.get(&id).cloned() else {
+        return Ok(E_INVALIDARG);
+    };
+    if !(1..=5).contains(&ty) || !map_access_allowed(&info, ty) {
+        return Ok(E_INVALIDARG);
+    }
+    if out == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    let pointer_size = if p.cpu.mode == anywasm_cpu::CpuMode::X86_32 {
+        4u64
+    } else {
+        8u64
+    };
+    if !mapped_subresource_output_writable(p, out, pointer_size + 8) {
+        return Ok(E_INVALIDARG);
+    }
+
+    if info.map_addr != 0 {
+        return Ok(DXGI_ERROR_INVALID_CALL);
+    }
+    if info.is_buffer {
+        if sub != 0 || info.size == 0 {
+            return Ok(E_INVALIDARG);
+        }
+    } else {
+        let subresources = info
+            .mips
+            .checked_mul(if info.is_3d { 1 } else { info.array });
+        if info.width == 0
+            || info.height == 0
+            || info.mips == 0
+            || info.array == 0
+            || (info.is_3d && info.depth == 0)
+            || subresources.is_none_or(|count| sub >= count)
+        {
+            return Ok(E_INVALIDARG);
+        }
+    }
+
     let (len, pitch, depth_pitch) = if info.is_buffer {
         (info.size as u64, info.size, info.size)
     } else {
-        let mip = sub % info.mips.max(1);
+        let mip = sub % info.mips;
         let (w, h) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
         let pitch = row_bytes(info.format, w);
-        let depth_pitch = pitch * rows(info.format, h);
+        let Some(depth_pitch) = pitch.checked_mul(rows(info.format, h)) else {
+            return Ok(E_INVALIDARG);
+        };
         let depth = if info.is_3d {
             mip_dim(info.depth, mip)
         } else {
@@ -1949,123 +2202,204 @@ fn map_with_readback(
         };
         (depth_pitch as u64 * depth as u64, pitch, depth_pitch)
     };
-    let addr = if info.map_addr != 0 {
-        info.map_addr
-    } else {
-        kernel32::alloc_block(p, len.max(16), true)
-    };
-    // MAP_READ=1, WRITE=2, READ_WRITE=3, WRITE_DISCARD=4, WRITE_NO_OVERWRITE=5
+    if len == 0 || len > u32::MAX as u64 || pitch == 0 || depth_pitch == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    let addr = allocate(p, len.max(16), true);
+    if addr == 0 {
+        return Ok(E_OUTOFMEMORY);
+    }
+
     let reads = ty == 1 || ty == 3;
     let writes = ty != 1;
-    let cpu_readable_staging = reads && info.usage == 3 && info.cpu & 0x0002_0000 != 0;
-    if cpu_readable_staging {
+    if reads {
         let commands = std::mem::take(&mut p.extra.gpu.buf);
         let mut bytes = vec![0; len as usize];
-        match request_readback(&commands, id, sub, &mut bytes) {
+        let status = request_readback(&commands, id, sub, &mut bytes);
+        p.extra.gpu.buf = commands;
+        match status {
             1 => p.write_bytes(addr, &bytes)?,
             0 => {
-                p.extra.gpu.buf = commands;
+                kernel32::free_block(p, addr);
                 return Ok(E_NOTIMPL);
             }
-            _ => return Ok(E_FAIL),
+            _ => {
+                kernel32::free_block(p, addr);
+                return Ok(E_FAIL);
+            }
         }
-    } else if reads || ty == 5 || ty == 2 {
+    } else if ty == 5 || ty == 2 {
         let sh = info.shadow.clone();
         let n = sh.len().min(len as usize);
         p.write_bytes(addr, &sh[..n])?;
     }
+
+    p.wrptr(out, addr)?;
+    p.wr32(out + pointer_size, pitch)?;
+    p.wr32(out + pointer_size + 4, depth_pitch)?;
     if let Some(r) = p.extra.com.res.get_mut(&id) {
         r.map_addr = addr;
         r.map_write = writes;
         r.map_sub = sub;
     }
-    p.wr64(out, addr)?;
-    p.wr32(out + 8, pitch)?;
-    p.wr32(out + 12, depth_pitch)?;
     Ok(S_OK)
 }
 
-fn obj_id_opt(p: &Process, ptr: u64) -> Option<u32> {
-    kind_of(p, ptr).and_then(|k| k.host_id())
+fn map_access_allowed(info: &ResInfo, map_type: u32) -> bool {
+    let can_read = info.cpu & D3D11_CPU_ACCESS_READ != 0;
+    let can_write = info.cpu & D3D11_CPU_ACCESS_WRITE != 0;
+    match map_type {
+        1 => info.usage == D3D11_USAGE_STAGING && can_read,
+        2 => can_write && matches!(info.usage, D3D11_USAGE_DYNAMIC | D3D11_USAGE_STAGING),
+        3 => info.usage == D3D11_USAGE_STAGING && can_read && can_write,
+        4 => info.usage == D3D11_USAGE_DYNAMIC && can_write,
+        5 => {
+            info.is_buffer
+                && info.usage == D3D11_USAGE_DYNAMIC
+                && can_write
+                && info.bind & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER) != 0
+                && info.bind & D3D11_BIND_CONSTANT_BUFFER == 0
+        }
+        _ => false,
+    }
+}
+
+fn mapped_subresource_output_writable(p: &Process, output: u64, size: u64) -> bool {
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_W};
+
+    let Some(end) = output.checked_add(size) else {
+        return false;
+    };
+    if end <= output {
+        return false;
+    }
+    let mut page = output & !(PAGE_SIZE - 1);
+    let last_page = (end - 1) & !(PAGE_SIZE - 1);
+    loop {
+        if p.mem.prot_of(page).is_none_or(|prot| prot & PROT_W == 0) {
+            return false;
+        }
+        if page == last_page {
+            return true;
+        }
+        page += PAGE_SIZE;
+    }
 }
 
 fn unmap(p: &mut Process) -> R {
-    let (res, _sub) = (p.arg(1), p.arg(2));
-    let Some(id) = obj_id_opt(p, res) else {
-        return Ok(0);
-    };
-    let info = p.extra.com.res.get(&id).cloned().unwrap_or_default();
-    if info.map_addr == 0 || !info.map_write {
-        return Ok(0);
+    let (res, sub) = (p.arg(1), p.arg(2) as u32);
+    if res == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: "Unmap requires a translated non-null resource".into(),
+        });
     }
-    if info.is_buffer {
-        let bytes = p.read_bytes(info.map_addr, info.size as usize)?;
-        if let Some(r) = p.extra.com.res.get_mut(&id) {
-            r.shadow = bytes.clone();
-            r.map_write = false;
-        }
-        p.extra.gpu.emit(
-            op::BUFFER_WRITE,
-            Pk::new().u32(id).u32(0).u32(info.size).bytes(&bytes),
-        );
-    } else {
-        let sub = info.map_sub;
-        let mip = sub % info.mips.max(1);
-        let (w, h) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
-        let pitch = row_bytes(info.format, w);
-        let nrows = rows(info.format, h);
-        let depth_pitch = pitch * nrows;
-        let depth = if info.is_3d {
-            mip_dim(info.depth, mip)
-        } else {
-            1
-        };
-        let bytes = p.read_bytes(info.map_addr, (depth_pitch * depth) as usize)?;
-        if let Some(r) = p.extra.com.res.get_mut(&id) {
-            if sub == 0 && !r.shadow.is_empty() {
-                let n = r.shadow.len().min(bytes.len());
-                r.shadow[..n].copy_from_slice(&bytes[..n]);
+    let id = obj_id(p, res).map_err(|_| Stop::Unimplemented {
+        dll: "d3d11".into(),
+        name: format!("Unmap resource {res:#x} is not translated"),
+    })?;
+    let info = p
+        .extra
+        .com
+        .res
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("Unmap resource {res:#x} has no translated resource state"),
+        })?;
+    if info.map_addr == 0 {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!("Unmap resource {res:#x} subresource {sub} was not mapped"),
+        });
+    }
+    if sub != info.map_sub {
+        return Err(Stop::Unimplemented {
+            dll: "d3d11".into(),
+            name: format!(
+                "Unmap resource {res:#x} subresource {sub} does not match mapped subresource {}",
+                info.map_sub
+            ),
+        });
+    }
+    if info.map_write {
+        if info.is_buffer {
+            let bytes = p.read_bytes(info.map_addr, info.size as usize)?;
+            if let Some(r) = p.extra.com.res.get_mut(&id) {
+                r.shadow = bytes.clone();
             }
-            r.map_write = false;
-        }
-        if info.is_3d {
-            for z in 0..depth {
-                let slice_bytes =
-                    &bytes[(z * depth_pitch) as usize..((z + 1) * depth_pitch) as usize];
+            p.extra.gpu.emit(
+                op::BUFFER_WRITE,
+                Pk::new().u32(id).u32(0).u32(info.size).bytes(&bytes),
+            );
+        } else {
+            let sub = info.map_sub;
+            let mip = sub % info.mips;
+            let (w, h) = (mip_dim(info.width, mip), mip_dim(info.height, mip));
+            let pitch = row_bytes(info.format, w);
+            let nrows = rows(info.format, h);
+            let depth_pitch = pitch * nrows;
+            let depth = if info.is_3d {
+                mip_dim(info.depth, mip)
+            } else {
+                1
+            };
+            let bytes = p.read_bytes(info.map_addr, (depth_pitch * depth) as usize)?;
+            if let Some(r) = p.extra.com.res.get_mut(&id) {
+                if sub == 0 && !r.shadow.is_empty() {
+                    let n = r.shadow.len().min(bytes.len());
+                    r.shadow[..n].copy_from_slice(&bytes[..n]);
+                }
+            }
+            if info.is_3d {
+                for z in 0..depth {
+                    let slice_bytes =
+                        &bytes[(z * depth_pitch) as usize..((z + 1) * depth_pitch) as usize];
+                    p.extra.gpu.emit(
+                        op::TEXTURE_WRITE,
+                        Pk::new()
+                            .u32(id)
+                            .u32(mip)
+                            .u32(z)
+                            .u32(0)
+                            .u32(0)
+                            .u32(w)
+                            .u32(h)
+                            .u32(pitch)
+                            .u32(slice_bytes.len() as u32)
+                            .bytes(slice_bytes),
+                    );
+                }
+            } else {
+                let slice = sub / info.mips;
                 p.extra.gpu.emit(
                     op::TEXTURE_WRITE,
                     Pk::new()
                         .u32(id)
                         .u32(mip)
-                        .u32(z)
+                        .u32(slice)
                         .u32(0)
                         .u32(0)
                         .u32(w)
                         .u32(h)
                         .u32(pitch)
-                        .u32(slice_bytes.len() as u32)
-                        .bytes(slice_bytes),
+                        .u32(bytes.len() as u32)
+                        .bytes(&bytes),
                 );
             }
-        } else {
-            let slice = sub / info.mips.max(1);
-            p.extra.gpu.emit(
-                op::TEXTURE_WRITE,
-                Pk::new()
-                    .u32(id)
-                    .u32(mip)
-                    .u32(slice)
-                    .u32(0)
-                    .u32(0)
-                    .u32(w)
-                    .u32(h)
-                    .u32(pitch)
-                    .u32(bytes.len() as u32)
-                    .bytes(&bytes),
-            );
         }
     }
+    if let Some(r) = p.extra.com.res.get_mut(&id) {
+        r.map_addr = 0;
+        r.map_write = false;
+    }
+    kernel32::free_block(p, info.map_addr);
     Ok(0)
+}
+
+fn obj_id_opt(p: &Process, ptr: u64) -> Option<u32> {
+    kind_of(p, ptr).and_then(|k| k.host_id())
 }
 
 // ── GetDesc / GetParent (kind dependent) ─────────────────────────────────────
@@ -2122,7 +2456,7 @@ fn get_desc(p: &mut Process) -> R {
             let Some(Kind::Texture2D { id }) = kind_of(p, backbuffer) else {
                 return Ok(E_FAIL);
             };
-            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let r = resource_info(p, id, "GetDesc")?;
             let mut b = vec![0u8; 72];
             for (off, v) in [
                 (0usize, r.width),
@@ -2141,7 +2475,7 @@ fn get_desc(p: &mut Process) -> R {
             p.write_bytes(out, &b)?;
         }
         Kind::Buffer { id } => {
-            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let r = resource_info(p, id, "GetDesc")?;
             for (i, v) in [r.size, r.usage, r.bind, r.cpu, r.misc, r.stride]
                 .iter()
                 .enumerate()
@@ -2150,7 +2484,7 @@ fn get_desc(p: &mut Process) -> R {
             }
         }
         Kind::Texture1D { id } => {
-            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let r = resource_info(p, id, "GetDesc")?;
             let vals = [
                 r.width, r.mips, r.array, r.format, r.usage, r.bind, r.cpu, r.misc,
             ];
@@ -2159,7 +2493,7 @@ fn get_desc(p: &mut Process) -> R {
             }
         }
         Kind::Texture2D { id } => {
-            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let r = resource_info(p, id, "GetDesc")?;
             let vals = [
                 r.width,
                 r.height,
@@ -2178,7 +2512,7 @@ fn get_desc(p: &mut Process) -> R {
             }
         }
         Kind::Texture3D { id } => {
-            let r = p.extra.com.res.get(&id).cloned().unwrap_or_default();
+            let r = resource_info(p, id, "GetDesc")?;
             let vals = [
                 r.width, r.height, r.depth, r.mips, r.format, r.usage, r.bind, r.cpu, r.misc,
             ];
@@ -2186,7 +2520,12 @@ fn get_desc(p: &mut Process) -> R {
                 p.wr32(out + 4 * i as u64, *v)?;
             }
         }
-        _ => {}
+        _ => {
+            return Err(Stop::Unimplemented {
+                dll: "d3d11".into(),
+                name: format!("GetDesc is not translated for COM object {this:#x}"),
+            });
+        }
     }
     Ok(S_OK)
 }
@@ -2194,6 +2533,14 @@ fn get_desc(p: &mut Process) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untracked_device_flags_and_predication_apis_are_unresolved() {
+        assert!(method("ID3D11Device", "GetCreationFlags").is_none());
+        assert!(method("ID3D11Device", "SetExceptionMode").is_none());
+        assert!(method("ID3D11Device", "GetExceptionMode").is_none());
+        assert!(method("ID3D11DeviceContext", "SetPredication").is_none());
+    }
 
     fn call_create_device(levels: Option<&[u32]>) -> (Process, u64) {
         use crate::vfs::Vfs;
@@ -2302,6 +2649,233 @@ mod tests {
         assert_eq!(p.rd32(OUT + 8).unwrap(), 8); // 2 RGBA8 texels per row
         assert_eq!(p.rd32(OUT + 12).unwrap(), 16); // two rows per depth slice
         assert_eq!(p.read_bytes(mapped, expected.len()).unwrap(), expected);
+    }
+
+    fn map_test_process(
+        mode: anywasm_cpu::CpuMode,
+        info: ResInfo,
+        subresource: u32,
+        map_type: u32,
+        output: u64,
+    ) -> (Process, u64) {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        const STACK: u64 = 0x20000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = mode;
+        for address in [OUT, STACK] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let id = p.extra.gpu.new_id();
+        p.extra.com.res.insert(id, info);
+        let resource = create(&mut p, "ID3D11Buffer", Kind::Buffer { id });
+        p.cpu.gpr[RSP] = STACK;
+        if mode == anywasm_cpu::CpuMode::X86_32 {
+            for (index, value) in [0, resource, subresource as u64, map_type as u64, 0, output]
+                .into_iter()
+                .enumerate()
+            {
+                p.wr32(STACK + 4 + index as u64 * 4, value as u32).unwrap();
+            }
+        } else {
+            p.cpu.gpr[RCX] = 0;
+            p.cpu.gpr[RDX] = resource;
+            p.cpu.gpr[R8] = subresource as u64;
+            p.cpu.gpr[R9] = map_type as u64;
+            p.wr64(STACK + 48, output).unwrap();
+        }
+        (p, resource)
+    }
+
+    fn remap_test_call(
+        p: &mut Process,
+        resource: u64,
+        subresource: u32,
+        map_type: u32,
+        output: u64,
+    ) {
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+
+        if p.cpu.mode == anywasm_cpu::CpuMode::X86_32 {
+            let stack = p.cpu.gpr[RSP];
+            for (index, value) in [0, resource, subresource as u64, map_type as u64, 0, output]
+                .into_iter()
+                .enumerate()
+            {
+                p.wr32(stack + 4 + index as u64 * 4, value as u32).unwrap();
+            }
+        } else {
+            p.cpu.gpr[RCX] = 0;
+            p.cpu.gpr[RDX] = resource;
+            p.cpu.gpr[R8] = subresource as u64;
+            p.cpu.gpr[R9] = map_type as u64;
+            p.wr64(p.cpu.gpr[RSP] + 48, output).unwrap();
+        }
+    }
+
+    fn dynamic_buffer_info() -> ResInfo {
+        ResInfo {
+            is_buffer: true,
+            size: 16,
+            usage: 2,
+            bind: 1,          // D3D11_BIND_VERTEX_BUFFER
+            cpu: 0x0001_0000, // D3D11_CPU_ACCESS_WRITE
+            shadow: vec![0; 16],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn map_rejects_invalid_type_subresource_access_and_output_before_mapping() {
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_R};
+        use anywasm_cpu::CpuMode;
+
+        let cases = [
+            (dynamic_buffer_info(), 0, 0), // unknown map type
+            (dynamic_buffer_info(), 1, 2), // buffer subresource out of range
+            (
+                ResInfo {
+                    usage: 0,
+                    ..dynamic_buffer_info()
+                },
+                0,
+                2,
+            ), // default resource cannot be CPU-written
+            (
+                ResInfo {
+                    usage: 2,
+                    cpu: 0,
+                    ..dynamic_buffer_info()
+                },
+                0,
+                2,
+            ), // missing CPU write access
+        ];
+        for (info, subresource, map_type) in cases {
+            let (mut p, _) =
+                map_test_process(CpuMode::X86_64, info, subresource, map_type, 0x10000);
+            p.wr64(0x10000, u64::MAX).unwrap();
+            let result = map(&mut p).unwrap();
+            assert_eq!(result, E_INVALIDARG);
+            assert_eq!(p.rd64(0x10000).unwrap(), u64::MAX);
+            assert_eq!(p.extra.com.res.values().next().unwrap().map_addr, 0);
+        }
+
+        let (mut p, _) = map_test_process(CpuMode::X86_64, dynamic_buffer_info(), 0, 2, 0);
+        assert_eq!(map(&mut p).unwrap(), E_INVALIDARG);
+        assert_eq!(p.extra.com.res.values().next().unwrap().map_addr, 0);
+
+        let (mut p, _) = map_test_process(CpuMode::X86_64, dynamic_buffer_info(), 0, 2, 0x30000);
+        assert!(p.mem.map(0x30000, PAGE_SIZE, PROT_R));
+        assert_eq!(map(&mut p).unwrap(), E_INVALIDARG);
+        assert_eq!(p.rd64(0x30000).unwrap(), 0);
+        assert_eq!(p.extra.com.res.values().next().unwrap().map_addr, 0);
+    }
+
+    #[test]
+    fn map_rejects_duplicate_mapping_until_unmap() {
+        use anywasm_cpu::CpuMode;
+
+        let (mut p, resource) =
+            map_test_process(CpuMode::X86_64, dynamic_buffer_info(), 0, 2, 0x10000);
+        assert_eq!(map(&mut p).unwrap(), S_OK);
+        let mapped = p.rd64(0x10000).unwrap();
+        assert_eq!(map(&mut p).unwrap(), DXGI_ERROR_INVALID_CALL);
+        assert_eq!(p.rd64(0x10000).unwrap(), mapped);
+
+        remap_test_call(&mut p, resource, 0, 0, 0);
+        assert_eq!(unmap(&mut p).unwrap(), 0);
+        assert_eq!(p.extra.com.res.values().next().unwrap().map_addr, 0);
+    }
+
+    #[test]
+    fn map_writes_pointer_sized_mapped_subresource_for_x86_and_x64() {
+        use anywasm_cpu::CpuMode;
+
+        for (mode, pointer_bytes, pitch_offset, depth_offset) in [
+            (CpuMode::X86_32, 4u64, 4u64, 8u64),
+            (CpuMode::X86_64, 8u64, 8u64, 12u64),
+        ] {
+            let (mut p, _) = map_test_process(mode, dynamic_buffer_info(), 0, 2, 0x10000);
+            p.wr64(0x10000, u64::MAX).unwrap();
+            assert_eq!(map(&mut p).unwrap(), S_OK);
+            let mapped = p.rdptr(0x10000).unwrap();
+            assert_ne!(mapped, 0);
+            assert_eq!(p.rd32(0x10000 + pitch_offset).unwrap(), 16);
+            assert_eq!(p.rd32(0x10000 + depth_offset).unwrap(), 16);
+            if pointer_bytes == 4 {
+                assert_eq!(p.rd32(0x10000).unwrap(), mapped as u32);
+            } else {
+                assert_eq!(p.rd64(0x10000).unwrap(), mapped);
+            }
+        }
+    }
+
+    #[test]
+    fn map_returns_notimpl_instead_of_stale_shadow_when_readback_is_unavailable() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        const STACK: u64 = 0x20000;
+        let mut p = Process::new(Vfs::new());
+        for address in [OUT, STACK] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let id = p.extra.gpu.new_id();
+        p.extra.com.res.insert(
+            id,
+            ResInfo {
+                is_buffer: true,
+                size: 4,
+                usage: 3,
+                cpu: 0x0002_0000, // D3D11_CPU_ACCESS_READ
+                shadow: vec![0xaa; 4],
+                ..Default::default()
+            },
+        );
+        let resource = create(&mut p, "ID3D11Buffer", Kind::Buffer { id });
+        p.cpu.gpr[RSP] = STACK;
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = resource;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = 1; // D3D11_MAP_READ
+        p.wr64(STACK + 48, OUT).unwrap();
+        p.wr64(OUT, u64::MAX).unwrap();
+        let pending_commands = vec![0x5a, 0xa5];
+        p.extra.gpu.buf = pending_commands.clone();
+
+        assert_eq!(
+            map_with_readback(&mut p, |_, _, _, _| 0).unwrap(),
+            E_NOTIMPL
+        );
+        assert_eq!(p.rd64(OUT).unwrap(), u64::MAX);
+        assert_eq!(p.extra.gpu.buf, pending_commands);
+        assert_eq!(p.extra.com.res.get(&id).unwrap().map_addr, 0);
+    }
+
+    #[test]
+    fn map_reports_out_of_memory_when_scratch_allocation_fails() {
+        use anywasm_cpu::CpuMode;
+
+        let (mut p, _) = map_test_process(
+            CpuMode::X86_64,
+            dynamic_buffer_info(),
+            0,
+            4, // D3D11_MAP_WRITE_DISCARD does not touch scratch before returning.
+            0x10000,
+        );
+        p.wr64(0x10000, u64::MAX).unwrap();
+        assert_eq!(
+            map_with_services(&mut p, |_, _, _, _| 1, |_, _, _| 0).unwrap(),
+            E_OUTOFMEMORY
+        );
+        assert_eq!(p.rd64(0x10000).unwrap(), u64::MAX);
+        assert_eq!(p.extra.com.res.values().next().unwrap().map_addr, 0);
     }
 
     #[test]
@@ -2693,6 +3267,124 @@ mod tests {
             explicit_fields,
             vec![explicit_view_id, 2, texture_id, 28, 10, 0, 1, 6, 2]
         );
+    }
+
+    #[test]
+    fn create_texturecube_srv_preserves_explicit_mip_range() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const VIEW_DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        for address in [VIEW_DESC, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let texture_id = new_res(
+            &mut p,
+            ResInfo {
+                width: 16,
+                height: 16,
+                mips: 4,
+                array: 6,
+                format: 28,
+                misc: 0x4,
+                ..Default::default()
+            },
+        );
+        let texture = create(
+            &mut p,
+            "ID3D11Texture2D",
+            Kind::Texture2D { id: texture_id },
+        );
+        let explicit_desc = [28u32, 9, 2, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        p.write_bytes(VIEW_DESC, &explicit_desc).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = VIEW_DESC;
+        p.cpu.gpr[R9] = OUT;
+
+        assert_eq!(create_view(&mut p, ViewKind::Srv).unwrap(), S_OK);
+        let view_id = kind_of(&p, p.rd64(OUT).unwrap())
+            .and_then(|kind| kind.host_id())
+            .unwrap();
+        let (_, payload) = gpu::decode(&p.extra.gpu.buf).last().unwrap().clone();
+        let fields = payload
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(fields, vec![view_id, 2, texture_id, 28, 9, 2, 1, 0, 6]);
+    }
+
+    #[test]
+    fn create_view_stops_on_an_untranslated_dimension_without_emitting_a_view() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const VIEW_DESC: u64 = 0x10000;
+        const OUT: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        for address in [VIEW_DESC, OUT] {
+            assert!(p.mem.map(address, PAGE_SIZE, PROT_RW));
+        }
+        let texture_id = new_res(&mut p, ResInfo::default());
+        let texture = create(
+            &mut p,
+            "ID3D11Texture2D",
+            Kind::Texture2D { id: texture_id },
+        );
+        p.wr64(OUT, 0xfeed_face_cafe_beef).unwrap();
+        p.write_bytes(
+            VIEW_DESC,
+            &[28u32, 0xdead, 0, 1]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = VIEW_DESC;
+        p.cpu.gpr[R9] = OUT;
+        let gpu_before = p.extra.gpu.buf.clone();
+
+        assert!(matches!(
+            create_view(&mut p, ViewKind::Srv),
+            Err(Stop::Unimplemented { dll, name }) if dll == "d3d11" && name.contains("dimension 57005")
+        ));
+        assert_eq!(p.extra.gpu.buf, gpu_before);
+        assert_eq!(p.rd64(OUT), Ok(0xfeed_face_cafe_beef));
+    }
+
+    #[test]
+    fn create_view_does_not_emit_a_descriptor_without_resource_state() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let texture = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: 77 });
+        p.wr64(OUT, 0xfeed_face_cafe_beef).unwrap();
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = texture;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = OUT;
+        let commands_before = p.extra.gpu.buf.clone();
+
+        assert!(matches!(
+            create_view(&mut p, ViewKind::Srv),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("CreateView resource 77 has no translated state")
+        ));
+        assert_eq!(p.extra.gpu.buf, commands_before);
+        assert_eq!(p.rd64(OUT).unwrap(), 0xfeed_face_cafe_beef);
     }
 
     #[test]
@@ -3168,7 +3860,11 @@ mod tests {
                 p.cpu.gpr[RDX] = format as u64;
                 p.cpu.gpr[R8] = samples as u64;
                 assert_eq!(query(&mut p).unwrap(), S_OK);
-                assert_eq!(p.rd32(OUT).unwrap(), 0, "{name} at {samples}x is unsupported");
+                assert_eq!(
+                    p.rd32(OUT).unwrap(),
+                    0,
+                    "{name} at {samples}x is unsupported"
+                );
             }
         }
     }
@@ -3259,12 +3955,9 @@ mod tests {
             assert_ne!(p.rd64(out).unwrap(), 0);
         }
 
-        for (index, format) in [
-            DXGI_FORMAT_R10G10B10A2_UNORM,
-            DXGI_FORMAT_R11G11B10_FLOAT,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, format) in [DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R11G11B10_FLOAT]
+            .into_iter()
+            .enumerate()
         {
             let mut packed_desc = float16_desc.clone();
             packed_desc[16..20].copy_from_slice(&format.to_le_bytes());
@@ -3434,6 +4127,8 @@ mod tests {
             ResInfo {
                 width: 8,
                 height: 8,
+                mips: 1,
+                array: 1,
                 format: 28,
                 samples: 1,
                 ..Default::default()
@@ -3444,6 +4139,8 @@ mod tests {
             ResInfo {
                 width: 8,
                 height: 8,
+                mips: 1,
+                array: 1,
                 format: 28,
                 samples: 4,
                 ..Default::default()
@@ -3481,6 +4178,8 @@ mod tests {
             ResInfo {
                 width: 8,
                 height: 8,
+                mips: 1,
+                array: 1,
                 format: DXGI_FORMAT_R16G16B16A16_FLOAT,
                 samples: 1,
                 ..Default::default()
@@ -3491,6 +4190,8 @@ mod tests {
             ResInfo {
                 width: 8,
                 height: 8,
+                mips: 1,
+                array: 1,
                 format: DXGI_FORMAT_R16G16B16A16_FLOAT,
                 samples: 4,
                 ..Default::default()
@@ -3522,6 +4223,8 @@ mod tests {
             ResInfo {
                 width: 8,
                 height: 8,
+                mips: 1,
+                array: 1,
                 format: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                 samples: 1,
                 ..Default::default()
@@ -3532,6 +4235,8 @@ mod tests {
             ResInfo {
                 width: 8,
                 height: 8,
+                mips: 1,
+                array: 1,
                 format: DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                 samples: 4,
                 ..Default::default()
@@ -3569,6 +4274,58 @@ mod tests {
                 DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
             ]
         );
+    }
+
+    #[test]
+    fn resolve_subresource_exposes_unsupported_sample_counts_without_emitting_a_command() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const STACK: u64 = 0x20000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let dst_id = new_res(
+            &mut p,
+            ResInfo {
+                width: 8,
+                height: 8,
+                mips: 1,
+                array: 1,
+                format: 28,
+                samples: 1,
+                ..Default::default()
+            },
+        );
+        let src_id = new_res(
+            &mut p,
+            ResInfo {
+                width: 8,
+                height: 8,
+                mips: 1,
+                array: 1,
+                format: 28,
+                samples: 1,
+                ..Default::default()
+            },
+        );
+        let dst = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: dst_id });
+        let src = create(&mut p, "ID3D11Texture2D", Kind::Texture2D { id: src_id });
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = dst;
+        p.cpu.gpr[R8] = 0;
+        p.cpu.gpr[R9] = src;
+        p.cpu.gpr[RSP] = STACK;
+        p.wr64(STACK + 40, 0).unwrap();
+        p.wr64(STACK + 48, 28).unwrap();
+        let commands_before = p.extra.gpu.buf.clone();
+
+        assert!(matches!(
+            method("ID3D11DeviceContext", "ResolveSubresource").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("sample counts 1 -> 1 are not translated")
+        ));
+        assert_eq!(p.extra.gpu.buf, commands_before);
     }
 
     #[test]
@@ -4111,5 +4868,218 @@ mod tests {
             .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(words, vec![73, 0, 0xdead_beef, 2, 3, 4]);
+    }
+
+    #[test]
+    fn clear_uav_exposes_a_view_that_was_not_translated_as_a_uav() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        let rtv = create(
+            &mut p,
+            "ID3D11RenderTargetView",
+            Kind::View {
+                vk: ViewKind::Rtv,
+                id: 73,
+                resource: 41,
+            },
+        );
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = rtv;
+        let commands_before = p.extra.gpu.buf.clone();
+
+        assert!(matches!(
+            method("ID3D11DeviceContext", "ClearUnorderedAccessViewFloat").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("not translated as an unordered-access view")
+        ));
+        assert_eq!(p.extra.gpu.buf, commands_before);
+    }
+
+    #[test]
+    fn input_layout_null_unbinds_but_unknown_objects_do_not_become_zero_ids() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0;
+        let set_layout = method("ID3D11DeviceContext", "IASetInputLayout").unwrap();
+        assert_eq!(set_layout(&mut p).unwrap(), 0);
+        let command = gpu::decode(&p.extra.gpu.buf).pop().unwrap();
+        assert_eq!(command.0, op::SET_INPUT_LAYOUT);
+        assert_eq!(u32::from_le_bytes(command.1[..4].try_into().unwrap()), 0);
+        p.extra.gpu.buf.clear();
+
+        p.cpu.gpr[RDX] = 0xdead_beef;
+        assert!(matches!(
+            set_layout(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("0xdeadbeef is not a translated COM object")
+        ));
+        assert!(p.extra.gpu.buf.is_empty());
+    }
+
+    #[test]
+    fn update_subresource_does_not_silently_accept_a_non_resource_com_object() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        let device = create(&mut p, "ID3D11Device", Kind::Device);
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = device;
+        let commands_before = p.extra.gpu.buf.clone();
+
+        assert!(matches!(
+            method("ID3D11DeviceContext", "UpdateSubresource").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("destination is not a translated buffer or texture")
+        ));
+        assert_eq!(p.extra.gpu.buf, commands_before);
+    }
+
+    #[test]
+    fn update_subresource_does_not_emit_a_write_without_resource_state() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        let buffer = create(&mut p, "ID3D11Buffer", Kind::Buffer { id: 77 });
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = buffer;
+        let commands_before = p.extra.gpu.buf.clone();
+
+        assert!(matches!(
+            method("ID3D11DeviceContext", "UpdateSubresource").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("UpdateSubresource resource 77 has no translated state")
+        ));
+        assert_eq!(p.extra.gpu.buf, commands_before);
+    }
+
+    #[test]
+    fn get_desc_does_not_report_success_for_an_untranslated_com_type() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let device = create(&mut p, "ID3D11Device", Kind::Device);
+        p.wr32(OUT, 0xcafe_babe).unwrap();
+        p.cpu.gpr[RCX] = device;
+        p.cpu.gpr[RDX] = OUT;
+
+        assert!(matches!(
+            method("ID3D11Device", "GetDesc").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("GetDesc is not translated for COM object")
+        ));
+        assert_eq!(p.rd32(OUT).unwrap(), 0xcafe_babe);
+    }
+
+    #[test]
+    fn get_desc_does_not_fabricate_a_zero_descriptor_for_missing_resource_state() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let buffer = create(&mut p, "ID3D11Buffer", Kind::Buffer { id: 77 });
+        p.wr32(OUT, 0xcafe_babe).unwrap();
+        p.cpu.gpr[RCX] = buffer;
+        p.cpu.gpr[RDX] = OUT;
+
+        assert!(matches!(
+            method("ID3D11Buffer", "GetDesc").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("GetDesc resource 77 has no translated state")
+        ));
+        assert_eq!(p.rd32(OUT).unwrap(), 0xcafe_babe);
+    }
+
+    #[test]
+    fn execute_command_list_does_not_ignore_an_untranslated_list() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0xdead_beef;
+
+        assert!(matches!(
+            method("ID3D11DeviceContext", "ExecuteCommandList").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("ExecuteCommandList command list 0xdeadbeef is not translated")
+        ));
+        assert!(p.extra.gpu.buf.is_empty());
+    }
+
+    #[test]
+    fn get_resource_does_not_report_a_missing_com_resource_as_success() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let device = create(&mut p, "ID3D11Device", Kind::Device);
+        p.wr64(OUT, 0xcafe_babe).unwrap();
+        p.cpu.gpr[RCX] = device;
+        p.cpu.gpr[RDX] = OUT;
+
+        assert!(matches!(
+            method("ID3D11ShaderResourceView", "GetResource").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("GetResource is not translated for COM object")
+        ));
+        assert_eq!(p.rd64(OUT).unwrap(), 0xcafe_babe);
+    }
+
+    #[test]
+    fn resource_and_context_queries_expose_untranslated_com_types() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+        use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+        const OUT: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(OUT, PAGE_SIZE, PROT_RW));
+        let device = create(&mut p, "ID3D11Device", Kind::Device);
+        p.cpu.gpr[RCX] = device;
+        p.cpu.gpr[RDX] = OUT;
+
+        assert!(matches!(
+            method("ID3D11Resource", "GetType").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("GetType is not translated for COM object")
+        ));
+        assert!(matches!(
+            method("ID3D11DeviceContext", "GetContextFlags").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("GetContextFlags is not translated for COM object")
+        ));
+    }
+
+    #[test]
+    fn unmap_does_not_silently_ignore_an_untranslated_resource() {
+        use crate::vfs::Vfs;
+        use anywasm_cpu::cpu::{RCX, RDX};
+
+        let mut p = Process::new(Vfs::new());
+        p.cpu.gpr[RCX] = 0;
+        p.cpu.gpr[RDX] = 0xdead_beef;
+
+        assert!(matches!(
+            method("ID3D11DeviceContext", "Unmap").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d11" && name.contains("Unmap resource 0xdeadbeef is not translated")
+        ));
     }
 }
