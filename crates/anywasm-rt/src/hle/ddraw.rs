@@ -13,7 +13,6 @@ const E_INVALIDARG: u64 = 0x8007_0057;
 const DDSURFACEDESC2_SIZE: u32 = 124;
 const DDPIXELFORMAT_OFFSET: u64 = 72;
 const DESKTOP_MODE: (u32, u32, u32) = (1920, 1080, 32);
-const AVAILABLE_VIDEO_MEMORY: u32 = 512 * 1024 * 1024;
 
 macro_rules! unimplemented_method {
     ($function:ident, $name:literal) => {
@@ -29,6 +28,21 @@ macro_rules! unimplemented_method {
 unimplemented_method!(unimplemented_compact, "IDirectDraw7::Compact");
 unimplemented_method!(unimplemented_flip_to_gdi, "IDirectDraw7::FlipToGDISurface");
 unimplemented_method!(unimplemented_initialize, "IDirectDraw7::Initialize");
+unimplemented_method!(
+    unimplemented_restore_all_surfaces,
+    "IDirectDraw7::RestoreAllSurfaces"
+);
+unimplemented_method!(
+    unimplemented_test_cooperative_level,
+    "IDirectDraw7::TestCooperativeLevel"
+);
+unimplemented_method!(unimplemented_get_caps, "IDirectDraw7::GetCaps");
+unimplemented_method!(
+    unimplemented_get_device_identifier,
+    "IDirectDraw7::GetDeviceIdentifier"
+);
+unimplemented_method!(unimplemented_enum_surfaces, "IDirectDraw7::EnumSurfaces");
+unimplemented_method!(unimplemented_evaluate_mode, "IDirectDraw7::EvaluateMode");
 unimplemented_method!(
     unimplemented_set_cooperative_level,
     "IDirectDraw7::SetCooperativeLevel"
@@ -57,22 +71,26 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         "SetCooperativeLevel" => unimplemented_set_cooperative_level,
         "WaitForVerticalBlank" => unimplemented_wait_for_vblank,
         "StartModeTest" => unimplemented_start_mode_test,
-        "RestoreAllSurfaces" | "TestCooperativeLevel" => |_| Ok(S_OK),
+        "RestoreAllSurfaces" => unimplemented_restore_all_surfaces,
+        "TestCooperativeLevel" => unimplemented_test_cooperative_level,
         "RestoreDisplayMode" => restore_display_mode,
         "SetDisplayMode" => set_display_mode,
-        "GetCaps" => get_caps,
+        "GetCaps" => unimplemented_get_caps,
         "GetDisplayMode" => get_display_mode,
         "GetFourCCCodes" => get_fourcc_codes,
         "GetGDISurface" => get_gdi_surface,
         "GetMonitorFrequency" => get_monitor_frequency,
         "GetScanLine" => get_scan_line,
         "GetVerticalBlankStatus" => get_vertical_blank_status,
+        // There is no translated DirectDraw surface heap to report. Return the
+        // API's unsupported HRESULT rather than fabricating a video-memory
+        // budget. GTA San Andreas ignores this query's HRESULT.
         "GetAvailableVidMem" => get_available_vidmem,
         "GetSurfaceFromDC" => get_surface_from_dc,
-        "GetDeviceIdentifier" => get_device_identifier,
-        "EvaluateMode" => evaluate_mode,
+        "GetDeviceIdentifier" => unimplemented_get_device_identifier,
+        "EvaluateMode" => unimplemented_evaluate_mode,
         "EnumDisplayModes" => enum_display_modes,
-        "EnumSurfaces" => |_| Ok(S_OK),
+        "EnumSurfaces" => unimplemented_enum_surfaces,
         "CreateClipper" | "CreatePalette" | "CreateSurface" | "DuplicateSurface" => {
             unsupported_object_creation
         }
@@ -113,17 +131,6 @@ fn zero_struct(p: &mut Process, out: u64, minimum: u32) -> Result<bool, Stop> {
     p.write_bytes(out, &vec![0; size as usize])?;
     p.wr32(out, size)?;
     Ok(true)
-}
-
-fn get_caps(p: &mut Process) -> R {
-    let (driver, hel) = (p.arg(1), p.arg(2));
-    if (driver == 0 && hel == 0)
-        || (driver != 0 && !zero_struct(p, driver, 4)?)
-        || (hel != 0 && !zero_struct(p, hel, 4)?)
-    {
-        return Ok(E_INVALIDARG);
-    }
-    Ok(S_OK)
 }
 
 fn write_display_mode(
@@ -226,15 +233,8 @@ fn get_vertical_blank_status(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
-fn get_available_vidmem(p: &mut Process) -> R {
-    let (total, free) = (p.arg(2), p.arg(3));
-    if total != 0 {
-        p.wr32(total, AVAILABLE_VIDEO_MEMORY)?;
-    }
-    if free != 0 {
-        p.wr32(free, AVAILABLE_VIDEO_MEMORY)?;
-    }
-    Ok(S_OK)
+fn get_available_vidmem(_p: &mut Process) -> R {
+    Ok(E_NOTIMPL)
 }
 
 #[cfg(test)]
@@ -257,6 +257,36 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn unbacked_directdraw_state_operations_are_coverage_gaps() {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        for method_name in [
+            "RestoreAllSurfaces",
+            "TestCooperativeLevel",
+            "GetCaps",
+            "GetDeviceIdentifier",
+            "EnumSurfaces",
+            "EvaluateMode",
+        ] {
+            let result = method("IDirectDraw7", method_name).unwrap()(&mut process);
+            assert!(
+                matches!(
+                    result,
+                    Err(Stop::Unimplemented { ref dll, ref name })
+                        if dll == "ddraw" && name.contains(method_name)
+                ),
+                "{method_name} must not claim success without backing state"
+            );
+        }
+    }
+
+    #[test]
+    fn available_video_memory_is_explicitly_unsupported_without_a_surface_heap() {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        let result = method("IDirectDraw7", "GetAvailableVidMem").unwrap()(&mut process);
+        assert_eq!(result.unwrap(), E_NOTIMPL);
+    }
 }
 
 fn get_surface_from_dc(p: &mut Process) -> R {
@@ -265,22 +295,6 @@ fn get_surface_from_dc(p: &mut Process) -> R {
         p.wrptr(out, 0)?;
     }
     Ok(E_NOTIMPL)
-}
-
-fn get_device_identifier(p: &mut Process) -> R {
-    let out = p.arg(1);
-    if !zero_struct(p, out, 4)? {
-        return Ok(E_INVALIDARG);
-    }
-    Ok(S_OK)
-}
-
-fn evaluate_mode(p: &mut Process) -> R {
-    let out = p.arg(2);
-    if out != 0 {
-        p.wr32(out, 0)?;
-    }
-    Ok(S_OK)
 }
 
 fn enum_display_modes(p: &mut Process) -> R {

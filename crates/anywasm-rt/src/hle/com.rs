@@ -132,6 +132,7 @@ pub enum Kind {
     DirectDraw,
     DirectSound,
     SoundBuffer {
+        device: u64,
         memory: u64,
         size: u32,
         caps: u32,
@@ -195,6 +196,59 @@ pub struct ResInfo {
     pub map_sub: u32,
 }
 
+/// Stateful listener settings owned by the application's one DirectSound primary buffer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DSoundListenerState {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub orient_front: [f32; 3],
+    pub orient_top: [f32; 3],
+    pub distance_factor: f32,
+    pub rolloff_factor: f32,
+    pub doppler_factor: f32,
+}
+
+impl Default for DSoundListenerState {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            velocity: [0.0; 3],
+            orient_front: [0.0, 0.0, 1.0],
+            orient_top: [0.0, 1.0, 0.0],
+            distance_factor: 1.0,
+            rolloff_factor: 1.0,
+            doppler_factor: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DSoundBufferControlState {
+    /// DirectSound attenuation in hundredths of a decibel (0 through -10000).
+    pub volume: i32,
+    /// Current secondary-buffer sample rate in samples per second.
+    pub frequency: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DSoundBufferLock {
+    /// First guest-memory region returned by IDirectSoundBuffer8::Lock.
+    pub first_ptr: u64,
+    pub first_len: u32,
+    /// Second region is zero when the request did not wrap or was not requested.
+    pub second_ptr: u64,
+    pub second_len: u32,
+}
+
+impl Default for DSoundBufferControlState {
+    fn default() -> Self {
+        Self {
+            volume: 0,
+            frequency: 44_100,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ComState {
     pub objs: HashMap<u64, ComObj>,
@@ -246,6 +300,25 @@ pub struct ComState {
     pub d3d9_texture_stage_states: HashMap<(u64, u32, u32), u32>,
     /// Direct3D 9 render-state values set by the guest, keyed by `(device, state)`.
     pub d3d9_render_states: HashMap<(u64, u32), u32>,
+    /// Current D3DMATERIAL9 value per device, stored as its 17 x86 DWORD words.
+    pub d3d9_materials: HashMap<u64, [u32; 17]>,
+    /// D3DLIGHT9 values per device and light index, stored as their 26 x86 DWORD words.
+    pub d3d9_lights: HashMap<(u64, u32), [u32; 26]>,
+    /// LightEnable state per device and light index (DWORD BOOL values).
+    pub d3d9_light_enabled: HashMap<(u64, u32), u32>,
+    /// DirectSound cooperative-level state keyed by DirectSound COM identity.
+    pub dsound_cooperative: HashMap<u64, (u64, u32)>,
+    /// Listener settings by DirectSound device. Deferred values are committed explicitly.
+    pub dsound_listeners: HashMap<u64, DSoundListenerState>,
+    pub dsound_listener_pending: HashMap<u64, DSoundListenerState>,
+    /// Virtual primary mixer format by DirectSound device, as a WAVEFORMATEX.
+    pub dsound_primary_formats: HashMap<u64, [u8; 18]>,
+    /// Immutable PCM format retained by each guest-backed DirectSound secondary buffer.
+    pub dsound_buffer_formats: HashMap<u64, [u8; 18]>,
+    /// Current software-buffer volume/frequency controls, keyed by buffer COM identity.
+    pub dsound_buffer_controls: HashMap<u64, DSoundBufferControlState>,
+    /// Outstanding Lock calls. Unlock must pair the pointers returned by Lock.
+    pub dsound_buffer_locks: HashMap<u64, Vec<DSoundBufferLock>>,
 }
 
 #[derive(Default)]
@@ -310,8 +383,16 @@ fn vtable_for(p: &mut Process, iface: &'static str) -> u64 {
         .unwrap_or(&["QueryInterface", "AddRef", "Release"]);
     let pointer_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
     let vt = kernel32::alloc_block(p, methods.len() as u64 * pointer_size + pointer_size, true);
+    let thunk_iface = if iface == "IDirectSoundBuffer" {
+        // The base interface's slots use the same signatures as the matching Buffer8 methods.
+        "IDirectSoundBuffer8"
+    } else {
+        iface
+    };
     for (i, m) in methods.iter().enumerate() {
-        let a = p.thunk_for("com", &format!("{iface}::{m}"), true).unwrap();
+        let a = p
+            .thunk_for("com", &format!("{thunk_iface}::{m}"), true)
+            .unwrap();
         let _ = p.wrptr(vt + pointer_size * i as u64, a);
     }
     p.extra.com.vtables.insert(iface, vt);
@@ -431,15 +512,20 @@ fn supports(kind: &Kind, want: &str) -> bool {
         Kind::Query { .. } => &["ID3D11Query", "ID3D11DeviceChild"],
         Kind::DirectDraw => &["IDirectDraw7"],
         Kind::DirectSound => &["IDirectSound8"],
-        Kind::SoundBuffer { caps, .. } => {
-            if caps & (dsound::DSBCAPS_PRIMARYBUFFER | dsound::DSBCAPS_CTRL3D)
-                == (dsound::DSBCAPS_PRIMARYBUFFER | dsound::DSBCAPS_CTRL3D)
-            {
-                &["IDirectSoundBuffer8", "IDirectSound3DListener"]
-            } else {
-                &["IDirectSoundBuffer8"]
-            }
+        Kind::SoundBuffer { caps, .. }
+            if caps & dsound::DSBCAPS_PRIMARYBUFFER != 0 && caps & dsound::DSBCAPS_CTRL3D != 0 =>
+        {
+            &["IDirectSoundBuffer", "IDirectSound3DListener"]
         }
+        Kind::SoundBuffer { caps, .. } if caps & dsound::DSBCAPS_PRIMARYBUFFER != 0 => {
+            &["IDirectSoundBuffer"]
+        }
+        Kind::SoundBuffer { caps, .. } if caps & dsound::DSBCAPS_CTRL3D != 0 => &[
+            "IDirectSoundBuffer",
+            "IDirectSoundBuffer8",
+            "IDirectSound3DBuffer",
+        ],
+        Kind::SoundBuffer { .. } => &["IDirectSoundBuffer", "IDirectSoundBuffer8"],
     };
     fam.iter().any(|f| *f == w)
 }
@@ -530,7 +616,9 @@ const ALL_NAMES: &[&str] = &[
     "ID3DBlob",
     "IDirectDraw7",
     "IDirectSound8",
+    "IDirectSoundBuffer",
     "IDirectSoundBuffer8",
+    "IDirectSound3DBuffer",
     "IDirectSound3DListener",
 ];
 
@@ -658,6 +746,7 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
     if refs == 0 {
         let o = p.extra.com.objs.remove(&this).unwrap();
         p.extra.com.deferred_contexts.remove(&this);
+        p.extra.com.dsound_cooperative.remove(&this);
         if matches!(&o.kind, Kind::Direct3DDevice9 { .. }) {
             p.extra.com.d3d9_viewports.remove(&this);
             p.extra.com.d3d9_scissor_rects.remove(&this);
@@ -665,6 +754,19 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
             p.extra
                 .com
                 .d3d9_transforms
+                .retain(|(device, _), _| *device != this);
+            p.extra.com.d3d9_materials.remove(&this);
+            p.extra
+                .com
+                .d3d9_lights
+                .retain(|(device, _), _| *device != this);
+            p.extra
+                .com
+                .d3d9_light_enabled
+                .retain(|(device, _), _| *device != this);
+            p.extra
+                .com
+                .d3d9_render_states
                 .retain(|(device, _), _| *device != this);
             let bound = p
                 .extra
@@ -720,12 +822,31 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
                 p.extra.gpu.emit(op::RELEASE, Pk::new().u32(id));
             }
         }
-        if let Kind::SoundBuffer { memory, .. } = o.kind {
+        if let Kind::SoundBuffer {
+            device,
+            memory,
+            caps,
+            ..
+        } = o.kind
+        {
+            p.extra.com.dsound_buffer_formats.remove(&this);
+            p.extra.com.dsound_buffer_controls.remove(&this);
+            p.extra.com.dsound_buffer_locks.remove(&this);
             let shared = p.extra.com.objs.values().any(|other| {
-                matches!(other.kind, Kind::SoundBuffer { memory: other_memory, .. } if other_memory == memory)
+                matches!(other.kind, Kind::SoundBuffer { memory: other_memory, .. } if memory != 0 && other_memory == memory)
             });
-            if !shared {
+            if memory != 0 && !shared {
                 kernel32::free_block(p, memory);
+            }
+            if caps & dsound::DSBCAPS_PRIMARYBUFFER != 0 {
+                if !p.extra.com.objs.values().any(|other| {
+                    matches!(other.kind, Kind::SoundBuffer { device: other_device, caps, .. }
+                        if other_device == device && caps & dsound::DSBCAPS_PRIMARYBUFFER != 0)
+                }) {
+                    p.extra.com.dsound_listeners.remove(&device);
+                    p.extra.com.dsound_listener_pending.remove(&device);
+                    p.extra.com.dsound_primary_formats.remove(&device);
+                }
             }
         }
         kernel32::free_block(p, o.block);

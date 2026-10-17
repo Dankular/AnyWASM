@@ -8,7 +8,7 @@
 use crate::frame_store::FrameStore;
 use anywasm_cpu_state::memory::GuestMemory;
 use anywasm_cpu_state::shared::{MappingEntry, GUEST_PAGE_SIZE};
-use std::cell::Cell;
+use std::{cell::Cell, collections::HashMap};
 
 pub use anywasm_cpu_state::memory::{Access, Fault, FaultKind, MemResult};
 
@@ -92,6 +92,8 @@ pub struct Memory {
     shared_cache_generation: u32,
     free_frames: Vec<u32>,
     pages_mapped: u64,
+    /// Per-page dirty state for MEM_WRITE_WATCH allocations.
+    write_watch_pages: HashMap<u64, bool>,
     /// Bumped on every write to a page that has ever been fetched from (self-modifying code
     /// detection for future translation caches) and on every protection change.
     pub code_epoch: u64,
@@ -136,6 +138,7 @@ impl Memory {
             shared_cache_generation: 0,
             free_frames: Vec::new(),
             pages_mapped: 0,
+            write_watch_pages: HashMap::new(),
             code_epoch: 0,
             tlb_r: Cell::new(TlbEntry::INVALID),
             tlb_w: Cell::new(TlbEntry::INVALID),
@@ -510,6 +513,11 @@ impl Memory {
     #[inline]
     fn mark_frame_dirty(&mut self, frame_offset: usize) {
         let frame_index = frame_offset / PAGE_SIZE as usize;
+        if let Some(page) = self.frame_pages.get(frame_index).copied() {
+            if let Some(dirty) = self.write_watch_pages.get_mut(&page) {
+                *dirty = true;
+            }
+        }
         if self.dirty_frames.get(frame_index).copied() == Some(0)
             && (self.dirty_frame_count as usize) < self.dirty_frame_indices.len()
         {
@@ -612,6 +620,7 @@ impl Memory {
         };
         self.free_frames.push((old >> 32) as u32);
         self.frame_pages[(old >> 32) as usize] = u64::MAX;
+        self.write_watch_pages.remove(&p);
         self.pages_mapped -= 1;
         if (old >> 1) & PROT_X as u64 != 0 {
             self.exec_page_count -= 1;
@@ -630,6 +639,64 @@ impl Memory {
         }
         self.flush_tlb();
         self.code_epoch += 1;
+    }
+
+    /// Start tracking writes to every mapped page in a region. The range is rounded to pages in
+    /// the same way as VirtualAlloc's address-plus-size span.
+    pub fn enable_write_watch(&mut self, addr: u64, len: u64) -> bool {
+        let Some(end) = addr.checked_add(len) else {
+            return false;
+        };
+        let Some(rounded_end) = end.checked_add(PAGE_MASK) else {
+            return false;
+        };
+        let first_page = addr >> 12;
+        let end_page = rounded_end >> 12;
+        if len == 0
+            || first_page >= end_page
+            || (first_page..end_page).any(|page| self.slot(page).is_none())
+        {
+            return false;
+        }
+        for page in first_page..end_page {
+            self.write_watch_pages.insert(page, false);
+        }
+        true
+    }
+
+    /// Return dirty page base addresses intersecting a region, or `None` if any requested page
+    /// is not part of a live MEM_WRITE_WATCH allocation.
+    pub fn write_watch_snapshot(&self, addr: u64, len: u64) -> Option<Vec<u64>> {
+        let end = addr.checked_add(len)?;
+        let rounded_end = end.checked_add(PAGE_MASK)?;
+        let first_page = addr >> 12;
+        let end_page = rounded_end >> 12;
+        if len == 0
+            || first_page >= end_page
+            || (first_page..end_page).any(|page| !self.write_watch_pages.contains_key(&page))
+        {
+            return None;
+        }
+        Some(
+            (first_page..end_page)
+                .filter_map(|page| {
+                    self.write_watch_pages
+                        .get(&page)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(page << 12)
+                })
+                .collect(),
+        )
+    }
+
+    /// Clear the tracked-write state for the supplied page base addresses.
+    pub fn reset_write_watch_pages(&mut self, page_addresses: &[u64]) {
+        for address in page_addresses {
+            if let Some(dirty) = self.write_watch_pages.get_mut(&(address >> 12)) {
+                *dirty = false;
+            }
+        }
     }
 
     /// Change protection; returns `false` if any page in the range is unmapped.
@@ -839,6 +906,9 @@ impl Memory {
             };
             if page == u64::MAX {
                 continue;
+            }
+            if let Some(dirty) = self.write_watch_pages.get_mut(&page) {
+                *dirty = true;
             }
             if self
                 .slot(page)
@@ -1095,6 +1165,49 @@ impl GuestMemory for Memory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn write_watch_tracks_guest_writes_resets_returned_pages_and_clears_unmapped_pages() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x20000, 0x2000, PROT_RW));
+        assert!(memory.enable_write_watch(0x20000, 0x2000));
+        assert_eq!(memory.write_watch_snapshot(0x20000, 0x2000), Some(vec![]));
+
+        memory.write_u8(0x20010, 1).unwrap();
+        memory.write_u8(0x21010, 2).unwrap();
+        assert_eq!(
+            memory.write_watch_snapshot(0x20000, 0x2000),
+            Some(vec![0x20000, 0x21000])
+        );
+
+        // GetWriteWatch only resets pages it returned when the caller's output capacity is short.
+        memory.reset_write_watch_pages(&[0x20000]);
+        assert_eq!(
+            memory.write_watch_snapshot(0x20000, 0x2000),
+            Some(vec![0x21000])
+        );
+
+        memory.unmap(0x21000, 0x1000);
+        assert_eq!(
+            memory.write_watch_snapshot(0x20000, 0x2000),
+            None,
+            "a freed watched page no longer belongs to a live tracked region"
+        );
+    }
+
+    #[test]
+    fn write_watch_records_shared_worker_stores() {
+        let mut memory = Memory::new();
+        assert!(memory.map(0x30000, 0x1000, PROT_RW));
+        assert!(memory.enable_write_watch(0x30000, 0x1000));
+        let frame = (memory.slot(0x30).unwrap() >> 32) as u32;
+
+        assert_eq!(memory.note_shared_worker_writes(&[frame]), 0);
+        assert_eq!(
+            memory.write_watch_snapshot(0x30000, 0x1000),
+            Some(vec![0x30000])
+        );
+    }
+
     #[test]
     fn in_place_mappings_point_at_live_frames_and_worker_writes_invalidate_code() {
         let mut m = Memory::new();

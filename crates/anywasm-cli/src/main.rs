@@ -160,12 +160,7 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
             };
             // Calls into a bundled guest DLL retain the guest binary's native ABI. HLE imports
             // cross the host boundary and need an explicit callee/caller cleanup rule.
-            if ok
-                && !has_bundled_export
-                && !data_import
-                && pe.machine == anywasm_pe::MACHINE_I386
-                && group.is_some_and(|g| anywasm_rt::x86_import_cleanup_bytes(g, &name).is_none())
-            {
+            if missing_x86_abi(pe.machine, has_bundled_export, data_import, group, &name) {
                 st.abi_missing.push(name.clone());
             }
             if ok {
@@ -177,6 +172,19 @@ fn analyze(path: &Path, dir: Option<&Path>) -> Result<Report, String> {
     }
     r.imports = by_dll.into_values().collect();
     Ok(r)
+}
+
+fn missing_x86_abi(
+    machine: u16,
+    has_bundled_export: bool,
+    data_import: bool,
+    group: Option<&str>,
+    name: &str,
+) -> bool {
+    machine == anywasm_pe::MACHINE_I386
+        && !has_bundled_export
+        && !data_import
+        && group.is_some_and(|g| anywasm_rt::x86_import_cleanup_bytes(g, name).is_none())
 }
 
 fn bundled_images(dir: Option<&Path>) -> Result<BTreeMap<String, BundledImage>, String> {
@@ -272,7 +280,8 @@ fn json_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_exported, json_quote, preflight_status, supported_pe_machine, BundledImage,
+        bundled_exported, json_quote, missing_x86_abi, preflight_status, supported_pe_machine,
+        BundledImage,
     };
     use anywasm_pe::ImportName;
     use std::collections::BTreeSet;
@@ -300,6 +309,45 @@ mod tests {
         assert!(!supported_pe_machine(anywasm_pe::MACHINE_I386, true));
         assert!(!supported_pe_machine(anywasm_pe::MACHINE_AMD64, false));
         assert!(!supported_pe_machine(anywasm_pe::MACHINE_ARM64, true));
+    }
+
+    #[test]
+    fn x86_abi_audit_includes_imports_without_runtime_implementations() {
+        assert!(!missing_x86_abi(
+            anywasm_pe::MACHINE_I386,
+            false,
+            false,
+            Some("user32"),
+            "DialogBoxParamA"
+        ));
+        assert!(!missing_x86_abi(
+            anywasm_pe::MACHINE_I386,
+            false,
+            false,
+            Some("kernel32"),
+            "CreatePipe"
+        ));
+        assert!(missing_x86_abi(
+            anywasm_pe::MACHINE_I386,
+            false,
+            false,
+            Some("not_a_real_api_set"),
+            "UnknownApi"
+        ));
+        assert!(!missing_x86_abi(
+            anywasm_pe::MACHINE_I386,
+            true,
+            false,
+            Some("user32"),
+            "DialogBoxParamA"
+        ));
+        assert!(!missing_x86_abi(
+            anywasm_pe::MACHINE_I386,
+            false,
+            true,
+            Some("user32"),
+            "DialogBoxParamA"
+        ));
     }
 
     #[test]

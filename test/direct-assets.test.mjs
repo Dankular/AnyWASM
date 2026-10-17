@@ -144,7 +144,7 @@ test('direct file ranges read only the requested spans across adjacent files', a
   assert.deepEqual(b.slices, [[0, 1]]);
 });
 
-test('direct range cache reuses exact reads without fetching a full file chunk', async () => {
+test('direct range cache reuses a small file across different guest subranges', async () => {
   const file = folderFile('data/small.bin', [10, 20, 30, 40]);
   const index = createDirectoryAssetIndex([file]);
   const source = new DirectoryAssetSource(index);
@@ -160,8 +160,30 @@ test('direct range cache reuses exact reads without fetching a full file chunk',
   const output = new Uint8Array(1);
   assert.equal(cache.copyRange(offset, 1, output), true);
   assert.deepEqual([...output], [20]);
+  await cache.ensureRange(offset + 2n, 1);
+  assert.equal(cache.copyRange(offset + 2n, 1, output), true);
+  assert.deepEqual([...output], [40]);
+  assert.deepEqual(file.slices, [[0, 4]]);
+});
+
+test('direct range cache does not expand reads for files above the small-file limit', async () => {
+  const file = folderFile('data/large.bin', Buffer.alloc(16 * 1024 + 1, 7));
+  const index = createDirectoryAssetIndex([file]);
+  const source = new DirectoryAssetSource(index);
+  const cache = new AssetRangeCache(null, index.packageLength, {
+    maxBytes: ASSET_CHUNK_SIZE,
+    fileRanges: index.fileRanges,
+    readAheadChunks: 0,
+    readRange: (start, length) => source.readRange(start, length),
+  });
+  const offset = index.fileRanges[0].start + 5n;
+
   await cache.ensureRange(offset, 1);
-  assert.deepEqual(file.slices, [[1, 2]]);
+
+  const output = new Uint8Array(1);
+  assert.equal(cache.copyRange(offset, 1, output), true);
+  assert.deepEqual([...output], [7]);
+  assert.deepEqual(file.slices, [[5, 6]]);
 });
 
 test('direct source rejects short reads with the selected path', async () => {

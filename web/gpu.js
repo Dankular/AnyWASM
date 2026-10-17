@@ -18,6 +18,7 @@ const OP = {
   DRAW_INSTANCED: 31, DRAW_INDEXED_INSTANCED: 32, COPY_RESOURCE: 33, PRESENT: 35, RELEASE: 36, SWAPCHAIN: 38,
   GENERATE_MIPS: 39, COPY_REGION: 40, RESIZE_SWAPCHAIN: 41, DISPATCH: 42, SET_UAVS: 43, SET_CBUFFERS1: 44,
   SET_FIXED_FUNCTION: 45, CREATE_TEXTURE3D: 46, RESOLVE_TEXTURE: 47, D3D9_RENDER_STATE: 48, CLEAR_STATE: 49, CLEAR_UAV: 50, PUSH_STATE: 51, POP_STATE: 52, CREATE_TEXTURE1D: 53,
+  GDI_FILL_RECT: 54,
 };
 for (const [name, code] of Object.entries(OP)) OP_NAMES.set(code, name);
 
@@ -880,6 +881,75 @@ const defaultPipelineState = () => ({
   d3d9RenderStates: new Map(),
 });
 
+function d3d9TextureArg(argument, stage, channel) {
+  const selector = argument & 0x0f;
+  const base = stage === 0
+    ? ({ 0: 'input.color', 1: 'input.color', 2: 'texel', 3: 'textureFactorColor', 4: 'input.specular' })[selector]
+    : ({ 0: 'input.color', 1: 'stage1Current', 2: 'texel1', 3: 'textureFactorColor', 4: 'input.specular' })[selector];
+  if (!base) throw new Error(`D3D9 texture argument selector ${selector} is not translated`);
+  const alpha = `${base}.a`;
+  let value = channel === 'rgb'
+    ? ((argument & 0x20) ? `vec3<f32>(${alpha})` : `${base}.rgb`)
+    : alpha;
+  if (argument & 0x10) value = `(${channel === 'rgb' ? 'vec3<f32>(1.0)' : '1.0'} - ${value})`;
+  return value;
+}
+
+function d3d9TextureOp(op, arg0, arg1, arg2, stage, channel) {
+  const a0 = d3d9TextureArg(arg0, stage, channel);
+  const a1 = d3d9TextureArg(arg1, stage, channel);
+  const a2 = d3d9TextureArg(arg2, stage, channel);
+  const a1Alpha = d3d9TextureArg(arg1, stage, 'a');
+  const a1Rgb = d3d9TextureArg(arg1, stage, 'rgb');
+  const a2Rgb = d3d9TextureArg(arg2, stage, 'rgb');
+  const diffuseAlpha = 'input.color.a';
+  const textureAlpha = stage === 0 ? 'texel.a' : 'texel1.a';
+  const currentAlpha = stage === 0 ? 'input.color.a' : 'stage1Current.a';
+  const mix = (alpha) => `(${a1} * ${alpha} + ${a2} * (1.0 - ${alpha}))`;
+  const saturate = (value) => channel === 'rgb'
+    ? `clamp(${value}, vec3<f32>(0.0), vec3<f32>(1.0))`
+    : `clamp(${value}, 0.0, 1.0)`;
+  switch (op) {
+    case 2: return saturate(a1);
+    case 3: return saturate(a2);
+    case 4: return saturate(`(${a1} * ${a2})`);
+    case 5: return saturate(`((${a1} * ${a2}) * 2.0)`);
+    case 6: return saturate(`((${a1} * ${a2}) * 4.0)`);
+    case 7: return saturate(`(${a1} + ${a2})`);
+    case 8: return saturate(`(${a1} + ${a2} - 0.5)`);
+    case 9: return saturate(`((${a1} + ${a2} - 0.5) * 2.0)`);
+    case 10: return saturate(`(${a1} - ${a2})`);
+    case 11: return saturate(`(${a1} + ${a2} * (1.0 - ${a1}))`);
+    case 12: return saturate(mix(diffuseAlpha));
+    case 13: return saturate(mix(textureAlpha));
+    case 14: return saturate(mix('textureFactorColor.a'));
+    case 15: return saturate(`(${a1} + ${a2} * (1.0 - ${textureAlpha}))`);
+    case 16: return saturate(mix(currentAlpha));
+    case 17:
+      if (stage !== 0) throw new Error('D3DTOP_PREMODULATE is only translated on stage 0');
+      return channel === 'rgb' ? 'input.color.rgb' : 'input.color.a';
+    case 18:
+      if (channel !== 'rgb') throw new Error('D3DTOP_MODULATEALPHA_ADDCOLOR is color-only');
+      return saturate(`(${a1Rgb} + ${a1Alpha} * ${a2Rgb})`);
+    case 19:
+      if (channel !== 'rgb') throw new Error('D3DTOP_MODULATECOLOR_ADDALPHA is color-only');
+      return saturate(`(${a1Rgb} * ${a2Rgb} + vec3<f32>(${a1Alpha}))`);
+    case 20:
+      if (channel !== 'rgb') throw new Error('D3DTOP_MODULATEINVALPHA_ADDCOLOR is color-only');
+      return saturate(`(${a1Rgb} + (1.0 - ${a1Alpha}) * ${a2Rgb})`);
+    case 21:
+      if (channel !== 'rgb') throw new Error('D3DTOP_MODULATEINVCOLOR_ADDALPHA is color-only');
+      return saturate(`((vec3<f32>(1.0) - ${a1Rgb}) * ${a2Rgb} + vec3<f32>(${a1Alpha}))`);
+    case 24: {
+      const dot = `clamp(dot((${a1Rgb} * 2.0 - vec3<f32>(1.0)), (${a2Rgb} * 2.0 - vec3<f32>(1.0))), 0.0, 1.0)`;
+      return saturate(channel === 'rgb' ? `vec3<f32>(${dot})` : dot);
+    }
+    case 25: return saturate(`(${a0} + ${a1} * ${a2})`);
+    case 26: return saturate(`(${a0} * ${a1} + (1.0 - ${a0}) * ${a2})`);
+    default: throw new Error(`D3D9 texture operation ${op} is not translated`);
+  }
+}
+
 const BLIT_WGSL = `
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
@@ -936,9 +1006,22 @@ export class GpuExecutor {
     if (this.d3d9TransformBuffers) {
       for (const buffer of this.d3d9TransformBuffers.values()) buffer.destroy();
     }
+    if (this.d3d9LightingBuffers) {
+      for (const buffer of this.d3d9LightingBuffers.values()) buffer.destroy();
+    }
     this.gammaTex?.destroy?.();
     this.gammaTex = null;
     this.gammaView = null;
+    this.gdiSurface?.destroy?.();
+    this.gdiSurface = null;
+    this.gdiView = null;
+    this.gdiHasPixels = false;
+    this.canvasHistory?.destroy?.();
+    this.canvasHistory = null;
+    this.canvasHistoryValid = false;
+    this.windowIds = new Set();
+    this.presentedSinceExecute = false;
+    this.canvasRestoredSinceExecute = false;
     this.res = new Map();      // id -> {kind:'buffer'|'texture', gpu, ...}
     this.views = new Map();    // id -> view description
     this.shaders = new Map();
@@ -947,6 +1030,7 @@ export class GpuExecutor {
     this.fixedFunctionShaders = new Map();
     this.fixedFunctionPixelVariants = new Map();
     this.d3d9TransformBuffers = new Map();
+    this.d3d9LightingBuffers = new Map();
     this.fixedFunctionNextId = 0xfffffff0;
     this.blends = new Map();
     this.rasters = new Map();
@@ -1003,7 +1087,8 @@ export class GpuExecutor {
     this.adapterInfo = adapter.info || {};
     this.canvasFormat = this.gpuInstance.getPreferredCanvasFormat();
     this.ctx = this.canvas.getContext('webgpu');
-    this.ctx.configure({ device: this.device, format: this.canvasFormat, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    // restoreCanvasHistory copies a saved frame back into the current canvas texture.
+    this.ctx.configure({ device: this.device, format: this.canvasFormat, alphaMode: 'opaque', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
     const mod = this.device.createShaderModule({ code: BLIT_WGSL });
     this.blitBGL = this.device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -1012,6 +1097,30 @@ export class GpuExecutor {
     this.blit = this.device.createRenderPipeline({
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blitBGL] }),
       vertex: { module: mod, entryPoint: 'vs' }, fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.canvasFormat }] }, primitive: { topology: 'triangle-list' },
+    });
+    this.gdiComposite = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.blitBGL] }),
+      vertex: { module: mod, entryPoint: 'vs' },
+      fragment: { module: mod, entryPoint: 'fs', targets: [{ format: this.canvasFormat, blend: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      } }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const fillMod = this.device.createShaderModule({ code: `
+struct FillColor { value: vec4<f32> };
+@group(0) @binding(0) var<uniform> fill: FillColor;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  return vec4(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4<f32> { return fill.value; }
+` });
+    this.gdiFill = this.device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: fillMod, entryPoint: 'vs' },
+      fragment: { module: fillMod, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      primitive: { topology: 'triangle-list' },
     });
     this.gammaBlitBGL = this.device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -1093,6 +1202,8 @@ export class GpuExecutor {
   /** Execute a command stream (Uint8Array). */
   execute(buf) {
     const firstError = this.stats.errors.length;
+    this.presentedSinceExecute = false;
+    this.canvasRestoredSinceExecute = false;
     let p = 0;
     const dvAll = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     while (p < buf.length) {
@@ -1113,6 +1224,20 @@ export class GpuExecutor {
       try { this.dispatch(op, dv, bytes); } catch (e) { this.stats.errors.push(`op ${op}: ${e.message}`); this.log(`op ${op} failed: ${e.stack || e.message}`); }
       if (this.profile) this.recordProfile(op, performance.now() - started, len);
       p += 8 + len;
+    }
+    if (!this.presentedSinceExecute) {
+      try { this.restoreCanvasHistory(); } catch (e) {
+        this.stats.errors.push(`GDI history restore: ${e.message}`);
+        this.log(`GDI history restore failed: ${e.stack || e.message}`);
+      }
+    }
+    try { this.compositeGdiSurface(); } catch (e) {
+      this.stats.errors.push(`GDI composition: ${e.message}`);
+      this.log(`GDI composition failed: ${e.stack || e.message}`);
+    }
+    try { this.saveCanvasHistory(); } catch (e) {
+      this.stats.errors.push(`GDI history save: ${e.message}`);
+      this.log(`GDI history save failed: ${e.stack || e.message}`);
     }
     const flushStarted = this.profile ? performance.now() : 0;
     this.flush();
@@ -1137,9 +1262,14 @@ export class GpuExecutor {
     const st = this.st;
     switch (op) {
       case OP.WINDOW: {
+        this.windowIds.add(u(0));
         const w = u(1), h = u(2);
         if (!this.windowSize || this.windowSize[0] !== w || this.windowSize[1] !== h) {
           this.windowSize = [w, h];
+          if (!this.swapchains.size && w > 0 && h > 0 && (this.canvas.width !== w || this.canvas.height !== h)) {
+            this.canvas.width = w;
+            this.canvas.height = h;
+          }
           this.onWindow?.({ id: u(0), width: w, height: h, title: bytes.length > 12 ? new TextDecoder().decode(bytes.subarray(12)) : undefined });
         }
         break;
@@ -1189,6 +1319,34 @@ export class GpuExecutor {
       case OP.PUSH_STATE: this.endPass(); this.stateStack.push(structuredClone(this.st)); break;
       case OP.POP_STATE: this.endPass(); this.st = this.stateStack.pop() || defaultPipelineState(); break;
       case OP.SET_FIXED_FUNCTION:
+        {
+        const transform = dv.byteLength >= 144
+          ? Array.from({ length: 16 }, (_, i) => f(20 + i))
+          : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        const worldView = dv.byteLength >= 208
+          ? Array.from({ length: 16 }, (_, i) => f(36 + i))
+          : transform;
+        const view = dv.byteLength >= 272
+          ? Array.from({ length: 16 }, (_, i) => f(52 + i))
+          : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        let fixedState = null;
+        if (dv.byteLength >= 368) {
+          const base = 68;
+          const materialWords = Array.from({ length: 17 }, (_, i) => u(base + i));
+          const ambientColor = u(base + 17);
+          const flags = u(base + 18);
+          const sources = Array.from({ length: 4 }, (_, i) => u(base + 19 + i));
+          const lightCount = Math.min(u(base + 23), 8);
+          const lights = [];
+          for (let i = 0; i < lightCount; i++) {
+            const at = base + 24 + i * 27;
+            lights.push({
+              index: u(at),
+              words: Array.from({ length: 26 }, (_, j) => u(at + 1 + j)),
+            });
+          }
+          fixedState = { materialWords, ambientColor, flags, sources, lights };
+        }
         this.setFixedFunction(
           u(0), u(1), u(2),
           dv.byteLength >= 16 ? u(3) : 4,
@@ -1208,11 +1366,13 @@ export class GpuExecutor {
           dv.byteLength >= 72 ? u(17) : 1,
           dv.byteLength >= 76 ? u(18) : 2,
           dv.byteLength >= 80 ? u(19) : 1,
-          dv.byteLength >= 144
-            ? Array.from({ length: 16 }, (_, i) => f(20 + i))
-            : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          transform,
+          worldView,
+          view,
+          fixedState,
         );
         break;
+        }
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
       case OP.SET_CBUFFERS: case OP.SET_SRVS: case OP.SET_SAMPLERS: {
         const arr = (op === OP.SET_CBUFFERS ? st.cb : op === OP.SET_SRVS ? st.srv : st.smp)[u(0)];
@@ -1263,6 +1423,7 @@ export class GpuExecutor {
         this.present(u(0), u(1), bytes.byteLength >= 12 ? u(2) : 1, gammaBytes);
         break;
       }
+      case OP.GDI_FILL_RECT: this.drawGdiFillRect(u(0), i32(1), i32(2), i32(3), i32(4), u(5)); break;
       case OP.GENERATE_MIPS: this.generateMips(u(0)); break;
       case OP.RELEASE: this.release(u(0)); break;
       case OP.DISPATCH: this.dispatchCompute(u(0), u(1), u(2)); break;
@@ -1552,7 +1713,7 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
-  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1, colorOp1 = 1, colorArg01 = 1, colorArg11 = 2, colorArg21 = 1, alphaOp1 = 1, alphaArg01 = 1, alphaArg11 = 2, alphaArg21 = 1, transform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) {
+  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1, colorOp1 = 1, colorArg01 = 1, colorArg11 = 2, colorArg21 = 1, alphaOp1 = 1, alphaArg01 = 1, alphaArg11 = 2, alphaArg21 = 1, transform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], worldView = transform, view = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], fixedState = null) {
     if (fvf === 0) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
@@ -1563,17 +1724,80 @@ export class GpuExecutor {
       throw new Error(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
-    const matrixBytes = new ArrayBuffer(64);
+    const matrixBytes = new ArrayBuffer(192);
     const matrixView = new DataView(matrixBytes);
-    for (let i = 0; i < 16; i++) matrixView.setFloat32(i * 4, transform[i], true);
-    const transformKey = Array.from({ length: 16 }, (_, i) => matrixView.getUint32(i * 4, true).toString(16).padStart(8, '0')).join('');
+    for (let i = 0; i < 16; i++) {
+      matrixView.setFloat32(i * 4, transform[i], true);
+      matrixView.setFloat32(64 + i * 4, worldView[i], true);
+      matrixView.setFloat32(128 + i * 4, view[i], true);
+    }
+    const transformKey = Array.from({ length: 48 }, (_, i) => matrixView.getUint32(i * 4, true).toString(16).padStart(8, '0')).join('');
     if (!this.d3d9TransformBuffers.has(transformKey)) {
-      const buffer = this.device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const buffer = this.device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       this.device.queue.writeBuffer(buffer, 0, new Uint8Array(matrixBytes));
       this.d3d9TransformBuffers.set(transformKey, buffer);
     }
     this.st.d3d9TransformKey = transformKey;
-    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}/${colorOp1}/${colorArg01}/${colorArg11}/${colorArg21}/${alphaOp1}/${alphaArg01}/${alphaArg11}/${alphaArg21}`;
+    const materialWords = fixedState?.materialWords || new Array(17).fill(0);
+    const flags = fixedState?.flags || 0;
+    const sources = fixedState?.sources || [1, 0, 2, 0];
+    const ambientColor = fixedState?.ambientColor || 0;
+    const lights = fixedState?.lights || [];
+    const floats = new Float32Array(64 * 4);
+    const wordFloat = (word) => {
+      const view = new DataView(new ArrayBuffer(4));
+      view.setUint32(0, word >>> 0, true);
+      return view.getFloat32(0, true);
+    };
+    for (let i = 0; i < 16; i++) floats[i] = wordFloat(materialWords[i]);
+    floats[16] = wordFloat(materialWords[16]);
+    const rgba = [
+      (ambientColor >>> 16) & 0xff,
+      (ambientColor >>> 8) & 0xff,
+      ambientColor & 0xff,
+      (ambientColor >>> 24) & 0xff,
+    ];
+    floats[17] = rgba[0] / 255;
+    floats[18] = rgba[1] / 255;
+    floats[19] = rgba[2] / 255;
+    floats[20] = (flags & 1) ? 1 : 0;
+    floats[21] = (flags & 2) ? 1 : 0;
+    floats[22] = (flags & 4) ? 1 : 0;
+    floats[23] = (flags & 8) ? 1 : 0;
+    floats[24] = (flags & 16) ? 1 : 0;
+    floats[25] = lights.length;
+    for (let i = 0; i < 4; i++) floats[28 + i] = sources[i];
+    for (let i = 0; i < Math.min(lights.length, 8); i++) {
+      const words = lights[i].words;
+      const at = 32 * 4 + i * 7 * 4;
+      for (let j = 0; j < 4; j++) {
+        floats[at + j] = wordFloat(words[1 + j]);
+        floats[at + 4 + j] = wordFloat(words[5 + j]);
+        floats[at + 8 + j] = wordFloat(words[9 + j]);
+      }
+      for (let j = 0; j < 3; j++) {
+        floats[at + 12 + j] = wordFloat(words[13 + j]);
+        floats[at + 16 + j] = wordFloat(words[16 + j]);
+      }
+      floats[at + 15] = 0;
+      floats[at + 19] = 0;
+      floats[at + 20] = wordFloat(words[21]);
+      floats[at + 21] = wordFloat(words[22]);
+      floats[at + 22] = wordFloat(words[23]);
+      floats[at + 23] = wordFloat(words[19]);
+      floats[at + 24] = wordFloat(words[20]);
+      floats[at + 25] = wordFloat(words[24]);
+      floats[at + 26] = wordFloat(words[25]);
+      floats[at + 27] = words[0];
+    }
+    const lightingKey = JSON.stringify([materialWords, ambientColor, flags, sources, lights]);
+    if (!this.d3d9LightingBuffers.has(lightingKey)) {
+      const buffer = this.device.createBuffer({ size: 1024, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(buffer, 0, new Uint8Array(floats.buffer));
+      this.d3d9LightingBuffers.set(lightingKey, buffer);
+    }
+    this.st.d3d9LightingKey = lightingKey;
+    const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 0}/${colorOp1}/${colorArg01}/${colorArg11}/${colorArg21}/${alphaOp1}/${alphaArg01}/${alphaArg11}/${alphaArg21}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
       const transformed = fvf === 0x44 || fvf === 0x144;
@@ -1595,7 +1819,106 @@ export class GpuExecutor {
              (input.position.x * (2.0 / ${Math.max(width, 1)}.0) - 1.0) * invW,
              (1.0 - input.position.y * (2.0 / ${Math.max(height, 1)}.0)) * invW,
              input.position.z * invW, invW);`
-        : 'output.position = d3d9Transform * vec4<f32>(input.position, 1.0);';
+        : 'output.position = d3d9Transforms.clip * vec4<f32>(input.position, 1.0);';
+      const lightingTypes = normal ? `
+        struct D3D9Light {
+          diffuse: vec4<f32>, specular: vec4<f32>, ambient: vec4<f32>,
+          position: vec4<f32>, direction: vec4<f32>, attenuationRange: vec4<f32>, spot: vec4<f32>,
+        };
+        struct D3D9FixedState {
+          materialDiffuse: vec4<f32>, materialAmbient: vec4<f32>,
+          materialSpecular: vec4<f32>, materialEmissive: vec4<f32>,
+          powerGlobalAmbient: vec4<f32>, flags: vec4<f32>, flags2: vec4<f32>,
+          materialSources: vec4<f32>, lights: array<D3D9Light, 8>,
+        };
+        struct D3D9Lighting { diffuse: vec4<f32>, specular: vec4<f32> };
+        @group(3) @binding(2) var<uniform> d3d9Fixed: D3D9FixedState;
+        fn d3d9SafeNormalize(value: vec3<f32>) -> vec3<f32> {
+          let lengthSquared = dot(value, value);
+          if (lengthSquared <= 0.000000000001) { return vec3<f32>(0.0); }
+          return value * inverseSqrt(lengthSquared);
+        }
+        fn d3d9MaterialColor(source: f32, materialColor: vec4<f32>, vertexColor: vec4<f32>) -> vec4<f32> {
+          if (d3d9Fixed.flags.y > 0.5 && source == 1.0) { return vertexColor; }
+          return materialColor;
+        }
+        fn d3d9Shade(position: vec3<f32>, sourceNormal: vec3<f32>, vertexColor: vec4<f32>) -> D3D9Lighting {
+          if (d3d9Fixed.flags.x < 0.5) {
+            return D3D9Lighting(vertexColor, vec4<f32>(0.0));
+          }
+          let diffuseMaterial = d3d9MaterialColor(d3d9Fixed.materialSources.x, d3d9Fixed.materialDiffuse, vertexColor);
+          let ambientMaterial = d3d9MaterialColor(d3d9Fixed.materialSources.y, d3d9Fixed.materialAmbient, vertexColor);
+          let specularMaterial = d3d9MaterialColor(d3d9Fixed.materialSources.z, d3d9Fixed.materialSpecular, vertexColor);
+          let emissiveMaterial = d3d9MaterialColor(d3d9Fixed.materialSources.w, d3d9Fixed.materialEmissive, vertexColor);
+          let eyePosition = (d3d9Transforms.worldView * vec4<f32>(position, 1.0)).xyz;
+          let m = mat3x3<f32>(d3d9Transforms.worldView[0].xyz, d3d9Transforms.worldView[1].xyz, d3d9Transforms.worldView[2].xyz);
+          let c0 = cross(m[1], m[2]);
+          let c1 = cross(m[2], m[0]);
+          let c2 = cross(m[0], m[1]);
+          let determinant = dot(m[0], c0);
+          let safeDeterminant = select(1.0, determinant, abs(determinant) > 0.000000000001);
+          var normal = (c0 * sourceNormal.x + c1 * sourceNormal.y + c2 * sourceNormal.z) / safeDeterminant;
+          if (abs(determinant) <= 0.000000000001) { normal = vec3<f32>(0.0); }
+          if (d3d9Fixed.flags.w > 0.5) { normal = d3d9SafeNormalize(normal); }
+          var diffuse = emissiveMaterial.rgb + ambientMaterial.rgb * d3d9Fixed.powerGlobalAmbient.yzw;
+          var specular = vec3<f32>(0.0);
+          var viewer = vec3<f32>(0.0, 0.0, -1.0);
+          if (d3d9Fixed.flags.z > 0.5) { viewer = d3d9SafeNormalize(-eyePosition); }
+          for (var i = 0u; i < u32(d3d9Fixed.flags2.y); i = i + 1u) {
+            let light = d3d9Fixed.lights[i];
+            let lightType = u32(light.spot.w);
+            var lightDirection = vec3<f32>(0.0);
+            var attenuation = 1.0;
+            var spot = 1.0;
+            if (lightType == 3u) {
+              lightDirection = -d3d9SafeNormalize((d3d9Transforms.view * vec4<f32>(light.direction.xyz, 0.0)).xyz);
+            } else {
+              let lightPosition = (d3d9Transforms.view * vec4<f32>(light.position.xyz, 1.0)).xyz;
+              let toLight = lightPosition - eyePosition;
+              let distance = length(toLight);
+              lightDirection = d3d9SafeNormalize(toLight);
+              if (distance > light.attenuationRange.w || light.attenuationRange.w <= 0.0) {
+                attenuation = 0.0;
+              } else {
+                let denominator = dot(light.attenuationRange.xyz, vec3<f32>(1.0, distance, distance * distance));
+                attenuation = 1.0 / max(denominator, 0.000000000001);
+              }
+              if (lightType == 2u) {
+                let direction = d3d9SafeNormalize((d3d9Transforms.view * vec4<f32>(light.direction.xyz, 0.0)).xyz);
+                let fromLight = -lightDirection;
+                let cone = dot(direction, fromLight);
+                let inner = cos(light.spot.y * 0.5);
+                let outer = cos(light.spot.z * 0.5);
+                if (cone >= inner) {
+                  spot = 1.0;
+                } else if (cone <= outer) {
+                  spot = 0.0;
+                } else {
+                  spot = pow(max((cone - outer) / max(inner - outer, 0.000000000001), 0.0), light.spot.x);
+                }
+              }
+            }
+            let intensity = attenuation * spot;
+            diffuse += ambientMaterial.rgb * light.ambient.rgb * intensity;
+            let nDotL = max(dot(normal, lightDirection), 0.0);
+            diffuse += diffuseMaterial.rgb * light.diffuse.rgb * (nDotL * intensity);
+            if (d3d9Fixed.flags2.x > 0.5 && d3d9Fixed.powerGlobalAmbient.x > 0.0 && nDotL > 0.0) {
+              let halfway = d3d9SafeNormalize(lightDirection + viewer);
+              let nDotH = max(dot(normal, halfway), 0.0);
+              specular += specularMaterial.rgb * light.specular.rgb * (pow(nDotH, d3d9Fixed.powerGlobalAmbient.x) * intensity);
+            }
+          }
+          return D3D9Lighting(
+            vec4<f32>(clamp(diffuse, vec3<f32>(0.0), vec3<f32>(1.0)), clamp(diffuseMaterial.a, 0.0, 1.0)),
+            vec4<f32>(clamp(specular, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0));
+        }
+      ` : '';
+      const lightingCode = normal
+        ? 'let lit = d3d9Shade(input.position, input.normal, input.color.bgra); output.color = lit.diffuse; output.specular = lit.specular;'
+        : 'output.color = input.color.bgra; output.specular = vec4<f32>(0.0);';
+      const fragmentOutput = normal
+        ? 'vec4<f32>(clamp(fixedColor.rgb + input.specular.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), fixedColor.a)'
+        : 'fixedColor';
       const code = `
         struct VertexInput {
           @location(0) position: ${inputPosition},
@@ -1606,99 +1929,55 @@ export class GpuExecutor {
         struct VertexOutput {
           @builtin(position) position: vec4<f32>,
           @location(0) color: vec4<f32>,
+          @location(1) specular: vec4<f32>,
           ${texcoordOutput}
         };
-        @group(3) @binding(1) var<uniform> d3d9Transform: mat4x4<f32>;
+        struct D3D9Transforms { clip: mat4x4<f32>, worldView: mat4x4<f32>, view: mat4x4<f32> };
+        @group(3) @binding(1) var<uniform> d3d9Transforms: D3D9Transforms;
+        ${lightingTypes}
         @vertex fn vs(input: VertexInput) -> VertexOutput {
           var output: VertexOutput;
           ${positionCode}
-          output.color = input.color.bgra;
+          ${lightingCode}
           ${texcoordAssign}
           return output;
         }
         @fragment fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
-          return input.color;
+          let fixedColor = input.color;
+          return ${fragmentOutput};
         }
       `;
       const module = this.device.createShaderModule({ code });
-      const channelArg = (argument, channel) => argument === 2 ? `texel.${channel}` : `input.color.${channel}`;
-      const color0 = channelArg(colorArg0, 'rgb');
-      const colorA = channelArg(colorArg1, 'rgb'), colorB = channelArg(colorArg2, 'rgb');
-      const colorAlphaA = channelArg(colorArg1, 'a');
-      const alpha0 = channelArg(alphaArg0, 'a');
-      const alphaA = channelArg(alphaArg1, 'a'), alphaB = channelArg(alphaArg2, 'a');
-      const textureFactorAlpha = (((textureFactor >>> 24) & 0xff) / 255).toFixed(8);
+      const factor = textureFactor >>> 0;
+      const textureFactorColor = `vec4<f32>(${((factor >>> 16) & 0xff) / 255}, ${((factor >>> 8) & 0xff) / 255}, ${(factor & 0xff) / 255}, ${(factor >>> 24) / 255})`;
       const colorExpr = colorOp === 1 ? 'input.color.rgb'
-        : colorOp === 2 || colorOp === 17 ? colorA
-        : colorOp === 3 ? colorB
-        : colorOp === 4 ? `(${colorA} * ${colorB})`
-        : colorOp === 5 ? `((${colorA} * ${colorB}) * 2.0)`
-        : colorOp === 6 ? `((${colorA} * ${colorB}) * 4.0)`
-        : colorOp === 7 ? `(${colorA} + ${colorB})`
-        : colorOp === 8 ? `(${colorA} + ${colorB} - 0.5)`
-        : colorOp === 9 ? `((${colorA} + ${colorB} - 0.5) * 2.0)`
-        : colorOp === 10 ? `(${colorA} - ${colorB})`
-        : colorOp === 11 ? `(${colorA} + ${colorB} - (${colorA} * ${colorB}))`
-        : colorOp === 12 || colorOp === 16 ? `((${colorA} * input.color.a) + (${colorB} * (1.0 - input.color.a)))`
-        : colorOp === 13 ? `((${colorA} * texel.a) + (${colorB} * (1.0 - texel.a)))`
-        : colorOp === 14 ? `((${colorA} * ${textureFactorAlpha}) + (${colorB} * (1.0 - ${textureFactorAlpha})))`
-        : colorOp === 15 ? `(${colorA} + (${colorB} * (1.0 - texel.a)))`
-        : colorOp === 18 ? `(${colorA} + (${colorAlphaA} * ${colorB}))`
-        : colorOp === 19 ? `((${colorA} * ${colorB}) + vec3<f32>(${colorAlphaA}))`
-        : colorOp === 20 ? `(${colorA} + ((1.0 - ${colorAlphaA}) * ${colorB}))`
-        : colorOp === 21 ? `((vec3<f32>(1.0) - ${colorA}) * ${colorB} + vec3<f32>(${colorAlphaA}))`
-        : colorOp === 24 ? `vec3<f32>(clamp(dot((${colorA} * 2.0 - vec3<f32>(1.0)), (${colorB} * 2.0 - vec3<f32>(1.0))), 0.0, 1.0))`
-        : colorOp === 25 ? `(${color0} + (${colorA} * ${colorB}))`
-        : colorOp === 26 ? `((${color0} * ${colorA}) + ((1.0 - ${color0}) * ${colorB}))`
-        : 'input.color.rgb';
-      const alphaExpr = alphaOp === 2 || alphaOp === 17 ? alphaA
-        : alphaOp === 3 ? alphaB
-        : alphaOp === 4 ? `(${alphaA} * ${alphaB})`
-        : alphaOp === 5 ? `((${alphaA} * ${alphaB}) * 2.0)`
-        : alphaOp === 6 ? `((${alphaA} * ${alphaB}) * 4.0)`
-        : alphaOp === 7 ? `(${alphaA} + ${alphaB})`
-        : alphaOp === 8 ? `(${alphaA} + ${alphaB} - 0.5)`
-        : alphaOp === 9 ? `((${alphaA} + ${alphaB} - 0.5) * 2.0)`
-        : alphaOp === 10 ? `(${alphaA} - ${alphaB})`
-        : alphaOp === 11 ? `(${alphaA} + ${alphaB} - (${alphaA} * ${alphaB}))`
-        : alphaOp === 12 || alphaOp === 16 ? `((${alphaA} * input.color.a) + (${alphaB} * (1.0 - input.color.a)))`
-        : alphaOp === 13 ? `((${alphaA} * texel.a) + (${alphaB} * (1.0 - texel.a)))`
-        : alphaOp === 14 ? `((${alphaA} * ${textureFactorAlpha}) + (${alphaB} * (1.0 - ${textureFactorAlpha})))`
-        : alphaOp === 15 ? `(${alphaA} + (${alphaB} * (1.0 - texel.a)))`
-        : alphaOp === 25 ? `(${alpha0} + (${alphaA} * ${alphaB}))`
-        : alphaOp === 26 ? `((${alpha0} * ${alphaA}) + ((1.0 - ${alpha0}) * ${alphaB}))`
-        : 'input.color.a';
-      const stage1Enabled = textured && (colorOp1 !== 1 || alphaOp1 !== 1);
-      const stage1ColorArg = (argument) => argument === 2 ? 'texel1.rgb'
-        : argument === 1 ? 'stage1CurrentColor' : 'input.color.rgb';
-      const stage1AlphaArg = (argument) => argument === 2 ? 'texel1.a'
-        : argument === 1 ? 'stage1CurrentAlpha' : 'input.color.a';
-      const stage1ColorA = stage1ColorArg(colorArg11), stage1ColorB = stage1ColorArg(colorArg21);
-      const stage1AlphaA = stage1AlphaArg(alphaArg11), stage1AlphaB = stage1AlphaArg(alphaArg21);
+        : d3d9TextureOp(colorOp, colorArg0, colorArg1, colorArg2, 0, 'rgb');
+      const alphaExpr = alphaOp === 1 ? 'input.color.a'
+        : d3d9TextureOp(alphaOp, alphaArg0, alphaArg1, alphaArg2, 0, 'a');
+      const stage1Enabled = textured && colorOp !== 1 && (colorOp1 !== 1 || alphaOp1 !== 1);
       const stage1ColorExpr = colorOp1 === 1 ? 'stage0Color'
-        : colorOp1 === 2 ? stage1ColorA
-        : colorOp1 === 3 ? stage1ColorB
-        : colorOp1 === 4 ? `(${stage1ColorA} * ${stage1ColorB})`
-        : 'stage0Color';
+        : d3d9TextureOp(colorOp1, colorArg01, colorArg11, colorArg21, 1, 'rgb');
       const stage1AlphaExpr = alphaOp1 === 1 ? 'stage0Alpha'
-        : alphaOp1 === 2 ? stage1AlphaA
-        : alphaOp1 === 3 ? stage1AlphaB
-        : alphaOp1 === 4 ? `(${stage1AlphaA} * ${stage1AlphaB})`
-        : 'stage0Alpha';
-      const texturedOutput = stage1Enabled
+        : d3d9TextureOp(alphaOp1, alphaArg01, alphaArg11, alphaArg21, 1, 'a');
+      const rawTexturedOutput = stage1Enabled
         ? `vec4<f32>(${stage1ColorExpr}, ${stage1AlphaExpr})`
         : `vec4<f32>(${colorExpr}, ${alphaExpr})`;
+      const texturedOutput = normal
+        ? `vec4<f32>(clamp((${rawTexturedOutput}).rgb + input.specular.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), (${rawTexturedOutput}).a)`
+        : rawTexturedOutput;
       const texturedCode = textured ? `${code}
         @group(1) @binding(0) var d3d9Texture: texture_2d<f32>;
         @group(2) @binding(0) var d3d9Sampler: sampler;
         ${stage1Enabled ? '@group(1) @binding(1) var d3d9Texture1: texture_2d<f32>;\n        @group(2) @binding(1) var d3d9Sampler1: sampler;' : ''}
         @fragment fn fsTextured(input: VertexOutput) -> @location(0) vec4<f32> {
           let texel = textureSample(d3d9Texture, d3d9Sampler, input.uv);
-          ${stage1Enabled ? `let texel1 = textureSample(d3d9Texture1, d3d9Sampler1, input.uv);
+          let textureFactorColor = ${textureFactorColor};
+          ${stage1Enabled ? `var texel1 = textureSample(d3d9Texture1, d3d9Sampler1, input.uv);
           let stage0Color = ${colorExpr};
           let stage0Alpha = ${alphaExpr};
-          let stage1CurrentColor = ${colorOp === 17 ? '(stage0Color * texel1.rgb)' : 'stage0Color'};
-          let stage1CurrentAlpha = ${alphaOp === 17 ? '(stage0Alpha * texel1.a)' : 'stage0Alpha'};` : ''}
+          let stage1Current = vec4<f32>(stage0Color, stage0Alpha);
+          ${colorOp === 17 ? 'texel1 = vec4<f32>(texel1.rgb * stage0Color, texel1.a);' : ''}
+          ${alphaOp === 17 ? 'texel1 = vec4<f32>(texel1.rgb, texel1.a * stage0Alpha);' : ''}` : ''}
           return ${texturedOutput};
         }
       ` : null;
@@ -1715,10 +1994,10 @@ export class GpuExecutor {
           { location: colorLocation, format: 28, slot: 0, offset: colorOffset, cls: 0, step: 0 },
           ...(textured ? [{ location: texcoordLocation, format: 16, slot: 0, offset: colorOffset + 4, cls: 0, step: 0 }] : []),
         ],
-        vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false, fixedFunctionD3D9: true },
+        vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false, fixedFunctionD3D9: true, fixedFunctionLighting: normal },
         ps: {
           stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false,
-          fixedFunction: { source: code, output: 'input.color' },
+          fixedFunction: { source: code, output: fragmentOutput },
           texturedVariant: texturedPsId || undefined,
         },
         texturedPs: texturedModule ? {
@@ -2147,7 +2426,13 @@ export class GpuExecutor {
       const buffer = this.d3d9TransformBuffers.get(st.d3d9TransformKey);
       if (!buffer) throw new Error('D3D9 fixed-function draw has no translated transform state');
       layoutEntries[3].push({ binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } });
-      resolved[3].push({ binding: 1, resource: { buffer, offset: 0, size: 64 } });
+      resolved[3].push({ binding: 1, resource: { buffer, offset: 0, size: 192 } });
+      if (vs.fixedFunctionLighting) {
+        const lighting = this.d3d9LightingBuffers.get(st.d3d9LightingKey);
+        if (!lighting) throw new Error('D3D9 fixed-function draw has no translated material/light state');
+        layoutEntries[3].push({ binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } });
+        resolved[3].push({ binding: 2, resource: { buffer: lighting, offset: 0, size: 1024 } });
+      }
     }
 
     // Pipeline.
@@ -2962,6 +3247,109 @@ export class GpuExecutor {
     this.createSwapchain(id, texId, w, h, dxgi);
   }
 
+  ensureCanvasHistory() {
+    const width = this.canvas.width, height = this.canvas.height;
+    if (width <= 0 || height <= 0) throw new Error(`invalid GDI target size ${width}x${height}`);
+    if (this.canvasHistory && this.canvasHistory.width === width && this.canvasHistory.height === height) return;
+    this.canvasHistory?.destroy();
+    this.canvasHistory = this.device.createTexture({
+      size: [width, height], format: this.canvasFormat,
+      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.canvasHistoryValid = false;
+  }
+
+  ensureGdiSurface() {
+    const width = this.canvas.width, height = this.canvas.height;
+    if (width <= 0 || height <= 0) throw new Error(`invalid GDI surface size ${width}x${height}`);
+    if (this.gdiSurface && this.gdiSurface.width === width && this.gdiSurface.height === height) return;
+    this.gdiSurface?.destroy();
+    this.gdiSurface = this.device.createTexture({
+      size: [width, height], format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+    });
+    this.gdiView = this.gdiSurface.createView();
+    this.gdiHasPixels = false;
+    const clear = this.encoder().beginRenderPass({ colorAttachments: [{
+      view: this.gdiView, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 },
+    }] });
+    clear.end();
+  }
+
+  drawGdiFillRect(windowId, left, top, right, bottom, colorRef) {
+    if (windowId !== 0 && !this.windowIds.has(windowId)) {
+      throw new Error(`GDI FillRect window ${windowId} has not been created`);
+    }
+    if (right <= left || bottom <= top) return;
+    this.ensureGdiSurface();
+    const width = this.gdiSurface.width, height = this.gdiSurface.height;
+    const x = Math.max(0, left), y = Math.max(0, top);
+    const x2 = Math.min(width, right), y2 = Math.min(height, bottom);
+    if (x >= x2 || y >= y2) return;
+    const rgba = new Float32Array([
+      (colorRef & 0xff) / 255,
+      ((colorRef >>> 8) & 0xff) / 255,
+      ((colorRef >>> 16) & 0xff) / 255,
+      1,
+    ]);
+    const uniform = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(uniform, 0, rgba);
+    this.transientBuffers.push(uniform);
+    const pass = this.encoder().beginRenderPass({ colorAttachments: [{
+      view: this.gdiView, loadOp: 'load', storeOp: 'store',
+    }] });
+    pass.setPipeline(this.gdiFill);
+    pass.setBindGroup(0, this.device.createBindGroup({
+      layout: this.gdiFill.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: uniform } }],
+    }));
+    pass.setViewport(0, 0, width, height, 0, 1);
+    pass.setScissorRect(x, y, x2 - x, y2 - y);
+    pass.draw(3);
+    pass.end();
+    this.gdiHasPixels = true;
+  }
+
+  restoreCanvasHistory() {
+    if (this.noPresent || !this.ctx) return;
+    this.ensureCanvasHistory();
+    if (!this.canvasHistoryValid) return;
+    this.encoder().copyTextureToTexture(
+      { texture: this.canvasHistory }, { texture: this.ctx.getCurrentTexture() },
+      [this.canvas.width, this.canvas.height, 1],
+    );
+    this.canvasRestoredSinceExecute = true;
+  }
+
+  compositeGdiSurface() {
+    if (this.noPresent || !this.gdiSurface || !this.gdiHasPixels || !this.ctx) return;
+    if (this.gdiSurface.width !== this.canvas.width || this.gdiSurface.height !== this.canvas.height) {
+      this.ensureGdiSurface();
+      return;
+    }
+    const pass = this.encoder().beginRenderPass({ colorAttachments: [{
+      view: this.ctx.getCurrentTexture().createView(),
+      loadOp: this.presentedSinceExecute || this.canvasRestoredSinceExecute ? 'load' : 'clear',
+      storeOp: 'store',
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+    }] });
+    pass.setPipeline(this.gdiComposite);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout: this.blitBGL, entries: [
+      { binding: 0, resource: this.gdiView }, { binding: 1, resource: this.blitSampler },
+    ] }));
+    pass.draw(3);
+    pass.end();
+  }
+
+  saveCanvasHistory() {
+    if (this.noPresent || !this.ctx) return;
+    this.ensureCanvasHistory();
+    this.encoder().copyTextureToTexture(
+      { texture: this.ctx.getCurrentTexture() }, { texture: this.canvasHistory },
+      [this.canvas.width, this.canvas.height, 1],
+    );
+    this.canvasHistoryValid = true;
+  }
+
   present(scId, texId, syncInterval = 1, gammaRamp = null) {
     this.lastPresentSyncInterval = Math.min(syncInterval >>> 0, 4);
     const t = this.res.get(texId);
@@ -2992,6 +3380,7 @@ export class GpuExecutor {
     pass.draw(3);
     pass.end();
     this.flush();
+    this.presentedSinceExecute = true;
     this.stats.presents++;
   }
 

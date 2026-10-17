@@ -3,6 +3,7 @@ export const ASSET_CACHE_LIMIT = 64 * 1024 * 1024;
 const ASSET_HEADER_SIZE = 24;
 const MAX_ASSET_INDEX_SIZE = 64 * 1024 * 1024;
 const ASSET_READ_AHEAD_BYTES = ASSET_CHUNK_SIZE / 2;
+const SMALL_FILE_READ_CACHE_LIMIT = 16 * 1024;
 
 export async function sha256Hex(bytes) {
   if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable; use HTTPS or localhost');
@@ -151,8 +152,15 @@ export class AssetRangeCache {
     if (length === 0) return;
     if (this.readRange) {
       if (length > this.maxBytes) throw new RangeError('guest asset read exceeds the cache capacity');
-      await this.#ensureDirectRange(start, length);
-      this.lastRead = { end, fileRange: this.#findFileRange(start) };
+      const fileRange = this.#findFileRange(start);
+      const fileEnd = fileRange ? BigInt(fileRange.end) : 0n;
+      const fileLength = fileRange ? fileEnd - BigInt(fileRange.start) : 0n;
+      if (fileRange && end <= fileEnd && fileLength <= BigInt(SMALL_FILE_READ_CACHE_LIMIT)) {
+        await this.#ensureDirectRange(BigInt(fileRange.start), Number(fileLength));
+      } else {
+        await this.#ensureDirectRange(start, length);
+      }
+      this.lastRead = { end, fileRange };
       return;
     }
     const first = start / BigInt(ASSET_CHUNK_SIZE);
@@ -184,6 +192,19 @@ export class AssetRangeCache {
     if (length === 0) return true;
     const end = start + BigInt(length);
     if (this.readRange) {
+      const fileRange = this.#findFileRange(start);
+      if (fileRange && end <= BigInt(fileRange.end)) {
+        const fileStart = BigInt(fileRange.start);
+        const fileLength = BigInt(fileRange.end) - fileStart;
+        if (fileLength <= BigInt(SMALL_FILE_READ_CACHE_LIMIT)) {
+          const fileBytes = this.#touchDirectRange(fileStart, Number(fileLength));
+          if (fileBytes) {
+            const within = Number(start - fileStart);
+            destination.set(fileBytes.subarray(within, within + length));
+            return true;
+          }
+        }
+      }
       const bytes = this.#touchDirectRange(start, length);
       if (!bytes) return false;
       destination.set(bytes);

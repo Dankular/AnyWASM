@@ -12,13 +12,16 @@ import { GpuExecutor } from './gpu.js';
 import { waitForPresentInterval } from './frame-pacing.js';
 import { SharedCpuCompletion, SharedCpuWorkerPool } from './shared-cpu-pool.js';
 import { InPlaceSharedCpuPool } from './shared-cpu-inplace-pool.js';
-import { createRemoteDirectoryFiles } from './direct-assets.js';
+import { createRemoteDirectoryFiles, normalizeDirectoryPath } from './direct-assets.js';
 import { encodeHostRegistrySnapshot } from './registry-snapshot.js';
 
 let w = null, exec = null, stopped = false, disposeRequested = false, wake = null, testMode = false, sharedCpuPool = null, sharedCpuRequested = false;
 let sharedNeedsCoordinatorTurn = false;
 const pendingSharedInputs = [];
 const pendingSharedCompletions = [];
+const pendingMessageBoxes = new Map();
+const pendingDialogBoxes = new Map();
+let stderrCarry = '';
 let sharedHandoffPendingFinish = false;
 let sharedExecutionMode = 'cooperative';
 let sharedExecutionReason = '';
@@ -31,9 +34,12 @@ let surfacedGpuErrorCount = 0;
 let userProfileStore = null;
 let userProfileSavedGeneration = 0;
 let userProfileFilesystemSavedGeneration = 0;
+let userProfileNextFlushAt = 0;
 let userProfileLastError = '';
 let userProfileLastErrorAt = 0;
 const dec = new TextDecoder();
+const stderrDec = new TextDecoder();
+let traceGuestDiagnostics = false;
 const inPlaceCpuEnabled = new URL(self.location.href).searchParams.has('inPlaceCpu');
 const sharedCpuWorkersEnabled = inPlaceCpuEnabled || new URL(self.location.href).searchParams.has('sharedCpuWorkers');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -165,6 +171,8 @@ async function initializeUserProfile(runtime) {
   userProfileStore?.close();
   userProfileStore = null;
   userProfileSavedGeneration = 0;
+  userProfileFilesystemSavedGeneration = 0;
+  userProfileNextFlushAt = 0;
   userProfileLastError = '';
   userProfileLastErrorAt = 0;
   let store = null;
@@ -208,12 +216,15 @@ async function initializeUserProfile(runtime) {
   }
 }
 
-async function flushUserProfileUpdates() {
+async function flushUserProfileUpdates(force = false) {
   if (!userProfileStore || !w) return null;
   const registryGeneration = Number(w.x.aw_user_profile_registry_generation?.() || 0);
   const filesystemGeneration = Number(w.x.aw_user_profile_filesystem_generation?.() || 0);
   if (registryGeneration === userProfileSavedGeneration
       && filesystemGeneration === userProfileFilesystemSavedGeneration) return null;
+  const now = performance.now();
+  if (!force && now < userProfileNextFlushAt) return null;
+  userProfileNextFlushAt = now + 250;
   try {
     const snapshotRecord = async (key, sizeExport, copyExport, maximum) => {
       const size = Number(w.x[sizeExport]?.() || 0);
@@ -247,7 +258,6 @@ async function flushUserProfileUpdates() {
     return null;
   } catch (error) {
     const message = error.message || String(error);
-    const now = performance.now();
     if (message !== userProfileLastError || now - userProfileLastErrorAt >= 5000) {
       userProfileLastError = message;
       userProfileLastErrorAt = now;
@@ -257,8 +267,237 @@ async function flushUserProfileUpdates() {
         text: `[profile] could not persist virtual HKCU changes; will retry: ${message}\n`,
       });
     }
+    userProfileNextFlushAt = now + 1000;
     return message;
   }
+}
+
+const MESSAGE_BOX_MARKER = '[anywasm-message-box]';
+const DIALOG_BOX_MARKER = '[anywasm-dialog-box]';
+const DIALOG_BOX_CLOSE_MARKER = '[anywasm-dialog-box-close]';
+function decodeMarkerHex(hex) {
+  if (hex.length > 2 * 1024 * 1024 || (hex.length & 1) !== 0 || !/^[0-9a-f]*$/i.test(hex)) return null;
+  try {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function parseMessageBoxMarker(line) {
+  if (!line.startsWith(`${MESSAGE_BOX_MARKER}1|`)) return null;
+  const fields = line.slice(`${MESSAGE_BOX_MARKER}1|`.length).split('|');
+  if (fields.length !== 6) return null;
+  const [ownerHex, flagsHex, defaultIdText, captionHex, textHex, buttonList] = fields;
+  if (!/^[0-9a-f]{1,8}$/i.test(ownerHex) || !/^[0-9a-f]{1,8}$/i.test(flagsHex)) return null;
+  if (!/^-?\d+$/.test(defaultIdText)) return null;
+  const owner = Number.parseInt(ownerHex, 16) >>> 0;
+  const flags = Number.parseInt(flagsHex, 16) >>> 0;
+  const defaultId = Number(defaultIdText);
+  if (!Number.isSafeInteger(defaultId)) return null;
+  const caption = decodeMarkerHex(captionHex);
+  const text = decodeMarkerHex(textHex);
+  if (caption === null || text === null) return null;
+  const buttons = [];
+  if (buttonList) {
+    for (const item of buttonList.split(',')) {
+      const colon = item.indexOf(':');
+      if (colon <= 0 || !/^-?\d+$/.test(item.slice(0, colon))) return null;
+      const id = Number(item.slice(0, colon));
+      if (!Number.isSafeInteger(id)) return null;
+      buttons.push({ id, label: item.slice(colon + 1) });
+    }
+  }
+  if (!buttons.length || new Set(buttons.map(({ id }) => id)).size !== buttons.length) return null;
+  return { owner, flags, defaultId, caption, text, buttons };
+}
+
+function parseDialogBoxMarker(line) {
+  if (!line.startsWith(`${DIALOG_BOX_MARKER}1|`)) return null;
+  const fields = line.slice(`${DIALOG_BOX_MARKER}1|`.length).split('|');
+  if (fields.length !== 13 && fields.length !== 18) return null;
+  const readHex = (value, maxDigits = 8) => {
+    if (!new RegExp(`^[0-9a-f]{1,${maxDigits}}$`, 'i').test(value)) return null;
+    return Number.parseInt(value, 16) >>> 0;
+  };
+  const readDecimal = (value, signed = false) => {
+    if (!(signed ? /^-?\d+$/ : /^\d+$/).test(value)) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const hwnd = readHex(fields[0]);
+  const owner = readHex(fields[1]);
+  const style = readHex(fields[2]);
+  const exStyle = readHex(fields[3]);
+  const x = readDecimal(fields[4], true);
+  const y = readDecimal(fields[5], true);
+  const cx = readDecimal(fields[6], true);
+  const cy = readDecimal(fields[7], true);
+  const title = decodeMarkerHex(fields[8]);
+  const extended = fields.length === 18;
+  const font = extended ? {
+    pointSize: readDecimal(fields[9]),
+    weight: readDecimal(fields[10]),
+    italic: readDecimal(fields[11]),
+    charset: readDecimal(fields[12]),
+    face: decodeMarkerHex(fields[13]),
+  } : null;
+  const initParamHex = fields[extended ? 14 : 9];
+  const count = readDecimal(fields[extended ? 15 : 10]);
+  const controlList = fields[extended ? 16 : 11];
+  const callsiteHex = fields[extended ? 17 : 12];
+  if ([hwnd, owner, style, exStyle, x, y, cx, cy, title, count].some((value) => value === null)
+      || !/^[0-9a-f]{1,16}$/i.test(initParamHex)
+      || !/^[0-9a-f]{1,16}$/i.test(callsiteHex)
+      || count > 256
+      || (font && Object.values(font).some((value) => value === null))) return null;
+  const controls = [];
+  if (controlList) {
+    for (const serialized of controlList.split(';')) {
+      const parts = serialized.split(',');
+      if (parts.length !== 10) return null;
+      const [idText, controlHwndHex, styleHex, exStyleHex, xText, yText, cxText, cyText, classHex, textHex] = parts;
+      const control = {
+        id: readDecimal(idText),
+        hwnd: readHex(controlHwndHex),
+        style: readHex(styleHex),
+        exStyle: readHex(exStyleHex),
+        x: readDecimal(xText, true),
+        y: readDecimal(yText, true),
+        cx: readDecimal(cxText, true),
+        cy: readDecimal(cyText, true),
+        className: decodeMarkerHex(classHex),
+        text: decodeMarkerHex(textHex),
+      };
+      if (Object.values(control).some((value) => value === null)) return null;
+      controls.push(control);
+    }
+  }
+  if (controls.length !== count) return null;
+  return {
+    hwnd,
+    owner,
+    style,
+    exStyle,
+    x,
+    y,
+    cx,
+    cy,
+    title,
+    initParam: Number.parseInt(initParamHex, 16),
+    count,
+    controls,
+    callsite: Number.parseInt(callsiteHex, 16),
+    font,
+  };
+}
+
+function parseDialogBoxCloseMarker(line) {
+  const prefix = `${DIALOG_BOX_CLOSE_MARKER}1|`;
+  if (!line.startsWith(prefix)) return null;
+  const fields = line.slice(prefix.length).split('|');
+  if (fields.length !== 2 || !/^[0-9a-f]{1,8}$/i.test(fields[0]) || !/^[0-9a-f]{1,16}$/i.test(fields[1])) return null;
+  const rawResult = BigInt(`0x${fields[1]}`);
+  const result = rawResult <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(rawResult) : rawResult;
+  return { hwnd: Number.parseInt(fields[0], 16) >>> 0, result };
+}
+
+function emitGuestStderr(text) {
+  if (!text) return;
+  const diagnostic = traceGuestDiagnostics
+    ? text.split('\n').filter((line) => line.startsWith('[process-exit]') || line.startsWith('[gta-eventvol]') || line.startsWith('[gta-startup-return]') || line.startsWith('[gta-copy-trace]') || line.startsWith('[gta-copy-watch]') || line.startsWith('[gta-txd-trace]') || line.startsWith('[gta-file-open]') || line.startsWith('[gta-file-read]') || line.startsWith('[gta-file-read-result]') || line.startsWith('[gta-file-size]') || line.startsWith('[gta-file-seek]') || line.startsWith('[gta-map-view]') || line.startsWith('[anywasm-message-box]') || line.startsWith('[anywasm-dialog-box]') || line.startsWith('[anywasm-dialog-box-close]') || /PostQuitMessage|PostThreadMessage|PostMessage|DestroyWindow|ExitProcess|TerminateProcess/i.test(line)).join('\n')
+    : text;
+  if (diagnostic) postMessage({ type: 'out', stream: 'stderr', text: diagnostic });
+}
+
+function handleGuestStderr(text) {
+  stderrCarry += text;
+  const lines = stderrCarry.split('\n');
+  stderrCarry = lines.pop() || '';
+  for (const rawLine of lines) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    const request = parseMessageBoxMarker(line);
+    if (request) {
+      const key = String(request.owner);
+      if (!pendingMessageBoxes.has(key)) {
+        pendingMessageBoxes.set(key, request);
+        postMessage({ type: 'message-box-request', ...request });
+      }
+    } else {
+      const dialogRequest = parseDialogBoxMarker(line);
+      if (dialogRequest) {
+        const key = String(dialogRequest.hwnd);
+        const signature = JSON.stringify(dialogRequest);
+        if (pendingDialogBoxes.get(key) !== signature) {
+          pendingDialogBoxes.set(key, signature);
+          postMessage({ type: 'dialog-box-request', ...dialogRequest });
+        }
+      } else {
+        const dialogClosed = parseDialogBoxCloseMarker(line);
+        if (dialogClosed) {
+          pendingDialogBoxes.delete(String(dialogClosed.hwnd));
+          postMessage({ type: 'dialog-box-close', ...dialogClosed });
+        } else {
+          emitGuestStderr(`${rawLine}\n`);
+        }
+      }
+    }
+  }
+  // Only retain a partial line while it could still become a marker. Ordinary
+  // stderr remains visible immediately even when the guest has not printed LF.
+  const markerPrefixes = [
+    `${MESSAGE_BOX_MARKER}1|`,
+    `${DIALOG_BOX_MARKER}1|`,
+    `${DIALOG_BOX_CLOSE_MARKER}1|`,
+  ];
+  const mayBeMarker = markerPrefixes.some((prefix) => prefix.startsWith(stderrCarry) || stderrCarry.startsWith(prefix));
+  if (stderrCarry && !mayBeMarker) {
+    emitGuestStderr(stderrCarry);
+    stderrCarry = '';
+  } else if (stderrCarry.startsWith(`${MESSAGE_BOX_MARKER}1|`)) {
+    const request = parseMessageBoxMarker(stderrCarry);
+    if (request) {
+      const key = String(request.owner);
+      if (!pendingMessageBoxes.has(key)) {
+        pendingMessageBoxes.set(key, request);
+        postMessage({ type: 'message-box-request', ...request });
+      }
+      stderrCarry = '';
+    }
+  } else if (stderrCarry.startsWith(`${DIALOG_BOX_MARKER}1|`)) {
+    const request = parseDialogBoxMarker(stderrCarry);
+    if (request) {
+      const key = String(request.hwnd);
+      const signature = JSON.stringify(request);
+      if (pendingDialogBoxes.get(key) !== signature) {
+        pendingDialogBoxes.set(key, signature);
+        postMessage({ type: 'dialog-box-request', ...request });
+      }
+      stderrCarry = '';
+    }
+  } else if (stderrCarry.startsWith(`${DIALOG_BOX_CLOSE_MARKER}1|`)) {
+    const dialogClosed = parseDialogBoxCloseMarker(stderrCarry);
+    if (dialogClosed) {
+      pendingDialogBoxes.delete(String(dialogClosed.hwnd));
+      postMessage({ type: 'dialog-box-close', ...dialogClosed });
+      stderrCarry = '';
+    }
+  }
+}
+
+function flushGuestStderr() {
+  if (!stderrCarry) return;
+  emitGuestStderr(stderrCarry);
+  stderrCarry = '';
+}
+
+function applyInput(kind, a, b, c) {
+  w.input(kind, a, b, c);
+  if (kind === 12) pendingMessageBoxes.delete(String(Number(b) >>> 0));
+  if (kind === 13) pendingDialogBoxes.delete(String(Number(b) >>> 0));
+  if (kind === 14) pendingDialogBoxes.delete(String(Number(a) >>> 0));
 }
 
 function sameWindowsPath(left, right) {
@@ -306,6 +545,18 @@ const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m
 
 async function start({ wasm, bundle, directFiles, directSource, entryPath, assetUrl, assetPackage, canvas, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, traceImports, diagProgress }) {
   const directLaunch = !!directFiles || !!directSource;
+  let directChangeFeedUrl = null;
+  let directChangeFeedId = null;
+  let directChangeSequence = 0;
+  let directChangeNextPollAt = 0;
+  let directChangeLastError = '';
+  let directChangeLastErrorAt = 0;
+  let directChangeUnavailable = false;
+  let directChangeOverflowReported = false;
+  let directChangePartialAttributesReported = false;
+  let directChangeNotificationsEnabled = false;
+  let directChangeCoverageConfigured = false;
+  let directChangeFeedReady = false;
   stopped = false;
   disposeRequested = false;
   wake = null;
@@ -316,6 +567,11 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
   sharedNeedsCoordinatorTurn = false;
   pendingSharedInputs.length = 0;
   pendingSharedCompletions.length = 0;
+  pendingMessageBoxes.clear();
+  pendingDialogBoxes.clear();
+  stderrCarry = '';
+  stderrDec.decode();
+  traceGuestDiagnostics = !!traceGtaEventvol;
   sharedHandoffPendingFinish = false;
   sharedExecutionMode = 'cooperative';
   sharedExecutionReason = '';
@@ -333,6 +589,24 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     options.memory = new WebAssembly.Memory({ initial: 4096, maximum: 32768, shared: true });
   }
   w = await AnyWasm.create(wasm, options);
+  const setDirectChangeCoverage = (enabled) => {
+    if (!directSource) return true;
+    if (directChangeCoverageConfigured && directChangeNotificationsEnabled === enabled) return true;
+    try {
+      w.setHostChangeNotificationsEnabled(enabled);
+      directChangeNotificationsEnabled = enabled;
+      directChangeCoverageConfigured = true;
+      return true;
+    } catch (error) {
+      directChangeUnavailable = true;
+      postMessage({
+        type: 'out',
+        stream: 'stderr',
+        text: `[coverage] could not ${enabled ? 'enable' : 'disable'} host-folder change coverage: ${error.message || error}\n`,
+      });
+      return false;
+    }
+  };
   const hostSystemParameters = await readHostSystemParameters();
   try {
     let bootFiles = directFiles;
@@ -346,6 +620,28 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       const manifest = await response.json();
       if (!Array.isArray(manifest.files) || !Array.isArray(manifest.directories)) {
         throw new Error(`${directSource.rootPath}: local install manifest is invalid`);
+      }
+      directChangeSequence = Number.isSafeInteger(manifest.changeSequence) && manifest.changeSequence >= 0
+        ? manifest.changeSequence
+        : 0;
+      directChangeFeedId = typeof manifest.changeFeedId === 'string' ? manifest.changeFeedId : null;
+      const changeUrl = new URL(directSource.manifestUrl);
+      if (!changeUrl.pathname.endsWith('/manifest')) {
+        throw new Error('local install manifest URL does not identify the Sims change feed');
+      }
+      changeUrl.pathname = `${changeUrl.pathname.slice(0, -'/manifest'.length)}/changes`;
+      changeUrl.search = '';
+      directChangeFeedUrl = changeUrl.href;
+      try {
+        const feedResponse = await fetch(`${directChangeFeedUrl}?since=${directChangeSequence}`, { cache: 'no-store' });
+        if (feedResponse.ok) {
+          const feed = await feedResponse.json();
+          directChangeFeedReady = feed?.available === true
+            && Number.isSafeInteger(feed.sequence)
+            && Array.isArray(feed.changes);
+        }
+      } catch {
+        directChangeFeedReady = false;
       }
       bootFiles = createRemoteDirectoryFiles([...manifest.files, ...manifest.directories], directSource.fileUrl);
       entryPath = directSource.entryPath || manifest.entryPath;
@@ -366,6 +662,10 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
             packageLength: Number(progress.packageLength),
           });
         }
+      }, {
+        afterLoadBegin: () => {
+          if (directSource) setDirectChangeCoverage(directChangeFeedReady);
+        },
       });
     } else {
       w.load(bundle);
@@ -493,7 +793,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       sharedCpuRequested = false;
       sharedExecutionReason = error.message || String(error);
       for (const input of pendingSharedInputs.splice(0)) {
-        if (input.type === 'input') w.input(input.kind, input.a, input.b, input.c);
+        if (input.type === 'input') applyInput(input.kind, input.a, input.b, input.c);
         else w.pushStdin(new TextEncoder().encode(input.text));
       }
       postMessage({
@@ -518,7 +818,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       pendingSharedCompletions.length = 0;
       sharedHandoffPendingFinish = false;
       for (const input of pendingSharedInputs.splice(0)) {
-        if (input.type === 'input') w.input(input.kind, input.a, input.b, input.c);
+        if (input.type === 'input') applyInput(input.kind, input.a, input.b, input.c);
         else w.pushStdin(new TextEncoder().encode(input.text));
       }
       postMessage({
@@ -596,6 +896,8 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     const factoryRoot = readGuestU32(0xc97b24) >>> 0;
     const factoryOffset = readGuestU32(0xc97b4c) >>> 0;
     const factoryMethods = (factoryRoot + factoryOffset) >>> 0;
+    const resourceManager = readGuestU32(0x11af588) >>> 0;
+    const resourcePath = readGuestU32((resourceManager + 0x28) >>> 0) >>> 0;
     const txdPoolBase = readGuestU32(0xc88018) >>> 0;
     const txdStorage = readGuestU32(0xc8800c) >>> 0;
     const txdRecords = readGuestU32(txdStorage) >>> 0;
@@ -616,6 +918,13 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
         copiedRecord: memoryWindow(0x30c04090, 16),
       },
       resourceGlobals: {
+        resourceSystem: {
+          managerGlobal: memoryWindow(0x11af588, 4),
+          manager: memoryWindow(resourceManager, 20),
+          managerPath: memoryWindow(resourcePath, 12),
+          workingDirectory: readGuestString(0x11af388, 260),
+          driveList: memoryWindow(0x11af5a0, 27),
+        },
         factoryBase: memoryWindow(0xc97b24, 12),
         rasterCreateCallback: `0x${readGuestU32((factoryRoot + 0x58) >>> 0).toString(16)}`,
         rasterCreateCallbackSlots: memoryWindow((factoryRoot + 0x58) >>> 0, 8),
@@ -656,6 +965,125 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       })),
     };
   };
+  const pollDirectHostChanges = async () => {
+    if (!directChangeFeedUrl || directChangeUnavailable || performance.now() < directChangeNextPollAt) return;
+    directChangeNextPollAt = performance.now() + 500;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2_000);
+    try {
+      const response = await fetch(`${directChangeFeedUrl}?since=${directChangeSequence}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`host-folder change feed returned HTTP ${response.status}`);
+      const feed = await response.json();
+      if (feed?.available !== true) {
+        setDirectChangeCoverage(false);
+        directChangeUnavailable = true;
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: `[coverage] host-folder change observation is unavailable: ${feed?.reason || 'local server disabled its recursive watcher'}\n`,
+        });
+        return;
+      }
+      if (!Number.isSafeInteger(feed.sequence) || feed.sequence < 0 || !Array.isArray(feed.changes)) {
+        throw new Error('host-folder change feed returned an invalid sequence response');
+      }
+      if (!setDirectChangeCoverage(true)) return;
+      if (!directChangePartialAttributesReported
+          && Array.isArray(feed.partialFilters)
+          && feed.partialFilters.includes(0x0004)) {
+        directChangePartialAttributesReported = true;
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: '[coverage] host-folder FILE_NOTIFY_CHANGE_ATTRIBUTES is partial: read-only/mode changes are observed, but Windows Hidden, System, and Archive attribute changes are not represented by Node file metadata.\n',
+        });
+      }
+      if (typeof feed.feedId === 'string') {
+        if (directChangeFeedId && feed.feedId !== directChangeFeedId) {
+          directChangeSequence = Number.isSafeInteger(feed.oldestSequence) && feed.oldestSequence > 0
+            ? feed.oldestSequence - 1
+            : 0;
+          directChangeOverflowReported = true;
+          postMessage({
+            type: 'out',
+            stream: 'stderr',
+            text: '[coverage] host change server restarted; applying its retained events from the new sequence epoch\n',
+          });
+        }
+        directChangeFeedId = feed.feedId;
+      }
+      if (feed.truncated === true && !directChangeOverflowReported) {
+        directChangeOverflowReported = true;
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: '[coverage] host-folder change feed overflowed; applying retained events, but older notifications may have been missed\n',
+        });
+      }
+      for (const change of feed.changes) {
+        const sequence = Number(change?.sequence);
+        if (!Number.isSafeInteger(sequence) || sequence <= directChangeSequence) continue;
+        if (sequence !== directChangeSequence + 1 && feed.truncated !== true && !directChangeOverflowReported) {
+          directChangeOverflowReported = true;
+          postMessage({
+            type: 'out',
+            stream: 'stderr',
+            text: `[coverage] host-folder change feed skipped sequence ${directChangeSequence + 1} through ${sequence - 1}\n`,
+          });
+        }
+        let relativePath;
+        try {
+          relativePath = normalizeDirectoryPath(change.path);
+        } catch {
+          directChangeSequence = sequence;
+          continue;
+        }
+        const filter = Number(change.filter);
+        if (!Number.isInteger(filter) || filter <= 0 || (filter & ~0x007f) !== 0) {
+          directChangeSequence = sequence;
+          continue;
+        }
+        const rootPath = directSource.rootPath.replace(/[\\/]+$/, '');
+        const guestPath = `${rootPath}\\${relativePath}`;
+        try {
+          w.notifyVfsChange(guestPath, filter);
+        } catch (error) {
+          setDirectChangeCoverage(false);
+          directChangeUnavailable = true;
+          postMessage({
+            type: 'out',
+            stream: 'stderr',
+            text: `[coverage] could not deliver host-folder change notifications: ${error.message || error}\n`,
+          });
+          return;
+        }
+        directChangeSequence = sequence;
+      }
+      if (feed.changes.length === 0 && feed.sequence > directChangeSequence) {
+        directChangeSequence = feed.sequence;
+      }
+      directChangeLastError = '';
+    } catch (error) {
+      setDirectChangeCoverage(false);
+      const message = error?.message || String(error);
+      const now = performance.now();
+      if (message !== directChangeLastError || now - directChangeLastErrorAt >= 5_000) {
+        directChangeLastError = message;
+        directChangeLastErrorAt = now;
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: `[coverage] host-folder change polling failed; will retry: ${message}\n`,
+        });
+      }
+      directChangeNextPollAt = now + 5_000;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
   if (canvas) {
     try {
       const tool = new ShaderTool(new URL('./shaders/', import.meta.url));
@@ -691,6 +1119,9 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     return retired;
   };
   while (!stopped && (status === Status.RUNNING || status === Status.FRAME || status === Status.IDLE)) {
+    // Host I/O is polled only between completed guest/coordinator slices, never from inside a
+    // Wasm call or while shared CPU workers are executing a batch.
+    await pollDirectHostChanges();
     const sliceStart = performance.now();
     sharedInstructionBudgetRemaining = SHARED_PUMP_INSTRUCTION_BUDGET;
     status = Status.RUNNING;
@@ -716,7 +1147,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       if (sharedNeedsCoordinatorTurn) {
         sharedCpuPool.importTo(w);
         for (const input of pendingSharedInputs.splice(0)) {
-          if (input.type === 'input') w.input(input.kind, input.a, input.b, input.c);
+          if (input.type === 'input') applyInput(input.kind, input.a, input.b, input.c);
           else w.pushStdin(new TextEncoder().encode(input.text));
         }
         sharedNeedsCoordinatorTurn = false;
@@ -822,13 +1253,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     }
     const o = w.takeStdout(); if (o.length) postMessage({ type: 'out', stream: 'stdout', text: dec.decode(o) });
     const e = w.takeStderr();
-    if (e.length) {
-      const text = dec.decode(e);
-      const diagnostic = traceGtaEventvol
-        ? text.split('\n').filter((line) => line.startsWith('[process-exit]') || line.startsWith('[gta-eventvol]') || line.startsWith('[gta-startup-return]') || line.startsWith('[gta-copy-trace]') || line.startsWith('[gta-copy-watch]') || line.startsWith('[gta-txd-trace]') || line.startsWith('[gta-file-open]') || line.startsWith('[gta-file-read]') || line.startsWith('[gta-file-read-result]') || line.startsWith('[gta-file-size]') || line.startsWith('[gta-file-seek]') || line.startsWith('[gta-map-view]') || /PostQuitMessage|PostThreadMessage|PostMessage|DestroyWindow|ExitProcess|TerminateProcess/i.test(line)).join('\n')
-        : text;
-      if (diagnostic) postMessage({ type: 'out', stream: 'stderr', text: diagnostic });
-    }
+    if (e.length) handleGuestStderr(stderrDec.decode(e, { stream: true }));
     if ((traceGtaEventvol || diagProgress) && performance.now() - lastTraceProgress >= (diagProgress ? 1_000 : 5_000)) {
       lastTraceProgress = performance.now();
       const trace = traceGtaEventvol ? {
@@ -935,8 +1360,11 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     }
     else if (status === Status.RUNNING) await sleep(0);
   }
+  const stderrTail = stderrDec.decode();
+  if (stderrTail) handleGuestStderr(stderrTail);
+  flushGuestStderr();
   const dt = (performance.now() - t0) / 1000;
-  userProfileFlushError = await flushUserProfileUpdates() || userProfileFlushError;
+  userProfileFlushError = await flushUserProfileUpdates(true) || userProfileFlushError;
   const callbackSuspended = !!w?.callbackSuspended;
   const n = callbackSuspended ? 0 : w.instructions();
   if (exec) postMessage({ type: 'gpu', ...exec.stats, asyncify: w?.asyncifyStats });
@@ -993,7 +1421,7 @@ onmessage = async (ev) => {
     if (sharedCpuRequested) {
       pendingSharedInputs.push({ type: 'input', kind: m.kind, a: m.a, b: m.b, c: m.c });
       sharedNeedsCoordinatorTurn = true;
-    } else w.input(m.kind, m.a, m.b, m.c);
+    } else applyInput(m.kind, m.a, m.b, m.c);
     wake?.(); wake = null;
   }
   else if (m.type === 'stdin' && w) {

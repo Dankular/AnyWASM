@@ -623,13 +623,9 @@ fn unimplemented_imports_are_reported_by_name() {
 }
 
 #[test]
-fn d3dprobe_runs_d3d11_then_exposes_the_untranslated_messagebox() {
+fn d3dprobe_runs_d3d11_and_waits_for_a_real_messagebox_response() {
     let (stop, _, err, process) = run("d3dprobe.exe");
-    assert!(matches!(
-        stop,
-        Stop::Unimplemented { ref dll, ref name }
-            if dll == "user32" && name.contains("MessageBoxA")
-    ));
+    assert_eq!(stop, Stop::Idle, "the guest should suspend for modal input");
     assert_ne!(
         process.extra.com.device, 0,
         "D3D11 device creation did not run"
@@ -638,7 +634,23 @@ fn d3dprobe_runs_d3d11_then_exposes_the_untranslated_messagebox() {
         process.extra.com.context, 0,
         "D3D11 context creation did not run"
     );
-    assert!(!err.contains("[MessageBox]"), "dialog was faked: {err:?}");
+    let message_box = process
+        .extra
+        .win
+        .message_box
+        .as_ref()
+        .expect("a real pending MessageBox must remain active until user input");
+    assert_eq!(message_box.caption, "probe");
+    assert_eq!(
+        message_box.text, "ok",
+        "the D3D11 probe should report success"
+    );
+    assert_eq!(message_box.buttons, vec![(1, "OK".to_owned())]);
+    assert_eq!(message_box.result, None, "the modal has not been answered");
+    assert!(
+        err.contains("[anywasm-message-box]1|"),
+        "the frontend must receive the pending modal request: {err:?}"
+    );
 }
 
 fn run_with(name: &str, cmdline: &str) -> (Stop, String, String, Process) {

@@ -544,7 +544,7 @@ export class AnyWasm {
   }
 
   /** Stage and load an executable directly from a browser-selected folder. */
-  async loadDirectory(entryPath, files, onProgress = () => {}) {
+  async loadDirectory(entryPath, files, onProgress = () => {}, { afterLoadBegin } = {}) {
     for (const name of ['aw_load_begin', 'aw_load_add_file', 'aw_load_finish']) {
       if (typeof this.x[name] !== 'function') throw new Error(`WASM runtime is missing ${name}; rebuild it`);
     }
@@ -579,18 +579,39 @@ export class AnyWasm {
       if (entryPtr !== null) this.x.aw_free(entryPtr, entryBytes.byteLength);
       this.x.aw_free(indexPtr, index.bytes.byteLength);
     }
+    await afterLoadBegin?.();
 
     const bootFiles = bootPaths.map((path) => ({ path, file: index.filesByPath.get(path) }));
     const totalBytes = bootFiles.reduce((total, item) => total + item.file.size, 0);
     let loadedBytes = 0;
+    let nextBootRead = 0;
+    const pendingBootReads = new Map();
+    const queueBootReads = () => {
+      while (nextBootRead < bootFiles.length && pendingBootReads.size < 4) {
+        const fileIndex = nextBootRead++;
+        const { path, file } = bootFiles[fileIndex];
+        const read = Promise.resolve()
+          .then(() => file.arrayBuffer())
+          .then((data) => ({ data }), (error) => ({ error }));
+        pendingBootReads.set(fileIndex, { path, file, read });
+      }
+    };
+    queueBootReads();
     for (let i = 0; i < bootFiles.length; i++) {
-      const { path, file } = bootFiles[i];
+      const pending = pendingBootReads.get(i);
+      if (!pending) throw new Error(`boot-file read queue lost file index ${i}`);
+      const { path, file } = pending;
       onProgress({ phase: 'boot', path, loadedBytes, totalBytes, fileIndex: i, totalFiles: bootFiles.length });
       let data;
       try {
-        data = new Uint8Array(await file.arrayBuffer());
+        const result = await pending.read;
+        if (result.error) throw result.error;
+        data = new Uint8Array(result.data);
       } catch (error) {
         throw new Error(`failed to read boot file ${path}: ${error?.message || error}`);
+      } finally {
+        pendingBootReads.delete(i);
+        queueBootReads();
       }
       if (data.byteLength !== file.size) {
         throw new Error(`short read for boot file ${path}: received ${data.byteLength} of ${file.size} bytes`);
@@ -636,6 +657,38 @@ export class AnyWasm {
     } finally {
       this.x.aw_free(ptr, bytes.byteLength);
     }
+  }
+
+  /** Notify guest directory-change waits about an external filesystem mutation. */
+  notifyVfsChange(path, filter) {
+    if (typeof this.x.aw_notify_vfs_change !== 'function') {
+      throw new Error('WASM runtime is missing aw_notify_vfs_change; rebuild it');
+    }
+    if (typeof path !== 'string' || !path || path.includes('\0')) {
+      throw new TypeError('host filesystem change path must be a nonempty string');
+    }
+    if (!Number.isInteger(filter) || filter < 1 || filter > 0xffff_ffff) {
+      throw new RangeError('host filesystem change filter must be a nonzero uint32');
+    }
+    const bytes = new TextEncoder().encode(path);
+    const ptr = this.x.aw_alloc(bytes.byteLength) >>> 0;
+    try {
+      new Uint8Array(this.x.memory.buffer, ptr, bytes.byteLength).set(bytes);
+      const rc = this.x.aw_notify_vfs_change(ptr, bytes.byteLength, filter >>> 0);
+      if (rc !== 0) throw new Error(this.message() || 'could not notify guest filesystem watchers');
+    } finally {
+      this.x.aw_free(ptr, bytes.byteLength);
+    }
+  }
+
+  /** Mark the direct install's host-folder change feed as connected or unavailable. */
+  setHostChangeNotificationsEnabled(enabled) {
+    if (typeof this.x.aw_set_host_change_notifications !== 'function') {
+      throw new Error('WASM runtime is missing aw_set_host_change_notifications; rebuild it');
+    }
+    if (typeof enabled !== 'boolean') throw new TypeError('host watcher state must be boolean');
+    const rc = this.x.aw_set_host_change_notifications(enabled ? 1 : 0);
+    if (rc !== 0) throw new Error(this.message() || 'could not set host filesystem watcher state');
   }
 
   /** Number of guest pages in the current quiescent process snapshot. */

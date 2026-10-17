@@ -1,5 +1,5 @@
 //! In-memory virtual file system keyed by lower-cased, `\`-normalised paths.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const ASSET_HEADER_LEN: usize = 24;
 const MAX_ASSET_READ_LEN: usize = 64 * 1024 * 1024 - 256 * 1024;
@@ -39,6 +39,7 @@ pub struct Vfs {
     files: HashMap<String, Vec<u8>>,
     assets: HashMap<String, AssetFile>,
     directories: HashSet<String>,
+    path_index: BTreeSet<String>,
     attributes: HashMap<String, u32>,
     file_metadata: HashMap<String, FileMetadata>,
     root_alias: Option<String>,
@@ -218,6 +219,13 @@ pub fn norm(path: &str) -> String {
 }
 
 impl Vfs {
+    fn rebuild_path_index(&mut self) {
+        self.path_index.clear();
+        self.path_index.extend(self.files.keys().cloned());
+        self.path_index.extend(self.assets.keys().cloned());
+        self.path_index.extend(self.directories.iter().cloned());
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -238,6 +246,18 @@ impl Vfs {
         Ok(())
     }
 
+    /// Return the drive bit for the host path mounted as the streamed VFS root.
+    pub fn root_alias_drive_mask(&self) -> u32 {
+        let Some(root) = self.root_alias.as_deref() else {
+            return 0;
+        };
+        let bytes = root.as_bytes();
+        if bytes.get(1) != Some(&b':') || !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+            return 0;
+        }
+        1u32 << (bytes[0].to_ascii_uppercase() - b'A')
+    }
+
     /// Normalize a path and map the mounted host installation prefix to the VFS root.
     pub fn normalize_path(&self, path: &str) -> String {
         let path = norm(path);
@@ -255,6 +275,7 @@ impl Vfs {
     pub fn insert(&mut self, path: &str, data: Vec<u8>) {
         let path = self.normalize_path(path);
         self.mark_user_profile_dirty(&path);
+        self.path_index.insert(path.clone());
         self.files.insert(path, data);
     }
     pub fn get(&self, path: &str) -> Option<&Vec<u8>> {
@@ -439,6 +460,7 @@ impl Vfs {
                 self.file_metadata.insert(path, metadata);
             }
         }
+        self.rebuild_path_index();
         self.user_profile_generation = 0;
         Ok(())
     }
@@ -753,6 +775,7 @@ impl Vfs {
         self.assets = parsed;
         self.file_metadata = parsed_metadata;
         self.directories.extend(parsed_directories);
+        self.rebuild_path_index();
         Ok(())
     }
 
@@ -872,8 +895,10 @@ impl Vfs {
             return true;
         }
         let prefix = format!("{dir}\\");
-        self.files.keys().any(|file| file.starts_with(&prefix))
-            || self.assets.keys().any(|file| file.starts_with(&prefix))
+        self.path_index
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|path| path.starts_with(&prefix))
     }
     /// Create one directory without creating missing parents.
     pub fn create_dir(&mut self, path: &str) -> Result<(), CreateDirError> {
@@ -889,6 +914,7 @@ impl Vfs {
             return Err(CreateDirError::PathNotFound);
         }
         self.directories.insert(dir.clone());
+        self.path_index.insert(dir.clone());
         self.mark_user_profile_dirty(&dir);
         Ok(())
     }
@@ -913,6 +939,7 @@ impl Vfs {
             // that is still supplied by immutable package data.
             return Err(RemoveDirError::AccessDenied);
         }
+        self.path_index.remove(&dir);
         self.attributes.remove(&dir);
         self.file_metadata.remove(&dir);
         self.mark_user_profile_dirty(&dir);
@@ -926,6 +953,9 @@ impl Vfs {
         let local = self.files.remove(&path).is_some();
         let asset = self.assets.remove(&path).is_some();
         if local || asset {
+            if !self.directories.contains(&path) {
+                self.path_index.remove(&path);
+            }
             self.mark_user_profile_dirty(&path);
             self.attributes.remove(&path);
             let mut parent = path.rsplit_once('\\').map(|(parent, _)| parent);
@@ -957,7 +987,10 @@ impl Vfs {
         };
         let mut entries: HashMap<String, (bool, u64)> = HashMap::new();
 
-        for file in self.paths() {
+        for file in self.path_index.range(prefix.clone()..) {
+            if !prefix.is_empty() && !file.starts_with(&prefix) {
+                break;
+            }
             let Some(relative) = file.strip_prefix(&prefix) else {
                 continue;
             };
@@ -966,6 +999,8 @@ impl Vfs {
             }
             if let Some((child, _)) = relative.split_once('\\') {
                 entries.entry(child.to_owned()).or_insert((true, 0));
+            } else if self.directories.contains(file) {
+                entries.entry(relative.to_owned()).or_insert((true, 0));
             } else {
                 entries.insert(
                     relative.to_owned(),

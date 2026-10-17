@@ -7,6 +7,7 @@
 
 use super::gpu::{op, Pk};
 use super::*;
+use crate::hle::gdi::bitmap_snapshot;
 use crate::process::*;
 use anywasm_cpu::mem::PROT_RW;
 use anywasm_cpu::CpuMode;
@@ -17,6 +18,8 @@ pub const WM_DESTROY: u64 = 0x0002;
 pub const WM_SIZE: u64 = 0x0005;
 pub const WM_SETFOCUS: u64 = 0x0007;
 pub const WM_KILLFOCUS: u64 = 0x0008;
+pub const WM_COMMAND: u64 = 0x0111;
+pub const WM_INITDIALOG: u64 = 0x0110;
 pub const WM_WINDOWPOSCHANGING: u64 = 0x0046;
 pub const WM_WINDOWPOSCHANGED: u64 = 0x0047;
 pub const WM_PAINT: u64 = 0x000f;
@@ -131,7 +134,10 @@ const TME_CANCEL: u32 = 0x8000_0000;
 const HWND_BASE: u64 = 0x0001_0010;
 const HWND_DESKTOP: u64 = HWND_BASE;
 const WS_CHILD: u32 = 0x4000_0000;
+const WS_TABSTOP: u32 = 0x0001_0000;
+const WS_DISABLED: u32 = 0x0800_0000;
 const WS_POPUP: u32 = 0x8000_0000;
+const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_MINIMIZE: u32 = 0x2000_0000;
 const WS_MAXIMIZE: u32 = 0x0100_0000;
 const WS_EX_TOPMOST: u32 = 0x0000_0008;
@@ -284,14 +290,95 @@ pub struct Hook {
     pub thread_id: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingMessageBox {
+    pub owner: u64,
+    pub flags: u32,
+    pub caption: String,
+    pub text: String,
+    pub buttons: Vec<(u32, String)>,
+    pub default_button: u32,
+    pub result: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogControl {
+    pub hwnd: u64,
+    pub id: u32,
+    pub class: String,
+    pub text: String,
+    pub style: u32,
+    pub ex_style: u32,
+    pub x: i16,
+    pub y: i16,
+    pub width: i16,
+    pub height: i16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDialog {
+    pub hwnd: u64,
+    pub owner: u64,
+    pub owner_was_enabled: bool,
+    pub previous_focus: u64,
+    pub instance: u64,
+    pub template: u64,
+    pub dialog_proc: u64,
+    pub init_param: u64,
+    pub callsite: u64,
+    pub title: String,
+    pub style: u32,
+    pub ex_style: u32,
+    pub font: Option<(u16, u16, u8, u8, String)>,
+    pub x: i16,
+    pub y: i16,
+    pub width: i16,
+    pub height: i16,
+    pub controls: Vec<DialogControl>,
+    pub result: Option<u64>,
+    pub presented: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IconBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub bits_per_pixel: u32,
+    pub row_bytes: usize,
+    pub bits: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IconObject {
+    pub is_icon: bool,
+    pub width: u32,
+    pub height: u32,
+    pub hotspot: (u32, u32),
+    pub mask: Option<IconBitmap>,
+    pub color: Option<IconBitmap>,
+    /// Raw, validated RT_ICON/RT_CURSOR DIB data including any cursor hotspot header.
+    pub resource_bits: Option<Vec<u8>>,
+}
+
 #[derive(Default)]
 pub struct WinState {
     pub classes: HashMap<String, Class>,
     pub atoms: HashMap<u16, String>,
     pub windows: HashMap<u64, Window>,
+    /// One synchronous MessageBox call can be suspended while the host collects a button click.
+    pub message_box: Option<PendingMessageBox>,
+    /// A modal dialog remains at its DialogBoxParam callsite until EndDialog supplies a result.
+    pub modal_dialogs: Vec<PendingDialog>,
+    /// Owned HICON/HCURSOR objects created from caller bitmaps or resource DIBs.
+    pub icons: HashMap<u64, IconObject>,
     z_order: Vec<u64>,
     window_threads: HashMap<u64, u32>,
     pub queue: VecDeque<Msg>,
+    /// Guest threads that have created a USER message queue through GetMessage/PeekMessage.
+    message_queue_threads: HashSet<u32>,
+    /// Process IDs whose translated UI thread has reached its first blocking GetMessage.
+    /// Win32's WaitForInputIdle succeeds immediately on later calls after that first idle point.
+    input_idle_observed: HashSet<u32>,
     timers: HashMap<(u32, u64, u64), Timer>,
     next_timer_id: u32,
     /// Balanced multimedia timer resolution requests, keyed by requested period in ms.
@@ -431,13 +518,13 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "SetWindowPlacement" => set_window_placement,
         "UpdateWindow" => update_window,
-        "DialogBoxParamA" => dialog_box_param_a_unimplemented,
+        "DialogBoxParamA" => dialog_box_param_a,
         "EndDialog" => end_dialog,
-        "CreateIconIndirect" => create_icon_indirect_unimplemented,
-        "CreateIconFromResource" => create_icon_from_resource_unimplemented,
+        "CreateIconIndirect" => create_icon_indirect,
+        "CreateIconFromResource" => create_icon_from_resource,
         "RegisterDeviceNotificationA" => register_device_notification_a,
-        "WaitForInputIdle" => wait_for_input_idle_unimplemented,
-        "FillRect" => fill_rect_unimplemented,
+        "WaitForInputIdle" => wait_for_input_idle,
+        "FillRect" => fill_rect,
         "RegisterDeviceNotificationW" => register_device_notification_w,
         "UnregisterDeviceNotification" => unregister_device_notification,
         "EnumDisplayDevicesW" => enum_display_devices_w,
@@ -697,8 +784,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             let (index, dpi) = (p.arg(0) as u32, p.arg(1) as u32);
             Ok(system_metric(index).saturating_mul(dpi as u64) / 96)
         },
-        "MessageBoxA" => message_box_a_unimplemented,
-        "MessageBoxW" => message_box_w_unimplemented,
+        "MessageBoxA" => |p| message_box(p, false),
+        "MessageBoxW" => |p| message_box(p, true),
         "MonitorFromWindow" => monitor_from_window,
         "MonitorFromPoint" => monitor_from_point,
         "GetMonitorInfoA" => |p| get_monitor_info(p, false),
@@ -709,20 +796,147 @@ pub fn lookup(name: &str) -> Option<HleFn> {
     })
 }
 
-fn message_box_a_unimplemented(p: &mut Process) -> R {
-    let flags = p.arg(3) as u32;
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!("MessageBoxA interactive dialog (type={flags:#x})"),
-    })
+fn message_box_buttons(button_type: u32) -> Option<Vec<(u32, String)>> {
+    let buttons: &[(u32, &str)] = match button_type {
+        0 => &[(1, "OK")],
+        1 => &[(1, "OK"), (2, "Cancel")],
+        2 => &[(3, "Abort"), (4, "Retry"), (5, "Ignore")],
+        3 => &[(6, "Yes"), (7, "No"), (2, "Cancel")],
+        4 => &[(6, "Yes"), (7, "No")],
+        5 => &[(4, "Retry"), (2, "Cancel")],
+        6 => &[(2, "Cancel"), (10, "Try Again"), (11, "Continue")],
+        _ => return None,
+    };
+    Some(
+        buttons
+            .iter()
+            .map(|(id, label)| (*id, (*label).to_owned()))
+            .collect(),
+    )
 }
 
-fn message_box_w_unimplemented(p: &mut Process) -> R {
-    let flags = p.arg(3) as u32;
-    Err(Stop::Unimplemented {
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    result
+}
+
+fn read_message_box_string(p: &Process, ptr: u64, wide: bool, field: &str) -> Result<String, Stop> {
+    if ptr == 0 {
+        return Ok(String::new());
+    }
+    if ptr < 0x1_0000 {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!(
+                "MessageBox{} {field} string resource {ptr:#x}",
+                if wide { 'W' } else { 'A' }
+            ),
+        });
+    }
+    if wide {
+        p.read_wstr(ptr)
+    } else {
+        p.read_cstr(ptr)
+    }
+}
+
+fn message_box(p: &mut Process, wide: bool) -> R {
+    const BUTTON_MASK: u32 = 0x000f;
+    const ICON_MASK: u32 = 0x00f0;
+    const DEFAULT_MASK: u32 = 0x0300;
+    const SUPPORTED_FLAGS: u32 = BUTTON_MASK
+        | ICON_MASK
+        | DEFAULT_MASK
+        | 0x0000_3000 // MB_APPLMODAL / MB_SYSTEMMODAL
+        | 0x0001_0000 // MB_SETFOREGROUND
+        | 0x0004_0000 // MB_TOPMOST
+        | 0x0008_0000 // MB_RIGHT
+        | 0x0010_0000; // MB_RTLREADING
+
+    let (owner, text_ptr, caption_ptr, flags) = (p.arg(0), p.arg(1), p.arg(2), p.arg(3) as u32);
+    let api = if wide { "MessageBoxW" } else { "MessageBoxA" };
+    if flags & !SUPPORTED_FLAGS != 0 || !matches!(flags & ICON_MASK, 0 | 0x10 | 0x20 | 0x30 | 0x40)
+    {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!("{api} flags {flags:#x} include unsupported styles"),
+        });
+    }
+    let buttons = message_box_buttons(flags & BUTTON_MASK).ok_or_else(|| Stop::Unimplemented {
         dll: "user32".into(),
-        name: format!("MessageBoxW interactive dialog (type={flags:#x})"),
-    })
+        name: format!("{api} button style {}", flags & BUTTON_MASK),
+    })?;
+    let default_index = ((flags & DEFAULT_MASK) >> 8) as usize;
+    let Some((default_button, _)) = buttons.get(default_index) else {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!("{api} default button {default_index} is outside its button set"),
+        });
+    };
+    let default_button = *default_button;
+    if owner != 0 && owner != HWND_DESKTOP && !p.extra.win.windows.contains_key(&owner) {
+        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(0);
+    }
+    let text = read_message_box_string(p, text_ptr, wide, "text")?;
+    let caption = read_message_box_string(p, caption_ptr, wide, "caption")?;
+    let caption = if caption.is_empty() {
+        "Error".to_owned()
+    } else {
+        caption
+    };
+    let request = PendingMessageBox {
+        owner,
+        flags,
+        caption,
+        text,
+        buttons,
+        default_button,
+        result: None,
+    };
+
+    if let Some(pending) = p.extra.win.message_box.as_mut() {
+        if pending.owner != request.owner
+            || pending.flags != request.flags
+            || pending.caption != request.caption
+            || pending.text != request.text
+            || pending.buttons != request.buttons
+        {
+            return Err(Stop::Unimplemented {
+                dll: "user32".into(),
+                name: format!("nested {api} while another modal message box is active"),
+            });
+        }
+        if let Some(result) = pending.result.take() {
+            p.extra.win.message_box = None;
+            return Ok(result as u64);
+        }
+        return Err(Stop::Idle);
+    }
+
+    let buttons = request
+        .buttons
+        .iter()
+        .map(|(id, label)| format!("{id}:{label}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let marker = format!(
+        "[anywasm-message-box]1|{:x}|{:x}|{}|{}|{}|{}\n",
+        request.owner,
+        request.flags,
+        request.default_button,
+        encode_hex(request.caption.as_bytes()),
+        encode_hex(request.text.as_bytes()),
+        buttons,
+    );
+    p.stderr.extend_from_slice(marker.as_bytes());
+    p.extra.win.message_box = Some(request);
+    Err(Stop::Idle)
 }
 
 fn pointer_sized_minus_one(p: &Process) -> u64 {
@@ -733,37 +947,749 @@ fn pointer_sized_minus_one(p: &Process) -> u64 {
     }
 }
 
-fn dialog_box_param_a_unimplemented(p: &mut Process) -> R {
-    let (template, parent, dialog_proc) = (p.arg(1), p.arg(2), p.arg(3));
-    if template == 0 || dialog_proc == 0 {
-        p.set_last_error(87); // ERROR_INVALID_PARAMETER
-        return Ok(pointer_sized_minus_one(p));
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DialogTemplateField {
+    Empty,
+    Ordinal(u16),
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedDialogControl {
+    id: u32,
+    class: DialogTemplateField,
+    title: DialogTemplateField,
+    style: u32,
+    ex_style: u32,
+    x: i16,
+    y: i16,
+    width: i16,
+    height: i16,
+    creation_data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedDialogTemplate {
+    extended: bool,
+    help_id: u32,
+    style: u32,
+    ex_style: u32,
+    x: i16,
+    y: i16,
+    width: i16,
+    height: i16,
+    menu: DialogTemplateField,
+    class: DialogTemplateField,
+    title: DialogTemplateField,
+    font: Option<(u16, u16, u8, u8, String)>,
+    controls: Vec<ParsedDialogControl>,
+}
+
+struct DialogTemplateReader<'a> {
+    process: &'a Process,
+    base: u64,
+    size: u32,
+    offset: u32,
+}
+
+impl DialogTemplateReader<'_> {
+    fn require(&self, bytes: u32) -> Result<(), Stop> {
+        if self.offset.saturating_add(bytes) > self.size {
+            return Err(Stop::Crash(format!(
+                "malformed dialog template: read at {:#x} exceeds {} bytes",
+                self.offset, self.size
+            )));
+        }
+        Ok(())
     }
-    if parent != 0 && parent != HWND_DESKTOP && !p.extra.win.windows.contains_key(&parent) {
-        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
-        return Ok(pointer_sized_minus_one(p));
+
+    fn u8(&mut self) -> Result<u8, Stop> {
+        self.require(1)?;
+        let value = self.process.rd8(self.base + self.offset as u64)?;
+        self.offset += 1;
+        Ok(value)
     }
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!(
-            "DialogBoxParamA template={template:#x} callback={dialog_proc:#x}; dialog templates and modal message loops are not translated"
-        ),
+
+    fn u16(&mut self) -> Result<u16, Stop> {
+        self.require(2)?;
+        let value = self.process.rd16(self.base + self.offset as u64)?;
+        self.offset += 2;
+        Ok(value)
+    }
+
+    fn u32(&mut self) -> Result<u32, Stop> {
+        self.require(4)?;
+        let value = self.process.rd32(self.base + self.offset as u64)?;
+        self.offset += 4;
+        Ok(value)
+    }
+
+    fn i16(&mut self) -> Result<i16, Stop> {
+        Ok(self.u16()? as i16)
+    }
+
+    fn field(&mut self) -> Result<DialogTemplateField, Stop> {
+        const MAX_UNITS: u32 = 4096;
+        let first = self.u16()?;
+        match first {
+            0 => Ok(DialogTemplateField::Empty),
+            0xffff => Ok(DialogTemplateField::Ordinal(self.u16()?)),
+            first => {
+                let mut units = Vec::with_capacity(32);
+                units.push(first);
+                while (units.len() as u32) < MAX_UNITS {
+                    let unit = self.u16()?;
+                    if unit == 0 {
+                        return Ok(DialogTemplateField::Text(String::from_utf16_lossy(&units)));
+                    }
+                    units.push(unit);
+                }
+                Err(Stop::Crash(
+                    "malformed dialog template: string exceeds 4096 UTF-16 units".into(),
+                ))
+            }
+        }
+    }
+
+    fn align_dword(&mut self) -> Result<(), Stop> {
+        let aligned =
+            self.offset.checked_add(3).ok_or_else(|| {
+                Stop::Crash("malformed dialog template: alignment overflow".into())
+            })? & !3;
+        self.require(aligned.saturating_sub(self.offset))?;
+        self.offset = aligned;
+        Ok(())
+    }
+
+    fn bytes(&mut self, count: u32) -> Result<Vec<u8>, Stop> {
+        self.require(count)?;
+        let bytes = self
+            .process
+            .read_bytes(self.base + self.offset as u64, count as usize)?;
+        self.offset += count;
+        Ok(bytes)
+    }
+
+    fn utf16_z(&mut self) -> Result<String, Stop> {
+        let mut units = Vec::with_capacity(32);
+        while units.len() < 4096 {
+            let unit = self.u16()?;
+            if unit == 0 {
+                return Ok(String::from_utf16_lossy(&units));
+            }
+            units.push(unit);
+        }
+        Err(Stop::Crash(
+            "malformed dialog template: font face exceeds 4096 UTF-16 units".into(),
+        ))
+    }
+}
+
+fn parse_dialog_template(
+    process: &Process,
+    base: u64,
+    size: u32,
+) -> Result<ParsedDialogTemplate, Stop> {
+    const DS_SETFONT: u32 = 0x0000_0040;
+    const MAX_CONTROLS: u16 = 256;
+    let mut reader = DialogTemplateReader {
+        process,
+        base,
+        size,
+        offset: 0,
+    };
+    let extended = size >= 4 && process.rd16(base)? == 1 && process.rd16(base + 2)? == 0xffff;
+
+    let (help_id, ex_style, style, count) = if extended {
+        reader.u16()?; // dlgVer
+        reader.u16()?; // signature
+        let help_id = reader.u32()?;
+        let ex_style = reader.u32()?;
+        let style = reader.u32()?;
+        (help_id, ex_style, style, reader.u16()?)
+    } else {
+        let style = reader.u32()?;
+        let ex_style = reader.u32()?;
+        (0, ex_style, style, reader.u16()?)
+    };
+    if count > MAX_CONTROLS {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!("DialogBoxParamA dialog has {count} controls; limit is {MAX_CONTROLS}"),
+        });
+    }
+    let (x, y, width, height) = (reader.i16()?, reader.i16()?, reader.i16()?, reader.i16()?);
+    let menu = reader.field()?;
+    let class = reader.field()?;
+    let title = reader.field()?;
+    let font = if style & DS_SETFONT != 0 {
+        let point_size = reader.u16()?;
+        if extended {
+            let weight = reader.u16()?;
+            let italic = reader.u8()?;
+            let charset = reader.u8()?;
+            Some((point_size, weight, italic, charset, reader.utf16_z()?))
+        } else {
+            Some((point_size, 0, 0, 0, reader.utf16_z()?))
+        }
+    } else {
+        None
+    };
+
+    let mut controls = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        reader.align_dword()?;
+        let (help_id, ex_style, style) = if extended {
+            (reader.u32()?, reader.u32()?, reader.u32()?)
+        } else {
+            (0, reader.u32()?, reader.u32()?)
+        };
+        let (x, y, width, height) = (reader.i16()?, reader.i16()?, reader.i16()?, reader.i16()?);
+        let id = if extended {
+            reader.u32()?
+        } else {
+            reader.u16()? as u32
+        };
+        let class = reader.field()?;
+        let title = reader.field()?;
+        let creation_size = reader.u16()? as u32;
+        let creation_data = reader.bytes(creation_size)?;
+        controls.push(ParsedDialogControl {
+            id,
+            class,
+            title,
+            style,
+            ex_style,
+            x,
+            y,
+            width,
+            height,
+            creation_data,
+        });
+        let _ = help_id;
+    }
+
+    Ok(ParsedDialogTemplate {
+        extended,
+        help_id,
+        style,
+        ex_style,
+        x,
+        y,
+        width,
+        height,
+        menu,
+        class,
+        title,
+        font,
+        controls,
     })
 }
 
+fn dialog_field_text(field: &DialogTemplateField) -> String {
+    match field {
+        DialogTemplateField::Text(text) => text.clone(),
+        DialogTemplateField::Ordinal(id) => format!("#{id}"),
+        DialogTemplateField::Empty => String::new(),
+    }
+}
+
+fn dialog_control_class(field: &DialogTemplateField) -> Option<String> {
+    match field {
+        DialogTemplateField::Text(class) => Some(lc(class)),
+        DialogTemplateField::Ordinal(0x80) => Some("button".into()),
+        DialogTemplateField::Ordinal(0x81) => Some("edit".into()),
+        DialogTemplateField::Ordinal(0x82) => Some("static".into()),
+        DialogTemplateField::Ordinal(0x83) => Some("listbox".into()),
+        DialogTemplateField::Ordinal(0x84) => Some("scrollbar".into()),
+        DialogTemplateField::Ordinal(0x85) => Some("combobox".into()),
+        DialogTemplateField::Empty => None,
+        DialogTemplateField::Ordinal(_) => None,
+    }
+}
+
+fn dialog_template_payload(
+    p: &Process,
+    instance: u64,
+    template: u64,
+) -> Result<Option<(u64, u32)>, Stop> {
+    const RT_DIALOG: u16 = 5;
+    if template <= 0xffff {
+        super::kernel32::resource_payload_by_id(p, instance, RT_DIALOG, template as u16)
+    } else {
+        let name = p.read_cstr(template)?;
+        super::kernel32::resource_payload_by_name(p, instance, RT_DIALOG, &name)
+    }
+}
+
+fn dialog_base_x(value: i16) -> i32 {
+    (value as i32 * 7) / 4
+}
+
+fn dialog_base_y(value: i16) -> i32 {
+    (value as i32 * 14) / 8
+}
+
+fn allocate_window_handle(p: &mut Process) -> u64 {
+    p.extra.win.next = p.extra.win.next.max(HWND_BASE) + 0x10;
+    p.extra.win.next
+}
+
+fn alloc_dialog_window(
+    p: &mut Process,
+    parent: u64,
+    instance: u64,
+    template: &ParsedDialogTemplate,
+) -> Result<(u64, Vec<DialogControl>), Stop> {
+    let title = dialog_field_text(&template.title);
+    let x = dialog_base_x(template.x);
+    let y = dialog_base_y(template.y);
+    let width = dialog_base_x(template.width).max(1);
+    let height = dialog_base_y(template.height).max(1);
+    for control in &template.controls {
+        let class = dialog_control_class(&control.class).ok_or_else(|| Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!(
+                "DialogBoxParamA control {} has unsupported class {:?}",
+                control.id, control.class
+            ),
+        })?;
+        if !control.creation_data.is_empty() {
+            return Err(Stop::Unimplemented {
+                dll: "user32".into(),
+                name: format!(
+                    "DialogBoxParamA control {} class {class} has {} creation-data bytes",
+                    control.id,
+                    control.creation_data.len()
+                ),
+            });
+        }
+        if builtin_class(&class).is_none() {
+            return Err(Stop::Unimplemented {
+                dll: "user32".into(),
+                name: format!("DialogBoxParamA control class {class} is not registered"),
+            });
+        }
+    }
+    let hwnd = allocate_window_handle(p);
+    let (client_x, client_y, _) = nonclient_insets(template.style, template.ex_style, false, 96);
+    let (client_w, client_h) =
+        client_size_from_outer(width, height, template.style, template.ex_style, false);
+    p.extra.win.windows.insert(
+        hwnd,
+        Window {
+            class: "#32770".into(),
+            wndproc: 0,
+            title: title.clone(),
+            x,
+            y,
+            w: width,
+            h: height,
+            client_x,
+            client_y,
+            client_w,
+            client_h,
+            visible: true,
+            style: template.style | WS_POPUP | WS_VISIBLE,
+            ex_style: template.ex_style,
+            has_menu: false,
+            menu: 0,
+            hinstance: instance,
+            user_data: 0,
+            parent,
+            control_id: 0,
+            unicode: true,
+            needs_paint: true,
+            gpu_id: p.extra.gpu.new_id(),
+        },
+    );
+    p.extra.win.z_order.retain(|existing| *existing != hwnd);
+    p.extra.win.z_order.insert(0, hwnd);
+    p.extra.win.window_threads.insert(hwnd, p.current_thread_id);
+
+    let mut controls = Vec::with_capacity(template.controls.len());
+    for control in &template.controls {
+        let class = dialog_control_class(&control.class).unwrap();
+        let child_hwnd = allocate_window_handle(p);
+        let child_style = control.style | WS_CHILD;
+        let class_info = builtin_class(&class).unwrap();
+        let child_x = dialog_base_x(control.x);
+        let child_y = dialog_base_y(control.y);
+        let child_w = dialog_base_x(control.width).max(1);
+        let child_h = dialog_base_y(control.height).max(1);
+        let child_text = dialog_field_text(&control.title);
+        p.extra.win.windows.insert(
+            child_hwnd,
+            Window {
+                class: class.clone(),
+                wndproc: class_info.wndproc,
+                title: child_text.clone(),
+                x: child_x,
+                y: child_y,
+                w: child_w,
+                h: child_h,
+                client_x: 0,
+                client_y: 0,
+                client_w: child_w,
+                client_h: child_h,
+                visible: child_style & WS_VISIBLE != 0,
+                style: child_style,
+                ex_style: control.ex_style,
+                has_menu: false,
+                menu: 0,
+                hinstance: instance,
+                user_data: 0,
+                parent: hwnd,
+                control_id: control.id,
+                unicode: true,
+                needs_paint: true,
+                gpu_id: p.extra.gpu.new_id(),
+            },
+        );
+        p.extra
+            .win
+            .z_order
+            .retain(|existing| *existing != child_hwnd);
+        p.extra.win.z_order.insert(0, child_hwnd);
+        p.extra
+            .win
+            .window_threads
+            .insert(child_hwnd, p.current_thread_id);
+        controls.push(DialogControl {
+            hwnd: child_hwnd,
+            id: control.id,
+            class,
+            text: child_text,
+            style: child_style,
+            ex_style: control.ex_style,
+            x: control.x,
+            y: control.y,
+            width: control.width,
+            height: control.height,
+        });
+    }
+    Ok((hwnd, controls))
+}
+
+fn refresh_pending_dialog_controls(p: &mut Process, hwnd: u64) {
+    let Some(index) = p
+        .extra
+        .win
+        .modal_dialogs
+        .iter()
+        .rposition(|dialog| dialog.hwnd == hwnd)
+    else {
+        return;
+    };
+    for control in &mut p.extra.win.modal_dialogs[index].controls {
+        let Some(window) = p.extra.win.windows.get(&control.hwnd) else {
+            continue;
+        };
+        control.text = window.title.clone();
+        control.style = window.style;
+        control.ex_style = window.ex_style;
+    }
+}
+
+fn dialog_callsite(p: &Process) -> Result<u64, Stop> {
+    p.rdptr(p.cpu.gpr[anywasm_cpu::cpu::RSP])
+}
+
+fn emit_dialog_request(p: &mut Process, dialog: &PendingDialog) {
+    let controls = dialog
+        .controls
+        .iter()
+        .map(|control| {
+            format!(
+                "{},{:x},{:x},{:x},{},{},{},{},{},{}",
+                control.id,
+                control.hwnd,
+                control.style,
+                control.ex_style,
+                control.x,
+                control.y,
+                control.width,
+                control.height,
+                encode_hex(control.class.as_bytes()),
+                encode_hex(control.text.as_bytes())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let font = dialog.font.as_ref();
+    let marker = format!(
+        "[anywasm-dialog-box]1|{hwnd:x}|{owner:x}|{style:x}|{ex_style:x}|{x}|{y}|{width}|{height}|{title}|{font_point_size}|{font_weight}|{font_italic}|{font_charset}|{font_face}|{init_param:x}|{control_count}|{controls}|{callsite:x}\n",
+        hwnd = dialog.hwnd,
+        owner = dialog.owner,
+        style = dialog.style,
+        ex_style = dialog.ex_style,
+        x = dialog.x,
+        y = dialog.y,
+        width = dialog.width,
+        height = dialog.height,
+        title = encode_hex(dialog.title.as_bytes()),
+        font_point_size = font.map(|font| font.0).unwrap_or(0),
+        font_weight = font.map(|font| font.1).unwrap_or(0),
+        font_italic = font.map(|font| font.2).unwrap_or(0),
+        font_charset = font.map(|font| font.3).unwrap_or(0),
+        font_face = font
+            .map(|font| encode_hex(font.4.as_bytes()))
+            .unwrap_or_default(),
+        init_param = dialog.init_param,
+        control_count = dialog.controls.len(),
+        controls = controls,
+        callsite = dialog.callsite,
+    );
+    p.stderr.extend_from_slice(marker.as_bytes());
+    if let Some(active) = p
+        .extra
+        .win
+        .modal_dialogs
+        .iter_mut()
+        .find(|active| active.hwnd == dialog.hwnd)
+    {
+        active.presented = true;
+    }
+}
+
+fn emit_dialog_closed(p: &mut Process, dialog: &PendingDialog) {
+    if dialog.presented {
+        p.stderr.extend_from_slice(
+            format!(
+                "[anywasm-dialog-box-close]1|{:x}|{:x}\n",
+                dialog.hwnd,
+                dialog.result.unwrap_or(0)
+            )
+            .as_bytes(),
+        );
+    }
+}
+
+fn invoke_dialog_proc(
+    p: &mut Process,
+    hwnd: u64,
+    message: u64,
+    wparam: u64,
+    lparam: u64,
+) -> Result<u64, Stop> {
+    let Some(dialog) = p
+        .extra
+        .win
+        .modal_dialogs
+        .iter()
+        .find(|dialog| dialog.hwnd == hwnd)
+    else {
+        return Ok(0);
+    };
+    let callback = dialog.dialog_proc;
+    p.call_guest(callback, &[hwnd, message, wparam, lparam])
+}
+
+fn end_dialog_for(p: &mut Process, hwnd: u64, result: u64) -> bool {
+    let Some(dialog) = p
+        .extra
+        .win
+        .modal_dialogs
+        .iter_mut()
+        .rev()
+        .find(|dialog| dialog.hwnd == hwnd)
+    else {
+        return false;
+    };
+    if dialog.result.is_none() {
+        dialog.result = Some(result);
+    }
+    true
+}
+
+fn destroy_modal_dialog(p: &mut Process, hwnd: u64) -> Result<u64, Stop> {
+    let Some(index) = p
+        .extra
+        .win
+        .modal_dialogs
+        .iter()
+        .rposition(|dialog| dialog.hwnd == hwnd)
+    else {
+        return Ok(0);
+    };
+    let dialog = p.extra.win.modal_dialogs[index].clone();
+    let children = p
+        .extra
+        .win
+        .windows
+        .iter()
+        .filter_map(|(&child, window)| (window.parent == hwnd).then_some(child))
+        .collect::<Vec<_>>();
+    for child in children {
+        destroy_window(p, child)?;
+    }
+    destroy_window(p, hwnd)?;
+    p.extra.win.modal_dialogs.remove(index);
+    if dialog.owner_was_enabled {
+        if let Some(owner) = p.extra.win.windows.get_mut(&dialog.owner) {
+            owner.style &= !WS_DISABLED;
+        }
+    }
+    p.extra.win.focus = if p.extra.win.windows.contains_key(&dialog.previous_focus) {
+        dialog.previous_focus
+    } else if p.extra.win.windows.contains_key(&dialog.owner) {
+        dialog.owner
+    } else {
+        0
+    };
+    emit_dialog_closed(p, &dialog);
+    Ok(dialog.result.unwrap_or(0))
+}
+
+fn dialog_box_param_a(p: &mut Process) -> R {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+    const ERROR_RESOURCE_NAME_NOT_FOUND: u32 = 1814;
+
+    let (instance, template_arg, owner, dialog_proc, init_param) =
+        (p.arg(0), p.arg(1), p.arg(2), p.arg(3), p.arg(4));
+    let callsite = dialog_callsite(p)?;
+    if template_arg == 0 || dialog_proc == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(pointer_sized_minus_one(p));
+    }
+    if owner != 0 && owner != HWND_DESKTOP && !p.extra.win.windows.contains_key(&owner) {
+        p.set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return Ok(pointer_sized_minus_one(p));
+    }
+
+    if let Some(dialog) = p.extra.win.modal_dialogs.last() {
+        if dialog.callsite == callsite
+            && dialog.instance == instance
+            && dialog.template == template_arg
+            && dialog.owner == owner
+            && dialog.dialog_proc == dialog_proc
+            && dialog.init_param == init_param
+        {
+            if dialog.result.is_none() {
+                return Err(Stop::Idle);
+            }
+            return destroy_modal_dialog(p, dialog.hwnd);
+        }
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: "nested DialogBoxParamA cannot be resumed while another modal call is suspended"
+                .into(),
+        });
+    }
+    if p.extra.win.message_box.is_some() {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: "DialogBoxParamA cannot open while MessageBox is active".into(),
+        });
+    }
+
+    let Some((data, size)) = dialog_template_payload(p, instance, template_arg)? else {
+        p.set_last_error(ERROR_RESOURCE_NAME_NOT_FOUND);
+        return Ok(pointer_sized_minus_one(p));
+    };
+    let template = parse_dialog_template(p, data, size)?;
+    if !matches!(template.menu, DialogTemplateField::Empty) {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!(
+                "DialogBoxParamA template menu {:?} is not modeled",
+                template.menu
+            ),
+        });
+    }
+    let supported_dialog_class = match &template.class {
+        DialogTemplateField::Empty => true,
+        DialogTemplateField::Text(name) => name.eq_ignore_ascii_case("#32770"),
+        DialogTemplateField::Ordinal(_) => false,
+    };
+    if !supported_dialog_class {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!(
+                "DialogBoxParamA custom dialog class {:?} is not modeled",
+                template.class
+            ),
+        });
+    }
+    let (hwnd, controls) = alloc_dialog_window(p, owner, instance, &template)?;
+    let owner_was_enabled = owner != 0
+        && owner != HWND_DESKTOP
+        && p.extra
+            .win
+            .windows
+            .get(&owner)
+            .is_some_and(|window| window.style & WS_DISABLED == 0);
+    if owner_was_enabled {
+        if let Some(window) = p.extra.win.windows.get_mut(&owner) {
+            window.style |= WS_DISABLED;
+        }
+    }
+    let previous_focus = p.extra.win.focus;
+    let focusable = |control: &&DialogControl| {
+        !matches!(control.class.as_str(), "static" | "scrollbar")
+            && control.style & (WS_DISABLED | WS_VISIBLE) == WS_VISIBLE
+    };
+    let default_focus = controls
+        .iter()
+        .filter(focusable)
+        .find(|control| control.style & WS_TABSTOP != 0)
+        .or_else(|| controls.iter().filter(focusable).next())
+        .map(|control| control.hwnd)
+        .unwrap_or(hwnd);
+    p.extra.win.focus = default_focus;
+    let dialog = PendingDialog {
+        hwnd,
+        owner,
+        owner_was_enabled,
+        previous_focus,
+        instance,
+        template: template_arg,
+        dialog_proc,
+        init_param,
+        callsite,
+        title: dialog_field_text(&template.title),
+        style: template.style,
+        ex_style: template.ex_style,
+        font: template.font.clone(),
+        x: template.x,
+        y: template.y,
+        width: template.width,
+        height: template.height,
+        controls,
+        result: None,
+        presented: false,
+    };
+    p.extra.win.modal_dialogs.push(dialog);
+    if invoke_dialog_proc(p, hwnd, WM_INITDIALOG, default_focus, init_param)? != 0 {
+        p.extra.win.focus = default_focus;
+    }
+    if let Some(result) = p
+        .extra
+        .win
+        .modal_dialogs
+        .last()
+        .filter(|dialog| dialog.hwnd == hwnd)
+        .and_then(|dialog| dialog.result)
+    {
+        let _ = destroy_modal_dialog(p, hwnd)?;
+        return Ok(result);
+    }
+    let dialog = p.extra.win.modal_dialogs.last().unwrap().clone();
+    emit_dialog_request(p, &dialog);
+    Err(Stop::Idle)
+}
+
 fn end_dialog(p: &mut Process) -> R {
-    let dialog = p.arg(0);
+    let (dialog, result) = (p.arg(0), p.arg(1));
     if !p.extra.win.windows.contains_key(&dialog) {
         p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
         return Ok(0);
     }
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!("EndDialog hwnd={dialog:#x}; the runtime has no active modal dialog state"),
-    })
+    Ok(end_dialog_for(p, dialog, result) as u64)
 }
 
-fn create_icon_indirect_unimplemented(p: &mut Process) -> R {
+fn create_icon_indirect(p: &mut Process) -> R {
     const ERROR_INVALID_HANDLE: u32 = 6;
     const ERROR_INVALID_PARAMETER: u32 = 87;
 
@@ -780,6 +1706,8 @@ fn create_icon_indirect_unimplemented(p: &mut Process) -> R {
     } else {
         16
     };
+    let is_icon = p.rd32(info)? != 0;
+    let hotspot = (p.rd32(info + 4)?, p.rd32(info + 8)?);
     let mask = p.rdptr(info + handle_offset)?;
     let color =
         p.rdptr(info + handle_offset + if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 })?;
@@ -787,36 +1715,349 @@ fn create_icon_indirect_unimplemented(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
-    for bitmap in [mask, color].into_iter().filter(|&handle| handle != 0) {
-        if !matches!(p.handles.get(&bitmap), Some(Handle::Other)) {
+    let Some(mask_bitmap) = bitmap_snapshot(p, mask)? else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    let color_bitmap = if color == 0 {
+        None
+    } else {
+        let Some(snapshot) = bitmap_snapshot(p, color)? else {
             p.set_last_error(ERROR_INVALID_HANDLE);
             return Ok(0);
+        };
+        Some(snapshot)
+    };
+
+    let (width, height) = if let Some(color) = &color_bitmap {
+        if color.planes != 1
+            || mask_bitmap.planes != 1
+            || color.width != mask_bitmap.width
+            || color.height.unsigned_abs() != mask_bitmap.height.unsigned_abs()
+            || mask_bitmap.bits_per_pixel != 1
+        {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
         }
+        (color.width as u32, color.height.unsigned_abs())
+    } else {
+        if mask_bitmap.planes != 1
+            || mask_bitmap.bits_per_pixel != 1
+            || mask_bitmap.height.unsigned_abs() % 2 != 0
+        {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+        (
+            mask_bitmap.width as u32,
+            mask_bitmap.height.unsigned_abs() / 2,
+        )
+    };
+    if width == 0 || height == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
     }
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!(
-            "CreateIconIndirect mask={mask:#x} color={color:#x}; GDI bitmap pixels are not connected to the USER32 icon model"
-        ),
-    })
+
+    let handle = p.new_handle(Handle::Other);
+    p.extra.win.icons.insert(
+        handle,
+        IconObject {
+            is_icon,
+            width,
+            height,
+            hotspot: if is_icon { (0, 0) } else { hotspot },
+            mask: Some(IconBitmap {
+                width: mask_bitmap.width as u32,
+                height: mask_bitmap.height.unsigned_abs(),
+                bits_per_pixel: mask_bitmap.bits_per_pixel,
+                row_bytes: mask_bitmap.row_bytes,
+                bits: mask_bitmap.bits,
+            }),
+            color: color_bitmap.map(|bitmap| IconBitmap {
+                width: bitmap.width as u32,
+                height: bitmap.height.unsigned_abs(),
+                bits_per_pixel: bitmap.bits_per_pixel,
+                row_bytes: bitmap.row_bytes,
+                bits: bitmap.bits,
+            }),
+            resource_bits: None,
+        },
+    );
+    Ok(handle)
 }
 
-fn create_icon_from_resource_unimplemented(p: &mut Process) -> R {
+fn create_icon_from_resource(p: &mut Process) -> R {
     const ERROR_INVALID_PARAMETER: u32 = 87;
+    const ERROR_INVALID_DATA: u32 = 13;
     let (bits, size, version) = (p.arg(0), p.arg(1) as u32, p.arg(3) as u32);
     if bits == 0 || size == 0 || !(0x0002_0000..=0x0003_0000).contains(&version) {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
-    // Confirm the guest buffer is readable before failing closed on the unsupported image decode.
-    let _ = p.read_bytes(bits, 1)?;
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!(
-            "CreateIconFromResource bytes={size} icon={} version={version:#x}; icon/cursor resource decoding is not translated",
-            p.arg(2) != 0
-        ),
-    })
+    let is_icon = p.arg(2) != 0;
+    if size > 64 * 1024 * 1024 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let resource = p.read_bytes(bits, size as usize)?;
+    let cursor_header_size = if is_icon { 0 } else { 4 };
+    if resource
+        .get(cursor_header_size..)
+        .is_some_and(|data| data.starts_with(b"\x89PNG\r\n\x1a\n"))
+    {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: "CreateIconFromResource PNG decoding is not translated".into(),
+        });
+    }
+    if resource.len() < cursor_header_size + 12 {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    }
+    if resource.len() < cursor_header_size + 40 {
+        // BITMAPCOREHEADER resources are 12 bytes; all other accepted headers are at least 40.
+        let dib = &resource[cursor_header_size..];
+        if dib.len() < 12 || u32::from_le_bytes(dib[0..4].try_into().unwrap()) != 12 {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        }
+    }
+    let dib = &resource[cursor_header_size..];
+    let header_size = u32::from_le_bytes(dib[0..4].try_into().unwrap()) as usize;
+    let (width, combined_height, planes, bpp, compression, clr_used, palette_entry_size) =
+        if header_size == 12 {
+            (
+                u16::from_le_bytes(dib[4..6].try_into().unwrap()) as i32,
+                u16::from_le_bytes(dib[6..8].try_into().unwrap()) as i32,
+                u16::from_le_bytes(dib[8..10].try_into().unwrap()),
+                u16::from_le_bytes(dib[10..12].try_into().unwrap()) as u32,
+                0,
+                0,
+                3usize,
+            )
+        } else {
+            if !matches!(header_size, 40 | 52 | 56 | 108 | 124) {
+                if header_size < 40 {
+                    return Err(Stop::Unimplemented {
+                        dll: "user32".into(),
+                        name: format!(
+                            "CreateIconFromResource DIB header size {header_size} is not translated"
+                        ),
+                    });
+                }
+                p.set_last_error(ERROR_INVALID_DATA);
+                return Ok(0);
+            }
+            if dib.len() < header_size {
+                p.set_last_error(ERROR_INVALID_DATA);
+                return Ok(0);
+            }
+            let read_i32 = |at: usize| i32::from_le_bytes(dib[at..at + 4].try_into().unwrap());
+            let read_u32 = |at: usize| u32::from_le_bytes(dib[at..at + 4].try_into().unwrap());
+            (
+                read_i32(4),
+                read_i32(8),
+                u16::from_le_bytes(dib[12..14].try_into().unwrap()),
+                u16::from_le_bytes(dib[14..16].try_into().unwrap()) as u32,
+                read_u32(16),
+                read_u32(32) as usize,
+                4usize,
+            )
+        };
+    let core_header = header_size == 12;
+    if width <= 0
+        || combined_height <= 0
+        || combined_height % 2 != 0
+        || planes != 1
+        || !matches!(bpp, 1 | 4 | 8 | 16 | 24 | 32)
+        || (core_header && !matches!(bpp, 1 | 4 | 8 | 24))
+    {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    }
+
+    let mask_bytes = if core_header {
+        0
+    } else if matches!(compression, 3 | 6) {
+        if !matches!(bpp, 16 | 32) {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        }
+        let masks_are_inline = header_size >= 52;
+        let alpha_is_inline = header_size >= 56;
+        if compression == 6 && masks_are_inline && !alpha_is_inline {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        }
+        let masks_at = if masks_are_inline { 40 } else { header_size };
+        let mask_count = if compression == 6 || (masks_are_inline && alpha_is_inline) {
+            4
+        } else {
+            3
+        };
+        let Some(mask_end) = masks_at.checked_add(mask_count * 4) else {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        };
+        if mask_end > dib.len() {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        }
+        let masks: Vec<u32> = (0..mask_count)
+            .map(|index| {
+                let at = masks_at + index * 4;
+                u32::from_le_bytes(dib[at..at + 4].try_into().unwrap())
+            })
+            .collect();
+        let channel_limit = if bpp == 32 {
+            u32::MAX
+        } else {
+            (1u32 << bpp) - 1
+        };
+        let rgb = [masks[0], masks[1], masks[2]];
+        let mask_is_contiguous = |mask: u32| {
+            if mask == 0 {
+                return false;
+            }
+            let shifted = mask >> mask.trailing_zeros();
+            shifted & shifted.wrapping_add(1) == 0
+        };
+        if rgb
+            .iter()
+            .any(|mask| !mask_is_contiguous(*mask) || *mask & !channel_limit != 0)
+            || (0..rgb.len()).any(|i| (i + 1..rgb.len()).any(|j| rgb[i] & rgb[j] != 0))
+            || (masks.len() == 4
+                && ((compression == 6 && !mask_is_contiguous(masks[3]))
+                    || masks[3] & !channel_limit != 0
+                    || masks[3] & (masks[0] | masks[1] | masks[2]) != 0))
+        {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        }
+        if masks_are_inline {
+            0
+        } else {
+            mask_end - header_size
+        }
+    } else if compression == 0 {
+        0
+    } else {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!("CreateIconFromResource DIB compression {compression} is not translated"),
+        });
+    };
+
+    let height = (combined_height / 2) as u32;
+    let palette_entries = if bpp <= 8 {
+        if clr_used == 0 {
+            1usize << bpp
+        } else {
+            clr_used
+        }
+    } else {
+        0
+    };
+    if bpp <= 8 && palette_entries > (1usize << bpp) {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    }
+    let Some(palette_bytes) = palette_entries.checked_mul(palette_entry_size) else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    let Some(palette_end) = header_size
+        .checked_add(mask_bytes)
+        .and_then(|offset| offset.checked_add(palette_bytes))
+    else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    let xor_pitch = ((width as u64 * bpp as u64 + 31) / 32) * 4;
+    let and_pitch = ((width as u64 + 31) / 32) * 4;
+    let Some(xor_size) = xor_pitch.checked_mul(height as u64) else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    let Some(and_size) = and_pitch.checked_mul(height as u64) else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    let (Ok(xor_size), Ok(and_size), Ok(xor_pitch), Ok(and_pitch)) = (
+        usize::try_from(xor_size),
+        usize::try_from(and_size),
+        usize::try_from(xor_pitch),
+        usize::try_from(and_pitch),
+    ) else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    let Some(and_start) = palette_end.checked_add(xor_size) else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    let Some(required_end) = and_start.checked_add(and_size) else {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    };
+    if required_end > dib.len() {
+        p.set_last_error(ERROR_INVALID_DATA);
+        return Ok(0);
+    }
+    let hotspot = if is_icon {
+        (0, 0)
+    } else {
+        (
+            u16::from_le_bytes(resource[0..2].try_into().unwrap()) as u32,
+            u16::from_le_bytes(resource[2..4].try_into().unwrap()) as u32,
+        )
+    };
+    let (mask, color) = if bpp == 1 {
+        let mut mono_bits = Vec::with_capacity(required_end - palette_end);
+        mono_bits.extend_from_slice(&dib[palette_end..and_start]);
+        mono_bits.extend_from_slice(&dib[and_start..required_end]);
+        (
+            Some(IconBitmap {
+                width: width as u32,
+                height: combined_height as u32,
+                bits_per_pixel: 1,
+                row_bytes: xor_pitch,
+                bits: mono_bits,
+            }),
+            None,
+        )
+    } else {
+        (
+            Some(IconBitmap {
+                width: width as u32,
+                height,
+                bits_per_pixel: 1,
+                row_bytes: and_pitch,
+                bits: dib[and_start..required_end].to_vec(),
+            }),
+            Some(IconBitmap {
+                width: width as u32,
+                height,
+                bits_per_pixel: bpp,
+                row_bytes: xor_pitch,
+                bits: dib[palette_end..and_start].to_vec(),
+            }),
+        )
+    };
+    let handle = p.new_handle(Handle::Other);
+    p.extra.win.icons.insert(
+        handle,
+        IconObject {
+            is_icon,
+            width: width as u32,
+            height,
+            hotspot,
+            mask,
+            color,
+            resource_bits: Some(resource),
+        },
+    );
+    Ok(handle)
 }
 
 fn register_device_notification_a(p: &mut Process) -> R {
@@ -895,56 +2136,170 @@ fn unregister_device_notification(p: &mut Process) -> R {
     Ok(1)
 }
 
-fn wait_for_input_idle_unimplemented(p: &mut Process) -> R {
+fn wait_for_input_idle(p: &mut Process) -> R {
     const WAIT_FAILED: u32 = u32::MAX;
+    const WAIT_TIMEOUT: u32 = 0x102;
     const ERROR_INVALID_HANDLE: u32 = 6;
     let process = p.arg(0);
     let is_current_process_pseudo = process == u32::MAX as u64 || process == u64::MAX;
-    let is_process_handle = matches!(p.handles.get(&process), Some(Handle::Process { .. }));
+    let process_id = match p.handles.get(&process) {
+        Some(Handle::Process { id, .. }) => Some(*id),
+        _ => None,
+    };
+    let is_process_handle = process_id.is_some();
     if !is_current_process_pseudo && !is_process_handle {
         p.set_last_error(ERROR_INVALID_HANDLE);
         return Ok(WAIT_FAILED as u64);
     }
+    let current = is_current_process_pseudo || process_id == Some(0x1000);
+    if !current {
+        // The runtime cannot inspect an unmodeled process to determine whether it owns a USER
+        // queue or has reached input-idle. Claiming success here would hide an unsupported wait.
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!("WaitForInputIdle foreign process handle {process:#x} is not modeled"),
+        });
+    }
+    const CURRENT_PROCESS_ID: u32 = 0x1000;
+    if p.extra
+        .win
+        .input_idle_observed
+        .contains(&CURRENT_PROCESS_ID)
+    {
+        return Ok(0);
+    }
+    let has_message_queue =
+        !p.extra.win.message_queue_threads.is_empty() || !p.extra.win.window_threads.is_empty();
+    if !has_message_queue {
+        // Microsoft documents immediate success when the target has no message queue.
+        p.extra.win.input_idle_observed.insert(CURRENT_PROCESS_ID);
+        return Ok(0);
+    }
+    let timeout = p.arg(1) as u32;
+    if timeout == 0 && !p.extra.win.queue.is_empty() {
+        return Ok(WAIT_TIMEOUT as u64);
+    }
     Err(Stop::Unimplemented {
         dll: "user32".into(),
         name: format!(
-            "WaitForInputIdle process={process:#x} timeout={}ms; process message-queue idle state is not observable",
-            p.arg(1) as u32
+            "WaitForInputIdle process={process:#x} timeout={timeout}ms while a translated message queue exists without an observed idle thread; queue state is insufficient to report a faithful result"
         ),
     })
 }
 
-fn fill_rect_unimplemented(p: &mut Process) -> R {
+fn fill_rect(p: &mut Process) -> R {
+    const ERROR_INVALID_HANDLE: u32 = 6;
     let (hdc, rect_ptr, brush) = (p.arg(0), p.arg(1), p.arg(2));
     if rect_ptr == 0 || brush == 0 {
         return Ok(0);
     }
-    let rect = read_rect(p, rect_ptr)?;
-    let is_window_dc = p
+    let (left, top, right, bottom) = read_rect(p, rect_ptr)?;
+    if left >= right || top >= bottom {
+        return Ok(1);
+    }
+
+    let window_dc = p
         .extra
         .win
         .device_context_refs
         .keys()
-        .any(|&(_, handle)| handle == hdc)
-        || p.extra
-            .win
-            .paint_windows
-            .iter()
-            .any(|&hwnd| hdc == 0x7000_0000 + hwnd);
-    if !is_window_dc && !matches!(p.handles.get(&hdc), Some(Handle::Other)) {
+        .find_map(|&(hwnd, handle)| (handle == hdc).then_some(hwnd))
+        .or_else(|| {
+            p.extra
+                .win
+                .paint_windows
+                .iter()
+                .find_map(|&hwnd| (hdc == 0x7000_0000 + hwnd).then_some(hwnd))
+        });
+    let target = if let Some(hwnd) = window_dc {
+        if hwnd == 0 || hwnd == HWND_DESKTOP {
+            Some(0)
+        } else {
+            p.extra.win.windows.get(&hwnd).map(|window| window.gpu_id)
+        }
+    } else {
+        match crate::hle::gdi::device_context_kind(p, hdc) {
+            Some(crate::hle::gdi::DeviceContextKind::Display) => p
+                .extra
+                .win
+                .windows
+                .get(&p.extra.win.main_window)
+                .map(|window| window.gpu_id)
+                .or(Some(0)),
+            Some(crate::hle::gdi::DeviceContextKind::Information) => return Ok(0),
+            Some(crate::hle::gdi::DeviceContextKind::Compatible) => {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!(
+                        "FillRect compatible DC {hdc:#x}; selected bitmap and memory-DC raster target are not translated"
+                    ),
+                });
+            }
+            None => None,
+        }
+    };
+    let Some(target) = target else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
         return Ok(0);
-    }
-    let is_color_brush = (1..=31).contains(&brush);
-    if !is_color_brush && !matches!(p.handles.get(&brush), Some(Handle::Other)) {
-        return Ok(0);
-    }
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!(
-            "FillRect hdc={hdc:#x} rect=({},{},{},{}) brush={brush:#x}; the runtime has no translated GDI raster target",
-            rect.0, rect.1, rect.2, rect.3
-        ),
-    })
+    };
+    let color = match crate::hle::gdi::solid_brush_color(p, brush) {
+        Some(color) => color,
+        None => match brush {
+            1..=31 => system_colorref((brush - 1) as u32),
+            _ => {
+                p.set_last_error(ERROR_INVALID_HANDLE);
+                return Ok(0);
+            }
+        },
+    };
+    p.extra.gpu.emit(
+        op::GDI_FILL_RECT,
+        Pk::new()
+            .u32(target)
+            .i32(left)
+            .i32(top)
+            .i32(right)
+            .i32(bottom)
+            .u32(color),
+    );
+    Ok(1)
+}
+
+fn system_colorref(index: u32) -> u32 {
+    const COLORS: [u32; 31] = [
+        0x00c8_c8c8, // scrollbar
+        0x0000_0000, // desktop
+        0x00d1_b499, // active caption
+        0x00de_cdbf, // inactive caption
+        0x00f0_f0f0, // menu
+        0x00ff_ffff, // window
+        0x0064_6464, // window frame
+        0x0000_0000, // menu text
+        0x0000_0000, // window text
+        0x0000_0000, // caption text
+        0x00b4_b4b4, // active border
+        0x00fc_f7f4, // inactive border
+        0x00ab_abab, // app workspace
+        0x00d4_7800, // highlight
+        0x00ff_ffff, // highlight text
+        0x00f0_f0f0, // button face
+        0x00a0_a0a0, // button shadow
+        0x006d_6d6d, // gray text
+        0x0000_0000, // button text
+        0x0054_4e43, // inactive caption text
+        0x00ff_ffff, // button highlight
+        0x0069_6969, // 3D dark shadow
+        0x00e3_e3e3, // 3D light
+        0x0000_0000, // info text
+        0x00e1_ffff, // info background
+        0x00ff_ffff,
+        0x00cc_6600, // hotlight
+        0x00ea_d1b9, // gradient active caption
+        0x00f2_e4d7, // gradient inactive caption
+        0x00ff_9933, // menu highlight
+        0x00f0_f0f0, // menu bar
+    ];
+    COLORS[index as usize]
 }
 
 fn system_parameters_info_a(p: &mut Process) -> R {
@@ -3925,6 +5280,33 @@ pub fn send(p: &mut Process, hwnd: u64, msg: u64, wparam: u64, lparam: u64) -> R
         return Ok(0);
     };
     let wndproc = w.wndproc;
+    if p.extra
+        .win
+        .modal_dialogs
+        .iter()
+        .any(|dialog| dialog.hwnd == hwnd)
+    {
+        const IDOK: u32 = 1;
+        const IDCANCEL: u32 = 2;
+        let result = invoke_dialog_proc(p, hwnd, msg, wparam, lparam)?;
+        let modal_still_open = p
+            .extra
+            .win
+            .modal_dialogs
+            .iter()
+            .any(|dialog| dialog.hwnd == hwnd && dialog.result.is_none());
+        if result == 0 && modal_still_open && msg == WM_CLOSE {
+            let _ = end_dialog_for(p, hwnd, IDCANCEL as u64);
+        } else if result == 0
+            && modal_still_open
+            && msg == WM_COMMAND
+            && (wparam >> 16) as u16 == 0 // BN_CLICKED
+            && matches!(wparam as u16 as u32, IDOK | IDCANCEL)
+        {
+            let _ = end_dialog_for(p, hwnd, (wparam as u16) as u64);
+        }
+        return Ok(result);
+    }
     if wndproc == 0 {
         return def_window_proc(p, hwnd, msg, wparam, lparam);
     }
@@ -4099,7 +5481,7 @@ fn def_window_proc(p: &mut Process, h: u64, msg: u64, w: u64, l: u64) -> R {
     match msg {
         // WM_CREATE's documented success result is zero; the window object has already
         // been installed by CreateWindowEx before this message is dispatched.
-        WM_CREATE => Ok(0),
+        WM_CREATE | WM_DESTROY | WM_NCDESTROY => Ok(0),
         WM_NCCREATE => Ok(1),
         WM_NCCALCSIZE => {
             let Some(window) = p.extra.win.windows.get(&h).cloned() else {
@@ -4144,6 +5526,10 @@ fn def_window_proc(p: &mut Process, h: u64, msg: u64, w: u64, l: u64) -> R {
         // delayed rendering. DefWindowProc has no work to perform for the message.
         WM_DESTROYCLIPBOARD | WM_SETTINGCHANGE => Ok(0),
         WM_ERASEBKGND => Ok(1),
+        // WM_CHAR is offered to the application's window procedure. When that procedure
+        // delegates an unhandled character to DefWindowProc, the default window procedure
+        // takes no further action and returns zero.
+        WM_CHAR => Ok(0),
         WM_PAINT => {
             if let Some(w) = p.extra.win.windows.get_mut(&h) {
                 w.needs_paint = false;
@@ -4271,11 +5657,16 @@ fn read_message_time(p: &Process, m: u64) -> Result<i32, Stop> {
 
 fn get_message(p: &mut Process) -> R {
     let (m, h) = (p.arg(0), p.arg(1));
+    p.extra
+        .win
+        .message_queue_threads
+        .insert(p.current_thread_id);
     if fetch(p, m, h, true)? {
         p.extra.win.last_get_message_time = read_message_time(p, m)?;
         let msg = read_message_type(p, m)?;
         return Ok((msg != WM_QUIT) as u64);
     }
+    p.extra.win.input_idle_observed.insert(0x1000);
     // Nothing to do: hand control back to the host and retry this call when input arrives.
     Err(Stop::Idle)
 }
@@ -4293,6 +5684,10 @@ fn dispatch_message(p: &mut Process) -> R {
 
 fn peek_message(p: &mut Process) -> R {
     let (m, h, flags) = (p.arg(0), p.arg(1), p.arg(4));
+    p.extra
+        .win
+        .message_queue_threads
+        .insert(p.current_thread_id);
     let before = p.extra.win.queue.len();
     let result = fetch(p, m, h, flags & PM_REMOVE != 0)?;
     if result {
@@ -4486,6 +5881,182 @@ pub fn input_event(p: &mut Process, kind: u32, a: i64, b: i64, c: i64) -> Result
             p.extra.win.mouse_dx = p.extra.win.mouse_dx.saturating_add(a as i32);
             p.extra.win.mouse_dy = p.extra.win.mouse_dy.saturating_add(b as i32);
         }
+        12 => {
+            let Some(request) = p.extra.win.message_box.as_mut() else {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: "MessageBox input without an active message box".into(),
+                });
+            };
+            let button = a as u32;
+            if request.owner != b as u64 || !request.buttons.iter().any(|(id, _)| *id == button) {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!(
+                        "MessageBox input has invalid owner/button ({:#x}, {button})",
+                        b
+                    ),
+                });
+            }
+            request.result = Some(button);
+        }
+        13 => {
+            let dialog_hwnd = b as u64;
+            let Some(dialog) = p
+                .extra
+                .win
+                .modal_dialogs
+                .last()
+                .filter(|dialog| dialog.hwnd == dialog_hwnd)
+                .cloned()
+            else {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!("DialogBox input for inactive dialog {dialog_hwnd:#x}"),
+                });
+            };
+            if c == 1 {
+                let _ = send(p, dialog_hwnd, WM_CLOSE, 0, 0)?;
+                if p.extra
+                    .win
+                    .modal_dialogs
+                    .last()
+                    .is_some_and(|active| active.hwnd == dialog_hwnd && active.result.is_none())
+                {
+                    let _ = end_dialog_for(p, dialog_hwnd, 2); // IDCANCEL
+                }
+            } else {
+                let control_id = a as u32;
+                let Some(control) = dialog.controls.iter().find(|item| item.id == control_id)
+                else {
+                    return Err(Stop::Unimplemented {
+                        dll: "user32".into(),
+                        name: format!("DialogBox input references absent control id {control_id}"),
+                    });
+                };
+                if control.class != "button" {
+                    return Err(Stop::Unimplemented {
+                        dll: "user32".into(),
+                        name: format!(
+                            "DialogBox input control {control_id} class {} is not clickable",
+                            control.class
+                        ),
+                    });
+                }
+                let wparam = (control_id as u64) | (0u64 << 16); // BN_CLICKED
+                let _ = send(p, dialog_hwnd, WM_COMMAND, wparam, control.hwnd)?;
+            }
+            if p.extra
+                .win
+                .modal_dialogs
+                .last()
+                .is_some_and(|active| active.hwnd == dialog_hwnd && active.result.is_none())
+            {
+                refresh_pending_dialog_controls(p, dialog_hwnd);
+                if let Some(active) = p.extra.win.modal_dialogs.last().cloned() {
+                    emit_dialog_request(p, &active);
+                }
+            }
+        }
+        14 => {
+            // Dialog edit text uses one Unicode scalar per event. c=0 clears the
+            // control and c=8 removes one scalar, which lets the host UI preserve
+            // guest-owned text while still supporting normal typing and deletion.
+            const EN_CHANGE: u64 = 0x0300;
+            const ES_READONLY: u32 = 0x0800;
+            const MAX_EDIT_UTF16_UNITS: usize = 32_767;
+            const MAX_EDIT_UTF8_BYTES: usize = 65_535;
+
+            let dialog_hwnd = a as u64;
+            let control_id = b as u32;
+            let Some(dialog) = p
+                .extra
+                .win
+                .modal_dialogs
+                .last()
+                .filter(|dialog| dialog.hwnd == dialog_hwnd)
+                .cloned()
+            else {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!("Dialog edit input for inactive dialog {dialog_hwnd:#x}"),
+                });
+            };
+            let Some(control) = dialog.controls.iter().find(|item| item.id == control_id) else {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!("Dialog edit input references absent control id {control_id}"),
+                });
+            };
+            if control.class != "edit" {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!(
+                        "Dialog edit input control {control_id} class {} is not editable",
+                        control.class
+                    ),
+                });
+            }
+            let Some(window) = p.extra.win.windows.get(&control.hwnd) else {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!(
+                        "Dialog edit input HWND {:#x} is no longer valid",
+                        control.hwnd
+                    ),
+                });
+            };
+            if window.style & WS_DISABLED != 0 || window.style & ES_READONLY != 0 {
+                return Ok(());
+            }
+
+            let mut updated = window.title.clone();
+            match c {
+                0 => updated.clear(),
+                8 => {
+                    updated.pop();
+                }
+                scalar if scalar > 0 => {
+                    let Some(character) = char::from_u32(scalar as u32) else {
+                        return Err(Stop::Unimplemented {
+                            dll: "user32".into(),
+                            name: format!(
+                                "Dialog edit input has invalid Unicode scalar {scalar:#x}"
+                            ),
+                        });
+                    };
+                    updated.push(character);
+                }
+                scalar => {
+                    return Err(Stop::Unimplemented {
+                        dll: "user32".into(),
+                        name: format!("Dialog edit input has invalid operation {scalar}"),
+                    });
+                }
+            }
+            if updated.encode_utf16().count() > MAX_EDIT_UTF16_UNITS
+                || updated.len() > MAX_EDIT_UTF8_BYTES
+            {
+                return Ok(());
+            }
+            if updated == window.title {
+                return Ok(());
+            }
+            p.extra.win.windows.get_mut(&control.hwnd).unwrap().title = updated;
+            let wparam = control_id as u64 | (EN_CHANGE << 16);
+            let _ = send(p, dialog_hwnd, WM_COMMAND, wparam, control.hwnd)?;
+            if p.extra
+                .win
+                .modal_dialogs
+                .last()
+                .is_some_and(|active| active.hwnd == dialog_hwnd && active.result.is_none())
+            {
+                refresh_pending_dialog_controls(p, dialog_hwnd);
+                if let Some(active) = p.extra.win.modal_dialogs.last().cloned() {
+                    emit_dialog_request(p, &active);
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -4546,66 +6117,473 @@ mod tests {
         }
     }
 
-    #[test]
-    fn modal_dialog_apis_fail_explicitly_until_modal_dialogs_are_modeled() {
-        const PARENT: u64 = HWND_BASE + 0x40;
-        let mut p = test_process_with_args(&[]);
-        p.extra.win.windows.insert(PARENT, test_window(true, 0));
+    fn dialog_template_standard() -> Vec<u8> {
+        fn u16v(bytes: &mut Vec<u8>, value: u16) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        fn u32v(bytes: &mut Vec<u8>, value: u32) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        fn field(bytes: &mut Vec<u8>, text: &str) {
+            bytes.extend_from_slice(
+                &text
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            u16v(bytes, 0);
+        }
 
-        set_args(&mut p, &[0x400000, 10, PARENT as u32, 0x1234, 0x55]);
-        assert!(matches!(
-            lookup("DialogBoxParamA").unwrap()(&mut p),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("DialogBoxParamA") && name.contains("callback=0x1234")
-        ));
+        let mut bytes = Vec::new();
+        u32v(&mut bytes, WS_VISIBLE | 0x40); // DS_SETFONT
+        u32v(&mut bytes, 0);
+        u16v(&mut bytes, 2);
+        for value in [1i16, 2, 120, 80] {
+            u16v(&mut bytes, value as u16);
+        }
+        u16v(&mut bytes, 0); // no menu
+        u16v(&mut bytes, 0); // default dialog class
+        field(&mut bytes, "Sample");
+        u16v(&mut bytes, 9);
+        field(&mut bytes, "MS Shell Dlg");
 
-        set_args(&mut p, &[PARENT as u32, 1]);
-        assert!(matches!(
-            lookup("EndDialog").unwrap()(&mut p),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("EndDialog") && name.contains("no active modal dialog")
-        ));
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        // EDIT control.
+        u32v(&mut bytes, WS_VISIBLE | WS_CHILD);
+        u32v(&mut bytes, 0);
+        for value in [4i16, 5, 80, 12] {
+            u16v(&mut bytes, value as u16);
+        }
+        u16v(&mut bytes, 100);
+        u16v(&mut bytes, 0xffff);
+        u16v(&mut bytes, 0x81);
+        field(&mut bytes, "old");
+        u16v(&mut bytes, 0);
+
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        // BUTTON control.
+        u32v(&mut bytes, WS_VISIBLE | WS_CHILD);
+        u32v(&mut bytes, 0);
+        for value in [8i16, 24, 40, 14] {
+            u16v(&mut bytes, value as u16);
+        }
+        u16v(&mut bytes, 7);
+        u16v(&mut bytes, 0xffff);
+        u16v(&mut bytes, 0x80);
+        field(&mut bytes, "OK");
+        u16v(&mut bytes, 0);
+        bytes
+    }
+
+    fn dialog_template_extended() -> Vec<u8> {
+        fn u16v(bytes: &mut Vec<u8>, value: u16) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        fn u32v(bytes: &mut Vec<u8>, value: u32) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        fn field(bytes: &mut Vec<u8>, text: &str) {
+            bytes.extend_from_slice(
+                &text
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            u16v(bytes, 0);
+        }
+
+        let mut bytes = Vec::new();
+        u16v(&mut bytes, 1);
+        u16v(&mut bytes, 0xffff);
+        u32v(&mut bytes, 0x12345678); // help ID
+        u32v(&mut bytes, 0x20);
+        u32v(&mut bytes, 0x40 | WS_VISIBLE);
+        u16v(&mut bytes, 1);
+        for value in [-1i16, 2, 90, 60] {
+            u16v(&mut bytes, value as u16);
+        }
+        u16v(&mut bytes, 0); // no menu
+        u16v(&mut bytes, 0); // default dialog class
+        field(&mut bytes, "Extended");
+        u16v(&mut bytes, 10); // point size
+        u16v(&mut bytes, 500); // weight
+        bytes.extend_from_slice(&[1, 2]); // italic, charset
+        field(&mut bytes, "Tahoma");
+        while bytes.len() % 4 != 0 {
+            bytes.push(0);
+        }
+        u32v(&mut bytes, 7); // control help ID
+        u32v(&mut bytes, 0);
+        u32v(&mut bytes, WS_VISIBLE | WS_CHILD);
+        for value in [3i16, 4, 20, 10] {
+            u16v(&mut bytes, value as u16);
+        }
+        u32v(&mut bytes, 0x10001); // extended ID
+        u16v(&mut bytes, 0xffff);
+        u16v(&mut bytes, 0x82); // STATIC
+        field(&mut bytes, "Label");
+        u16v(&mut bytes, 0);
+        bytes
+    }
+
+    fn add_dialog_resource(p: &mut Process, template: &[u8]) {
+        const MODULE: u64 = 0x0040_0000;
+        const RESOURCE_RVA: u32 = 0x1000;
+        const DATA_RVA: u32 = 0x3000;
+        assert!(p.mem.map(MODULE, 0x5000, PROT_RW));
+        p.modules.push(Module {
+            name: "dialog-test.exe".into(),
+            path: "dialog-test.exe".into(),
+            base: MODULE,
+            size: 0x5000,
+            entry: 0,
+            is_dll: false,
+            tls_callbacks: Vec::new(),
+            exports: HashMap::new(),
+            ordinals: HashMap::new(),
+            exception_table_rva: 0,
+            runtime_functions: Vec::new(),
+            resource_rva: RESOURCE_RVA,
+            resource_size: 0x1000,
+            hle_group: None,
+        });
+        let root = MODULE + RESOURCE_RVA as u64;
+        p.wr16(root + 14, 1).unwrap();
+        p.wr32(root + 16, 5).unwrap(); // RT_DIALOG
+        p.wr32(root + 20, 0x8000_0020).unwrap();
+        p.wr16(root + 0x20 + 14, 1).unwrap();
+        p.wr32(root + 0x20 + 16, 101).unwrap();
+        p.wr32(root + 0x20 + 20, 0x8000_0040).unwrap();
+        p.wr16(root + 0x40 + 14, 1).unwrap();
+        p.wr32(root + 0x40 + 16, 0x0409).unwrap();
+        p.wr32(root + 0x40 + 20, 0x60).unwrap();
+        p.wr32(root + 0x60, DATA_RVA).unwrap();
+        p.wr32(root + 0x64, template.len() as u32).unwrap();
+        p.write_bytes(MODULE + DATA_RVA as u64, template).unwrap();
     }
 
     #[test]
-    fn icon_creation_validates_parameters_and_fails_closed_for_untranslated_images() {
+    fn parses_standard_and_extended_dialog_templates() {
+        const BASE: u64 = 0x0003_5000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(BASE, 0x1000, PROT_RW));
+        let standard = dialog_template_standard();
+        p.write_bytes(BASE, &standard).unwrap();
+        let parsed = parse_dialog_template(&p, BASE, standard.len() as u32).unwrap();
+        assert!(!parsed.extended);
+        assert_eq!(parsed.title, DialogTemplateField::Text("Sample".into()));
+        assert_eq!(parsed.x, 1);
+        assert_eq!(parsed.controls.len(), 2);
+        assert_eq!(parsed.controls[0].id, 100);
+        assert_eq!(parsed.controls[0].class, DialogTemplateField::Ordinal(0x81));
+        assert_eq!(
+            parsed.controls[0].title,
+            DialogTemplateField::Text("old".into())
+        );
+        assert_eq!(parsed.font, Some((9, 0, 0, 0, "MS Shell Dlg".into())));
+
+        let extended = dialog_template_extended();
+        p.write_bytes(BASE, &extended).unwrap();
+        let parsed = parse_dialog_template(&p, BASE, extended.len() as u32).unwrap();
+        assert!(parsed.extended);
+        assert_eq!(parsed.help_id, 0x12345678);
+        assert_eq!(parsed.class, DialogTemplateField::Empty);
+        assert_eq!(parsed.title, DialogTemplateField::Text("Extended".into()));
+        assert_eq!(parsed.font, Some((10, 500, 1, 2, "Tahoma".into())));
+        assert_eq!(parsed.controls[0].id, 0x10001);
+        assert_eq!(
+            parsed.controls[0].title,
+            DialogTemplateField::Text("Label".into())
+        );
+    }
+
+    #[test]
+    fn modal_dialog_calls_init_handles_edit_and_button_events_and_returns_enddialog_result() {
+        const PARENT: u64 = HWND_BASE + 0x40;
+        const CALLBACK: u64 = 0x0003_5000;
+        const CALL_COUNT: u64 = 0x0003_6000;
+        const LAST_MESSAGE: u64 = CALL_COUNT + 4;
+        const LAST_WPARAM: u64 = CALL_COUNT + 8;
+        const LAST_LPARAM: u64 = CALL_COUNT + 12;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(CALLBACK, 0x1000, PROT_RWX));
+        assert!(p.mem.map(CALL_COUNT, 0x1000, PROT_RW));
+        add_dialog_resource(&mut p, &dialog_template_standard());
+        p.extra.win.windows.insert(PARENT, test_window(true, 0));
+        p.extra.win.focus = PARENT;
+
+        let mut callback = vec![0xff, 0x05]; // inc dword ptr [CALL_COUNT]
+        callback.extend_from_slice(&(CALL_COUNT as u32).to_le_bytes());
+        callback.extend_from_slice(&[0x8b, 0x44, 0x24, 0x08]); // mov eax,[esp+8] (message)
+        callback.push(0xa3); // mov [LAST_MESSAGE],eax
+        callback.extend_from_slice(&(LAST_MESSAGE as u32).to_le_bytes());
+        callback.extend_from_slice(&[0x8b, 0x44, 0x24, 0x0c]); // mov eax,[esp+12] (wParam)
+        callback.push(0xa3);
+        callback.extend_from_slice(&(LAST_WPARAM as u32).to_le_bytes());
+        callback.extend_from_slice(&[0x8b, 0x44, 0x24, 0x10]); // mov eax,[esp+16] (lParam)
+        callback.push(0xa3);
+        callback.extend_from_slice(&(LAST_LPARAM as u32).to_le_bytes());
+        callback.extend_from_slice(&[0x31, 0xc0, 0xc2, 0x10, 0x00]); // FALSE; ret 16
+        p.write_bytes(CALLBACK, &callback).unwrap();
+
+        let args = [0x0040_0000, 101, PARENT as u32, CALLBACK as u32, 0x55];
+        set_args_with_callback_stack(&mut p, &args);
+        let start_result = lookup("DialogBoxParamA").unwrap()(&mut p);
+        assert!(
+            matches!(start_result, Err(Stop::Idle)),
+            "got {start_result:?}"
+        );
+        let dialog = p.extra.win.modal_dialogs.last().unwrap().clone();
+        assert_eq!(p.rd32(CALL_COUNT).unwrap(), 1);
+        assert_eq!(p.rd32(LAST_MESSAGE).unwrap(), WM_INITDIALOG as u32);
+        assert_ne!(p.extra.win.windows[&PARENT].style & WS_DISABLED, 0);
+        assert_eq!(dialog.title, "Sample");
+        let edit = dialog
+            .controls
+            .iter()
+            .find(|control| control.id == 100)
+            .unwrap();
+
+        input_event(&mut p, 14, dialog.hwnd as i64, 100, 'é' as i64).unwrap();
+        assert_eq!(p.extra.win.windows[&edit.hwnd].title, "oldé");
+        assert_eq!(p.rd32(LAST_MESSAGE).unwrap(), WM_COMMAND as u32);
+        assert_eq!(
+            p.rd32(LAST_WPARAM).unwrap(),
+            (100u32 | (0x0300 << 16)),
+            "EN_CHANGE carries the control ID in LOWORD and notification code in HIWORD"
+        );
+        assert_eq!(p.rd32(LAST_LPARAM).unwrap(), edit.hwnd as u32);
+        assert_eq!(
+            p.rd32(CALL_COUNT).unwrap(),
+            2,
+            "edit text must send one EN_CHANGE notification"
+        );
+        input_event(&mut p, 14, dialog.hwnd as i64, 100, 8).unwrap();
+        assert_eq!(p.extra.win.windows[&edit.hwnd].title, "old");
+
+        input_event(&mut p, 13, 7, dialog.hwnd as i64, 0).unwrap();
+        assert_eq!(p.rd32(LAST_MESSAGE).unwrap(), WM_COMMAND as u32);
+        assert!(p.extra.win.modal_dialogs.last().unwrap().presented);
+        assert!(p
+            .stderr
+            .windows(b"[anywasm-dialog-box]1|".len())
+            .any(|window| window == b"[anywasm-dialog-box]1|"));
+
+        set_args_with_callback_stack(&mut p, &[dialog.hwnd as u32, 0x1234]);
+        assert_eq!(lookup("EndDialog").unwrap()(&mut p), Ok(1));
+        set_args_with_callback_stack(&mut p, &args);
+        assert_eq!(lookup("DialogBoxParamA").unwrap()(&mut p), Ok(0x1234));
+        assert_eq!(p.rd32(CALL_COUNT).unwrap(), 6);
+        assert_eq!(p.rd32(LAST_MESSAGE).unwrap(), WM_NCDESTROY as u32);
+        assert!(p.extra.win.modal_dialogs.is_empty());
+        assert_eq!(p.extra.win.windows[&PARENT].style & WS_DISABLED, 0);
+        assert_eq!(p.extra.win.focus, PARENT);
+        assert!(!p.extra.win.windows.contains_key(&dialog.hwnd));
+        assert!(p
+            .stderr
+            .windows(b"[anywasm-dialog-box-close]1|".len())
+            .any(|window| window == b"[anywasm-dialog-box-close]1|"));
+
+        // The default dialog procedure maps WM_CLOSE to EndDialog(IDCANCEL).
+        set_args_with_callback_stack(&mut p, &args);
+        assert!(matches!(
+            lookup("DialogBoxParamA").unwrap()(&mut p),
+            Err(Stop::Idle)
+        ));
+        let second_dialog = p.extra.win.modal_dialogs.last().unwrap().hwnd;
+        input_event(&mut p, 13, 0, second_dialog as i64, 1).unwrap();
+        set_args_with_callback_stack(&mut p, &args);
+        assert_eq!(lookup("DialogBoxParamA").unwrap()(&mut p), Ok(2));
+    }
+
+    #[test]
+    fn create_icon_indirect_copies_valid_gdi_bitmap_state() {
         const INFO: u64 = 0x0003_5000;
-        const BITS: u64 = 0x0003_6000;
         let mut p = test_process_with_args(&[]);
         assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
         assert!(p.mem.map(INFO, 0x1000, PROT_RW));
-        assert!(p.mem.map(BITS, 0x1000, PROT_RW));
 
         set_args(&mut p, &[0]);
         assert_eq!(lookup("CreateIconIndirect").unwrap()(&mut p), Ok(0));
         assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
 
-        // ICONINFO on x86: fIcon, xHotspot, yHotspot, hbmMask, hbmColor.
-        p.handles.insert(0x1111, Handle::Other);
-        p.handles.insert(0x2222, Handle::Other);
+        // Build a 1x1 monochrome mask and color bitmap through the real GDI bitmap HLE.
+        set_args(&mut p, &[1, 1, 1, 1, 0]);
+        let mask = crate::hle::gdi::lookup("CreateBitmap").unwrap()(&mut p).unwrap();
+        set_args(&mut p, &[1, 1, 1, 24, 0]);
+        let color = crate::hle::gdi::lookup("CreateBitmap").unwrap()(&mut p).unwrap();
         p.wr32(INFO, 1).unwrap();
-        p.wr32(INFO + 4, 0).unwrap();
-        p.wr32(INFO + 8, 0).unwrap();
-        p.wr32(INFO + 12, 0x1111).unwrap();
-        p.wr32(INFO + 16, 0x2222).unwrap();
+        p.wr32(INFO + 4, 99).unwrap();
+        p.wr32(INFO + 8, 101).unwrap();
+        p.wr32(INFO + 12, mask as u32).unwrap();
+        p.wr32(INFO + 16, color as u32).unwrap();
         set_args(&mut p, &[INFO as u32]);
-        assert!(matches!(
-            lookup("CreateIconIndirect").unwrap()(&mut p),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("CreateIconIndirect") && name.contains("GDI bitmap pixels")
-        ));
+        let icon = lookup("CreateIconIndirect").unwrap()(&mut p).unwrap();
+        assert_ne!(icon, 0);
+        assert!(matches!(p.handles.get(&icon), Some(Handle::Other)));
+        let image = &p.extra.win.icons[&icon];
+        assert!(image.is_icon);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.hotspot, (0, 0));
+        assert_eq!(image.mask.as_ref().unwrap().bits_per_pixel, 1);
+        assert_eq!(image.mask.as_ref().unwrap().bits.len(), 2);
+        assert_eq!(image.mask.as_ref().unwrap().row_bytes, 2);
+        assert_eq!(image.color.as_ref().unwrap().bits_per_pixel, 24);
 
+        // The new object owns copies. Deleting caller bitmaps leaves its images intact.
+        set_args(&mut p, &[mask as u32]);
+        assert_eq!(
+            crate::hle::gdi::lookup("DeleteObject").unwrap()(&mut p),
+            Ok(1)
+        );
+        set_args(&mut p, &[color as u32]);
+        assert_eq!(
+            crate::hle::gdi::lookup("DeleteObject").unwrap()(&mut p),
+            Ok(1)
+        );
+        assert_eq!(
+            p.extra.win.icons[&icon].color.as_ref().unwrap().bits.len(),
+            4
+        );
+    }
+
+    #[test]
+    fn create_icon_from_resource_validates_and_copies_dib_or_exposes_unsupported_png() {
+        const BITS: u64 = 0x0003_6000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(BITS, 0x1000, PROT_RW));
         set_args(&mut p, &[BITS as u32, 1, 1, 0x0001ffff]);
         assert_eq!(lookup("CreateIconFromResource").unwrap()(&mut p), Ok(0));
         assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
 
-        p.wr8(BITS, 0).unwrap();
-        set_args(&mut p, &[BITS as u32, 1, 1, 0x00030000]);
+        // A cursor resource starts with a four-byte hotspot. Reject a truncated LOCALHEADER
+        // through the Win32 error path instead of slicing past the input buffer.
+        p.write_bytes(BITS, &[1, 0, 1]).unwrap();
+        set_args(&mut p, &[BITS as u32, 3, 0, 0x00030000]);
+        assert_eq!(lookup("CreateIconFromResource").unwrap()(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 13);
+
+        set_args(&mut p, &[BITS as u32, 1, 1, 0x00030001]);
+        assert_eq!(lookup("CreateIconFromResource").unwrap()(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        let mut dib = vec![0u8; 48];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&1i32.to_le_bytes()); // width
+        dib[8..12].copy_from_slice(&2i32.to_le_bytes()); // XOR + AND rows
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        dib[20..24].copy_from_slice(&8u32.to_le_bytes());
+        p.write_bytes(BITS, &dib).unwrap();
+        // The documented version interval is inclusive and accepts intermediate values.
+        set_args(&mut p, &[BITS as u32, dib.len() as u32, 1, 0x00028000]);
+        let icon = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        assert_ne!(icon, 0);
+        let image = &p.extra.win.icons[&icon];
+        assert!(image.is_icon);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.resource_bits.as_deref(), Some(dib.as_slice()));
+        assert_eq!(image.mask.as_ref().unwrap().bits_per_pixel, 1);
+        assert_eq!(image.mask.as_ref().unwrap().bits, [0, 0, 0, 0]);
+        assert_eq!(image.color.as_ref().unwrap().bits_per_pixel, 24);
+        assert_eq!(image.color.as_ref().unwrap().row_bytes, 4);
+        assert_eq!(image.color.as_ref().unwrap().bits, [0, 0, 0, 0]);
+
+        let mut cursor = vec![0u8; 52];
+        cursor[0..2].copy_from_slice(&2u16.to_le_bytes());
+        cursor[2..4].copy_from_slice(&3u16.to_le_bytes());
+        cursor[4..].copy_from_slice(&dib);
+        p.write_bytes(BITS, &cursor).unwrap();
+        set_args(&mut p, &[BITS as u32, cursor.len() as u32, 0, 0x00030000]);
+        let cursor_handle = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        assert!(!p.extra.win.icons[&cursor_handle].is_icon);
+        assert_eq!(p.extra.win.icons[&cursor_handle].hotspot, (2, 3));
+
+        p.write_bytes(BITS, b"\x89PNG\r\n\x1a\n").unwrap();
+        set_args(&mut p, &[BITS as u32, 8, 1, 0x00030000]);
         assert!(matches!(
             lookup("CreateIconFromResource").unwrap()(&mut p),
             Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("CreateIconFromResource") && name.contains("resource decoding")
+                if dll == "user32" && name.contains("PNG decoding")
         ));
+    }
+
+    #[test]
+    fn create_icon_from_resource_decodes_core_header_and_bitfield_masks() {
+        const BITS: u64 = 0x0003_9000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(BITS, 0x1000, PROT_RW));
+
+        // BITMAPCOREHEADER, 1-bit XOR and AND rows, with RGBTRIPLE color-table entries.
+        let mut core = vec![0u8; 26];
+        core[0..4].copy_from_slice(&12u32.to_le_bytes());
+        core[4..6].copy_from_slice(&1u16.to_le_bytes());
+        core[6..8].copy_from_slice(&2u16.to_le_bytes());
+        core[8..10].copy_from_slice(&1u16.to_le_bytes());
+        core[10..12].copy_from_slice(&1u16.to_le_bytes());
+        core[18..22].copy_from_slice(&[0x80, 0, 0, 0]);
+        core[22..26].copy_from_slice(&[0x40, 0, 0, 0]);
+        p.write_bytes(BITS, &core).unwrap();
+        set_args(&mut p, &[BITS as u32, core.len() as u32, 1, 0x00030000]);
+        let mono = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        let mono = &p.extra.win.icons[&mono];
+        assert_eq!((mono.width, mono.height), (1, 1));
+        assert_eq!(mono.mask.as_ref().unwrap().height, 2);
+        assert_eq!(
+            mono.mask.as_ref().unwrap().bits,
+            [0x80, 0, 0, 0, 0x40, 0, 0, 0]
+        );
+        assert!(mono.color.is_none());
+
+        // BITMAPINFOHEADER + BI_BITFIELDS masks + 16-bit XOR + 1-bit AND rows.
+        let mut bitfields = vec![0u8; 60];
+        bitfields[0..4].copy_from_slice(&40u32.to_le_bytes());
+        bitfields[4..8].copy_from_slice(&1i32.to_le_bytes());
+        bitfields[8..12].copy_from_slice(&2i32.to_le_bytes());
+        bitfields[12..14].copy_from_slice(&1u16.to_le_bytes());
+        bitfields[14..16].copy_from_slice(&16u16.to_le_bytes());
+        bitfields[16..20].copy_from_slice(&3u32.to_le_bytes());
+        bitfields[40..44].copy_from_slice(&0x7c00u32.to_le_bytes());
+        bitfields[44..48].copy_from_slice(&0x03e0u32.to_le_bytes());
+        bitfields[48..52].copy_from_slice(&0x001fu32.to_le_bytes());
+        bitfields[52..56].copy_from_slice(&[0x34, 0x12, 0, 0]);
+        bitfields[56..60].copy_from_slice(&[0x80, 0, 0, 0]);
+        p.write_bytes(BITS, &bitfields).unwrap();
+        set_args(
+            &mut p,
+            &[BITS as u32, bitfields.len() as u32, 1, 0x00030000],
+        );
+        let rgb = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        let rgb = &p.extra.win.icons[&rgb];
+        assert_eq!(rgb.color.as_ref().unwrap().bits_per_pixel, 16);
+        assert_eq!(rgb.color.as_ref().unwrap().bits, [0x34, 0x12, 0, 0]);
+        assert_eq!(rgb.mask.as_ref().unwrap().bits, [0x80, 0, 0, 0]);
+
+        // BITMAPV3INFOHEADER stores alpha and RGB masks inside its header.
+        let mut v3 = vec![0u8; 116];
+        v3[0..4].copy_from_slice(&56u32.to_le_bytes());
+        v3[4..8].copy_from_slice(&1i32.to_le_bytes());
+        v3[8..12].copy_from_slice(&2i32.to_le_bytes());
+        v3[12..14].copy_from_slice(&1u16.to_le_bytes());
+        v3[14..16].copy_from_slice(&32u16.to_le_bytes());
+        v3[16..20].copy_from_slice(&3u32.to_le_bytes());
+        v3[40..44].copy_from_slice(&0x00ff0000u32.to_le_bytes());
+        v3[44..48].copy_from_slice(&0x0000ff00u32.to_le_bytes());
+        v3[48..52].copy_from_slice(&0x000000ffu32.to_le_bytes());
+        v3[52..56].copy_from_slice(&0xff000000u32.to_le_bytes());
+        p.write_bytes(BITS, &v3).unwrap();
+        set_args(&mut p, &[BITS as u32, v3.len() as u32, 1, 0x00030000]);
+        let rgba = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        let rgba = &p.extra.win.icons[&rgba];
+        assert_eq!(rgba.color.as_ref().unwrap().bits_per_pixel, 32);
+        assert_eq!(rgba.color.as_ref().unwrap().bits.len(), 4);
+        assert_eq!(rgba.mask.as_ref().unwrap().bits.len(), 4);
     }
 
     #[test]
@@ -4706,7 +6684,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_input_idle_rejects_bad_handles_and_stops_for_unobservable_process_state() {
+    fn wait_for_input_idle_tracks_no_queue_first_idle_and_one_shot_success() {
         let mut p = test_process_with_args(&[]);
         assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
 
@@ -4717,20 +6695,114 @@ mod tests {
         );
         assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 6);
 
-        let process = p.new_handle(Handle::Process {
+        // A foreign process could own a GUI queue. Since this runtime cannot inspect it, preserve
+        // that boundary instead of returning a fabricated success.
+        let foreign = p.new_handle(Handle::Process {
             id: 999,
             inheritable: false,
         });
-        set_args(&mut p, &[process as u32, 5000]);
+        set_args(&mut p, &[foreign as u32, 5000]);
         assert!(matches!(
             lookup("WaitForInputIdle").unwrap()(&mut p),
             Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("WaitForInputIdle") && name.contains("idle state is not observable")
+                if dll == "user32" && name.contains("foreign process")
+        ));
+
+        let current = p.new_handle(Handle::Process {
+            id: 0x1000,
+            inheritable: false,
+        });
+        set_args(&mut p, &[current as u32, 5000]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0));
+        assert!(p.extra.win.input_idle_observed.contains(&0x1000));
+
+        // The API waits only once: after the process first had no GUI queue, later calls succeed
+        // immediately even if a queue exists and has become busy.
+        p.extra.win.message_queue_threads.insert(0x1004);
+        p.extra.win.queue.push_back(Msg {
+            hwnd: HWND_DESKTOP,
+            msg: WM_PAINT,
+            wparam: 0,
+            lparam: 0,
+            time: 0,
+            pt: (0, 0),
+        });
+        set_args(&mut p, &[current as u32, 0]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0));
+    }
+
+    #[test]
+    fn wait_for_input_idle_times_out_or_reports_unmodeled_blocking_wait() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        p.extra.win.message_queue_threads.insert(0x1004);
+        p.extra.win.queue.push_back(Msg {
+            hwnd: HWND_DESKTOP,
+            msg: WM_PAINT,
+            wparam: 0,
+            lparam: 0,
+            time: 0,
+            pt: (0, 0),
+        });
+        let current = p.new_handle(Handle::Process {
+            id: 0x1000,
+            inheritable: false,
+        });
+        set_args(&mut p, &[current as u32, 0]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0x102));
+        set_args(&mut p, &[current as u32, 5000]);
+        assert!(matches!(
+            lookup("WaitForInputIdle").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("without an observed idle thread")
         ));
     }
 
     #[test]
-    fn fill_rect_does_not_report_success_without_a_gdi_raster_target() {
+    fn wait_for_input_idle_does_not_guess_from_an_empty_existing_queue() {
+        let mut p = test_process_with_args(&[]);
+        p.extra.win.message_queue_threads.insert(0x1004);
+        let current = p.new_handle(Handle::Process {
+            id: 0x1000,
+            inheritable: false,
+        });
+        set_args(&mut p, &[current as u32, 0]);
+        assert!(matches!(
+            lookup("WaitForInputIdle").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("queue state is insufficient")
+        ));
+    }
+
+    #[test]
+    fn empty_get_message_records_the_process_first_idle_point() {
+        const MSG: u64 = 0x0003_a000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(MSG, 0x1000, PROT_RW));
+
+        set_args(&mut p, &[MSG as u32, 0, 0, 0]);
+        assert!(matches!(
+            lookup("GetMessageA").unwrap()(&mut p),
+            Err(Stop::Idle)
+        ));
+        assert!(p
+            .extra
+            .win
+            .message_queue_threads
+            .contains(&p.current_thread_id));
+        assert!(p.extra.win.input_idle_observed.contains(&0x1000));
+
+        let process = p.new_handle(Handle::Process {
+            id: 0x1000,
+            inheritable: false,
+        });
+        set_args(&mut p, &[process as u32, u32::MAX]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0));
+    }
+
+    #[test]
+    fn fill_rect_queues_real_renderer_draw_for_window_and_display_contexts() {
         const WINDOW: u64 = HWND_BASE + 0x60;
         const RECT: u64 = 0x0003_8000;
         let mut p = test_process_with_args(&[]);
@@ -4740,10 +6812,39 @@ mod tests {
         write_rect(&mut p, RECT, 3, 5, 20, 30).unwrap();
 
         set_args(&mut p, &[hdc as u32, RECT as u32, 6]); // COLOR_WINDOW + 1
+        let result = lookup("FillRect").unwrap()(&mut p);
+        assert_eq!(
+            result,
+            Ok(1),
+            "hdc={hdc:#x} DC refs={:?} windows={:?} error={:#x}",
+            p.extra.win.device_context_refs,
+            p.extra.win.windows.keys().collect::<Vec<_>>(),
+            p.rd32(TEB_ADDR + 0x34).unwrap_or(0)
+        );
+        let decoded = crate::hle::gpu::decode(&p.extra.gpu.buf);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, op::GDI_FILL_RECT);
+        let words: Vec<u32> = decoded[0]
+            .1
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        assert_eq!(words, [0, 3, 5, 20, 30, system_colorref(5)]);
+
+        // GDI display DCs draw to the main browser surface. Information DCs and compatible DCs
+        // are distinct modes and do not silently claim a raster operation succeeded.
+        set_args(&mut p, &[0, 0, 0, 0]);
+        let display = crate::hle::gdi::lookup("CreateDCA").unwrap()(&mut p).unwrap();
+        set_args(&mut p, &[display as u32, RECT as u32, 6]);
+        assert_eq!(lookup("FillRect").unwrap()(&mut p), Ok(1));
+
+        set_args(&mut p, &[0]);
+        let compatible = crate::hle::gdi::lookup("CreateCompatibleDC").unwrap()(&mut p).unwrap();
+        set_args(&mut p, &[compatible as u32, RECT as u32, 6]);
         assert!(matches!(
             lookup("FillRect").unwrap()(&mut p),
             Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("FillRect") && name.contains("no translated GDI raster target")
+                if dll == "user32" && name.contains("compatible DC")
         ));
     }
 
@@ -4896,7 +6997,7 @@ mod tests {
     }
 
     #[test]
-    fn message_box_requires_an_interactive_translation() {
+    fn message_box_w_waits_for_a_real_button_selection() {
         const TEXT: u64 = 0x30000;
         const CAPTION: u64 = 0x31000;
         let mut p = test_process_with_args(&[0, TEXT as u32, CAPTION as u32, 0]);
@@ -4907,15 +7008,20 @@ mod tests {
 
         let result = lookup("MessageBoxW").unwrap()(&mut p);
 
-        assert!(matches!(
-            result,
-            Err(Stop::Unimplemented { ref dll, ref name })
-                if dll == "user32" && name.contains("MessageBoxW")
-        ));
+        assert!(matches!(result, Err(Stop::Idle)));
+        assert_eq!(
+            p.extra.win.message_box.as_ref().unwrap().text,
+            "Unable to start game"
+        );
+        assert!(p.stderr.starts_with(b"[anywasm-message-box]1|"));
+
+        input_event(&mut p, 12, 1, 0, 0).unwrap();
+        assert_eq!(lookup("MessageBoxW").unwrap()(&mut p), Ok(1));
+        assert!(p.extra.win.message_box.is_none());
     }
 
     #[test]
-    fn message_box_a_requires_an_interactive_translation() {
+    fn message_box_a_rejects_a_button_not_present_in_the_dialog() {
         const TEXT: u64 = 0x32000;
         const CAPTION: u64 = 0x33000;
         let mut p = test_process_with_args(&[0, TEXT as u32, CAPTION as u32, 0]);
@@ -4926,11 +7032,38 @@ mod tests {
 
         let result = lookup("MessageBoxA").unwrap()(&mut p);
 
+        assert!(matches!(result, Err(Stop::Idle)));
         assert!(matches!(
-            result,
+            input_event(&mut p, 12, 2, 0, 0),
             Err(Stop::Unimplemented { ref dll, ref name })
-                if dll == "user32" && name.contains("MessageBoxA")
+                if dll == "user32" && name.contains("invalid owner/button")
         ));
+    }
+
+    #[test]
+    fn message_box_a_returns_the_selected_button_id_after_host_input() {
+        const TEXT: u64 = 0x34000;
+        const CAPTION: u64 = 0x35000;
+        let mut p = test_process_with_args(&[0, TEXT as u32, CAPTION as u32, 1]);
+        assert!(p.mem.map(TEXT, 0x1000, PROT_RW));
+        assert!(p.mem.map(CAPTION, 0x1000, PROT_RW));
+        p.write_cstr(TEXT, "Save changes?").unwrap();
+        p.write_cstr(CAPTION, "Editor").unwrap();
+
+        let message_box = lookup("MessageBoxA").unwrap();
+        assert!(matches!(message_box(&mut p), Err(Stop::Idle)));
+        let pending = p.extra.win.message_box.as_ref().unwrap();
+        assert_eq!(pending.caption, "Editor");
+        assert_eq!(pending.text, "Save changes?");
+        assert_eq!(
+            pending.buttons,
+            vec![(1, "OK".to_owned()), (2, "Cancel".to_owned())]
+        );
+        assert_eq!(pending.result, None);
+
+        input_event(&mut p, 12, 2, 0, 0).unwrap();
+        assert_eq!(message_box(&mut p), Ok(2));
+        assert!(p.extra.win.message_box.is_none());
     }
 
     #[test]
@@ -5051,6 +7184,19 @@ mod tests {
     }
 
     #[test]
+    fn default_window_proc_ignores_an_unhandled_character_message() {
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        let hwnd = HWND_BASE + 0x40;
+        p.extra.win.windows.insert(hwnd, test_window(true, 0));
+
+        assert_eq!(
+            def_window_proc(&mut p, hwnd, WM_CHAR, '\r' as u64, 1),
+            Ok(0)
+        );
+        assert!(p.extra.win.windows.contains_key(&hwnd));
+    }
+
+    #[test]
     fn default_window_proc_accepts_window_creation_and_preserves_the_window() {
         let mut p = Process::new(crate::vfs::Vfs::new());
         let hwnd = HWND_BASE + 0x40;
@@ -5132,6 +7278,16 @@ mod tests {
 
     fn set_args(p: &mut Process, args: &[u32]) {
         let stack = p.alloc_virtual(0x1000, PROT_RW);
+        p.cpu.gpr[RSP] = stack;
+        p.wr32(stack, 0xfeed_face).unwrap();
+        for (index, arg) in args.iter().copied().enumerate() {
+            p.wr32(stack + 4 + index as u64 * 4, arg).unwrap();
+        }
+    }
+
+    fn set_args_with_callback_stack(p: &mut Process, args: &[u32]) {
+        set_args(p, args);
+        let stack = p.cpu.gpr[RSP] + 0x800;
         p.cpu.gpr[RSP] = stack;
         p.wr32(stack, 0xfeed_face).unwrap();
         for (index, arg) in args.iter().copied().enumerate() {

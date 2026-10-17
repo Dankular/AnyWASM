@@ -185,14 +185,17 @@ pub enum ThreadWait {
     Handle {
         handle: u64,
         deadline: Option<u64>,
+        alertable: bool,
     },
     Multiple {
         handles: Vec<u64>,
         wait_all: bool,
         deadline: Option<u64>,
+        alertable: bool,
     },
     Sleep {
         deadline: u64,
+        alertable: bool,
     },
     CriticalAcquire {
         address: u64,
@@ -209,6 +212,12 @@ pub enum ThreadWait {
         deadline: Option<u64>,
         outcome: Option<bool>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueuedUserApc {
+    pub routine: u64,
+    pub data: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -342,7 +351,8 @@ pub enum Handle {
     Mapping {
         size: u64,
         file_path: Option<String>,
-        protection: u8,
+        protection: u32,
+        file_writable: bool,
     },
     Find {
         entries: Vec<FindEntry>,
@@ -374,8 +384,23 @@ pub enum Handle {
         count: u32,
         max_count: u32,
     },
+    /// Handle to a process-local kernel synchronization object. Multiple handles may refer to
+    /// the same entry in `Process::kernel_objects`, matching Win32's object identity model.
+    KernelObject {
+        object_id: u64,
+        access: u32,
+        inheritable: bool,
+    },
+    Pipe {
+        pipe_id: u64,
+        endpoint: PipeEndpoint,
+        generation: u64,
+        inheritable: bool,
+        overlapped: bool,
+    },
     Thread {
         id: u32,
+        access: u32,
         start: u64,
         parameter: u64,
         exit_code: Option<u32>,
@@ -388,6 +413,67 @@ pub enum Handle {
     },
     Module(u64),
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipeEndpoint {
+    AnonymousRead,
+    AnonymousWrite,
+    NamedServer,
+    NamedClient,
+}
+
+/// Process-local byte-stream pipe state shared by anonymous endpoints or one named-pipe
+/// server/client instance.
+#[derive(Clone, Debug)]
+pub struct PipeConnection {
+    pub name: Option<String>,
+    pub anonymous: bool,
+    pub buffer_to_server: VecDeque<u8>,
+    pub buffer_to_client: VecDeque<u8>,
+    pub capacity_to_server: usize,
+    pub capacity_to_client: usize,
+    pub server_readable: bool,
+    pub server_writable: bool,
+    pub client_readable: bool,
+    pub client_writable: bool,
+    pub server_open: bool,
+    pub client_open: bool,
+    pub connected: bool,
+    /// Generation of the active named-pipe client connection. Handles from older
+    /// generations remain valid handles but cannot access a later client's stream.
+    pub client_generation: u64,
+    /// A nonblocking server receives one successful ConnectNamedPipe result after an explicit
+    /// disconnect, even when no client has connected yet. Opening a client consumes this state.
+    pub reconnect_available: bool,
+    pub connect_pending: bool,
+    pub nonblocking: bool,
+    pub max_instances: u32,
+    pub server_handles: u32,
+    pub client_handles: u32,
+    pub anonymous_read_handles: u32,
+    pub anonymous_write_handles: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KernelObjectState {
+    Event { signaled: bool, manual: bool },
+    Mutex { owner: Option<u32>, recursion: u32 },
+    Semaphore { count: u32, max_count: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KernelObject {
+    pub name: Option<String>,
+    pub state: KernelObjectState,
+    handle_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelObjectError {
+    NotFound,
+    TypeMismatch,
+    AccessDenied,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -493,6 +579,7 @@ pub struct Process {
     pub stderr: Vec<u8>,
     /// Change notifications on streamed assets lack host-folder and mapped-writeback observation.
     pub change_notification_coverage_reported: bool,
+    pub host_change_notifications_enabled: bool,
     pub stdin: VecDeque<u8>,
     /// Process standard device handles; they may be redirected through SetStdHandle.
     pub std_handles: [u64; 3],
@@ -503,7 +590,21 @@ pub struct Process {
     pub ignore_ctrl_c: bool,
     pending_input_events: VecDeque<(u32, i64, i64, i64)>,
     pub handles: HashMap<u64, Handle>,
+    /// User APCs queued for guest threads, in Win32 FIFO delivery order.
+    pub user_apcs: HashMap<u32, VecDeque<QueuedUserApc>>,
+    /// Threads woken from an alertable wait by a queued APC; dispatch before guest resumes.
+    pending_user_apc_delivery: HashSet<u32>,
+    /// Guest-created threads which have not executed their first instruction yet.
+    apc_start_pending: HashSet<u32>,
     pub next_handle: u64,
+    /// Named event/mutex/semaphore namespace and process-local object state.
+    pub(crate) kernel_objects: HashMap<u64, KernelObject>,
+    pub(crate) named_kernel_objects: HashMap<String, u64>,
+    pub(crate) next_kernel_object_id: u64,
+    /// Pipe connections shared between endpoint handles, keyed by a separate local ID space.
+    pub(crate) pipes: HashMap<u64, PipeConnection>,
+    pub(crate) named_pipe_instances: HashMap<String, Vec<u64>>,
+    pub(crate) next_pipe_id: u64,
     /// CryptoAPI provider contexts are separate from kernel handles and use the same ID space.
     pub crypto_providers: HashMap<u64, CryptoProviderState>,
     /// CryptoAPI hashes are separate from kernel handles and use the same ID space.
@@ -721,6 +822,8 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
     }
     if group == "kernel32" {
         match name {
+            // FlushViewOfFile(base, SIZE_T) uses two 32-bit WINAPI arguments in PE32.
+            "FlushViewOfFile" => return Some(8),
             // GetProductInfo(version, service pack, product output) uses five Win32 stack args.
             "GetProductInfo" => return Some(20),
             // IsWow64Process(process handle, BOOL output) uses two Win32 stack args.
@@ -972,6 +1075,9 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
                     "GetComputerNameExA",
                     "GetLongPathNameW",
                     "GetFileAttributesExW",
+                    "OpenEventW",
+                    "OpenMutexW",
+                    "OpenSemaphoreW",
                 ],
                 3,
             ),
@@ -980,6 +1086,10 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
                     "VirtualProtect",
                     "CreateSemaphoreA",
                     "CreateEventA",
+                    "CreateEventW",
+                    "CreateEventExW",
+                    "CreateMutexExW",
+                    "CreateSemaphoreW",
                     "SetFilePointer",
                     "GetLocaleInfoA",
                     "GetLocaleInfoW",
@@ -997,6 +1107,7 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
                 ],
                 4,
             ),
+            (&["CreateSemaphoreExW"], 6),
             (
                 &[
                     "GetStringTypeA",
@@ -1367,6 +1478,7 @@ impl Process {
             stdout: Vec::new(),
             stderr: Vec::new(),
             change_notification_coverage_reported: false,
+            host_change_notifications_enabled: false,
             stdin: VecDeque::new(),
             std_handles: [0x10, 0x14, 0x18],
             error_mode: 0,
@@ -1374,7 +1486,16 @@ impl Process {
             ignore_ctrl_c: false,
             pending_input_events: VecDeque::new(),
             handles: HashMap::new(),
+            user_apcs: HashMap::new(),
+            pending_user_apc_delivery: HashSet::new(),
+            apc_start_pending: HashSet::new(),
             next_handle: 0x100,
+            kernel_objects: HashMap::new(),
+            named_kernel_objects: HashMap::new(),
+            next_kernel_object_id: 1,
+            pipes: HashMap::new(),
+            named_pipe_instances: HashMap::new(),
+            next_pipe_id: 1,
             crypto_providers: HashMap::new(),
             crypto_hashes: HashMap::new(),
             crypto_keys: HashMap::new(),
@@ -1743,6 +1864,7 @@ impl Process {
                 wait_order: 0,
             },
         );
+        self.apc_start_pending.insert(id);
         if suspended {
             self.thread_suspend_counts.insert(id, 1);
             self.suspended_thread_states.insert(id, ThreadState::Ready);
@@ -1830,6 +1952,9 @@ impl Process {
             return false;
         }
         self.guest_threads.get_mut(&id).unwrap().state = ThreadState::Exited(code);
+        self.user_apcs.remove(&id);
+        self.pending_user_apc_delivery.remove(&id);
+        self.apc_start_pending.remove(&id);
         self.ready_threads.retain(|ready_id| *ready_id != id);
         self.thread_suspend_counts.remove(&id);
         self.suspended_thread_states.remove(&id);
@@ -1856,6 +1981,38 @@ impl Process {
         self.current_wait_order = self.wait_sequence;
         self.current_thread_state = ThreadState::Blocked(wait);
         self.schedule_requested = true;
+    }
+
+    pub fn queue_user_apc(&mut self, thread_id: u32, routine: u64, data: u64) {
+        self.user_apcs
+            .entry(thread_id)
+            .or_default()
+            .push_back(QueuedUserApc { routine, data });
+        self.refresh_waiters();
+    }
+
+    pub fn has_queued_user_apcs(&self, thread_id: u32) -> bool {
+        self.user_apcs
+            .get(&thread_id)
+            .is_some_and(|queue| !queue.is_empty())
+    }
+
+    /// Run every user APC queued for the current thread in FIFO order.
+    pub fn dispatch_current_user_apcs(&mut self) -> Result<bool, Stop> {
+        let thread_id = self.current_thread_id;
+        let mut dispatched = false;
+        loop {
+            let next = self
+                .user_apcs
+                .get_mut(&thread_id)
+                .and_then(VecDeque::pop_front);
+            let Some(apc) = next else {
+                self.user_apcs.remove(&thread_id);
+                return Ok(dispatched);
+            };
+            dispatched = true;
+            self.call_guest(apc.routine, &[apc.data])?;
+        }
     }
 
     pub fn request_thread_yield(&mut self) {
@@ -2191,6 +2348,9 @@ impl Process {
         self.ready_threads
             .extend(ready.into_iter().filter(|&id| id != selected));
         self.restore_thread(selected)?;
+        if self.apc_start_pending.remove(&selected) && self.has_queued_user_apcs(selected) {
+            self.pending_user_apc_delivery.insert(selected);
+        }
         Ok(true)
     }
 
@@ -2208,7 +2368,7 @@ impl Process {
                     deadline: Some(deadline),
                     ..
                 })
-                | ThreadState::Blocked(ThreadWait::Sleep { deadline })
+                | ThreadState::Blocked(ThreadWait::Sleep { deadline, .. })
                 | ThreadState::Blocked(ThreadWait::Condition {
                     deadline: Some(deadline),
                     outcome: None,
@@ -2235,6 +2395,9 @@ impl Process {
         self.thread_suspend_counts.remove(&id);
         self.suspended_thread_states.remove(&id);
         self.current_thread_state = ThreadState::Exited(code);
+        self.user_apcs.remove(&id);
+        self.pending_user_apc_delivery.remove(&id);
+        self.apc_start_pending.remove(&id);
         for handle in self.handles.values_mut() {
             if let Handle::Thread {
                 id: handle_id,
@@ -2334,6 +2497,15 @@ impl Process {
             Handle::ChangeNotification { signaled, .. } => Some(*signaled),
             Handle::Mutex { owner, .. } => Some(owner.is_none() || *owner == Some(id)),
             Handle::Semaphore { count, .. } => Some(*count != 0),
+            Handle::KernelObject { object_id, .. } => {
+                match &self.kernel_objects.get(object_id)?.state {
+                    KernelObjectState::Event { signaled, .. } => Some(*signaled),
+                    KernelObjectState::Mutex { owner, .. } => {
+                        Some(owner.is_none() || *owner == Some(id))
+                    }
+                    KernelObjectState::Semaphore { count, .. } => Some(*count != 0),
+                }
+            }
             Handle::Thread { exit_code, .. } => Some(exit_code.is_some()),
             _ => None,
         }
@@ -2363,6 +2535,29 @@ impl Process {
                 }
             }
             Handle::Semaphore { count, .. } => *count -= 1,
+            Handle::KernelObject { object_id, .. } => {
+                match &mut self
+                    .kernel_objects
+                    .get_mut(object_id)
+                    .expect("validated kernel object")
+                    .state
+                {
+                    KernelObjectState::Event { signaled, manual } => {
+                        if !*manual {
+                            *signaled = false;
+                        }
+                    }
+                    KernelObjectState::Mutex { owner, recursion } => {
+                        if *owner == Some(id) {
+                            *recursion = recursion.saturating_add(1);
+                        } else {
+                            *owner = Some(id);
+                            *recursion = 1;
+                        }
+                    }
+                    KernelObjectState::Semaphore { count, .. } => *count -= 1,
+                }
+            }
             Handle::Thread { .. } => {}
             _ => unreachable!("validated wait handle"),
         }
@@ -2376,22 +2571,7 @@ impl Process {
         wait_all: bool,
         id: u32,
     ) -> Result<Option<u64>, u32> {
-        if handles.is_empty() {
-            return Err(87);
-        }
-        if wait_all
-            && handles
-                .iter()
-                .enumerate()
-                .any(|(i, handle)| handles[..i].contains(handle))
-        {
-            return Err(87);
-        }
-        for &handle in handles {
-            if self.handle_is_signaled(handle, id).is_none() {
-                return Err(6);
-            }
-        }
+        self.validate_wait_handles(handles, wait_all, id)?;
         if wait_all {
             if handles
                 .iter()
@@ -2411,6 +2591,37 @@ impl Process {
             }
         }
         Ok(None)
+    }
+
+    /// Validate wait handles without consuming synchronization objects.
+    pub fn validate_wait_handles(
+        &self,
+        handles: &[u64],
+        wait_all: bool,
+        id: u32,
+    ) -> Result<(), u32> {
+        if handles.is_empty() {
+            return Err(87);
+        }
+        if wait_all
+            && handles
+                .iter()
+                .enumerate()
+                .any(|(i, handle)| handles[..i].contains(handle))
+        {
+            return Err(87);
+        }
+        for &handle in handles {
+            if let Some(Handle::KernelObject { access, .. }) = self.handles.get(&handle) {
+                if access & 0x0010_0000 == 0 {
+                    return Err(5); // ERROR_ACCESS_DENIED: SYNCHRONIZE was not granted.
+                }
+            }
+            if self.handle_is_signaled(handle, id).is_none() {
+                return Err(6);
+            }
+        }
+        Ok(())
     }
 
     /// Record a change visible to the guest VFS and wake matching directory watchers.
@@ -2514,92 +2725,106 @@ impl Process {
             else {
                 continue;
             };
-            let completion = match wait {
-                ThreadWait::Handle { handle, deadline } => {
-                    match self.try_wait_handles(&[handle], false, id) {
+            let alertable_apc_pending = match &wait {
+                ThreadWait::Handle { alertable, .. }
+                | ThreadWait::Multiple { alertable, .. }
+                | ThreadWait::Sleep { alertable, .. } => {
+                    *alertable && self.has_queued_user_apcs(id)
+                }
+                _ => false,
+            };
+            let completion = if alertable_apc_pending {
+                self.pending_user_apc_delivery.insert(id);
+                Some((0xc0, None)) // WAIT_IO_COMPLETION
+            } else {
+                match wait {
+                    ThreadWait::Handle {
+                        handle, deadline, ..
+                    } => match self.try_wait_handles(&[handle], false, id) {
                         Ok(Some(_)) => Some((0, None)),
                         Ok(None) if deadline.is_some_and(|deadline| now >= deadline) => {
                             Some((0x102, None))
                         }
                         Err(error) => Some((u32::MAX as u64, Some(error))),
                         _ => None,
-                    }
-                }
-                ThreadWait::Multiple {
-                    handles,
-                    wait_all,
-                    deadline,
-                } => match self.try_wait_handles(&handles, wait_all, id) {
-                    Ok(Some(index)) => Some((index, None)),
-                    Ok(None) if deadline.is_some_and(|deadline| now >= deadline) => {
-                        Some((0x102, None))
-                    }
-                    Err(error) => Some((u32::MAX as u64, Some(error))),
-                    _ => None,
-                },
-                ThreadWait::Sleep { deadline } if now >= deadline => Some((0, None)),
-                ThreadWait::CriticalAcquire { address } => {
-                    if self.try_acquire_critical(address, id) {
-                        Some((0, None))
-                    } else {
-                        None
-                    }
-                }
-                ThreadWait::SrwAcquire { address, exclusive } => {
-                    if self.try_acquire_srw(address, id, exclusive) {
-                        Some((0, None))
-                    } else {
-                        None
-                    }
-                }
-                ThreadWait::Condition {
-                    condition,
-                    lock,
-                    critical,
-                    exclusive,
-                    deadline,
-                    mut outcome,
-                } => {
-                    if outcome.is_none() && deadline.is_some_and(|deadline| now >= deadline) {
-                        outcome = Some(false);
-                    }
-                    if let Some(woken) = outcome {
-                        let acquired = if critical {
-                            self.try_acquire_critical(lock, id)
-                        } else {
-                            self.try_acquire_srw(lock, id, exclusive)
-                        };
-                        if !acquired {
-                            if critical {
-                                let state = self.critical_sections.entry(lock).or_default();
-                                if !state.waiters.contains(&id) {
-                                    state.waiters.push_back(id);
-                                }
-                            } else {
-                                let state = self.srw_locks.entry(lock).or_default();
-                                if !state.waiters.contains(&id) {
-                                    state.waiters.push_back(id);
-                                }
-                            }
-                            if let Some(thread) = self.guest_threads.get_mut(&id) {
-                                thread.state = ThreadState::Blocked(ThreadWait::Condition {
-                                    condition,
-                                    lock,
-                                    critical,
-                                    exclusive,
-                                    deadline,
-                                    outcome: Some(woken),
-                                });
-                            }
-                            None
-                        } else {
-                            Some((woken as u64, (!woken).then_some(1460)))
+                    },
+                    ThreadWait::Multiple {
+                        handles,
+                        wait_all,
+                        deadline,
+                        ..
+                    } => match self.try_wait_handles(&handles, wait_all, id) {
+                        Ok(Some(index)) => Some((index, None)),
+                        Ok(None) if deadline.is_some_and(|deadline| now >= deadline) => {
+                            Some((0x102, None))
                         }
-                    } else {
-                        None
+                        Err(error) => Some((u32::MAX as u64, Some(error))),
+                        _ => None,
+                    },
+                    ThreadWait::Sleep { deadline, .. } if now >= deadline => Some((0, None)),
+                    ThreadWait::CriticalAcquire { address } => {
+                        if self.try_acquire_critical(address, id) {
+                            Some((0, None))
+                        } else {
+                            None
+                        }
                     }
+                    ThreadWait::SrwAcquire { address, exclusive } => {
+                        if self.try_acquire_srw(address, id, exclusive) {
+                            Some((0, None))
+                        } else {
+                            None
+                        }
+                    }
+                    ThreadWait::Condition {
+                        condition,
+                        lock,
+                        critical,
+                        exclusive,
+                        deadline,
+                        mut outcome,
+                    } => {
+                        if outcome.is_none() && deadline.is_some_and(|deadline| now >= deadline) {
+                            outcome = Some(false);
+                        }
+                        if let Some(woken) = outcome {
+                            let acquired = if critical {
+                                self.try_acquire_critical(lock, id)
+                            } else {
+                                self.try_acquire_srw(lock, id, exclusive)
+                            };
+                            if !acquired {
+                                if critical {
+                                    let state = self.critical_sections.entry(lock).or_default();
+                                    if !state.waiters.contains(&id) {
+                                        state.waiters.push_back(id);
+                                    }
+                                } else {
+                                    let state = self.srw_locks.entry(lock).or_default();
+                                    if !state.waiters.contains(&id) {
+                                        state.waiters.push_back(id);
+                                    }
+                                }
+                                if let Some(thread) = self.guest_threads.get_mut(&id) {
+                                    thread.state = ThreadState::Blocked(ThreadWait::Condition {
+                                        condition,
+                                        lock,
+                                        critical,
+                                        exclusive,
+                                        deadline,
+                                        outcome: Some(woken),
+                                    });
+                                }
+                                None
+                            } else {
+                                Some((woken as u64, (!woken).then_some(1460)))
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 }
-                _ => None,
             };
             if let Some((result, error)) = completion {
                 if let Some(thread) = self.guest_threads.get_mut(&id) {
@@ -2619,6 +2844,249 @@ impl Process {
         self.next_handle += 4;
         self.handles.insert(id, h);
         id
+    }
+
+    fn kernel_object_states_match(left: &KernelObjectState, right: &KernelObjectState) -> bool {
+        matches!(
+            (left, right),
+            (
+                KernelObjectState::Event { .. },
+                KernelObjectState::Event { .. }
+            ) | (
+                KernelObjectState::Mutex { .. },
+                KernelObjectState::Mutex { .. }
+            ) | (
+                KernelObjectState::Semaphore { .. },
+                KernelObjectState::Semaphore { .. }
+            )
+        )
+    }
+
+    fn add_kernel_object_handle(&mut self, object_id: u64, access: u32, inheritable: bool) -> u64 {
+        self.kernel_objects
+            .get_mut(&object_id)
+            .expect("kernel object exists before making handle")
+            .handle_count += 1;
+        self.new_handle(Handle::KernelObject {
+            object_id,
+            access,
+            inheritable,
+        })
+    }
+
+    /// Create an unnamed object, or open an existing same-type named object. Existing state is
+    /// retained and the caller receives an independent handle to the same object identity.
+    pub fn create_kernel_object(
+        &mut self,
+        name: Option<String>,
+        state: KernelObjectState,
+        access: u32,
+        inheritable: bool,
+        full_access: u32,
+    ) -> Result<(u64, bool), KernelObjectError> {
+        if access & !full_access != 0 {
+            return Err(KernelObjectError::AccessDenied);
+        }
+        if let Some(name) = name.as_ref() {
+            if let Some(&object_id) = self.named_kernel_objects.get(name) {
+                let Some(object) = self.kernel_objects.get(&object_id) else {
+                    self.named_kernel_objects.remove(name);
+                    return Err(KernelObjectError::NotFound);
+                };
+                if !Self::kernel_object_states_match(&object.state, &state) {
+                    return Err(KernelObjectError::TypeMismatch);
+                }
+                let handle = self.add_kernel_object_handle(object_id, access, inheritable);
+                return Ok((handle, true));
+            }
+        }
+
+        let object_id = self.next_kernel_object_id;
+        self.next_kernel_object_id = self.next_kernel_object_id.wrapping_add(1).max(1);
+        self.kernel_objects.insert(
+            object_id,
+            KernelObject {
+                name: name.clone(),
+                state,
+                handle_count: 0,
+            },
+        );
+        if let Some(name) = name {
+            self.named_kernel_objects.insert(name, object_id);
+        }
+        let handle = self.add_kernel_object_handle(object_id, access, inheritable);
+        Ok((handle, false))
+    }
+
+    /// Open an existing named object of the requested type and with a valid access mask.
+    pub fn open_kernel_object(
+        &mut self,
+        name: &str,
+        expected: &KernelObjectState,
+        access: u32,
+        inheritable: bool,
+        full_access: u32,
+    ) -> Result<u64, KernelObjectError> {
+        let Some(&object_id) = self.named_kernel_objects.get(name) else {
+            return Err(KernelObjectError::NotFound);
+        };
+        let Some(object) = self.kernel_objects.get(&object_id) else {
+            self.named_kernel_objects.remove(name);
+            return Err(KernelObjectError::NotFound);
+        };
+        if !Self::kernel_object_states_match(&object.state, expected) {
+            return Err(KernelObjectError::TypeMismatch);
+        }
+        if access & !full_access != 0 {
+            return Err(KernelObjectError::AccessDenied);
+        }
+        Ok(self.add_kernel_object_handle(object_id, access, inheritable))
+    }
+
+    pub fn duplicate_kernel_object_handle(
+        &mut self,
+        object_id: u64,
+        access: u32,
+        inheritable: bool,
+    ) -> Option<u64> {
+        self.kernel_objects.get(&object_id)?;
+        Some(self.add_kernel_object_handle(object_id, access, inheritable))
+    }
+
+    /// Close a handle and release its reference to a synchronization object. The named object
+    /// remains openable until its final handle is closed.
+    pub fn close_handle(&mut self, handle: u64) -> Option<Handle> {
+        let closed = self.handles.remove(&handle)?;
+        if let Handle::KernelObject { object_id, .. } = &closed {
+            let name = if let Some(object) = self.kernel_objects.get_mut(object_id) {
+                object.handle_count = object.handle_count.saturating_sub(1);
+                (object.handle_count == 0)
+                    .then(|| object.name.clone())
+                    .flatten()
+            } else {
+                None
+            };
+            if self
+                .kernel_objects
+                .get(object_id)
+                .is_some_and(|object| object.handle_count == 0)
+            {
+                self.kernel_objects.remove(object_id);
+                if let Some(name) = name {
+                    if self.named_kernel_objects.get(&name) == Some(object_id) {
+                        self.named_kernel_objects.remove(&name);
+                    }
+                }
+            }
+        }
+        if let Handle::Pipe {
+            pipe_id,
+            endpoint,
+            generation,
+            ..
+        } = &closed
+        {
+            let mut remove_named_entry = None;
+            if let Some(pipe) = self.pipes.get_mut(pipe_id) {
+                match endpoint {
+                    PipeEndpoint::AnonymousRead => {
+                        pipe.anonymous_read_handles = pipe.anonymous_read_handles.saturating_sub(1);
+                    }
+                    PipeEndpoint::AnonymousWrite => {
+                        pipe.anonymous_write_handles =
+                            pipe.anonymous_write_handles.saturating_sub(1);
+                    }
+                    PipeEndpoint::NamedServer => {
+                        pipe.server_handles = pipe.server_handles.saturating_sub(1);
+                        if pipe.server_handles == 0 {
+                            pipe.server_open = false;
+                            pipe.connected = false;
+                            pipe.connect_pending = false;
+                            pipe.client_open = false;
+                            remove_named_entry = pipe.name.clone();
+                        }
+                    }
+                    PipeEndpoint::NamedClient => {
+                        if *generation == pipe.client_generation {
+                            pipe.client_handles = pipe.client_handles.saturating_sub(1);
+                            if pipe.client_handles == 0 {
+                                pipe.client_open = false;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(name) = remove_named_entry {
+                if let Some(instances) = self.named_pipe_instances.get_mut(&name) {
+                    instances.retain(|id| id != pipe_id);
+                    if instances.is_empty() {
+                        self.named_pipe_instances.remove(&name);
+                    }
+                }
+            }
+            let remove_pipe = self.pipes.get(pipe_id).is_some_and(|pipe| {
+                if pipe.anonymous {
+                    pipe.anonymous_read_handles == 0 && pipe.anonymous_write_handles == 0
+                } else {
+                    pipe.server_handles == 0 && pipe.client_handles == 0
+                }
+            });
+            if remove_pipe {
+                self.pipes.remove(pipe_id);
+            }
+        }
+        Some(closed)
+    }
+
+    pub fn new_pipe(&mut self, pipe: PipeConnection) -> u64 {
+        let id = self.next_pipe_id;
+        self.next_pipe_id = self.next_pipe_id.wrapping_add(1).max(1);
+        self.pipes.insert(id, pipe);
+        id
+    }
+
+    pub fn new_pipe_handle(
+        &mut self,
+        pipe_id: u64,
+        endpoint: PipeEndpoint,
+        inheritable: bool,
+        overlapped: bool,
+    ) -> u64 {
+        let generation = self
+            .pipes
+            .get(&pipe_id)
+            .map_or(0, |pipe| pipe.client_generation);
+        self.new_pipe_handle_generation(pipe_id, endpoint, generation, inheritable, overlapped)
+    }
+
+    pub fn new_pipe_handle_generation(
+        &mut self,
+        pipe_id: u64,
+        endpoint: PipeEndpoint,
+        generation: u64,
+        inheritable: bool,
+        overlapped: bool,
+    ) -> u64 {
+        let pipe = self
+            .pipes
+            .get_mut(&pipe_id)
+            .expect("pipe exists before handle");
+        match endpoint {
+            PipeEndpoint::AnonymousRead => pipe.anonymous_read_handles += 1,
+            PipeEndpoint::AnonymousWrite => pipe.anonymous_write_handles += 1,
+            PipeEndpoint::NamedServer => pipe.server_handles += 1,
+            PipeEndpoint::NamedClient if generation == pipe.client_generation => {
+                pipe.client_handles += 1;
+            }
+            PipeEndpoint::NamedClient => {}
+        }
+        self.new_handle(Handle::Pipe {
+            pipe_id,
+            endpoint,
+            generation,
+            inheritable,
+            overlapped,
+        })
     }
 
     pub fn new_crypto_provider(&mut self, provider: CryptoProviderState) -> u64 {
@@ -5102,6 +5570,14 @@ impl Process {
                     Err(stop) => return stop,
                 }
             }
+            if self
+                .pending_user_apc_delivery
+                .remove(&self.current_thread_id)
+            {
+                if let Err(stop) = self.dispatch_current_user_apcs() {
+                    return stop;
+                }
+            }
             let slice = self
                 .active_run_budget
                 .unwrap_or(0)
@@ -5122,12 +5598,12 @@ impl Process {
                 Err(Stop::ThreadExit(code)) => {
                     return Stop::Crash(format!(
                         "ExitThread used by non-thread context with code {code}"
-                    ))
+                    ));
                 }
                 Err(Stop::GuestUnwind(_)) => {
                     return Stop::Crash(
                         "RtlUnwindEx transfer escaped its active guest exception dispatcher".into(),
-                    )
+                    );
                 }
                 Err(Stop::GuestExceptionTransfer) => {
                     // A nested exception restored a guest handler context outside one or more
@@ -5138,12 +5614,12 @@ impl Process {
                     return Stop::Crash(
                         "PE32 C++ catch transfer escaped its active guest exception dispatcher"
                             .into(),
-                    )
+                    );
                 }
                 Err(Stop::GuestSehTransfer32(_)) => {
                     return Stop::Crash(
                         "PE32 SEH transfer escaped its active guest exception dispatcher".into(),
-                    )
+                    );
                 }
                 Err(Stop::GuestUnwind32(unwind)) => {
                     if let Err(stop) = crate::exception32::complete_guest_unwind32(self, unwind) {
@@ -6192,6 +6668,13 @@ mod scheduler_tests {
 
     #[test]
     fn target_import_cleanup_matches_real_x86_signatures() {
+        assert_eq!(
+            x86_abi_cleanup_bytes("kernel32", "CreateFileMappingA"),
+            Ok(24)
+        );
+        assert_eq!(x86_abi_cleanup_bytes("kernel32", "MapViewOfFile"), Ok(20));
+        assert_eq!(x86_abi_cleanup_bytes("kernel32", "FlushViewOfFile"), Ok(8));
+        assert_eq!(x86_abi_cleanup_bytes("kernel32", "UnmapViewOfFile"), Ok(4));
         assert_eq!(x86_abi_cleanup_bytes("kernel32", "GetStringTypeA"), Ok(20));
         assert_eq!(x86_abi_cleanup_bytes("kernel32", "GetStringTypeW"), Ok(16));
         assert_eq!(x86_abi_cleanup_bytes("user32", "ReleaseCapture"), Ok(0));
@@ -6528,6 +7011,7 @@ mod scheduler_tests {
             .unwrap();
         let handle = process.new_handle(Handle::Thread {
             id: higher_priority,
+            access: 0x001f_ffff,
             start: 0x2000,
             parameter: 0,
             exit_code: None,
@@ -6565,7 +7049,10 @@ mod scheduler_tests {
             .create_guest_thread(exited, 0x2000, 0, false)
             .unwrap();
         process.guest_threads.get_mut(&blocked).unwrap().state =
-            ThreadState::Blocked(ThreadWait::Sleep { deadline: 0 });
+            ThreadState::Blocked(ThreadWait::Sleep {
+                deadline: 0,
+                alertable: false,
+            });
         process.guest_threads.get_mut(&exited).unwrap().state = ThreadState::Exited(0);
 
         assert_eq!(
@@ -6784,6 +7271,7 @@ mod scheduler_tests {
             handles: vec![first, second],
             wait_all: true,
             deadline: None,
+            alertable: false,
         });
         assert!(process.schedule_thread().unwrap());
         if let Some(Handle::Event { signaled, .. }) = process.handles.get_mut(&first) {
@@ -6836,6 +7324,7 @@ mod scheduler_tests {
         process.block_current_thread(ThreadWait::Handle {
             handle: watch,
             deadline: None,
+            alertable: false,
         });
         assert!(process.schedule_thread().unwrap());
         assert!(matches!(

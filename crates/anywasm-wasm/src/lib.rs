@@ -318,6 +318,47 @@ pub unsafe extern "C" fn aw_set_vfs_root_alias(ptr: *const u8, len: usize) -> i3
     0
 }
 
+/// Deliver a host filesystem mutation to guest directory-change waiters.
+///
+/// `ptr` must point to `len` readable UTF-8 bytes containing an absolute guest path.
+#[no_mangle]
+pub unsafe extern "C" fn aw_notify_vfs_change(ptr: *const u8, len: usize, filter: u32) -> i32 {
+    let Some(s) = state() else { return 1 };
+    const SUPPORTED_FILTERS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040;
+    if ptr.is_null()
+        || len == 0
+        || len > 32 * 1024
+        || filter == 0
+        || filter & !SUPPORTED_FILTERS != 0
+    {
+        s.message = b"host filesystem change has an invalid path or filter".to_vec();
+        return 1;
+    }
+    let path = match std::str::from_utf8(std::slice::from_raw_parts(ptr, len)) {
+        Ok(path) if !path.contains('\0') => path,
+        _ => {
+            s.message = b"host filesystem change path is not valid UTF-8".to_vec();
+            return 1;
+        }
+    };
+    s.p.notify_vfs_change(path, filter);
+    s.message.clear();
+    0
+}
+
+/// Tell the guest whether an external watcher is connected to its streamed install root.
+#[no_mangle]
+pub extern "C" fn aw_set_host_change_notifications(enabled: u32) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if enabled > 1 {
+        s.message = b"host filesystem watcher state must be zero or one".to_vec();
+        return 1;
+    }
+    s.p.host_change_notifications_enabled = enabled != 0;
+    s.message.clear();
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn aw_run(steps: u64) -> i32 {
     let Some(s) = state() else { return 3 };

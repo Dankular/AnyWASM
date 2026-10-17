@@ -3409,6 +3409,14 @@ fn crt_cp1252_encode_unit(unit: u16) -> Option<u8> {
     }
 }
 
+fn c_string_byte_set(bytes: &[u8]) -> [bool; 256] {
+    let mut set = [false; 256];
+    for &byte in bytes {
+        set[byte as usize] = true;
+    }
+    set
+}
+
 fn crt_strcoll(p: &mut Process) -> R {
     let (left, right) = (p.read_cstr_raw(p.arg(0))?, p.read_cstr_raw(p.arg(1))?);
     Ok(left.cmp(&right) as i32 as i64 as u64)
@@ -3429,7 +3437,7 @@ fn crt_getdrive(p: &mut Process) -> R {
     Ok((letter - b'A' + 1) as u64)
 }
 
-fn parse_unsigned_decimal_wide(input: &[u16]) -> Option<(u32, usize)> {
+fn parse_wide_integer(input: &[u16], conversion: u8) -> Option<(u64, usize)> {
     let mut index = 0usize;
     let negative = match input.first().copied() {
         Some(unit) if unit == b'+' as u16 => {
@@ -3442,15 +3450,47 @@ fn parse_unsigned_decimal_wide(input: &[u16]) -> Option<(u32, usize)> {
         }
         _ => false,
     };
+
+    let base = match conversion {
+        b'o' => 8,
+        b'x' | b'X' => 16,
+        b'i' => match (input.get(index), input.get(index + 1)) {
+            (Some(&zero), Some(&prefix))
+                if zero == b'0' as u16 && (prefix == b'x' as u16 || prefix == b'X' as u16) =>
+            {
+                16
+            }
+            (Some(&zero), _) if zero == b'0' as u16 => 8,
+            _ => 10,
+        },
+        _ => 10,
+    };
+
+    // A 0x prefix is part of the item only when followed by at least one hex
+    // digit. This matches scanf's longest valid integer prefix behavior.
+    if base == 16
+        && input.get(index) == Some(&(b'0' as u16))
+        && input
+            .get(index + 1)
+            .is_some_and(|unit| *unit == b'x' as u16 || *unit == b'X' as u16)
+        && input
+            .get(index + 2)
+            .and_then(|unit| wide_digit(*unit))
+            .is_some_and(|d| d < 16)
+    {
+        index += 2;
+    }
+
     let first_digit = index;
-    let mut value = 0u32;
+    let mut value = 0u64;
     while let Some(unit) = input.get(index).copied() {
-        if !(b'0' as u16..=b'9' as u16).contains(&unit) {
+        let Some(digit) = wide_digit(unit) else {
+            break;
+        };
+        if digit >= base {
             break;
         }
-        value = value
-            .wrapping_mul(10)
-            .wrapping_add((unit - b'0' as u16) as u32);
+        value = value.wrapping_mul(base as u64).wrapping_add(digit as u64);
         index += 1;
     }
     if index == first_digit {
@@ -3464,6 +3504,33 @@ fn parse_unsigned_decimal_wide(input: &[u16]) -> Option<(u32, usize)> {
         },
         index,
     ))
+}
+
+fn wide_digit(unit: u16) -> Option<u32> {
+    match unit {
+        unit if (b'0' as u16..=b'9' as u16).contains(&unit) => Some((unit - b'0' as u16) as u32),
+        unit if (b'a' as u16..=b'f' as u16).contains(&unit) => {
+            Some((unit - b'a' as u16) as u32 + 10)
+        }
+        unit if (b'A' as u16..=b'F' as u16).contains(&unit) => {
+            Some((unit - b'A' as u16) as u32 + 10)
+        }
+        _ => None,
+    }
+}
+
+fn write_swscanf_integer(
+    p: &mut Process,
+    destination: u64,
+    value: u64,
+    length_modifier: u8,
+) -> Result<(), Stop> {
+    match length_modifier {
+        3 => p.wr8(destination, value as u8),   // hh
+        4 => p.wr16(destination, value as u16), // h
+        2 => p.wr64(destination, value),        // ll / I64
+        _ => p.wr32(destination, value as u32), // int and Windows long are 32-bit
+    }
 }
 
 fn crt_swscanf(p: &mut Process) -> R {
@@ -3531,20 +3598,50 @@ fn crt_swscanf(p: &mut Process) -> R {
         let width = (format_index != width_start).then_some(width);
 
         let mut length_modifier = 0u8;
-        if format
-            .get(format_index)
-            .copied()
-            .is_some_and(|unit| unit == b'l' as u16 || unit == b'L' as u16)
-        {
-            length_modifier = 1;
-            if format[format_index] == b'L' as u16 {
-                length_modifier = 2;
-            }
-            format_index += 1;
-            if format.get(format_index) == Some(&(b'l' as u16)) {
-                length_modifier = 2;
+        match format.get(format_index).copied() {
+            Some(unit) if unit == b'h' as u16 => {
                 format_index += 1;
+                if format.get(format_index) == Some(&(b'h' as u16)) {
+                    length_modifier = 3; // hh
+                    format_index += 1;
+                } else {
+                    length_modifier = 4; // h
+                }
             }
+            Some(unit) if unit == b'l' as u16 || unit == b'L' as u16 => {
+                length_modifier = 1;
+                if unit == b'L' as u16 {
+                    length_modifier = 2;
+                }
+                format_index += 1;
+                if format.get(format_index) == Some(&(b'l' as u16)) {
+                    length_modifier = 2; // ll
+                    format_index += 1;
+                }
+            }
+            Some(unit) if unit == b'I' as u16 => {
+                format_index += 1;
+                let modifier_start = format_index;
+                while format
+                    .get(format_index)
+                    .is_some_and(|unit| (b'0' as u16..=b'9' as u16).contains(unit))
+                {
+                    format_index += 1;
+                }
+                length_modifier = match &format[modifier_start..format_index] {
+                    [a, b] if *a == b'3' as u16 && *b == b'2' as u16 => 5, // I32
+                    [a, b] if *a == b'6' as u16 && *b == b'4' as u16 => 2, // I64
+                    [] => 0, // pointer-sized integer; x86 guest pointers are 32-bit
+                    _ => {
+                        return Err(Stop::Unimplemented {
+                            dll: "crt".into(),
+                            name: "swscanf unsupported I-length modifier".into(),
+                        }
+                        .record(p));
+                    }
+                };
+            }
+            _ => {}
         }
 
         let Some(conversion) = format.get(format_index).copied() else {
@@ -3558,21 +3655,16 @@ fn crt_swscanf(p: &mut Process) -> R {
             }
             .record(p));
         };
-        if !matches!(conversion, b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'u') {
+        if !matches!(
+            conversion,
+            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'd' | b'i' | b'u' | b'o' | b'x' | b'X'
+        ) {
             return Err(Stop::Unimplemented {
                 dll: "crt".into(),
                 name: format!("swscanf %{} conversion", conversion as char),
             }
             .record(p));
         }
-        if conversion == b'u' && length_modifier == 2 {
-            return Err(Stop::Unimplemented {
-                dll: "crt".into(),
-                name: "swscanf %llu conversion".into(),
-            }
-            .record(p));
-        }
-
         attempted_conversion = true;
         while input_index < input.len()
             && input[input_index] <= u8::MAX as u16
@@ -3585,14 +3677,14 @@ fn crt_swscanf(p: &mut Process) -> R {
             Some(width) => &available[..available.len().min(width)],
             None => available,
         };
-        if conversion == b'u' {
-            let Some((value, consumed)) = parse_unsigned_decimal_wide(available) else {
+        if matches!(conversion, b'd' | b'i' | b'u' | b'o' | b'x' | b'X') {
+            let Some((value, consumed)) = parse_wide_integer(available, conversion) else {
                 break;
             };
             if !suppressed {
                 let destination = p.arg(2 + argument_index);
                 argument_index += 1;
-                p.wr32(destination, value)?;
+                write_swscanf_integer(p, destination, value, length_modifier)?;
                 assignments += 1;
             }
             input_index += consumed;
@@ -3612,7 +3704,7 @@ fn crt_swscanf(p: &mut Process) -> R {
         if !suppressed {
             let destination = p.arg(2 + argument_index);
             argument_index += 1;
-            if length_modifier != 0 {
+            if length_modifier == 1 || length_modifier == 2 {
                 p.wr64(destination, value.to_bits())?;
             } else {
                 p.wr32(destination, (value as f32).to_bits())?;
@@ -4425,8 +4517,26 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             }
             Ok(s.windows(n.len()).position(|w| w == n.as_slice()).map(|i| a + i as u64).unwrap_or(0))
         },
-        "strspn" | "strcspn" | "strpbrk" => |p| {
-            Err(Stop::Unimplemented { dll: "crt".into(), name: "strspn/strcspn/strpbrk".into() }.record(p))
+        "strspn" => |p| {
+            Err(Stop::Unimplemented { dll: "crt".into(), name: "strspn".into() }.record(p))
+        },
+        "strcspn" => |p| {
+            let (string, reject) = (p.read_cstr_raw(p.arg(0))?, p.read_cstr_raw(p.arg(1))?);
+            let rejected = c_string_byte_set(&reject);
+            Ok(string.iter().take_while(|&&byte| !rejected[byte as usize]).count() as u64)
+        },
+        "strpbrk" => |p| {
+            let (string_address, string, accept) = (
+                p.arg(0),
+                p.read_cstr_raw(p.arg(0))?,
+                p.read_cstr_raw(p.arg(1))?,
+            );
+            let accepted = c_string_byte_set(&accept);
+            Ok(string
+                .iter()
+                .position(|&byte| accepted[byte as usize])
+                .map(|offset| string_address + offset as u64)
+                .unwrap_or(0))
         },
         "_strdup" | "strdup" => |p| {
             let s = p.read_cstr_raw(p.arg(0))?;
@@ -8241,6 +8351,42 @@ mod crt_handler_audit_tests {
         address
     }
 
+    fn raw_c_string(p: &mut Process, value: &[u8]) -> u64 {
+        let address = kernel32::alloc_block(p, value.len() as u64 + 1, true);
+        p.write_bytes(address, &[value, &[0]].concat()).unwrap();
+        address
+    }
+
+    #[test]
+    fn x86_strcspn_counts_bytes_before_first_rejected_character() {
+        let mut p = process();
+        let text = raw_c_string(&mut p, b"abcdeabc");
+        let reject = raw_c_string(&mut p, b"dx");
+        let reject_none = raw_c_string(&mut p, b"");
+        let high_bytes = raw_c_string(&mut p, &[0x80, b'a', 0xff, b'b']);
+        let high_reject = raw_c_string(&mut p, &[0xff]);
+
+        assert_eq!(call_x86(&mut p, "strcspn", &[text, reject]), Ok(3));
+        assert_eq!(call_x86(&mut p, "strcspn", &[text, reject_none]), Ok(8));
+        assert_eq!(
+            call_x86(&mut p, "strcspn", &[high_bytes, high_reject]),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn x86_strpbrk_returns_first_matching_guest_byte_or_null() {
+        let mut p = process();
+        let text = raw_c_string(&mut p, &[b'a', 0x80, 0xff, b'b']);
+        let accept = raw_c_string(&mut p, &[0xff, 0x80]);
+        let accept_none = raw_c_string(&mut p, &[0xfe]);
+        let accept_empty = raw_c_string(&mut p, b"");
+
+        assert_eq!(call_x86(&mut p, "strpbrk", &[text, accept]), Ok(text + 1));
+        assert_eq!(call_x86(&mut p, "strpbrk", &[text, accept_none]), Ok(0));
+        assert_eq!(call_x86(&mut p, "strpbrk", &[text, accept_empty]), Ok(0));
+    }
+
     #[test]
     fn wstat64i32_translates_real_file_size_permissions_drive_and_times() {
         let mut vfs = Vfs::new();
@@ -9255,6 +9401,93 @@ mod crt_handler_audit_tests {
     }
 
     #[test]
+    fn swscanf_converts_signed_and_radix_integer_fields_with_length_modifiers() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let input = kernel32::alloc_block(&mut p, 256, true);
+        let format = kernel32::alloc_block(&mut p, 128, true);
+        let signed = kernel32::alloc_block(&mut p, 4, true);
+        let autodetected = kernel32::alloc_block(&mut p, 4, true);
+        let autodetected_octal = kernel32::alloc_block(&mut p, 4, true);
+        let octal = kernel32::alloc_block(&mut p, 4, true);
+        let unsigned = kernel32::alloc_block(&mut p, 4, true);
+        let hexadecimal = kernel32::alloc_block(&mut p, 4, true);
+        let uppercase_hexadecimal = kernel32::alloc_block(&mut p, 4, true);
+        let byte = kernel32::alloc_block(&mut p, 1, true);
+        let long_long = kernel32::alloc_block(&mut p, 8, true);
+
+        p.write_wstr(input, "-42 0x2a 052 052 255 ff FF -2 4294967297")
+            .unwrap();
+        p.write_wstr(format, "%d %i %i %o %u %x %X %hhd %lld")
+            .unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "swscanf",
+                &[
+                    input,
+                    format,
+                    signed,
+                    autodetected,
+                    autodetected_octal,
+                    octal,
+                    unsigned,
+                    hexadecimal,
+                    uppercase_hexadecimal,
+                    byte,
+                    long_long,
+                ],
+            ),
+            Ok(9)
+        );
+        assert_eq!(p.rd32(signed).unwrap(), (-42i32) as u32);
+        assert_eq!(p.rd32(autodetected).unwrap(), 42);
+        assert_eq!(p.rd32(autodetected_octal).unwrap(), 42);
+        assert_eq!(p.rd32(octal).unwrap(), 42);
+        assert_eq!(p.rd32(unsigned).unwrap(), 255);
+        assert_eq!(p.rd32(hexadecimal).unwrap(), 255);
+        assert_eq!(p.rd32(uppercase_hexadecimal).unwrap(), 255);
+        assert_eq!(p.rd8(byte).unwrap(), (-2i8) as u8);
+        assert_eq!(p.rd64(long_long).unwrap(), 4_294_967_297);
+    }
+
+    #[test]
+    fn swscanf_honors_integer_field_width_suppression_and_i32_i64_lengths() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let input = kernel32::alloc_block(&mut p, 128, true);
+        let format = kernel32::alloc_block(&mut p, 128, true);
+        let remainder = kernel32::alloc_block(&mut p, 4, true);
+        let short = kernel32::alloc_block(&mut p, 2, true);
+        let byte = kernel32::alloc_block(&mut p, 1, true);
+        let wide = kernel32::alloc_block(&mut p, 8, true);
+
+        p.write_wstr(input, "123 655 255 10").unwrap();
+        p.write_wstr(format, "%*2d%d %3hd %hhu %I64x").unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "swscanf",
+                &[input, format, remainder, short, byte, wide],
+            ),
+            Ok(4)
+        );
+        assert_eq!(p.rd32(remainder).unwrap(), 3);
+        assert_eq!(p.rd16(short).unwrap(), 655);
+        assert_eq!(p.rd8(byte).unwrap(), 255);
+        assert_eq!(p.rd64(wide).unwrap(), 16);
+
+        p.write_wstr(input, "-2 4294967297").unwrap();
+        p.write_wstr(format, "%I32d %I64u").unwrap();
+        assert_eq!(
+            call_x86(&mut p, "swscanf", &[input, format, remainder, wide]),
+            Ok(2)
+        );
+        assert_eq!(p.rd32(remainder).unwrap(), (-2i32) as u32);
+        assert_eq!(p.rd64(wide).unwrap(), 4_294_967_297);
+    }
+
+    #[test]
     fn swscanf_returns_scan_counts_and_exposes_unmodeled_conversions() {
         let mut p = process();
         p.cpu.mode = CpuMode::X86_32;
@@ -9276,14 +9509,14 @@ mod crt_handler_audit_tests {
         );
 
         p.write_wstr(input, "12").unwrap();
-        p.write_wstr(format, "%d").unwrap();
+        p.write_wstr(format, "%s").unwrap();
         let unsupported = call_x86(&mut p, "swscanf", &[input, format, output]);
         assert!(
             matches!(
                 unsupported.clone(),
-                Err(Stop::Unimplemented { name, .. }) if name.contains("%d")
+                Err(Stop::Unimplemented { name, .. }) if name.contains("%s")
             ),
-            "unexpected `%d` scan result: {unsupported:?}"
+            "unexpected `%s` scan result: {unsupported:?}"
         );
     }
 

@@ -90,7 +90,14 @@ try {
 
 // Verify the high-level browser path streams an exact partial File.slice through Asyncify.
 const wasm = await AnyWasm.create(runtimeBytes);
-await wasm.loadDirectory('hello.exe', files);
+let afterLoadBeginCalled = false;
+await wasm.loadDirectory('hello.exe', files, undefined, {
+  afterLoadBegin: () => {
+    afterLoadBeginCalled = true;
+    wasm.setHostChangeNotificationsEnabled(true);
+  },
+});
+assert.equal(afterLoadBeginCalled, true, 'loadDirectory must expose the initialized process before staging boot files');
 assert.equal(typeof wasm.x.aw_test_asset_read, 'function', 'runtime must include the streaming smoke-test ABI');
 const assetPath = new TextEncoder().encode('data/stream.bin');
 const assetPathPtr = allocate(wasm, assetPath);

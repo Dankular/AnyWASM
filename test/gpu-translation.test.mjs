@@ -84,3 +84,12 @@ test('truncated GPU command headers and payloads are exposed', () => {
     'truncated GPU command 65535 at offset 0: declared payload 4 bytes, only 0 remain',
   ]);
 });
+
+test('GDI fill rectangle renderer rejects window targets that were not created', () => {
+  const gpu = new GpuExecutor({}, null);
+  const command = new Uint32Array([54, 24, 7, 0, 0, 10, 10, 0x00030201]);
+
+  const errors = gpu.execute(new Uint8Array(command.buffer));
+
+  assert.deepEqual(errors, ['op 54: GDI FillRect window 7 has not been created']);
+});

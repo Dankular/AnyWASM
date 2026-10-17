@@ -57,6 +57,7 @@ pub mod op {
     pub const PUSH_STATE: u32 = 51; // save immediate-context pipeline state
     pub const POP_STATE: u32 = 52; // restore the most recently saved pipeline state
     pub const CREATE_TEXTURE1D: u32 = 53; // id,w,mips,array,format,bind,usage,misc
+    pub const GDI_FILL_RECT: u32 = 54; // window, left, top, right, bottom, COLORREF
 }
 
 #[derive(Default)]
@@ -171,5 +172,29 @@ mod tests {
         assert_eq!(d[0], (op::DRAW, vec![3, 0, 0, 0, 0, 0, 0, 0]));
         assert_eq!(d[1].1.len() % 4, 0);
         assert_eq!(&d[1].1[12..15], &[7, 8, 9]);
+    }
+
+    #[test]
+    fn gdi_fill_rect_command_preserves_signed_coordinates_and_colorref() {
+        let mut g = GpuStream::default();
+        g.emit(
+            op::GDI_FILL_RECT,
+            Pk::new()
+                .u32(7)
+                .i32(-2)
+                .i32(3)
+                .i32(20)
+                .i32(31)
+                .u32(0x0003_0201),
+        );
+        let decoded = decode(&g.buf);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, op::GDI_FILL_RECT);
+        let words: Vec<u32> = decoded[0]
+            .1
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        assert_eq!(words, [7, (-2i32) as u32, 3, 20, 31, 0x0003_0201]);
     }
 }

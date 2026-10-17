@@ -24,6 +24,9 @@ const D3DTS_TEXTURE0: u32 = 16;
 const D3DTS_TEXTURE7: u32 = 23;
 const D3DTS_WORLD: u32 = 256;
 const D3DTS_WORLDMATRIX_MAX: u32 = 511;
+const D3D9_MAX_ACTIVE_LIGHTS: usize = 8;
+const D3D9_LIGHT_WORDS: usize = 26;
+const D3D9_MATERIAL_WORDS: usize = 17;
 
 const IDENTITY_MATRIX: [u32; 16] = [
     1.0f32.to_bits(),
@@ -401,6 +404,8 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirect3DDevice9", "GetGammaRamp") => 3,
         ("IDirect3DDevice9", "SetGammaRamp") => 4,
         ("IDirect3DDevice9", "SetTransform" | "GetTransform" | "MultiplyTransform") => 3,
+        ("IDirect3DDevice9", "SetMaterial" | "GetMaterial") => 2,
+        ("IDirect3DDevice9", "SetLight" | "GetLight" | "LightEnable" | "GetLightEnable") => 3,
         (
             "IDirect3DDevice9",
             "GetCreationParameters"
@@ -558,6 +563,12 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "SetTransform") => set_transform,
         ("IDirect3DDevice9", "GetTransform") => get_transform,
         ("IDirect3DDevice9", "MultiplyTransform") => multiply_transform,
+        ("IDirect3DDevice9", "SetMaterial") => set_material,
+        ("IDirect3DDevice9", "GetMaterial") => get_material,
+        ("IDirect3DDevice9", "SetLight") => set_light,
+        ("IDirect3DDevice9", "GetLight") => get_light,
+        ("IDirect3DDevice9", "LightEnable") => light_enable,
+        ("IDirect3DDevice9", "GetLightEnable") => get_light_enable,
         ("IDirect3DDevice9", "SetVertexShader") => |p| set_shader9(p, true),
         ("IDirect3DDevice9", "SetPixelShader") => |p| set_shader9(p, false),
         ("IDirect3DDevice9", "GetVertexShader") => |p| get_shader9(p, true),
@@ -877,7 +888,7 @@ fn write_caps(p: &mut Process, out: u64) -> Result<(), Stop> {
         0x0000_1fff,
         0x0000_1fff,
         0x0000_00ff,
-        0x0000_020f,
+        0x0000_0208, // Gouraud RGB and translated fixed-function specular Gouraud RGB.
         0x0000_ffdf, // TextureCaps: rectangular textures are supported; omit SQUAREONLY (0x20).
         0x0000_003f,
         0x0000_003f,
@@ -902,9 +913,12 @@ fn write_caps(p: &mut Process, out: u64) -> Result<(), Stop> {
     caps[116..132].copy_from_slice(&[0u8; 16]);
     caps[132..136].copy_from_slice(&1.0f32.to_le_bytes());
     caps[140..144].copy_from_slice(&0x0000_000fu32.to_le_bytes());
-    // GTA SA's phase-5 startup check requires D3DSHADECAPS_SPECULARGOURAUDRGB (ShadeCaps bit 9)
-    // and D3DTEXOPCAPS_LERP (TextureOpCaps bit 24).
-    caps[144..148].copy_from_slice(&0x0100_ffffu32.to_le_bytes());
+    // Translated operations are stage 0/1 disable/select/modulate/add/blend,
+    // signed add, subtract, premodulate, dot product, multiply-add and LERP.
+    // Bump mapping is excluded because its cross-stage semantics are not
+    // implemented. LERP is D3DTEXOPCAPS bit 25 (0x02000000); bit 24 is
+    // MULTIPLYADD.
+    caps[144..148].copy_from_slice(&0x039f_ffffu32.to_le_bytes());
     caps[148..152].copy_from_slice(&8u32.to_le_bytes());
     caps[152..156].copy_from_slice(&8u32.to_le_bytes());
     caps[156..160].copy_from_slice(&0x0000_003fu32.to_le_bytes());
@@ -2221,6 +2235,9 @@ fn set_shader9(p: &mut Process, vertex: bool) -> R {
     } else {
         p.extra.com.d3d9_pixel_shaders.insert(device, shader);
     }
+    if vertex && shader == 0 {
+        refresh_fixed_function(p, device)?;
+    }
     Ok(S_OK)
 }
 
@@ -2930,6 +2947,15 @@ fn reset_device(p: &mut Process) -> R {
         .com
         .d3d9_transforms
         .retain(|(bound_device, _), _| *bound_device != device);
+    p.extra.com.d3d9_materials.remove(&device);
+    p.extra
+        .com
+        .d3d9_lights
+        .retain(|(bound_device, _), _| *bound_device != device);
+    p.extra
+        .com
+        .d3d9_light_enabled
+        .retain(|(bound_device, _), _| *bound_device != device);
     p.extra.com.d3d9_gamma_ramps.remove(&device);
     p.extra.com.d3d9_stream0.remove(&device);
     p.extra.com.d3d9_indices.remove(&device);
@@ -3232,21 +3258,218 @@ fn set_render_state(p: &mut Process) -> R {
     p.extra
         .gpu
         .emit(op::D3D9_RENDER_STATE, Pk::new().u32(state).u32(value));
-    if state == 60 {
-        let fvf = p
-            .extra
-            .com
-            .objs
-            .get(&device)
-            .and_then(|object| match object.kind {
-                com::Kind::Direct3DDevice9 { fvf, .. } => Some(fvf),
-                _ => None,
-            })
-            .unwrap_or(0);
-        if fvf_stride(fvf).is_some() {
-            apply_fvf(p, device, fvf)?;
-        }
+    if state == 60 || d3d9_lighting_render_state(state) {
+        refresh_fixed_function(p, device)?;
     }
+    Ok(S_OK)
+}
+
+fn d3d9_lighting_render_state(state: u32) -> bool {
+    matches!(state, 29 | 137 | 139 | 141 | 142 | 143 | 145..=148)
+}
+
+fn refresh_fixed_function(p: &mut Process, device: u64) -> R {
+    if p.extra
+        .com
+        .d3d9_vertex_shaders
+        .get(&device)
+        .copied()
+        .unwrap_or(0)
+        != 0
+    {
+        return Ok(S_OK);
+    }
+    let fvf = p
+        .extra
+        .com
+        .objs
+        .get(&device)
+        .and_then(|object| match object.kind {
+            com::Kind::Direct3DDevice9 { fvf, .. } => Some(fvf),
+            _ => None,
+        })
+        .unwrap_or(0);
+    if fvf_stride(fvf).is_some() {
+        apply_fvf(p, device, fvf)?;
+    }
+    Ok(S_OK)
+}
+
+fn set_material(p: &mut Process) -> R {
+    let (device, material_ptr) = (p.arg(0), p.arg(1));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || material_ptr == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let bytes = p.read_bytes(material_ptr, D3D9_MATERIAL_WORDS * 4)?;
+    let mut material = [0; D3D9_MATERIAL_WORDS];
+    for (word, bytes) in material.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes(bytes.try_into().unwrap());
+    }
+    p.extra.com.d3d9_materials.insert(device, material);
+    refresh_fixed_function(p, device)
+}
+
+fn get_material(p: &mut Process) -> R {
+    let (device, material_ptr) = (p.arg(0), p.arg(1));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || material_ptr == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let material = p
+        .extra
+        .com
+        .d3d9_materials
+        .get(&device)
+        .copied()
+        .unwrap_or([0; D3D9_MATERIAL_WORDS]);
+    let mut bytes = [0; D3D9_MATERIAL_WORDS * 4];
+    for (chunk, word) in bytes.chunks_exact_mut(4).zip(material) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    p.write_bytes(material_ptr, &bytes)?;
+    Ok(S_OK)
+}
+
+fn default_d3d9_light() -> [u32; D3D9_LIGHT_WORDS] {
+    let mut light = [0; D3D9_LIGHT_WORDS];
+    light[0] = 3; // D3DLIGHT_DIRECTIONAL
+    light[1] = 1.0f32.to_bits();
+    light[2] = 1.0f32.to_bits();
+    light[3] = 1.0f32.to_bits();
+    light[16] = 1.0f32.to_bits(); // Direction.z
+    light
+}
+
+fn valid_d3d9_light(light: &[u32; D3D9_LIGHT_WORDS]) -> bool {
+    let kind = light[0];
+    if !(1..=3).contains(&kind) {
+        return false;
+    }
+    let value = |index: usize| f32::from_bits(light[index]);
+    let finite_nonnegative = |index: usize| value(index).is_finite() && value(index) >= 0.0;
+    if !finite_nonnegative(19) || !finite_nonnegative(20) {
+        return false;
+    }
+    if ![21, 22, 23].into_iter().all(finite_nonnegative) {
+        return false;
+    }
+    if kind != 3 && value(21) == 0.0 && value(22) == 0.0 && value(23) == 0.0 {
+        return false;
+    }
+    if kind == 2 {
+        let (theta, phi) = (value(24), value(25));
+        return theta.is_finite()
+            && phi.is_finite()
+            && theta >= 0.0
+            && theta <= phi
+            && phi <= std::f32::consts::PI;
+    }
+    true
+}
+
+fn set_light(p: &mut Process) -> R {
+    let (device, index, light_ptr) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || light_ptr == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let bytes = p.read_bytes(light_ptr, D3D9_LIGHT_WORDS * 4)?;
+    let mut light = [0; D3D9_LIGHT_WORDS];
+    for (word, bytes) in light.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes(bytes.try_into().unwrap());
+    }
+    if !valid_d3d9_light(&light) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    p.extra.com.d3d9_lights.insert((device, index), light);
+    refresh_fixed_function(p, device)
+}
+
+fn get_light(p: &mut Process) -> R {
+    let (device, index, light_ptr) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || light_ptr == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let Some(light) = p.extra.com.d3d9_lights.get(&(device, index)).copied() else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let mut bytes = [0; D3D9_LIGHT_WORDS * 4];
+    for (chunk, word) in bytes.chunks_exact_mut(4).zip(light) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    p.write_bytes(light_ptr, &bytes)?;
+    Ok(S_OK)
+}
+
+fn light_enable(p: &mut Process) -> R {
+    let (device, index, enabled) = (p.arg(0), p.arg(1) as u32, p.arg(2) as u32 != 0);
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let was_enabled = p
+        .extra
+        .com
+        .d3d9_light_enabled
+        .get(&(device, index))
+        .copied()
+        .unwrap_or(0)
+        != 0;
+    let enabled_count = p
+        .extra
+        .com
+        .d3d9_light_enabled
+        .iter()
+        .filter(|((bound_device, _), enabled)| *bound_device == device && **enabled != 0)
+        .count();
+    if enabled && !was_enabled && enabled_count >= D3D9_MAX_ACTIVE_LIGHTS {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    p.extra
+        .com
+        .d3d9_lights
+        .entry((device, index))
+        .or_insert_with(default_d3d9_light);
+    p.extra
+        .com
+        .d3d9_light_enabled
+        .insert((device, index), u32::from(enabled));
+    refresh_fixed_function(p, device)
+}
+
+fn get_light_enable(p: &mut Process) -> R {
+    let (device, index, out) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || out == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let enabled = p
+        .extra
+        .com
+        .d3d9_light_enabled
+        .get(&(device, index))
+        .copied()
+        .unwrap_or(0);
+    p.wr32(out, u32::from(enabled != 0))?;
     Ok(S_OK)
 }
 
@@ -3257,6 +3480,8 @@ fn get_render_state(p: &mut Process) -> R {
     }
     let default = match state {
         7 | 14 | 137 | 141 => 1, // ZENABLE, ZWRITEENABLE, LIGHTING, COLORVERTEX
+        145 => 1,                // DIFFUSEMATERIALSOURCE = COLOR1
+        146 => 2,                // SPECULARMATERIALSOURCE = COLOR2
         22 => 3,                 // CULL_CCW
         _ => 0,
     };
@@ -3327,8 +3552,73 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
     for word in d3d9_world_view_projection(p, device) {
         payload = payload.u32(word);
     }
+    for word in d3d9_world_view(p, device) {
+        payload = payload.u32(word);
+    }
+    for word in matrix_for(p, device, D3DTS_VIEW) {
+        payload = payload.u32(word);
+    }
+    for word in d3d9_fixed_function_state(p, device) {
+        payload = payload.u32(word);
+    }
     p.extra.gpu.emit(op::SET_FIXED_FUNCTION, payload);
     Ok(S_OK)
+}
+
+fn render_state_value(p: &Process, device: u64, state: u32, default: u32) -> u32 {
+    p.extra
+        .com
+        .d3d9_render_states
+        .get(&(device, state))
+        .copied()
+        .unwrap_or(default)
+}
+
+fn d3d9_fixed_function_state(p: &Process, device: u64) -> Vec<u32> {
+    let material = p
+        .extra
+        .com
+        .d3d9_materials
+        .get(&device)
+        .copied()
+        .unwrap_or([0; D3D9_MATERIAL_WORDS]);
+    let flags = u32::from(render_state_value(p, device, 137, 1) != 0)
+        | (u32::from(render_state_value(p, device, 141, 1) != 0) << 1)
+        | (u32::from(render_state_value(p, device, 142, 0) != 0) << 2)
+        | (u32::from(render_state_value(p, device, 143, 0) != 0) << 3)
+        | (u32::from(render_state_value(p, device, 29, 0) != 0) << 4);
+    let mut words = Vec::with_capacity(24 + D3D9_MAX_ACTIVE_LIGHTS * 27);
+    words.extend(material);
+    words.push(render_state_value(p, device, 139, 0)); // D3DRS_AMBIENT (D3DCOLOR)
+    words.push(flags);
+    words.push(render_state_value(p, device, 145, 1)); // diffuse material source
+    words.push(render_state_value(p, device, 147, 0)); // ambient material source
+    words.push(render_state_value(p, device, 146, 2)); // specular material source
+    words.push(render_state_value(p, device, 148, 0)); // emissive material source
+
+    let mut lights = p
+        .extra
+        .com
+        .d3d9_light_enabled
+        .iter()
+        .filter_map(|(&(bound_device, index), &enabled)| {
+            (bound_device == device && enabled != 0).then_some((index, ()))
+        })
+        .collect::<Vec<_>>();
+    lights.sort_unstable_by_key(|(index, _)| *index);
+    words.push(lights.len() as u32);
+    for (index, _) in lights.into_iter().take(D3D9_MAX_ACTIVE_LIGHTS) {
+        words.push(index);
+        words.extend(
+            p.extra
+                .com
+                .d3d9_lights
+                .get(&(device, index))
+                .copied()
+                .unwrap_or_else(default_d3d9_light),
+        );
+    }
+    words
 }
 
 fn valid_transform_state(state: u32) -> bool {
@@ -3366,6 +3656,13 @@ fn d3d9_world_view_projection(p: &Process, device: u64) -> [u32; 16] {
     let view = matrix_for(p, device, D3DTS_VIEW);
     let projection = matrix_for(p, device, D3DTS_PROJECTION);
     multiply_d3d_matrices(multiply_d3d_matrices(world, view), projection)
+}
+
+fn d3d9_world_view(p: &Process, device: u64) -> [u32; 16] {
+    multiply_d3d_matrices(
+        matrix_for(p, device, D3DTS_WORLD),
+        matrix_for(p, device, D3DTS_VIEW),
+    )
 }
 
 fn refresh_fixed_function_transform(p: &mut Process, device: u64, state: u32) -> R {
@@ -3472,11 +3769,11 @@ fn set_texture_stage_state(p: &mut Process) -> R {
         return Ok(D3DERR_NOTAVAILABLE);
     }
     let valid = match state {
-        1 if stage == 0 => matches!(value, 1..=17 | 18..=21 | 24..=26), // stage-0 ops, including PREMODULATE
-        1 => matches!(value, 1..=2), // stage 1: disable or select an argument
-        2 | 3 | 5 | 6 | 26 | 27 => value <= 2, // diffuse/current or texture arguments
-        4 if stage == 0 => matches!(value, 2..=17 | 25..=26), // stage-0 alpha ops, including PREMODULATE
-        4 => matches!(value, 1..=2), // stage-1 disable or select an argument
+        1 if stage == 0 => matches!(value, 1..=17 | 18..=21 | 24..=26),
+        1 => matches!(value, 1..=16 | 18..=21 | 24..=26),
+        2 | 3 | 5 | 6 | 26 | 27 => valid_d3d9_texture_argument(value),
+        4 if stage == 0 => matches!(value, 1..=17 | 24..=26),
+        4 => matches!(value, 1..=16 | 24..=26),
         _ => false,
     };
     if !valid {
@@ -3501,6 +3798,12 @@ fn set_texture_stage_state(p: &mut Process) -> R {
         apply_fvf(p, device, fvf)?;
     }
     Ok(S_OK)
+}
+
+fn valid_d3d9_texture_argument(value: u32) -> bool {
+    const ARG_MASK: u32 = 0x0f;
+    const ARG_MODIFIERS: u32 = 0x30;
+    value & !(ARG_MASK | ARG_MODIFIERS) == 0 && value & ARG_MASK <= 4
 }
 
 fn get_texture_stage_state(p: &mut Process) -> R {
@@ -4060,7 +4363,7 @@ mod tests {
             .rev()
             .find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
             .expect("transform update should refresh the active fixed-function state");
-        assert_eq!(payload.len(), 144);
+        assert_eq!(payload.len(), 368);
         assert_eq!(
             u32::from_le_bytes(payload[80..84].try_into().unwrap()),
             2.0f32.to_bits()
@@ -5429,7 +5732,7 @@ mod tests {
             S_OK
         );
         let set_texture_stage_state = method("IDirect3DDevice9", "SetTextureStageState").unwrap();
-        for color_op in [8, 9, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 24, 25, 26] {
+        for color_op in [8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 24, 25, 26] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 1), (16, color_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }
@@ -5475,7 +5778,7 @@ mod tests {
                 ]
             );
         }
-        for alpha_op in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 25, 26] {
+        for alpha_op in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 25, 26] {
             for (offset, value) in [(4, device as u32), (8, 0), (12, 4), (16, alpha_op)] {
                 p.wr32(STACK + offset, value).unwrap();
             }
@@ -5621,7 +5924,6 @@ mod tests {
         let gpu_before_unsupported = p.extra.gpu.buf.clone();
         let states_before_unsupported = p.extra.com.d3d9_texture_stage_states.clone();
         for (stage, state, value) in [
-            (1, 1, 4),
             (1, 1, 17),
             (0, 1, 22),
             (0, 1, 23),
@@ -5629,7 +5931,6 @@ mod tests {
             (1, 1, 23),
             (0, 4, 22),
             (0, 4, 23),
-            (1, 4, 4),
             (1, 4, 17),
             (1, 4, 22),
             (1, 4, 23),
@@ -5974,7 +6275,14 @@ mod tests {
                 1,
             ]
         );
-        assert_eq!(&fixed_function_words[20..], &IDENTITY_MATRIX);
+        assert_eq!(fixed_function_words.len(), 92);
+        assert_eq!(&fixed_function_words[20..36], &IDENTITY_MATRIX);
+        assert_eq!(&fixed_function_words[36..52], &IDENTITY_MATRIX);
+        assert_eq!(&fixed_function_words[52..68], &IDENTITY_MATRIX);
+        assert_eq!(
+            &fixed_function_words[68..],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 2, 0, 0]
+        );
         let buffer_id = u32::from_le_bytes(commands[1].1[0..4].try_into().unwrap());
         assert_eq!(
             commands[1]

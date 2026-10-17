@@ -17,6 +17,13 @@ const DC_DISPLAY: u64 = 1;
 const DC_INFORMATION: u64 = 2;
 const DC_COMPATIBLE: u64 = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceContextKind {
+    Display,
+    Information,
+    Compatible,
+}
+
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -27,6 +34,17 @@ struct GdiResource {
     base: u64,
     allocation_size: u64,
     data: u64,
+}
+
+/// An owned snapshot of the bits and format metadata from a guest bitmap. USER32 consumes this
+/// when CreateIconIndirect copies caller-owned bitmaps into a new icon object.
+pub(crate) struct BitmapSnapshot {
+    pub width: i32,
+    pub height: i32,
+    pub planes: u32,
+    pub bits_per_pixel: u32,
+    pub row_bytes: usize,
+    pub bits: Vec<u8>,
 }
 
 pub fn lookup(name: &str) -> Option<HleFn> {
@@ -121,6 +139,66 @@ fn resource(p: &Process, handle: u64, expected_kind: u32) -> Option<GdiResource>
         allocation_size,
         data,
     })
+}
+
+pub(crate) fn bitmap_snapshot(p: &Process, handle: u64) -> Result<Option<BitmapSnapshot>, Stop> {
+    let Some(object) = resource(p, handle, KIND_BITMAP) else {
+        return Ok(None);
+    };
+    let width = p.rd64(object.base + 32)? as i32;
+    let raw_height = p.rd64(object.base + 40)? as i64;
+    let packed_format = p.rd64(object.base + 48)?;
+    let (planes, bits_per_pixel, dib) = if packed_format >> 32 != 0 {
+        ((packed_format >> 32) as u32, packed_format as u32, false)
+    } else {
+        (1, packed_format as u32, true)
+    };
+    let height = raw_height.unsigned_abs();
+    let data_size = p.rd64(object.base + 24)?;
+    if width <= 0 || height == 0 || planes == 0 || bits_per_pixel == 0 {
+        return Ok(None);
+    }
+    let Some(row_bits) = (width as u64).checked_mul(planes.saturating_mul(bits_per_pixel) as u64)
+    else {
+        return Ok(None);
+    };
+    let row_bytes = if dib {
+        row_bits.checked_add(31).map(|bits| bits / 32 * 4)
+    } else {
+        row_bits.checked_add(15).map(|bits| bits / 16 * 2)
+    };
+    let Some(row_bytes) = row_bytes else {
+        return Ok(None);
+    };
+    let Some(required_size) = row_bytes.checked_mul(height) else {
+        return Ok(None);
+    };
+    if row_bytes == 0 || required_size > data_size {
+        return Ok(None);
+    }
+    Ok(Some(BitmapSnapshot {
+        width,
+        height: raw_height as i32,
+        planes,
+        bits_per_pixel: planes.saturating_mul(bits_per_pixel),
+        row_bytes: row_bytes as usize,
+        bits: p.read_bytes(object.data, data_size as usize)?,
+    }))
+}
+
+pub(crate) fn device_context_kind(p: &Process, handle: u64) -> Option<DeviceContextKind> {
+    let object = resource(p, handle, KIND_DC)?;
+    match p.rd64(object.base + 32).ok()? {
+        DC_DISPLAY => Some(DeviceContextKind::Display),
+        DC_INFORMATION => Some(DeviceContextKind::Information),
+        DC_COMPATIBLE => Some(DeviceContextKind::Compatible),
+        _ => None,
+    }
+}
+
+pub(crate) fn solid_brush_color(p: &Process, handle: u64) -> Option<u32> {
+    let object = resource(p, handle, KIND_BRUSH)?;
+    Some(p.rd64(object.base + 32).ok()? as u32 & 0x00ff_ffff)
 }
 
 fn release_resource(p: &mut Process, handle: u64, expected_kind: u32) -> bool {

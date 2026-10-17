@@ -1429,6 +1429,7 @@ fn wsa_wait_for_multiple_events(p: &mut Process) -> Result<u64, Stop> {
         handles,
         wait_all,
         deadline,
+        alertable: false,
     });
     Ok(WSA_WAIT_TIMEOUT as u64)
 }

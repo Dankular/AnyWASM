@@ -546,8 +546,25 @@ r = await runExe('fixtures/verconditionmask_test.exe');
 check('VerSetConditionMask encodes version comparison conditions',
   r.status === Status.EXITED && r.exitCode === 0, JSON.stringify(r));
 
-r = await runExe('fixtures/d3dprobe.exe');
-check('d3dprobe.exe (D3D11CreateDevice + MessageBoxA) runs to completion', r.status === Status.EXITED && r.exitCode === 0 && r.err.includes('[MessageBox] probe: ok'), JSON.stringify(r));
+const d3dprobeWasm = await AnyWasm.create(wasm);
+d3dprobeWasm.load(pack('fixtures/d3dprobe.exe'));
+let d3dprobeErr = '';
+const collectD3dprobeOutput = (stream, text) => {
+  if (stream === 'stderr') d3dprobeErr += text;
+};
+const d3dprobeWaiting = await d3dprobeWasm.runToEnd({ onOutput: collectD3dprobeOutput });
+const d3dprobeMessageBox = d3dprobeErr.includes('[anywasm-message-box]1|');
+if (d3dprobeWaiting.status === Status.IDLE && d3dprobeMessageBox) {
+  // Simulate the OK button click sent by the browser modal through aw_input.
+  d3dprobeWasm.input(12, 1, 0, 0);
+}
+const d3dprobeFinished = d3dprobeWaiting.status === Status.IDLE && d3dprobeMessageBox
+  ? await d3dprobeWasm.runToEnd({ onOutput: collectD3dprobeOutput })
+  : d3dprobeWaiting;
+check('d3dprobe.exe presents MessageBoxA, waits for OK input, then resumes to exit',
+  d3dprobeWaiting.status === Status.IDLE && d3dprobeMessageBox &&
+    d3dprobeFinished.status === Status.EXITED && d3dprobeFinished.exitCode === 0,
+  JSON.stringify({ waiting: d3dprobeWaiting, finished: d3dprobeFinished, err: d3dprobeErr }));
 
 r = await runExe('fixtures/unimpl.exe');
 check('unimpl.exe reports the unimplemented import by name', r.status === Status.UNIMPLEMENTED && /kernel32!CreateToolhelp32Snapshot/.test(r.message) && r.out === 'before\n', JSON.stringify(r));

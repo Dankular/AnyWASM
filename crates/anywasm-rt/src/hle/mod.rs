@@ -52,6 +52,8 @@ pub struct Extra {
     pub version: version::VersionState,
     /// Process-local byte-range locks made through kernel32 LockFile.
     pub file_range_locks: Vec<kernel32::FileRangeLock>,
+    /// Active file-backed views created through kernel32 MapViewOfFile.
+    pub file_mapping_views: HashMap<u64, kernel32::FileMappingView>,
     /// Desired access captured by CreateFile for validating file-lock calls.
     pub file_access: HashMap<u64, u32>,
     pub cmdline_a: u64,
@@ -123,16 +125,10 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         "shlwapi" => Some("shlwapi"),
         "winmm" => Some("winmm"),
         "d3d11" => Some("d3d11"),
-        // GTA San Andreas probes for d3d8.dll as a DirectX runtime-presence gate before it
-        // continues to its D3D9 startup path; this maps the module load only, not D3D8 exports.
-        "d3d8" => Some("d3d8"),
         "dsound" => Some("dsound"),
         "eax" => Some("eax"),
         "vorbisfile" => Some("vorbisfile"),
         "d3dx9_31" => Some("d3dx9_31"),
-        // GTA loads this DirectPlay helper as part of its DirectX runtime check. No exports are
-        // supplied until a guest call demonstrates that the game needs one.
-        "dpnhpast" => Some("dpnhpast"),
         "d3d9" => Some("d3d9"),
         "dinput8" => Some("dinput8"),
         "ddraw" => Some("ddraw"),
@@ -203,32 +199,18 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
 /// handlers are useful at runtime but must not make `analyze` claim that the import is covered.
 pub fn import_is_implemented(group: &str, name: &str) -> bool {
     let diagnostic_only = match group {
-        "user32" => matches!(
-            name,
-            "DialogBoxParamA"
-                | "EndDialog"
-                | "CreateIconIndirect"
-                | "CreateIconFromResource"
-                | "WaitForInputIdle"
-                | "FillRect"
-                | "MessageBoxA"
-                | "MessageBoxW"
-        ),
+        "user32" => matches!(name, "CreateIconFromResource" | "WaitForInputIdle"),
         "kernel32" => matches!(
             name,
             "QueueUserAPC"
-                | "GetWriteWatch"
                 | "CreatePipe"
                 | "CreateNamedPipeW"
                 | "ConnectNamedPipe"
                 | "DisconnectNamedPipe"
                 | "CreateProcessW"
                 | "DeviceIoControl"
-                | "OpenEventW"
-                | "OpenMutexW"
-                | "OpenSemaphoreW"
         ),
-        "crt" => matches!(name, "_beginthread" | "strspn" | "strcspn" | "strpbrk"),
+        "crt" => matches!(name, "_beginthread" | "strspn"),
         _ => false,
     };
     !diagnostic_only && lookup(group, name).is_some()
@@ -241,12 +223,7 @@ mod import_coverage_tests {
     #[test]
     fn diagnostic_only_import_handlers_are_not_reported_as_implemented() {
         for (group, name) in [
-            ("user32", "DialogBoxParamA"),
-            ("user32", "EndDialog"),
-            ("user32", "MessageBoxA"),
-            ("user32", "MessageBoxW"),
             ("kernel32", "CreatePipe"),
-            ("kernel32", "OpenEventW"),
             ("crt", "_beginthread"),
             ("crt", "strspn"),
         ] {
@@ -261,6 +238,20 @@ mod import_coverage_tests {
         }
         assert!(import_is_implemented("user32", "CreateWindowExA"));
         assert!(import_is_implemented("kernel32", "CreateFileW"));
+        assert!(import_is_implemented("kernel32", "GetWriteWatch"));
+        assert!(import_is_implemented("crt", "strcspn"));
+        assert!(import_is_implemented("crt", "strpbrk"));
+        assert!(import_is_implemented("user32", "MessageBoxA"));
+        assert!(import_is_implemented("user32", "MessageBoxW"));
+        assert!(import_is_implemented("user32", "DialogBoxParamA"));
+        assert!(import_is_implemented("user32", "EndDialog"));
+        assert!(import_is_implemented("user32", "CreateIconIndirect"));
+        assert!(import_is_implemented("user32", "FillRect"));
+        assert!(!import_is_implemented("user32", "CreateIconFromResource"));
+        assert!(!import_is_implemented("user32", "WaitForInputIdle"));
+        assert!(import_is_implemented("kernel32", "OpenEventW"));
+        assert!(import_is_implemented("kernel32", "OpenMutexW"));
+        assert!(import_is_implemented("kernel32", "OpenSemaphoreW"));
     }
 }
 
@@ -332,6 +323,8 @@ mod import_coverage_batch_tests {
         assert!(lookup("eax", "#6").is_some());
         assert_eq!(group_of("vorbisfile"), Some("vorbisfile"));
         assert!(lookup("vorbisfile", "ov_open_callbacks").is_some());
+        assert_eq!(group_of("d3d8"), None, "D3D8 is not translated");
+        assert_eq!(group_of("dpnhpast"), None, "dpnhpast is not translated");
         assert_eq!(data_symbol("msvcp", MSVC_STD_CIN_SYMBOL), Some(0x80));
         assert_eq!(data_symbol("msvcp", MSVC_STD_COUT_SYMBOL), Some(0xe0));
         assert_eq!(data_symbol("crt", "_HUGE"), Some(8));

@@ -20,6 +20,8 @@ try {
   const exports = new Set(WebAssembly.Module.exports(wasmModule).map((entry) => entry.name));
   const imports = WebAssembly.Module.imports(wasmModule);
   const requiredExports = [
+    'aw_notify_vfs_change',
+    'aw_set_host_change_notifications',
     'asyncify_start_unwind',
     'asyncify_stop_unwind',
     'asyncify_start_rewind',

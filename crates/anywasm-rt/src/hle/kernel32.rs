@@ -4,22 +4,33 @@ use super::*;
 use crate::process::*;
 use crate::vfs::{absolute, norm, AssetReadError, CreateDirError, FileMetadata, RemoveDirError};
 use anywasm_cpu::cpu::RSP;
-use anywasm_cpu::mem::{PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_W, PROT_X};
+use anywasm_cpu::mem::{PAGE_SIZE, PROT_NONE, PROT_R, PROT_RW, PROT_RWX, PROT_W, PROT_X};
 use anywasm_cpu::CpuMode;
+use std::collections::VecDeque;
+
+#[cfg(test)]
+#[path = "kernel32_pipe_tests.rs"]
+mod pipe_runtime_tests;
 
 const INVALID_HANDLE: u64 = u64::MAX;
+const ERROR_INVALID_FUNCTION: u32 = 1;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_GEN_FAILURE: u32 = 31;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+const ERROR_WRITE_FAULT: u32 = 29;
 const ERROR_NOT_SAME_DEVICE: u32 = 17;
 const ERROR_READ_FAULT: u32 = 30;
 const ERROR_LOCK_VIOLATION: u32 = 33;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_INVALID_NAME: u32 = 123;
+const ERROR_INVALID_ADDRESS: u32 = 487;
 const ERROR_INVALID_FLAGS: u32 = 1004;
+const ERROR_FILE_INVALID: u32 = 1006;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_RESOURCE_DATA_NOT_FOUND: u32 = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND: u32 = 1813;
@@ -33,6 +44,12 @@ const ERROR_FILE_EXISTS: u32 = 80;
 const ERROR_MORE_DATA: u32 = 234;
 const ERROR_MR_MID_NOT_FOUND: u32 = 317;
 const ERROR_NOT_FOUND: u32 = 1168;
+const ERROR_BROKEN_PIPE: u32 = 109;
+const ERROR_NO_DATA: u32 = 232;
+const ERROR_PIPE_BUSY: u32 = 231;
+const ERROR_PIPE_NOT_CONNECTED: u32 = 233;
+const ERROR_PIPE_CONNECTED: u32 = 535;
+const ERROR_PIPE_LISTENING: u32 = 536;
 const ERROR_RESOURCE_LANG_NOT_FOUND: u32 = 1815;
 const ERROR_NOT_OWNER: u32 = 288;
 const ERROR_NOT_LOCKED: u32 = 158;
@@ -49,6 +66,7 @@ const WINDOWS_CTYPE1: &[u8; 0x2_0000] = include_bytes!("windows_ctype1.bin");
 const PRODUCT_BUSINESS: u32 = 0x0000_0006;
 const PRODUCT_PROFESSIONAL: u32 = 0x0000_0030;
 const WAIT_OBJECT_0: u64 = 0;
+const WAIT_IO_COMPLETION: u64 = 0x0000_00c0;
 const WAIT_TIMEOUT: u64 = 0x102;
 const WAIT_FAILED: u64 = u32::MAX as u64;
 const CURRENT_PROCESS_ID: u32 = 0x1000;
@@ -66,6 +84,17 @@ pub struct FileRangeLock {
     pub path: String,
     pub offset: u64,
     pub length: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileMappingView {
+    pub path: Option<String>,
+    pub file_offset: u64,
+    pub length: u64,
+    /// True only for FILE_MAP_WRITE shared views. FILE_MAP_COPY changes stay private.
+    pub shared_write: bool,
+    /// Bytes at the last successful map/flush, used to commit only changed ranges.
+    pub last_flushed: Vec<u8>,
 }
 
 pub const STD_IN: u64 = 0x10;
@@ -90,14 +119,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetThreadIdealProcessor" => set_thread_ideal_processor,
         "GetCurrentThreadId" => |p| Ok(p.current_thread_id as u64),
         "OpenThread" => open_thread,
-        // The scheduler does not yet queue APC routines for alertable delivery. Report the
-        // missing execution service explicitly instead of accepting an APC that can never run.
-        "QueueUserAPC" => |_| {
-            unsupported_kernel32(
-                "QueueUserAPC",
-                "APC queuing and alertable delivery are not modeled",
-            )
-        },
+        "QueueUserAPC" => queue_user_apc,
         "SuspendThread" => suspend_thread,
         "TerminateThread" => terminate_thread,
         "GetExitCodeProcess" => get_exit_code_process,
@@ -206,12 +228,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "VirtualFree" => virtual_free,
         "VirtualProtect" => virtual_protect,
         "VirtualQuery" => virtual_query,
-        "GetWriteWatch" => |_| {
-            unsupported_kernel32(
-                "GetWriteWatch",
-                "page write-watch tracking is not modeled by guest memory",
-            )
-        },
+        "GetWriteWatch" => get_write_watch,
         // Guest code writes advance Memory's code epoch, so the interpreter drops stale decoded
         // blocks without requiring an explicit cache flush.
         "FlushInstructionCache" => |_| Ok(1),
@@ -245,42 +262,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "ReadFile" => read_file,
         "LockFile" => lock_file,
         "UnlockFile" => unlock_file,
-        "CreatePipe" => |_| {
-            unsupported_kernel32(
-                "CreatePipe",
-                "anonymous pipe buffering, blocking reads, and inherited-handle lifetime are not modeled",
-            )
-        },
-        "CreateNamedPipeW" => |_| {
-            unsupported_kernel32(
-                "CreateNamedPipeW",
-                "named-pipe server/client IPC is not modeled",
-            )
-        },
-        "ConnectNamedPipe" => |_| {
-            unsupported_kernel32(
-                "ConnectNamedPipe",
-                "named-pipe server/client IPC is not modeled",
-            )
-        },
-        "DisconnectNamedPipe" => |_| {
-            unsupported_kernel32(
-                "DisconnectNamedPipe",
-                "named-pipe server/client IPC is not modeled",
-            )
-        },
-        "CreateProcessW" => |_| {
-            unsupported_kernel32(
-                "CreateProcessW",
-                "the runtime does not load and schedule a second guest process",
-            )
-        },
-        "DeviceIoControl" => |_| {
-            unsupported_kernel32(
-                "DeviceIoControl",
-                "device and filesystem control-code dispatch is not modeled",
-            )
-        },
+        "CreatePipe" => create_pipe,
+        "CreateNamedPipeW" => create_named_pipe_w,
+        "ConnectNamedPipe" => connect_named_pipe,
+        "DisconnectNamedPipe" => disconnect_named_pipe,
+        "CreateProcessW" => create_process_w,
+        "DeviceIoControl" => device_io_control,
         "GetOverlappedResult" => get_overlapped_result,
         "WriteConsoleA" => write_console_a,
         "WriteConsoleW" => write_console_w,
@@ -301,6 +288,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "CreateFileW" => |p| create_file(p, true),
         "CreateFileMappingA" => create_file_mapping,
         "MapViewOfFile" => map_view_of_file,
+        "FlushViewOfFile" => flush_view_of_file,
         "UnmapViewOfFile" => unmap_view_of_file,
         "FindFirstFileA" => |p| find_first_file(p, false),
         "FindFirstFileW" => |p| find_first_file(p, true),
@@ -313,7 +301,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "FindCloseChangeNotification" => find_close_change_notification,
         "CloseHandle" => |p| {
             let h = p.arg(0);
-            let closed = p.handles.remove(&h).is_some() || matches!(h, STD_IN | STD_OUT | STD_ERR);
+            let closed = p.close_handle(h).is_some() || matches!(h, STD_IN | STD_OUT | STD_ERR);
             if closed {
                 p.extra.file_range_locks.retain(|lock| lock.handle != h);
                 p.extra.file_access.remove(&h);
@@ -470,7 +458,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "GetDiskFreeSpaceExA" | "GetDiskFreeSpaceExW" => get_disk_free_space_ex,
         "GetDiskFreeSpaceA" | "GetDiskFreeSpaceW" => get_disk_free_space,
         "GetDriveTypeA" => get_drive_type_a,
-        "GetLogicalDrives" => |_| Ok(1 << 2),
+        "GetLogicalDrives" => |p| Ok((1 << 2 | p.vfs.root_alias_drive_mask()) as u64),
         "GetLogicalDriveStringsA" => get_logical_drive_strings_a,
         "GetVolumeInformationA" => |p| get_volume_information(p, false),
         "GetVolumeInformationW" => |p| get_volume_information(p, true),
@@ -660,31 +648,35 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.wr64(once, 1)?;
             Ok(1)
         },
-        "CreateEventA" | "CreateEventW" => |p| {
-            let (manual, init) = (p.arg(1) != 0, p.arg(2) != 0);
-            Ok(p.new_handle(Handle::Event {
-                signaled: init,
-                manual,
-            }))
-        },
-        "OpenEventW" => |_| {
-            unsupported_kernel32(
-                "OpenEventW",
-                "the named kernel-object namespace is not modeled",
-            )
-        },
-        "CreateEventExW" => |p| {
-            let flags = p.arg(2) as u32;
-            Ok(p.new_handle(Handle::Event {
-                signaled: flags & 2 != 0,
-                manual: flags & 1 != 0,
-            }))
-        },
+        "CreateEventA" => |p| create_event(p, false, false),
+        "CreateEventW" => |p| create_event(p, true, false),
+        "CreateEventExW" => |p| create_event(p, true, true),
+        "OpenEventW" => |p| open_sync_object(p, SyncObjectType::Event),
         "SetEvent" => |p| {
             let h = p.arg(0);
             if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&h) {
                 *signaled = true;
                 Ok(1)
+            } else if let Some(Handle::KernelObject {
+                object_id, access, ..
+            }) = p.handles.get(&h)
+            {
+                let (object_id, access) = (*object_id, *access);
+                if access & EVENT_MODIFY_STATE == 0 {
+                    p.set_last_error(ERROR_ACCESS_DENIED);
+                    return Ok(0);
+                }
+                if let Some(KernelObjectState::Event { signaled, .. }) = p
+                    .kernel_objects
+                    .get_mut(&object_id)
+                    .map(|object| &mut object.state)
+                {
+                    *signaled = true;
+                    Ok(1)
+                } else {
+                    p.set_last_error(ERROR_INVALID_HANDLE);
+                    Ok(0)
+                }
             } else {
                 p.set_last_error(ERROR_INVALID_HANDLE);
                 Ok(0)
@@ -695,28 +687,40 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&h) {
                 *signaled = false;
                 Ok(1)
+            } else if let Some(Handle::KernelObject {
+                object_id, access, ..
+            }) = p.handles.get(&h)
+            {
+                let (object_id, access) = (*object_id, *access);
+                if access & EVENT_MODIFY_STATE == 0 {
+                    p.set_last_error(ERROR_ACCESS_DENIED);
+                    return Ok(0);
+                }
+                if let Some(KernelObjectState::Event { signaled, .. }) = p
+                    .kernel_objects
+                    .get_mut(&object_id)
+                    .map(|object| &mut object.state)
+                {
+                    *signaled = false;
+                    Ok(1)
+                } else {
+                    p.set_last_error(ERROR_INVALID_HANDLE);
+                    Ok(0)
+                }
             } else {
                 p.set_last_error(ERROR_INVALID_HANDLE);
                 Ok(0)
             }
         },
-        "CreateMutexA" | "CreateMutexW" => create_mutex,
+        "CreateMutexA" => |p| create_mutex(p, false),
+        "CreateMutexW" => |p| create_mutex(p, true),
         "CreateMutexExW" => create_mutex_ex,
-        "OpenMutexW" => |_| {
-            unsupported_kernel32(
-                "OpenMutexW",
-                "the named kernel-object namespace is not modeled",
-            )
-        },
+        "OpenMutexW" => |p| open_sync_object(p, SyncObjectType::Mutex),
         "ReleaseMutex" => release_mutex,
-        "CreateSemaphoreA" | "CreateSemaphoreW" => create_semaphore,
+        "CreateSemaphoreA" => |p| create_semaphore(p, false),
+        "CreateSemaphoreW" => |p| create_semaphore(p, true),
         "CreateSemaphoreExW" => create_semaphore_ex,
-        "OpenSemaphoreW" => |_| {
-            unsupported_kernel32(
-                "OpenSemaphoreW",
-                "the named kernel-object namespace is not modeled",
-            )
-        },
+        "OpenSemaphoreW" => |p| open_sync_object(p, SyncObjectType::Semaphore),
         "ReleaseSemaphore" => release_semaphore,
         "WaitForSingleObject" => |p| wait_for_single_object(p, false),
         "WaitForSingleObjectEx" => |p| wait_for_single_object(p, p.arg(2) != 0),
@@ -914,12 +918,7 @@ fn duplicate_handle(p: &mut Process) -> R {
     let (target_output, desired_access, inherit, options) =
         (p.arg(3), p.arg(4) as u32, p.arg(5) != 0, p.arg(6) as u32);
 
-    if options & DUPLICATE_CLOSE_SOURCE != 0 {
-        return Err(Stop::Crash(
-            "untranslated: kernel32!DuplicateHandle with DUPLICATE_CLOSE_SOURCE".into(),
-        ));
-    }
-    if options & !DUPLICATE_SAME_ACCESS != 0 {
+    if options & !(DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE) != 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
@@ -936,6 +935,69 @@ fn duplicate_handle(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_HANDLE);
         return Ok(0);
     }
+
+    if let Some(Handle::KernelObject {
+        object_id,
+        access: source_access,
+        ..
+    }) = p.handles.get(&source_handle)
+    {
+        let (object_id, source_access) = (*object_id, *source_access);
+        let access = if options & DUPLICATE_SAME_ACCESS != 0 {
+            source_access
+        } else {
+            desired_access
+        };
+        if access & !source_access != 0 {
+            p.set_last_error(ERROR_ACCESS_DENIED);
+            return Ok(0);
+        }
+        let next_handle = p.next_handle;
+        let duplicate = p
+            .duplicate_kernel_object_handle(object_id, access, inherit)
+            .expect("source kernel-object handle keeps object alive");
+        debug_assert_eq!(duplicate, next_handle);
+        if target_output != 0 {
+            if let Err(error) = p.wrptr(target_output, duplicate) {
+                p.close_handle(duplicate);
+                return Err(error);
+            }
+        }
+        if options & DUPLICATE_CLOSE_SOURCE != 0 {
+            p.close_handle(source_handle);
+        }
+        return Ok(1);
+    }
+
+    if let Some(Handle::Pipe {
+        pipe_id,
+        endpoint,
+        generation,
+        overlapped,
+        ..
+    }) = p.handles.get(&source_handle)
+    {
+        if options & DUPLICATE_SAME_ACCESS == 0 {
+            return Err(Stop::Crash(
+                "untranslated: kernel32!DuplicateHandle pipe access conversion".into(),
+            ));
+        }
+        let (pipe_id, endpoint, generation, overlapped) =
+            (*pipe_id, *endpoint, *generation, *overlapped);
+        let duplicate =
+            p.new_pipe_handle_generation(pipe_id, endpoint, generation, inherit, overlapped);
+        if target_output != 0 {
+            if let Err(error) = p.wrptr(target_output, duplicate) {
+                p.close_handle(duplicate);
+                return Err(error);
+            }
+        }
+        if options & DUPLICATE_CLOSE_SOURCE != 0 {
+            p.close_handle(source_handle);
+        }
+        return Ok(1);
+    }
+
     if options & DUPLICATE_SAME_ACCESS == 0 {
         return Err(Stop::Crash(format!(
             "untranslated: kernel32!DuplicateHandle access mask {desired_access:#x}"
@@ -950,6 +1012,7 @@ fn duplicate_handle(p: &mut Process) -> R {
     } else if is_current_thread_pseudo_handle(source_handle) {
         Handle::Thread {
             id: p.current_thread_id,
+            access: THREAD_ALL_ACCESS,
             start: 0,
             parameter: 0,
             exit_code: match &p.current_thread_state {
@@ -967,6 +1030,7 @@ fn duplicate_handle(p: &mut Process) -> R {
             },
             Some(Handle::Thread {
                 id,
+                access,
                 start: 0,
                 parameter: 0,
                 exit_code,
@@ -974,6 +1038,7 @@ fn duplicate_handle(p: &mut Process) -> R {
                 ..
             }) if *id == p.current_thread_id => Handle::Thread {
                 id: *id,
+                access: *access,
                 start: 0,
                 parameter: 0,
                 exit_code: *exit_code,
@@ -984,7 +1049,7 @@ fn duplicate_handle(p: &mut Process) -> R {
                 return Err(Stop::Crash(format!(
                     "untranslated: kernel32!DuplicateHandle object type {}",
                     handle_type_name(handle)
-                )))
+                )));
             }
             None => {
                 p.set_last_error(ERROR_INVALID_HANDLE);
@@ -1001,6 +1066,12 @@ fn duplicate_handle(p: &mut Process) -> R {
     }
     let created_handle = p.new_handle(duplicate);
     debug_assert_eq!(created_handle, next_handle);
+    if options & DUPLICATE_CLOSE_SOURCE != 0
+        && !is_current_process_pseudo_handle(source_handle)
+        && !is_current_thread_pseudo_handle(source_handle)
+    {
+        p.close_handle(source_handle);
+    }
     Ok(1)
 }
 
@@ -1015,6 +1086,8 @@ fn handle_type_name(handle: &Handle) -> &'static str {
         Handle::DeviceNotification { .. } => "device notification",
         Handle::Mutex { .. } => "mutex",
         Handle::Semaphore { .. } => "semaphore",
+        Handle::KernelObject { .. } => "synchronization object",
+        Handle::Pipe { .. } => "pipe",
         Handle::Thread { .. } => "thread",
         Handle::Process { .. } => "process",
         Handle::Module(_) => "module",
@@ -1165,8 +1238,44 @@ fn thread_id_from_handle(p: &Process, handle: u64) -> Option<u32> {
     }
 }
 
+fn queue_user_apc(p: &mut Process) -> R {
+    let (routine, thread_handle) = (p.arg(0), p.arg(1));
+    if routine == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let Some(thread_id) = thread_id_from_handle(p, thread_handle) else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    let state = if thread_id == p.current_thread_id && !p.current_thread_saved {
+        Some(&p.current_thread_state)
+    } else {
+        p.guest_threads.get(&thread_id).map(|thread| &thread.state)
+    };
+    let Some(state) = state else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    if matches!(state, ThreadState::Exited(_)) {
+        p.set_last_error(ERROR_GEN_FAILURE);
+        return Ok(0);
+    }
+    if !is_current_thread_pseudo_handle(thread_handle)
+        && matches!(
+            p.handles.get(&thread_handle),
+            Some(Handle::Thread { access, .. }) if access & THREAD_SET_CONTEXT == 0
+        )
+    {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(0);
+    }
+    p.queue_user_apc(thread_id, routine, p.arg(2));
+    Ok(1)
+}
+
 fn open_thread(p: &mut Process) -> R {
-    let (inherit, id) = (p.arg(1) != 0, p.arg(2) as u32);
+    let (desired_access, inherit, id) = (p.arg(0) as u32, p.arg(1) != 0, p.arg(2) as u32);
     if id == 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
@@ -1200,6 +1309,11 @@ fn open_thread(p: &mut Process) -> R {
     let suspended = p.thread_suspend_counts.get(&id).copied().unwrap_or(0) != 0;
     Ok(p.new_handle(Handle::Thread {
         id,
+        access: if desired_access & MAXIMUM_ALLOWED != 0 {
+            THREAD_ALL_ACCESS
+        } else {
+            desired_access
+        },
         start,
         parameter,
         exit_code,
@@ -1548,6 +1662,7 @@ pub fn create_thread(p: &mut Process) -> R {
     }
     let handle = p.new_handle(Handle::Thread {
         id,
+        access: THREAD_ALL_ACCESS,
         start,
         parameter,
         exit_code: None,
@@ -1562,6 +1677,10 @@ pub fn create_thread(p: &mut Process) -> R {
 
 fn sleep_thread(p: &mut Process, alertable: bool) -> R {
     let ms = p.arg(0) as u32;
+    if alertable && p.has_queued_user_apcs(p.current_thread_id) {
+        p.dispatch_current_user_apcs()?;
+        return Ok(WAIT_IO_COMPLETION);
+    }
     if ms == 0 {
         p.request_thread_yield();
         return Ok(0);
@@ -1582,6 +1701,7 @@ fn sleep_thread(p: &mut Process, alertable: bool) -> R {
     let duration = (ms as u64).saturating_mul(100_000);
     p.block_current_thread(ThreadWait::Sleep {
         deadline: p.now_ticks().saturating_add(duration),
+        alertable,
     });
     Ok(0)
 }
@@ -1627,44 +1747,354 @@ fn acquire_srw(p: &mut Process, exclusive: bool) -> R {
     Ok(0)
 }
 
-fn create_mutex(p: &mut Process) -> R {
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const THREAD_SET_CONTEXT: u32 = 0x0000_0010;
+const THREAD_ALL_ACCESS: u32 = 0x001f_ffff;
+const STANDARD_RIGHTS_REQUIRED: u32 = 0x000f_0000;
+const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+const GENERIC_EXECUTE_MASK: u32 = 0x2000_0000;
+const EVENT_MODIFY_STATE: u32 = 0x0000_0002;
+const MUTEX_MODIFY_STATE: u32 = 0x0000_0001;
+const SEMAPHORE_MODIFY_STATE: u32 = 0x0000_0002;
+const EVENT_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3;
+const MUTEX_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1;
+const SEMAPHORE_ALL_ACCESS: u32 = STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3;
+
+#[derive(Clone, Copy)]
+enum SyncObjectType {
+    Event,
+    Mutex,
+    Semaphore,
+}
+
+impl SyncObjectType {
+    fn all_access(self) -> u32 {
+        match self {
+            Self::Event => EVENT_ALL_ACCESS,
+            Self::Mutex => MUTEX_ALL_ACCESS,
+            Self::Semaphore => SEMAPHORE_ALL_ACCESS,
+        }
+    }
+
+    fn state(self) -> KernelObjectState {
+        match self {
+            Self::Event => KernelObjectState::Event {
+                signaled: false,
+                manual: false,
+            },
+            Self::Mutex => KernelObjectState::Mutex {
+                owner: None,
+                recursion: 0,
+            },
+            Self::Semaphore => KernelObjectState::Semaphore {
+                count: 0,
+                max_count: 1,
+            },
+        }
+    }
+}
+
+fn normalize_sync_access(kind: SyncObjectType, requested: u32) -> u32 {
+    let mut access = requested & !MAXIMUM_ALLOWED;
+    let query = if matches!(kind, SyncObjectType::Event | SyncObjectType::Semaphore) {
+        0x1
+    } else {
+        0
+    };
+    if requested & MAXIMUM_ALLOWED != 0 {
+        access |= kind.all_access();
+    }
+    if access & GENERIC_ALL != 0 {
+        access = (access & !GENERIC_ALL) | kind.all_access();
+    }
+    if access & GENERIC_READ != 0 {
+        access = (access & !GENERIC_READ) | 0x0002_0000 | SYNCHRONIZE | query;
+    }
+    if access & GENERIC_WRITE != 0 {
+        let modify = match kind {
+            SyncObjectType::Event => EVENT_MODIFY_STATE,
+            SyncObjectType::Mutex => MUTEX_MODIFY_STATE,
+            SyncObjectType::Semaphore => SEMAPHORE_MODIFY_STATE,
+        };
+        access = (access & !GENERIC_WRITE) | 0x0002_0000 | SYNCHRONIZE | modify;
+    }
+    if access & GENERIC_EXECUTE_MASK != 0 {
+        access = (access & !GENERIC_EXECUTE_MASK) | 0x0002_0000 | SYNCHRONIZE;
+    }
+    access
+}
+
+fn read_sync_name(p: &Process, address: u64, wide: bool) -> Result<Option<String>, Stop> {
+    if address == 0 {
+        return Ok(None);
+    }
+    if wide {
+        return Ok(Some(p.read_wstr(address)?));
+    }
+    let mut bytes = Vec::new();
+    for offset in 0..(1 << 20) {
+        let byte = p.rd8(address + offset)?;
+        if byte == 0 {
+            let decoded = cp_decode(VIRTUAL_ANSI_CODE_PAGE, &bytes);
+            return Ok(Some(String::from_utf16_lossy(&decoded)));
+        }
+        bytes.push(byte);
+    }
+    Err(Stop::Crash(format!(
+        "unterminated ANSI object name at {address:#x}"
+    )))
+}
+
+fn sync_name_error(name: &str) -> Option<u32> {
+    if name.is_empty() {
+        return Some(ERROR_INVALID_PARAMETER);
+    }
+    if name.encode_utf16().count() > 260 {
+        return Some(ERROR_INVALID_NAME);
+    }
+    let tail = name
+        .strip_prefix("Global\\")
+        .or_else(|| name.strip_prefix("Local\\"))
+        .unwrap_or(name);
+    if tail.contains('\\') {
+        return Some(ERROR_INVALID_NAME);
+    }
+    None
+}
+
+/// Read SECURITY_ATTRIBUTES using the active guest pointer width. Security descriptors are not
+/// interpreted by this runtime, so new objects with a custom descriptor fail explicitly; handle
+/// inheritance is still preserved exactly for default-security objects.
+fn read_security_attributes(p: &Process, address: u64) -> Result<(bool, bool), Stop> {
+    if address == 0 {
+        return Ok((false, false));
+    }
+    let (expected_size, descriptor_offset, inherit_offset) = if p.cpu.mode == CpuMode::X86_32 {
+        (12, 4, 8)
+    } else {
+        (24, 8, 16)
+    };
+    if p.rd32(address)? != expected_size {
+        return Err(Stop::Crash("invalid SECURITY_ATTRIBUTES length".into()));
+    }
+    let descriptor = p.rdptr(address + descriptor_offset)? != 0;
+    let inheritable = p.rd32(address + inherit_offset)? != 0;
+    Ok((inheritable, descriptor))
+}
+
+fn map_kernel_object_error(p: &mut Process, error: KernelObjectError) {
+    p.set_last_error(match error {
+        KernelObjectError::NotFound => ERROR_FILE_NOT_FOUND,
+        KernelObjectError::TypeMismatch => ERROR_INVALID_HANDLE,
+        KernelObjectError::AccessDenied => ERROR_ACCESS_DENIED,
+    });
+}
+
+fn create_sync_object(
+    p: &mut Process,
+    kind: SyncObjectType,
+    state: KernelObjectState,
+    name: Option<String>,
+    access: u32,
+    inheritable: bool,
+    custom_security: bool,
+) -> R {
+    if let Some(name) = name.as_deref() {
+        if let Some(error) = sync_name_error(name) {
+            p.set_last_error(error);
+            return Ok(0);
+        }
+    }
+    let existing = name
+        .as_ref()
+        .and_then(|name| p.named_kernel_objects.get(name))
+        .is_some();
+    if custom_security && !existing {
+        p.set_last_error(ERROR_NOT_SUPPORTED);
+        return Ok(0);
+    }
+    match p.create_kernel_object(name, state, access, inheritable, kind.all_access()) {
+        Ok((handle, existed)) => {
+            if existed {
+                p.set_last_error(ERROR_ALREADY_EXISTS);
+            }
+            Ok(handle)
+        }
+        Err(error) => {
+            map_kernel_object_error(p, error);
+            Ok(0)
+        }
+    }
+}
+
+fn create_event(p: &mut Process, wide: bool, extended: bool) -> R {
+    let (name_ptr, flags, access, sa_ptr) = if extended {
+        let flags = p.arg(2) as u32;
+        if flags & !3 != 0 {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+        (
+            p.arg(1),
+            flags,
+            normalize_sync_access(SyncObjectType::Event, p.arg(3) as u32),
+            p.arg(0),
+        )
+    } else {
+        let flags = (p.arg(1) as u32 & 1) | ((p.arg(2) as u32 & 1) << 1);
+        (p.arg(3), flags, EVENT_ALL_ACCESS, p.arg(0))
+    };
+    let name = read_sync_name(p, name_ptr, wide)?;
+    let (inheritable, custom_security) = match read_security_attributes(p, sa_ptr) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
+    create_sync_object(
+        p,
+        SyncObjectType::Event,
+        KernelObjectState::Event {
+            manual: flags & 1 != 0,
+            signaled: flags & 2 != 0,
+        },
+        name,
+        access,
+        inheritable,
+        custom_security,
+    )
+}
+
+fn open_sync_object(p: &mut Process, kind: SyncObjectType) -> R {
+    let requested = p.arg(0) as u32;
+    let inheritable = p.arg(1) != 0;
+    let Some(name) = read_sync_name(p, p.arg(2), true)? else {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    };
+    if let Some(error) = sync_name_error(&name) {
+        p.set_last_error(error);
+        return Ok(0);
+    }
+    let access = normalize_sync_access(kind, requested);
+    match p.open_kernel_object(&name, &kind.state(), access, inheritable, kind.all_access()) {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            map_kernel_object_error(p, error);
+            Ok(0)
+        }
+    }
+}
+
+fn create_mutex(p: &mut Process, wide: bool) -> R {
+    let name = read_sync_name(p, p.arg(2), wide)?;
+    let (inheritable, custom_security) = match read_security_attributes(p, p.arg(0)) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
     let owned = p.arg(1) != 0;
-    Ok(p.new_handle(Handle::Mutex {
+    let state = KernelObjectState::Mutex {
         owner: owned.then_some(p.current_thread_id),
         recursion: owned as u32,
-    }))
+    };
+    create_sync_object(
+        p,
+        SyncObjectType::Mutex,
+        state,
+        name,
+        MUTEX_ALL_ACCESS,
+        inheritable,
+        custom_security,
+    )
 }
 
 fn create_mutex_ex(p: &mut Process) -> R {
-    let owned = p.arg(2) & 1 != 0;
-    Ok(p.new_handle(Handle::Mutex {
-        owner: owned.then_some(p.current_thread_id),
-        recursion: owned as u32,
-    }))
-}
-
-fn create_semaphore(p: &mut Process) -> R {
-    let (initial, max_count) = (p.arg(1) as u32, p.arg(2) as u32);
-    if max_count == 0 || initial > max_count {
+    let flags = p.arg(2) as u32;
+    if flags & !1 != 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
-    Ok(p.new_handle(Handle::Semaphore {
-        count: initial,
-        max_count,
-    }))
+    let name = read_sync_name(p, p.arg(1), true)?;
+    let (inheritable, custom_security) = match read_security_attributes(p, p.arg(0)) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
+    let owned = flags & 1 != 0;
+    create_sync_object(
+        p,
+        SyncObjectType::Mutex,
+        KernelObjectState::Mutex {
+            owner: owned.then_some(p.current_thread_id),
+            recursion: owned as u32,
+        },
+        name,
+        normalize_sync_access(SyncObjectType::Mutex, p.arg(3) as u32),
+        inheritable,
+        custom_security,
+    )
+}
+
+fn create_semaphore(p: &mut Process, wide: bool) -> R {
+    let (initial, max_count) = (p.arg(1) as i32, p.arg(2) as i32);
+    if initial < 0 || max_count <= 0 || initial > max_count {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let name = read_sync_name(p, p.arg(3), wide)?;
+    let (inheritable, custom_security) = match read_security_attributes(p, p.arg(0)) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
+    create_sync_object(
+        p,
+        SyncObjectType::Semaphore,
+        KernelObjectState::Semaphore {
+            count: initial as u32,
+            max_count: max_count as u32,
+        },
+        name,
+        SEMAPHORE_ALL_ACCESS,
+        inheritable,
+        custom_security,
+    )
 }
 
 fn create_semaphore_ex(p: &mut Process) -> R {
-    let (initial, max_count) = (p.arg(1) as u32, p.arg(2) as u32);
-    if max_count == 0 || initial > max_count {
+    let (initial, max_count, flags) = (p.arg(2) as i32, p.arg(3) as i32, p.arg(5) as u32);
+    if initial < 0 || max_count <= 0 || initial > max_count || flags != 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
-    Ok(p.new_handle(Handle::Semaphore {
-        count: initial,
-        max_count,
-    }))
+    let name = read_sync_name(p, p.arg(1), true)?;
+    let (inheritable, custom_security) = match read_security_attributes(p, p.arg(0)) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
+    create_sync_object(
+        p,
+        SyncObjectType::Semaphore,
+        KernelObjectState::Semaphore {
+            count: initial as u32,
+            max_count: max_count as u32,
+        },
+        name,
+        normalize_sync_access(SyncObjectType::Semaphore, p.arg(4) as u32),
+        inheritable,
+        custom_security,
+    )
 }
 
 fn release_mutex(p: &mut Process) -> R {
@@ -1682,6 +2112,36 @@ fn release_mutex(p: &mut Process) -> R {
             p.set_last_error(ERROR_NOT_OWNER);
             Ok(0)
         }
+        Some(Handle::KernelObject {
+            object_id, access, ..
+        }) => {
+            let (object_id, access) = (*object_id, *access);
+            if access & MUTEX_MODIFY_STATE == 0 {
+                p.set_last_error(ERROR_ACCESS_DENIED);
+                return Ok(0);
+            }
+            match p
+                .kernel_objects
+                .get_mut(&object_id)
+                .map(|object| &mut object.state)
+            {
+                Some(KernelObjectState::Mutex { owner, recursion }) if *owner == Some(id) => {
+                    *recursion -= 1;
+                    if *recursion == 0 {
+                        *owner = None;
+                    }
+                    Ok(1)
+                }
+                Some(KernelObjectState::Mutex { .. }) => {
+                    p.set_last_error(ERROR_NOT_OWNER);
+                    Ok(0)
+                }
+                _ => {
+                    p.set_last_error(ERROR_INVALID_HANDLE);
+                    Ok(0)
+                }
+            }
+        }
         _ => {
             p.set_last_error(ERROR_INVALID_HANDLE);
             Ok(0)
@@ -1691,15 +2151,45 @@ fn release_mutex(p: &mut Process) -> R {
 
 fn release_semaphore(p: &mut Process) -> R {
     let (handle, release_count, previous_count) = (p.arg(0), p.arg(1) as u32, p.arg(2));
-    let result = match p.handles.get_mut(&handle) {
-        Some(Handle::Semaphore { count, max_count })
-            if release_count != 0 && count.saturating_add(release_count) <= *max_count =>
-        {
-            let previous = *count;
-            *count += release_count;
-            Some(previous)
+    let result = match p.handles.get(&handle) {
+        Some(Handle::Semaphore { .. }) => match p.handles.get_mut(&handle) {
+            Some(Handle::Semaphore { count, max_count })
+                if release_count != 0 && count.saturating_add(release_count) <= *max_count =>
+            {
+                let previous = *count;
+                *count += release_count;
+                Some(previous)
+            }
+            Some(Handle::Semaphore { .. }) => None,
+            _ => unreachable!(),
+        },
+        Some(Handle::KernelObject {
+            object_id, access, ..
+        }) => {
+            let (object_id, access) = (*object_id, *access);
+            if access & SEMAPHORE_MODIFY_STATE == 0 {
+                p.set_last_error(ERROR_ACCESS_DENIED);
+                return Ok(0);
+            }
+            match p
+                .kernel_objects
+                .get_mut(&object_id)
+                .map(|object| &mut object.state)
+            {
+                Some(KernelObjectState::Semaphore { count, max_count })
+                    if release_count != 0 && count.saturating_add(release_count) <= *max_count =>
+                {
+                    let previous = *count;
+                    *count += release_count;
+                    Some(previous)
+                }
+                Some(KernelObjectState::Semaphore { .. }) => None,
+                _ => {
+                    p.set_last_error(ERROR_INVALID_HANDLE);
+                    return Ok(0);
+                }
+            }
         }
-        Some(Handle::Semaphore { .. }) => None,
         _ => {
             p.set_last_error(ERROR_INVALID_HANDLE);
             return Ok(0);
@@ -1717,6 +2207,14 @@ fn release_semaphore(p: &mut Process) -> R {
 
 fn wait_for_single_object(p: &mut Process, alertable: bool) -> R {
     let (handle, timeout) = (p.arg(0), p.arg(1) as u32);
+    if alertable && p.has_queued_user_apcs(p.current_thread_id) {
+        if let Err(error) = p.validate_wait_handles(&[handle], false, p.current_thread_id) {
+            p.set_last_error(error);
+            return Ok(WAIT_FAILED);
+        }
+        p.dispatch_current_user_apcs()?;
+        return Ok(WAIT_IO_COMPLETION);
+    }
     match p.try_wait_handles(&[handle], false, p.current_thread_id) {
         Ok(Some(_)) => return Ok(WAIT_OBJECT_0),
         Err(error) => {
@@ -1728,12 +2226,6 @@ fn wait_for_single_object(p: &mut Process, alertable: bool) -> R {
     if timeout == 0 {
         return Ok(WAIT_TIMEOUT);
     }
-    if alertable {
-        return Err(Stop::Unimplemented {
-            dll: "kernel32".into(),
-            name: "alertable WaitForSingleObjectEx requires APC delivery".into(),
-        });
-    }
     if p.nested != 0 {
         return Err(Stop::Unimplemented {
             dll: "kernel32".into(),
@@ -1744,7 +2236,11 @@ fn wait_for_single_object(p: &mut Process, alertable: bool) -> R {
         p.now_ticks()
             .saturating_add((timeout as u64).saturating_mul(100_000))
     });
-    p.block_current_thread(ThreadWait::Handle { handle, deadline });
+    p.block_current_thread(ThreadWait::Handle {
+        handle,
+        deadline,
+        alertable,
+    });
     Ok(WAIT_TIMEOUT)
 }
 
@@ -1759,7 +2255,17 @@ fn wait_for_multiple_objects(p: &mut Process, alertable: bool) -> R {
     let timeout = p.arg(3) as u32;
     let mut wait_handles = Vec::with_capacity(count);
     for i in 0..count {
-        wait_handles.push(p.rd64(handles + (i as u64) * 8)?);
+        wait_handles.push(
+            p.rdptr(handles + (i as u64) * if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 })?,
+        );
+    }
+    if alertable && p.has_queued_user_apcs(p.current_thread_id) {
+        if let Err(error) = p.validate_wait_handles(&wait_handles, wait_all, p.current_thread_id) {
+            p.set_last_error(error);
+            return Ok(WAIT_FAILED);
+        }
+        p.dispatch_current_user_apcs()?;
+        return Ok(WAIT_IO_COMPLETION);
     }
     match p.try_wait_handles(&wait_handles, wait_all, p.current_thread_id) {
         Ok(Some(index)) => return Ok(WAIT_OBJECT_0 + index),
@@ -1771,12 +2277,6 @@ fn wait_for_multiple_objects(p: &mut Process, alertable: bool) -> R {
     }
     if timeout == 0 {
         return Ok(WAIT_TIMEOUT);
-    }
-    if alertable {
-        return Err(Stop::Unimplemented {
-            dll: "kernel32".into(),
-            name: "alertable WaitForMultipleObjectsEx requires APC delivery".into(),
-        });
     }
     if p.nested != 0 {
         return Err(Stop::Unimplemented {
@@ -1792,6 +2292,7 @@ fn wait_for_multiple_objects(p: &mut Process, alertable: bool) -> R {
         handles: wait_handles,
         wait_all,
         deadline,
+        alertable,
     });
     Ok(WAIT_TIMEOUT)
 }
@@ -2462,18 +2963,46 @@ fn virtual_alloc(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
+    const MEM_RESERVE: u64 = 0x2000;
+    const MEM_RESET: u64 = 0x80000;
+    const MEM_WRITE_WATCH: u64 = 0x200000;
+    let write_watch = ty & MEM_WRITE_WATCH != 0;
+    if write_watch && (ty & MEM_RESERVE == 0 || ty & MEM_RESET != 0) {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
     let pr = prot_from_win(prot);
     // Commit of an already-mapped region: just (re)protect it.
     if addr != 0 && p.mem.is_mapped(addr) {
+        if write_watch {
+            // MEM_WRITE_WATCH is a reservation attribute; it cannot be added to an existing
+            // allocation by committing or protecting pages that were allocated without it.
+            p.set_last_error(ERROR_INVALID_ADDRESS);
+            return Ok(0);
+        }
         if ty & 0x1000 != 0 {
-            let len = (size + 0xfff) & !0xfff;
-            let end = (addr & !0xfff) + len;
-            let mut a = addr & !0xfff;
+            let base = addr & !0xfff;
+            let Some(span) = (addr - base).checked_add(size) else {
+                p.set_last_error(ERROR_INVALID_PARAMETER);
+                return Ok(0);
+            };
+            let Some(len) = span.checked_add(0xfff).map(|n| n & !0xfff) else {
+                p.set_last_error(ERROR_INVALID_PARAMETER);
+                return Ok(0);
+            };
+            let Some(end) = base.checked_add(len) else {
+                p.set_last_error(ERROR_INVALID_PARAMETER);
+                return Ok(0);
+            };
+            let mut a = base;
             while a < end {
                 if !p.mem.is_mapped(a) {
-                    p.mem.map(a, 0x1000, pr);
+                    if !p.mem.map(a, PAGE_SIZE, pr) {
+                        p.set_last_error(ERROR_INVALID_ADDRESS);
+                        return Ok(0);
+                    }
                 }
-                a += 0x1000;
+                a += PAGE_SIZE;
             }
             p.mem.protect(addr & !0xfff, len, pr);
         }
@@ -2486,22 +3015,103 @@ fn virtual_alloc(p: &mut Process) -> R {
             p.set_last_error(487);
             return Ok(0);
         }
-        p.mem
-            .map(a, len, if ty & 0x1000 != 0 { pr } else { PROT_NONE });
+        if !p
+            .mem
+            .map(a, len, if ty & 0x1000 != 0 { pr } else { PROT_NONE })
+        {
+            p.set_last_error(ERROR_INVALID_ADDRESS);
+            return Ok(0);
+        }
         p.vmem.insert(a, (len, pr));
+        if write_watch && !p.mem.enable_write_watch(a, len) {
+            p.mem.unmap(a, len);
+            p.vmem.remove(&a);
+            p.set_last_error(ERROR_INVALID_ADDRESS);
+            return Ok(0);
+        }
         return Ok(a);
     }
-    let mapped_prot = if ty & 0x1000 != 0 { pr } else { PROT_RW };
-    Ok(p.alloc_virtual(size, mapped_prot))
+    let mapped_prot = if ty & 0x1000 != 0 { pr } else { PROT_NONE };
+    let allocated = p.alloc_virtual(size, mapped_prot);
+    if write_watch && !p.mem.enable_write_watch(allocated, size) {
+        if let Some((len, _)) = p.vmem.remove(&allocated) {
+            p.mem.unmap(allocated, len);
+        }
+        p.set_last_error(ERROR_INVALID_ADDRESS);
+        return Ok(0);
+    }
+    Ok(allocated)
+}
+
+fn get_write_watch(p: &mut Process) -> R {
+    const WRITE_WATCH_FLAG_RESET: u32 = 0x1;
+    let (flags, base, size, addresses, count, granularity) = (
+        p.arg(0) as u32,
+        p.arg(1),
+        p.arg(2),
+        p.arg(3),
+        p.arg(4),
+        p.arg(5),
+    );
+    if flags & !WRITE_WATCH_FLAG_RESET != 0 || count == 0 || granularity == 0 {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    let Some(end) = base.checked_add(size) else {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    };
+    let in_virtual_allocation = p
+        .vmem
+        .range(..=base)
+        .next_back()
+        .is_some_and(|(start, (length, _))| end > base && end <= start.saturating_add(*length));
+    let Some(written_pages) = p.mem.write_watch_snapshot(base, size) else {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    };
+    if !in_virtual_allocation {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    let capacity = p.rdptr(count)? as usize;
+    let returned = written_pages.len().min(capacity);
+    if returned != 0 && addresses == 0 {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    let pointer_size = match p.cpu.mode {
+        CpuMode::X86_32 => 4,
+        CpuMode::X86_64 => 8,
+    };
+    for (index, address) in written_pages.iter().take(returned).copied().enumerate() {
+        let Some(destination) = addresses.checked_add(index as u64 * pointer_size) else {
+            return Ok(ERROR_INVALID_PARAMETER as u64);
+        };
+        p.wrptr(destination, address)?;
+    }
+    p.wrptr(count, returned as u64)?;
+    p.wr32(granularity, PAGE_SIZE as u32)?;
+    if flags & WRITE_WATCH_FLAG_RESET != 0 {
+        p.mem.reset_write_watch_pages(&written_pages[..returned]);
+    }
+    Ok(0)
 }
 
 fn virtual_free(p: &mut Process) -> R {
     let (addr, size, ty) = (p.arg(0), p.arg(1), p.arg(2));
+    if p.extra
+        .file_mapping_views
+        .iter()
+        .any(|(&base, view)| addr >= base && addr < base.saturating_add(view.length))
+    {
+        // File views have their own writeback and lifetime rules. They can only be released by
+        // UnmapViewOfFile, never by VirtualFree (including MEM_DECOMMIT).
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
     if ty & 0x8000 != 0 {
         if let Some((len, _)) = p.vmem.remove(&addr) {
             p.mem.unmap(addr, len);
+            p.set_last_error(0);
             return Ok(1);
         }
+        p.set_last_error(ERROR_INVALID_ADDRESS);
         return Ok(0);
     }
     if ty & 0x4000 != 0 && size > 0 {
@@ -2913,6 +3523,24 @@ pub(crate) fn resource_payload_by_id(
     resource_data_info(p, entry)
 }
 
+pub(crate) fn resource_payload_by_name(
+    p: &Process,
+    hmodule: u64,
+    resource_type: u16,
+    resource_name: &str,
+) -> Result<Option<(u64, u32)>, Stop> {
+    let entry = find_resource_entry(
+        p,
+        hmodule,
+        &ResourceKey::Id(resource_type),
+        &ResourceKey::Name(resource_name.to_owned()),
+    )?;
+    if entry == 0 {
+        return Ok(None);
+    }
+    resource_data_info(p, entry)
+}
+
 fn resource_data_info(p: &Process, resource: u64) -> Result<Option<(u64, u32)>, Stop> {
     for module in &p.modules {
         if module.resource_rva == 0 || module.resource_size < 16 {
@@ -2996,8 +3624,662 @@ fn emit(p: &mut Process, handle: u64, data: &[u8]) -> Option<usize> {
     }
 }
 
+const DEFAULT_PIPE_BUFFER_SIZE: usize = 4096;
+const MAX_PIPE_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+const PIPE_ACCESS_INBOUND: u32 = 0x1;
+const PIPE_ACCESS_OUTBOUND: u32 = 0x2;
+const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const PIPE_TYPE_MESSAGE: u32 = 0x4;
+const PIPE_READMODE_MESSAGE: u32 = 0x2;
+const PIPE_NOWAIT: u32 = 0x1;
+const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x8;
+const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+
+fn pipe_connection(
+    name: Option<String>,
+    anonymous: bool,
+    capacity_to_server: usize,
+    capacity_to_client: usize,
+    server_readable: bool,
+    server_writable: bool,
+    nonblocking: bool,
+    max_instances: u32,
+) -> PipeConnection {
+    PipeConnection {
+        name,
+        anonymous,
+        buffer_to_server: VecDeque::new(),
+        buffer_to_client: VecDeque::new(),
+        capacity_to_server,
+        capacity_to_client,
+        server_readable,
+        server_writable,
+        client_readable: false,
+        client_writable: false,
+        server_open: true,
+        client_open: anonymous,
+        connected: anonymous,
+        client_generation: 0,
+        reconnect_available: false,
+        connect_pending: false,
+        nonblocking,
+        max_instances,
+        server_handles: 0,
+        client_handles: 0,
+        anonymous_read_handles: 0,
+        anonymous_write_handles: 0,
+    }
+}
+
+fn create_pipe(p: &mut Process) -> R {
+    let (read_output, write_output, attributes, requested_size) =
+        (p.arg(0), p.arg(1), p.arg(2), p.arg(3) as u32 as usize);
+    if read_output == 0 || write_output == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let (inheritable, custom_security) = match read_security_attributes(p, attributes) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
+    if custom_security {
+        return unsupported_kernel32(
+            "CreatePipe",
+            "custom security descriptors are not interpreted",
+        );
+    }
+    let capacity = if requested_size == 0 {
+        DEFAULT_PIPE_BUFFER_SIZE
+    } else {
+        requested_size
+    };
+    if capacity > MAX_PIPE_BUFFER_SIZE {
+        p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return Ok(0);
+    }
+    let pipe_id = p.new_pipe(pipe_connection(
+        None, true, capacity, capacity, false, false, false, 1,
+    ));
+    let read_handle = p.new_pipe_handle(pipe_id, PipeEndpoint::AnonymousRead, inheritable, false);
+    let write_handle = p.new_pipe_handle(pipe_id, PipeEndpoint::AnonymousWrite, inheritable, false);
+    if let Err(error) = p.wrptr(read_output, read_handle) {
+        p.close_handle(read_handle);
+        p.close_handle(write_handle);
+        return Err(error);
+    }
+    if let Err(error) = p.wrptr(write_output, write_handle) {
+        p.close_handle(read_handle);
+        p.close_handle(write_handle);
+        return Err(error);
+    }
+    Ok(1)
+}
+
+fn normalize_named_pipe_path(path: &str) -> Result<Option<String>, u32> {
+    let normalized = path.replace('/', "\\");
+    let lowercase = normalized.to_ascii_lowercase();
+    let prefix = "\\\\.\\pipe\\";
+    if lowercase.starts_with(prefix) {
+        let name = lowercase[prefix.len()..].to_string();
+        if name.is_empty() || name.contains('\\') || normalized.encode_utf16().count() > 256 {
+            return Err(ERROR_INVALID_NAME);
+        }
+        return Ok(Some(name));
+    }
+    if lowercase.starts_with("\\\\") && lowercase.contains("\\pipe\\") {
+        return Err(ERROR_NOT_SUPPORTED); // remote pipe servers are outside this process-local VFS.
+    }
+    Ok(None)
+}
+
+fn create_named_pipe_w(p: &mut Process) -> R {
+    let (raw_name, open_mode, pipe_mode, max_instances) = (
+        p.read_wstr(p.arg(0))?,
+        p.arg(1) as u32,
+        p.arg(2) as u32,
+        p.arg(3) as u32,
+    );
+    let name = match normalize_named_pipe_path(&raw_name) {
+        Ok(Some(name)) => name,
+        Ok(None) => {
+            p.set_last_error(ERROR_INVALID_NAME);
+            return Ok(INVALID_HANDLE);
+        }
+        Err(ERROR_NOT_SUPPORTED) => {
+            return unsupported_kernel32(
+                "CreateNamedPipeW",
+                "remote named-pipe servers are not modeled",
+            );
+        }
+        Err(error) => {
+            p.set_last_error(error);
+            return Ok(INVALID_HANDLE);
+        }
+    };
+
+    let access_mode = open_mode & 0x3;
+    let open_flags = open_mode & !0x3;
+    if access_mode == 0 || max_instances == 0 || max_instances > PIPE_UNLIMITED_INSTANCES {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(INVALID_HANDLE);
+    }
+    if open_flags & FILE_FLAG_OVERLAPPED != 0 {
+        return unsupported_kernel32(
+            "CreateNamedPipeW",
+            "overlapped pipe completion is not modeled",
+        );
+    }
+    if open_flags & !(FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_WRITE_THROUGH) != 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(INVALID_HANDLE);
+    }
+    if pipe_mode
+        & !(PIPE_NOWAIT | PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS)
+        != 0
+    {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(INVALID_HANDLE);
+    }
+    if pipe_mode & PIPE_READMODE_MESSAGE != 0 && pipe_mode & PIPE_TYPE_MESSAGE == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(INVALID_HANDLE);
+    }
+    if pipe_mode & PIPE_TYPE_MESSAGE != 0 {
+        return unsupported_kernel32("CreateNamedPipeW", "message-type pipes are not modeled");
+    }
+
+    let out_size = p.arg(4) as u32 as usize;
+    let in_size = p.arg(5) as u32 as usize;
+    let out_size = if out_size == 0 {
+        DEFAULT_PIPE_BUFFER_SIZE
+    } else {
+        out_size
+    };
+    let in_size = if in_size == 0 {
+        DEFAULT_PIPE_BUFFER_SIZE
+    } else {
+        in_size
+    };
+    if out_size > MAX_PIPE_BUFFER_SIZE || in_size > MAX_PIPE_BUFFER_SIZE {
+        p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return Ok(INVALID_HANDLE);
+    }
+    let attributes = p.arg(7);
+    let (inheritable, custom_security) = match read_security_attributes(p, attributes) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(INVALID_HANDLE);
+        }
+    };
+    if custom_security {
+        return unsupported_kernel32(
+            "CreateNamedPipeW",
+            "custom security descriptors are not interpreted",
+        );
+    }
+
+    let instances = p.named_pipe_instances.get(&name);
+    if open_flags & FILE_FLAG_FIRST_PIPE_INSTANCE != 0
+        && instances.is_some_and(|ids| !ids.is_empty())
+    {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(INVALID_HANDLE);
+    }
+    if let Some(ids) = instances {
+        if ids.len() >= max_instances as usize {
+            p.set_last_error(ERROR_PIPE_BUSY);
+            return Ok(INVALID_HANDLE);
+        }
+        if ids
+            .first()
+            .and_then(|id| p.pipes.get(id))
+            .is_some_and(|instance| instance.max_instances != max_instances)
+        {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(INVALID_HANDLE);
+        }
+    }
+    let id = p.new_pipe(pipe_connection(
+        Some(name.clone()),
+        false,
+        in_size,
+        out_size,
+        matches!(access_mode, PIPE_ACCESS_INBOUND | 3),
+        matches!(access_mode, PIPE_ACCESS_OUTBOUND | 3),
+        pipe_mode & PIPE_NOWAIT != 0,
+        max_instances,
+    ));
+    let handle = p.new_pipe_handle(id, PipeEndpoint::NamedServer, inheritable, false);
+    p.named_pipe_instances.entry(name).or_default().push(id);
+    Ok(handle)
+}
+
+fn open_named_pipe_client(p: &mut Process, name: &str) -> R {
+    let access = p.arg(1) as u32;
+    let attributes = p.arg(3);
+    let disposition = p.arg(4) as u32;
+    let flags = p.arg(5) as u32;
+    if disposition != 3 {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(INVALID_HANDLE);
+    }
+    if flags & FILE_FLAG_OVERLAPPED != 0 {
+        return unsupported_kernel32(
+            "CreateFileW named-pipe client",
+            "overlapped pipe I/O is not modeled",
+        );
+    }
+    if flags & !(FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH) != 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(INVALID_HANDLE);
+    }
+    let (inheritable, _custom_security) = match read_security_attributes(p, attributes) {
+        Ok(values) => values,
+        Err(_) => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(INVALID_HANDLE);
+        }
+    };
+    let requested_read = access & (GENERIC_READ | GENERIC_ALL | 1) != 0;
+    let requested_write = access & (GENERIC_WRITE | GENERIC_ALL | 2) != 0;
+    let ids = p.named_pipe_instances.get(name).cloned();
+    let Some(ids) = ids else {
+        p.set_last_error(ERROR_FILE_NOT_FOUND);
+        return Ok(INVALID_HANDLE);
+    };
+    let selected = ids.into_iter().find(|id| {
+        p.pipes.get(id).is_some_and(|pipe| {
+            pipe.server_open
+                && !pipe.connected
+                && pipe.client_handles == 0
+                && (!requested_read || pipe.server_writable)
+                && (!requested_write || pipe.server_readable)
+        })
+    });
+    let Some(id) = selected else {
+        p.set_last_error(ERROR_PIPE_BUSY);
+        return Ok(INVALID_HANDLE);
+    };
+    if let Some(pipe) = p.pipes.get_mut(&id) {
+        pipe.client_open = true;
+        pipe.client_readable = requested_read;
+        pipe.client_writable = requested_write;
+        pipe.connected = true;
+        pipe.reconnect_available = false;
+        pipe.connect_pending = true;
+    }
+    p.set_last_error(0);
+    Ok(p.new_pipe_handle(id, PipeEndpoint::NamedClient, inheritable, false))
+}
+
+fn connect_named_pipe(p: &mut Process) -> R {
+    let handle = p.arg(0);
+    let overlapped = p.arg(1);
+    let Some(Handle::Pipe {
+        pipe_id,
+        endpoint: PipeEndpoint::NamedServer,
+        overlapped: handle_overlapped,
+        ..
+    }) = p.handles.get(&handle)
+    else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    if *handle_overlapped {
+        return unsupported_kernel32(
+            "ConnectNamedPipe",
+            "overlapped connect completion is not modeled",
+        );
+    }
+    if overlapped != 0 {
+        return unsupported_kernel32(
+            "ConnectNamedPipe",
+            "OVERLAPPED arguments on synchronous pipe handles are not modeled",
+        );
+    }
+    let Some(pipe) = p.pipes.get_mut(pipe_id) else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    if pipe.connected {
+        if !pipe.client_open {
+            p.set_last_error(ERROR_NO_DATA);
+            return Ok(0);
+        }
+        pipe.connect_pending = false;
+        p.set_last_error(ERROR_PIPE_CONNECTED);
+        return Ok(0);
+    }
+    if pipe.nonblocking {
+        if pipe.reconnect_available {
+            pipe.reconnect_available = false;
+            p.set_last_error(0);
+            return Ok(1);
+        }
+        p.set_last_error(ERROR_PIPE_LISTENING);
+        return Ok(0);
+    }
+    Err(Stop::Unimplemented {
+        dll: "kernel32".into(),
+        name: "blocking ConnectNamedPipe needs a schedulable guest thread wait".into(),
+    })
+}
+
+fn disconnect_named_pipe(p: &mut Process) -> R {
+    let handle = p.arg(0);
+    let Some(Handle::Pipe {
+        pipe_id,
+        endpoint: PipeEndpoint::NamedServer,
+        ..
+    }) = p.handles.get(&handle)
+    else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    let Some(pipe) = p.pipes.get_mut(pipe_id) else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    };
+    if !pipe.connected {
+        p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+        return Ok(0);
+    }
+    // DisconnectNamedPipe ends the current client session immediately. Existing client-side
+    // handles keep their generation, so they become disconnected handles and cannot block the
+    // server from accepting the next client.
+    pipe.client_generation = pipe.client_generation.wrapping_add(1).max(1);
+    pipe.client_handles = 0;
+    pipe.connected = false;
+    pipe.reconnect_available = true;
+    pipe.connect_pending = false;
+    pipe.client_open = false;
+    pipe.buffer_to_server.clear();
+    pipe.buffer_to_client.clear();
+    Ok(1)
+}
+
+const FSCTL_PIPE_PEEK: u32 = 0x0011_400c;
+const PIPE_STATE_CONNECTED: u32 = 3;
+const PIPE_PEEK_HEADER_SIZE: usize = 16;
+
+fn device_io_control(p: &mut Process) -> R {
+    let (handle, control_code, _input, input_size, output, output_size, bytes_returned, overlapped) = (
+        p.arg(0),
+        p.arg(1) as u32,
+        p.arg(2),
+        p.arg(3) as u32 as usize,
+        p.arg(4),
+        p.arg(5) as u32 as usize,
+        p.arg(6),
+        p.arg(7),
+    );
+    if !p.handles.contains_key(&handle) {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        if bytes_returned != 0 {
+            p.wr32(bytes_returned, 0)?;
+        }
+        return Ok(0);
+    }
+    if control_code != FSCTL_PIPE_PEEK {
+        return Err(Stop::Unimplemented {
+            dll: "kernel32".into(),
+            name: format!("DeviceIoControl control code {control_code:#010x} is not translated"),
+        });
+    }
+    let Some(Handle::Pipe {
+        pipe_id,
+        endpoint,
+        generation,
+        overlapped: handle_overlapped,
+        ..
+    }) = p.handles.get(&handle)
+    else {
+        p.set_last_error(ERROR_INVALID_FUNCTION);
+        if bytes_returned != 0 {
+            p.wr32(bytes_returned, 0)?;
+        }
+        return Ok(0);
+    };
+    let (pipe_id, endpoint, generation, handle_overlapped) =
+        (*pipe_id, *endpoint, *generation, *handle_overlapped);
+
+    if input_size != 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        if bytes_returned != 0 {
+            p.wr32(bytes_returned, 0)?;
+        }
+        return Ok(0);
+    }
+    if handle_overlapped {
+        if overlapped == 0 {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            if bytes_returned != 0 {
+                p.wr32(bytes_returned, 0)?;
+            }
+            return Ok(0);
+        }
+        return unsupported_kernel32(
+            "DeviceIoControl",
+            "overlapped FSCTL_PIPE_PEEK completion is not modeled",
+        );
+    }
+    // On a synchronous handle Windows ignores lpOverlapped and requires lpBytesReturned.
+    if bytes_returned == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if output_size < PIPE_PEEK_HEADER_SIZE {
+        p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        p.wr32(bytes_returned, 0)?;
+        return Ok(0);
+    }
+
+    let Some(pipe) = p.pipes.get(&pipe_id) else {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        p.wr32(bytes_returned, 0)?;
+        return Ok(0);
+    };
+    if endpoint == PipeEndpoint::NamedClient && generation != pipe.client_generation {
+        p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+        p.wr32(bytes_returned, 0)?;
+        return Ok(0);
+    }
+    if !pipe.connected {
+        p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+        p.wr32(bytes_returned, 0)?;
+        return Ok(0);
+    }
+
+    let (readable, queue) = match endpoint {
+        PipeEndpoint::AnonymousRead | PipeEndpoint::NamedServer => (
+            pipe.server_readable || pipe.anonymous,
+            &pipe.buffer_to_server,
+        ),
+        PipeEndpoint::NamedClient => (pipe.client_readable, &pipe.buffer_to_client),
+        PipeEndpoint::AnonymousWrite => (false, &pipe.buffer_to_client),
+    };
+    if !readable {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        p.wr32(bytes_returned, 0)?;
+        return Ok(0);
+    }
+
+    let available = queue.len();
+    let copied = available.min(output_size - PIPE_PEEK_HEADER_SIZE);
+    let mut result = Vec::with_capacity(PIPE_PEEK_HEADER_SIZE + copied);
+    result.extend_from_slice(&PIPE_STATE_CONNECTED.to_le_bytes());
+    result.extend_from_slice(&(available.min(u32::MAX as usize) as u32).to_le_bytes());
+    // This runtime implements byte-type pipes, so message count and message length are zero.
+    result.extend_from_slice(&0u32.to_le_bytes());
+    result.extend_from_slice(&0u32.to_le_bytes());
+    result.extend(queue.iter().take(copied).copied());
+    p.write_bytes(output, &result)?;
+    p.wr32(bytes_returned, result.len() as u32)?;
+    if copied != available {
+        p.set_last_error(ERROR_MORE_DATA);
+        Ok(0)
+    } else {
+        Ok(1)
+    }
+}
+
 fn write_file(p: &mut Process) -> R {
     let (h, buf, n, written) = (p.arg(0), p.arg(1), p.arg(2) as usize, p.arg(3));
+    if matches!(p.handles.get(&h), Some(Handle::Pipe { .. })) {
+        let overlapped = p.arg(4);
+        let (pipe_id, endpoint, generation, handle_overlapped) = match p.handles.get(&h) {
+            Some(Handle::Pipe {
+                pipe_id,
+                endpoint,
+                generation,
+                overlapped,
+                ..
+            }) => (*pipe_id, *endpoint, *generation, *overlapped),
+            _ => unreachable!(),
+        };
+        if handle_overlapped {
+            return unsupported_kernel32("WriteFile", "overlapped pipe I/O is not modeled");
+        }
+        if endpoint != PipeEndpoint::AnonymousWrite && overlapped != 0 {
+            return unsupported_kernel32(
+                "WriteFile",
+                "OVERLAPPED arguments on synchronous named-pipe handles are not modeled",
+            );
+        }
+        if written == 0 {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+        p.wr32(written, 0)?;
+        let Some(pipe) = p.pipes.get(&pipe_id) else {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            if written != 0 {
+                p.wr32(written, 0)?;
+            }
+            return Ok(0);
+        };
+        if endpoint == PipeEndpoint::NamedClient && generation != pipe.client_generation {
+            p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+            if written != 0 {
+                p.wr32(written, 0)?;
+            }
+            return Ok(0);
+        }
+        let (queue_to_server, queue_to_client, nonblocking) = match endpoint {
+            PipeEndpoint::AnonymousWrite => {
+                if pipe.anonymous_read_handles == 0 {
+                    p.set_last_error(ERROR_BROKEN_PIPE);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                (true, false, false)
+            }
+            PipeEndpoint::NamedClient => {
+                if !pipe.connected {
+                    p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                if !pipe.client_writable {
+                    p.set_last_error(ERROR_ACCESS_DENIED);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                if !pipe.server_open || !pipe.server_readable {
+                    p.set_last_error(ERROR_BROKEN_PIPE);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                // CreateFile client handles default to blocking wait mode.
+                (true, false, false)
+            }
+            PipeEndpoint::NamedServer => {
+                if !pipe.connected {
+                    p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                if !pipe.server_writable {
+                    p.set_last_error(ERROR_ACCESS_DENIED);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                if !pipe.client_open || !pipe.client_readable {
+                    p.set_last_error(ERROR_BROKEN_PIPE);
+                    if written != 0 {
+                        p.wr32(written, 0)?;
+                    }
+                    return Ok(0);
+                }
+                (false, true, pipe.nonblocking)
+            }
+            PipeEndpoint::AnonymousRead => {
+                p.set_last_error(ERROR_ACCESS_DENIED);
+                if written != 0 {
+                    p.wr32(written, 0)?;
+                }
+                return Ok(0);
+            }
+        };
+        let available = if queue_to_server {
+            pipe.capacity_to_server
+                .saturating_sub(pipe.buffer_to_server.len())
+        } else {
+            pipe.capacity_to_client
+                .saturating_sub(pipe.buffer_to_client.len())
+        };
+        if n == 0 {
+            if written != 0 {
+                p.wr32(written, 0)?;
+            }
+            return Ok(1);
+        }
+        if available < n && !nonblocking {
+            return Err(Stop::Unimplemented {
+                dll: "kernel32".into(),
+                name: "blocking WriteFile on a full pipe needs a schedulable guest-thread wait"
+                    .into(),
+            });
+        }
+        let bytes_to_write = if nonblocking { n.min(available) } else { n };
+        let data = p.read_bytes(buf, bytes_to_write)?;
+        if queue_to_server {
+            p.pipes
+                .get_mut(&pipe_id)
+                .expect("pipe was checked above")
+                .buffer_to_server
+                .extend(data.iter().copied());
+        } else if queue_to_client {
+            p.pipes
+                .get_mut(&pipe_id)
+                .expect("pipe was checked above")
+                .buffer_to_client
+                .extend(data.iter().copied());
+        }
+        if written != 0 {
+            p.wr32(written, bytes_to_write as u32)?;
+        }
+        return Ok(1);
+    }
     let cache_write = if p.trace_imports {
         p.handles.get(&h).and_then(|handle| match handle {
             Handle::File { path, pos, .. } if path.ends_with("caspartcache.package") => {
@@ -3163,6 +4445,137 @@ fn unlock_file(p: &mut Process) -> R {
 fn read_file(p: &mut Process) -> R {
     let (h, buf, n, read) = (p.arg(0), p.arg(1), p.arg(2) as usize, p.arg(3));
     let overlapped = p.arg(4);
+    if matches!(p.handles.get(&h), Some(Handle::Pipe { .. })) {
+        let (pipe_id, endpoint, generation, handle_overlapped) = match p.handles.get(&h) {
+            Some(Handle::Pipe {
+                pipe_id,
+                endpoint,
+                generation,
+                overlapped,
+                ..
+            }) => (*pipe_id, *endpoint, *generation, *overlapped),
+            _ => unreachable!(),
+        };
+        if handle_overlapped {
+            return unsupported_kernel32("ReadFile", "overlapped pipe I/O is not modeled");
+        }
+        if endpoint != PipeEndpoint::AnonymousRead && overlapped != 0 {
+            return unsupported_kernel32(
+                "ReadFile",
+                "OVERLAPPED arguments on synchronous named-pipe handles are not modeled",
+            );
+        }
+        if read == 0 {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+        p.wr32(read, 0)?;
+        let Some(pipe) = p.pipes.get(&pipe_id) else {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            if read != 0 {
+                p.wr32(read, 0)?;
+            }
+            return Ok(0);
+        };
+        if endpoint == PipeEndpoint::NamedClient && generation != pipe.client_generation {
+            p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+            if read != 0 {
+                p.wr32(read, 0)?;
+            }
+            return Ok(0);
+        }
+        let (queue_to_server, nonblocking) = match endpoint {
+            PipeEndpoint::AnonymousRead => (true, false),
+            PipeEndpoint::NamedServer => {
+                if !pipe.connected {
+                    p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+                    if read != 0 {
+                        p.wr32(read, 0)?;
+                    }
+                    return Ok(0);
+                }
+                if !pipe.server_readable {
+                    p.set_last_error(ERROR_ACCESS_DENIED);
+                    if read != 0 {
+                        p.wr32(read, 0)?;
+                    }
+                    return Ok(0);
+                }
+                (true, pipe.nonblocking)
+            }
+            PipeEndpoint::NamedClient => {
+                if !pipe.connected {
+                    p.set_last_error(ERROR_PIPE_NOT_CONNECTED);
+                    if read != 0 {
+                        p.wr32(read, 0)?;
+                    }
+                    return Ok(0);
+                }
+                if !pipe.client_readable {
+                    p.set_last_error(ERROR_ACCESS_DENIED);
+                    if read != 0 {
+                        p.wr32(read, 0)?;
+                    }
+                    return Ok(0);
+                }
+                (false, false)
+            }
+            PipeEndpoint::AnonymousWrite => {
+                p.set_last_error(ERROR_ACCESS_DENIED);
+                if read != 0 {
+                    p.wr32(read, 0)?;
+                }
+                return Ok(0);
+            }
+        };
+        let available = if queue_to_server {
+            pipe.buffer_to_server.len()
+        } else {
+            pipe.buffer_to_client.len()
+        };
+        if n != 0 && available == 0 {
+            let peer_open = match endpoint {
+                PipeEndpoint::AnonymousRead => pipe.anonymous_write_handles != 0,
+                PipeEndpoint::NamedServer => pipe.client_open,
+                PipeEndpoint::NamedClient => pipe.server_open,
+                PipeEndpoint::AnonymousWrite => false,
+            };
+            if !peer_open {
+                p.set_last_error(ERROR_BROKEN_PIPE);
+                if read != 0 {
+                    p.wr32(read, 0)?;
+                }
+                return Ok(0);
+            }
+            if nonblocking {
+                p.set_last_error(ERROR_NO_DATA);
+                if read != 0 {
+                    p.wr32(read, 0)?;
+                }
+                return Ok(0);
+            }
+            return Err(Stop::Unimplemented {
+                dll: "kernel32".into(),
+                name: "blocking ReadFile on an empty pipe needs a schedulable guest-thread wait"
+                    .into(),
+            });
+        }
+        let bytes_to_read = n.min(available);
+        let data: Vec<u8> = {
+            let pipe = p.pipes.get_mut(&pipe_id).expect("pipe checked above");
+            let queue = if queue_to_server {
+                &mut pipe.buffer_to_server
+            } else {
+                &mut pipe.buffer_to_client
+            };
+            queue.drain(..bytes_to_read).collect()
+        };
+        p.write_bytes(buf, &data)?;
+        if read != 0 {
+            p.wr32(read, data.len() as u32)?;
+        }
+        return Ok(1);
+    }
     let data: Vec<u8> = if h == STD_IN {
         let k = n.min(p.stdin.len());
         p.stdin.drain(..k).collect()
@@ -3446,6 +4859,20 @@ fn create_file(p: &mut Process, wide: bool) -> R {
     if n == "conin$" {
         return Ok(STD_IN);
     }
+    match normalize_named_pipe_path(&raw_path) {
+        Ok(Some(pipe_name)) => return open_named_pipe_client(p, &pipe_name),
+        Ok(None) => {}
+        Err(ERROR_NOT_SUPPORTED) => {
+            return unsupported_kernel32(
+                "CreateFileW named-pipe client",
+                "remote named-pipe clients are not modeled",
+            );
+        }
+        Err(error) => {
+            p.set_last_error(error);
+            return Ok(INVALID_HANDLE);
+        }
+    }
     let path = absolute(&raw_path, &p.current_directory);
     let normalized_path = p.vfs.normalize_path(&path);
     if p.trace_gta_eventvol
@@ -3540,6 +4967,102 @@ fn create_file(p: &mut Process, wide: bool) -> R {
     Ok(handle)
 }
 
+fn create_process_w(p: &mut Process) -> R {
+    let (
+        application_name,
+        command_line,
+        process_security,
+        thread_security,
+        _inherit_handles,
+        creation_flags,
+        _environment,
+        current_directory,
+        startup_info,
+        process_information,
+    ) = (
+        p.arg(0),
+        p.arg(1),
+        p.arg(2),
+        p.arg(3),
+        p.arg(4) != 0,
+        p.arg(5) as u32,
+        p.arg(6),
+        p.arg(7),
+        p.arg(8),
+        p.arg(9),
+    );
+    if process_information == 0 || startup_info == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let startup_size = p.rd32(startup_info)?;
+    let expected_startup_size = if p.cpu.mode == CpuMode::X86_32 {
+        68
+    } else {
+        104
+    };
+    if startup_size != expected_startup_size {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    for security_attributes in [process_security, thread_security] {
+        let (_, custom_security) = match read_security_attributes(p, security_attributes) {
+            Ok(values) => values,
+            Err(_) => {
+                p.set_last_error(ERROR_INVALID_PARAMETER);
+                return Ok(0);
+            }
+        };
+        if custom_security {
+            return unsupported_kernel32(
+                "CreateProcessW",
+                "custom process or thread security descriptors are not modeled",
+            );
+        }
+    }
+    if application_name == 0 && command_line == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if current_directory != 0 {
+        let directory = p.read_wstr(current_directory)?;
+        if directory.is_empty() {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+        if !p.vfs.is_dir(&absolute(&directory, &p.current_directory)) {
+            p.set_last_error(ERROR_PATH_NOT_FOUND);
+            return Ok(0);
+        }
+    }
+    if creation_flags & 0x0008_0000 != 0 {
+        return unsupported_kernel32(
+            "CreateProcessW",
+            "STARTUPINFOEX attribute lists are not modeled",
+        );
+    }
+    if application_name == 0 {
+        return unsupported_kernel32(
+            "CreateProcessW",
+            "resolving the executable from the mutable command line is not modeled",
+        );
+    }
+    let application = p.read_wstr(application_name)?;
+    if application.is_empty() {
+        p.set_last_error(ERROR_FILE_NOT_FOUND);
+        return Ok(0);
+    }
+    let executable = absolute(&application, &p.current_directory);
+    if !p.vfs.exists(&executable) {
+        p.set_last_error(ERROR_FILE_NOT_FOUND);
+        return Ok(0);
+    }
+    unsupported_kernel32(
+        "CreateProcessW",
+        "the runtime does not load and schedule a second guest process",
+    )
+}
+
 fn create_file_mapping(p: &mut Process) -> R {
     let (file, protection, size_high, size_low, name_ptr) = (
         p.arg(0),
@@ -3549,11 +5072,12 @@ fn create_file_mapping(p: &mut Process) -> R {
         p.arg(5),
     );
     let requested_size = ((size_high as u64) << 32) | size_low as u64;
-    let file_path = if file as u32 == u32::MAX {
-        None
+    let protection = protection as u32;
+    let (file_path, file_writable) = if file as u32 == u32::MAX {
+        (None, true)
     } else {
         match p.handles.get(&file) {
-            Some(Handle::File { path, .. }) => Some(path.clone()),
+            Some(Handle::File { path, write, .. }) => (Some(path.clone()), *write),
             _ => {
                 p.set_last_error(ERROR_INVALID_HANDLE);
                 return Ok(0);
@@ -3563,6 +5087,24 @@ fn create_file_mapping(p: &mut Process) -> R {
     if name_ptr != 0 {
         // Named mappings are currently independent volatile mappings.
         let _ = p.read_cstr(name_ptr)?;
+    }
+    let valid_protection = matches!(protection, 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80);
+    if !valid_protection {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let shared_write_protection = matches!(protection, 0x04 | 0x40);
+    if shared_write_protection && !file_writable {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(0);
+    }
+    if shared_write_protection
+        && file_path
+            .as_deref()
+            .is_some_and(|path| p.vfs.is_readonly(path))
+    {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(0);
     }
     let size = if requested_size == 0 {
         file_path
@@ -3576,10 +5118,43 @@ fn create_file_mapping(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
+    if let Some(path) = file_path.as_deref() {
+        let Some(file_len) = p.vfs.file_len(path) else {
+            p.set_last_error(ERROR_FILE_INVALID);
+            return Ok(0);
+        };
+        if size > file_len {
+            if !shared_write_protection {
+                p.set_last_error(ERROR_FILE_INVALID);
+                return Ok(0);
+            }
+            // A streamed asset has no mutable local overlay. Do not advertise a writable
+            // mapping when VFS cannot commit changes back to its source.
+            if p.vfs.get(path).is_none() {
+                p.set_last_error(ERROR_NOT_SUPPORTED);
+                return Ok(0);
+            }
+            let (Ok(old_len), Ok(new_len)) = (usize::try_from(file_len), usize::try_from(size))
+            else {
+                p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                return Ok(0);
+            };
+            let Some(data) = p.vfs.get_mut(path) else {
+                p.set_last_error(ERROR_FILE_INVALID);
+                return Ok(0);
+            };
+            if data.len() != old_len || data.try_reserve(new_len - old_len).is_err() {
+                p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                return Ok(0);
+            }
+            data.resize(new_len, 0);
+        }
+    }
     let handle = p.new_handle(Handle::Mapping {
         size,
         file_path,
-        protection: prot_from_win(protection),
+        protection,
+        file_writable,
     });
     p.set_last_error(0);
     Ok(handle)
@@ -3593,19 +5168,20 @@ fn map_view_of_file(p: &mut Process) -> R {
         p.arg(3) as u32,
         p.arg(4),
     );
-    let (size, file_path, _protection) = match p.handles.get(&mapping) {
+    let (size, file_path, protection, file_writable) = match p.handles.get(&mapping) {
         Some(Handle::Mapping {
             size,
             file_path,
             protection,
-        }) => (*size, file_path.clone(), *protection),
+            file_writable,
+        }) => (*size, file_path.clone(), *protection, *file_writable),
         _ => {
             p.set_last_error(ERROR_INVALID_HANDLE);
             return Ok(0);
         }
     };
     let offset = ((offset_high as u64) << 32) | offset_low as u64;
-    if offset >= size {
+    if offset >= size || offset & 0xffff != 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
@@ -3618,6 +5194,42 @@ fn map_view_of_file(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
+    let all_access = access as u32 == 0x000f_001f;
+    let access = access as u32;
+    const FILE_MAP_COPY: u32 = 0x0001;
+    const FILE_MAP_WRITE: u32 = 0x0002;
+    const FILE_MAP_READ: u32 = 0x0004;
+    const FILE_MAP_EXECUTE: u32 = 0x0020;
+    let known_access = FILE_MAP_COPY | FILE_MAP_WRITE | FILE_MAP_READ | FILE_MAP_EXECUTE;
+    if !all_access && (access == 0 || access & !known_access != 0) {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let copy_view = !all_access && access & FILE_MAP_COPY != 0;
+    let shared_write = all_access || (!copy_view && access & FILE_MAP_WRITE != 0);
+    let read_view = all_access || access & (FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_COPY) != 0;
+    let execute_view = !all_access && access & FILE_MAP_EXECUTE != 0;
+    let prot_read = matches!(protection, 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80);
+    let prot_write = matches!(protection, 0x04 | 0x40);
+    let prot_copy = matches!(protection, 0x08 | 0x80);
+    let prot_execute = matches!(protection, 0x10 | 0x20 | 0x40 | 0x80);
+    if (copy_view && !prot_copy)
+        || (shared_write && !prot_write)
+        || (read_view && !prot_read)
+        || (execute_view && !prot_execute)
+        || (shared_write && file_path.is_some() && !file_writable)
+    {
+        p.set_last_error(ERROR_ACCESS_DENIED);
+        return Ok(0);
+    }
+    if shared_write
+        && file_path
+            .as_deref()
+            .is_some_and(|path| p.vfs.get(path).is_none())
+    {
+        p.set_last_error(ERROR_NOT_SUPPORTED);
+        return Ok(0);
+    }
     if p.trace_gta_eventvol {
         let path = file_path.as_deref().unwrap_or("<pagefile>");
         p.stderr.extend_from_slice(
@@ -3627,17 +5239,35 @@ fn map_view_of_file(p: &mut Process) -> R {
             .as_bytes(),
         );
     }
-    let guest_protection = if access & 0x2 != 0 || access & 0x1 != 0 {
-        PROT_RW
-    } else if access & 0x20 != 0 {
-        PROT_R | PROT_X
-    } else {
-        PROT_R
+    let guest_protection = match (
+        read_view || shared_write || copy_view,
+        shared_write || copy_view,
+        execute_view,
+    ) {
+        (true, true, true) => PROT_RWX,
+        (true, true, false) => PROT_RW,
+        (true, false, true) => PROT_R | PROT_X,
+        (false, false, true) => PROT_X,
+        (true, false, false) => PROT_R,
+        _ => {
+            p.set_last_error(ERROR_INVALID_PARAMETER);
+            return Ok(0);
+        }
+    };
+    let view_len = match usize::try_from(len) {
+        Ok(value) => value,
+        Err(_) => {
+            p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return Ok(0);
+        }
     };
     let contents = if let Some(path) = file_path.as_deref() {
-        match p.vfs.read_range(path, offset, len as usize) {
-            Ok(data) => Some(data),
-            Err(AssetReadError::NotFound) => None,
+        match p.vfs.read_range(path, offset, view_len) {
+            Ok(data) if data.len() == view_len => data,
+            Ok(_) | Err(AssetReadError::NotFound) => {
+                p.set_last_error(ERROR_FILE_INVALID);
+                return Ok(0);
+            }
             Err(AssetReadError::TooLarge) => {
                 p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
                 return Ok(0);
@@ -3648,29 +5278,170 @@ fn map_view_of_file(p: &mut Process) -> R {
             }
         }
     } else {
-        None
+        let mut zeroes = Vec::new();
+        if zeroes.try_reserve_exact(view_len).is_err() {
+            p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return Ok(0);
+        }
+        zeroes.resize(view_len, 0);
+        zeroes
     };
-    let address = p.alloc_virtual(len, guest_protection);
+    let Some(address) = p.try_alloc_virtual(len, guest_protection) else {
+        p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+        return Ok(0);
+    };
     if p.trace_gta_eventvol {
         p.stderr.extend_from_slice(
             format!("[gta-map-view] mapped address={address:#x} len={len:#x}\n").as_bytes(),
         );
     }
-    if let Some(contents) = contents {
-        p.mem
-            .write_force(address, &contents)
-            .map_err(|e| Stop::Crash(format!("mapped file initialization failed: {e:?}")))?;
+    if let Err(error) = p.mem.write_force(address, &contents) {
+        if let Some((mapped_len, _)) = p.vmem.remove(&address) {
+            p.mem.unmap(address, mapped_len);
+        }
+        return Err(Stop::Crash(format!(
+            "mapped file initialization failed: {error:?}"
+        )));
     }
+    p.extra.file_mapping_views.insert(
+        address,
+        FileMappingView {
+            path: file_path,
+            file_offset: offset,
+            length: len,
+            shared_write,
+            last_flushed: if shared_write { contents } else { Vec::new() },
+        },
+    );
     p.set_last_error(0);
     Ok(address)
 }
 
+fn flush_mapped_view_range(p: &mut Process, address: u64, requested_len: u64) -> Result<(), u32> {
+    let Some((&base, view)) = p.extra.file_mapping_views.iter().find(|(base, view)| {
+        address >= **base
+            && address
+                .checked_sub(**base)
+                .is_some_and(|offset| offset < view.length)
+    }) else {
+        return Err(ERROR_INVALID_ADDRESS);
+    };
+    let view = view.clone();
+    let view_offset = address.checked_sub(base).ok_or(ERROR_INVALID_ADDRESS)?;
+    let len = if requested_len == 0 {
+        view.length
+            .checked_sub(view_offset)
+            .ok_or(ERROR_INVALID_ADDRESS)?
+    } else {
+        requested_len
+    };
+    if len == 0 || len > view.length.saturating_sub(view_offset) {
+        return Err(ERROR_INVALID_ADDRESS);
+    }
+    let start = usize::try_from(view_offset).map_err(|_| ERROR_INVALID_ADDRESS)?;
+    let len_usize = usize::try_from(len).map_err(|_| ERROR_NOT_ENOUGH_MEMORY)?;
+    let end = start.checked_add(len_usize).ok_or(ERROR_INVALID_ADDRESS)?;
+    let current = p
+        .read_bytes(address, len_usize)
+        .map_err(|_| ERROR_INVALID_ADDRESS)?;
+
+    if view.shared_write {
+        if let Some(path) = view.path.as_deref() {
+            if p.vfs.get(path).is_none() || end > view.last_flushed.len() {
+                return Err(ERROR_FILE_INVALID);
+            }
+            let file_len_before = p.vfs.file_len(path).ok_or(ERROR_FILE_INVALID)?;
+            let old = &view.last_flushed[start..end];
+            let mut cursor = 0;
+            let mut changed_vfs = false;
+            let mut write_error = None;
+            while cursor < current.len() {
+                while cursor < current.len() && current[cursor] == old[cursor] {
+                    cursor += 1;
+                }
+                if cursor == current.len() {
+                    break;
+                }
+                let changed_start = cursor;
+                while cursor < current.len() && current[cursor] != old[cursor] {
+                    cursor += 1;
+                }
+                let file_offset = view
+                    .file_offset
+                    .checked_add(view_offset)
+                    .and_then(|offset| offset.checked_add(changed_start as u64))
+                    .ok_or(ERROR_WRITE_FAULT)?;
+                let changed_bytes = &current[changed_start..cursor];
+                let same_as_vfs = usize::try_from(file_offset)
+                    .ok()
+                    .and_then(|file_start| {
+                        file_start
+                            .checked_add(changed_bytes.len())
+                            .and_then(|file_end| {
+                                p.vfs
+                                    .get(path)
+                                    .and_then(|file| file.get(file_start..file_end))
+                            })
+                    })
+                    .is_some_and(|vfs_bytes| vfs_bytes == changed_bytes);
+                if !same_as_vfs {
+                    if !p.vfs.write_range(path, file_offset, changed_bytes) {
+                        write_error = Some(ERROR_WRITE_FAULT);
+                        break;
+                    }
+                    changed_vfs = true;
+                }
+            }
+            if changed_vfs {
+                let mut changed_filter = FILE_NOTIFY_CHANGE_LAST_WRITE;
+                if p.vfs.file_len(path) != Some(file_len_before) {
+                    changed_filter |= FILE_NOTIFY_CHANGE_SIZE;
+                }
+                p.notify_vfs_change(path, changed_filter);
+            }
+            if let Some(error) = write_error {
+                return Err(error);
+            }
+            if let Some(active) = p.extra.file_mapping_views.get_mut(&base) {
+                active.last_flushed[start..end].copy_from_slice(&current);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn flush_view_of_file(p: &mut Process) -> R {
+    match flush_mapped_view_range(p, p.arg(0), p.arg(1)) {
+        Ok(()) => {
+            p.set_last_error(0);
+            Ok(1)
+        }
+        Err(error) => {
+            p.set_last_error(error);
+            Ok(0)
+        }
+    }
+}
+
 fn unmap_view_of_file(p: &mut Process) -> R {
     let address = p.arg(0);
-    let Some((len, _)) = p.vmem.remove(&address) else {
+    let Some(view) = p.extra.file_mapping_views.get(&address).cloned() else {
+        p.set_last_error(ERROR_INVALID_ADDRESS);
         return Ok(0);
     };
+    if view.shared_write {
+        if let Err(error) = flush_mapped_view_range(p, address, view.length) {
+            p.set_last_error(error);
+            return Ok(0);
+        }
+    }
+    let Some((len, _)) = p.vmem.remove(&address) else {
+        p.set_last_error(ERROR_INVALID_ADDRESS);
+        return Ok(0);
+    };
+    p.extra.file_mapping_views.remove(&address);
     p.mem.unmap(address, len);
+    p.set_last_error(0);
     Ok(1)
 }
 
@@ -3877,8 +5648,8 @@ fn find_first_change_notification(p: &mut Process, wide: bool) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(INVALID_HANDLE);
     }
-    if filter & (FILE_NOTIFY_CHANGE_SECURITY | FILE_NOTIFY_CHANGE_LAST_ACCESS) != 0 {
-        // Security descriptors and access timestamps are not represented in the guest VFS.
+    if filter & FILE_NOTIFY_CHANGE_SECURITY != 0 {
+        // Security descriptors are not represented in the guest VFS or host change feed.
         p.set_last_error(ERROR_NOT_SUPPORTED);
         return Ok(INVALID_HANDLE);
     }
@@ -3896,9 +5667,12 @@ fn find_first_change_notification(p: &mut Process, wide: bool) -> R {
         p.set_last_error(ERROR_PATH_NOT_FOUND);
         return Ok(INVALID_HANDLE);
     }
-    if p.vfs.has_streamed_assets_below(&absolute_path) && !p.change_notification_coverage_reported {
+    if !p.host_change_notifications_enabled
+        && !p.change_notification_coverage_reported
+        && p.vfs.has_streamed_assets_below(&absolute_path)
+    {
         p.stderr.extend_from_slice(
-            b"[coverage] kernel32!FindFirstChangeNotificationW on streamed assets observes guest VFS mutations; host-folder changes and mapped-file writeback are not connected.\n",
+            b"[coverage] kernel32!FindFirstChangeNotificationW observes guest VFS and mapped-view writeback; host-folder changes to streamed assets are not observed.\n",
         );
         p.change_notification_coverage_reported = true;
     }
@@ -4035,6 +5809,19 @@ fn virtual_path_exists(p: &Process, absolute_path: &str) -> bool {
         )
 }
 
+fn drive_mask_for_path(path: &str) -> u32 {
+    let bytes = path.as_bytes();
+    if bytes.get(1) != Some(&b':') || !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return 0;
+    }
+    1u32 << (bytes[0].to_ascii_uppercase() - b'A')
+}
+
+fn is_virtual_drive_mounted(p: &Process, path: &str) -> bool {
+    let mask = 1 << 2 | p.vfs.root_alias_drive_mask();
+    drive_mask_for_path(path) & mask != 0
+}
+
 fn missing_path_error(p: &mut Process, absolute_path: &str) {
     let parent = absolute_path
         .rfind('\\')
@@ -4065,12 +5852,12 @@ fn get_drive_type_a(p: &mut Process) -> R {
     };
     let has_required_root_separator = !explicit_path || path.ends_with('\\');
     let absolute_path = absolute(&path, &p.current_directory);
+    let drive_is_mounted = is_virtual_drive_mounted(p, &absolute_path);
+    let is_alias_drive = drive_mask_for_path(&absolute_path) & p.vfs.root_alias_drive_mask() != 0;
     Ok(
         if has_required_root_separator
-            && virtual_path_exists(p, &absolute_path)
-            && absolute_path
-                .get(..2)
-                .is_some_and(|drive| drive.eq_ignore_ascii_case("C:"))
+            && drive_is_mounted
+            && (virtual_path_exists(p, &absolute_path) || is_alias_drive)
         {
             DRIVE_FIXED
         } else {
@@ -4080,21 +5867,28 @@ fn get_drive_type_a(p: &mut Process) -> R {
 }
 
 fn get_logical_drive_strings_a(p: &mut Process) -> R {
-    // The virtual machine exposes one fixed volume. The final extra NUL makes this a
-    // MULTI_SZ: "C:\\0\0". On success the count excludes that extra NUL.
-    const MULTI_SZ: &[u8] = b"C:\\\0\0";
+    // Expose the base C: volume plus any drive-qualified streamed-root alias.
+    // The final extra NUL makes this a MULTI_SZ; success excludes that extra NUL.
+    let drive_mask = 1 << 2 | p.vfs.root_alias_drive_mask();
+    let mut multi_sz = Vec::with_capacity(53);
+    for index in 0..26 {
+        if drive_mask & (1 << index) != 0 {
+            multi_sz.extend_from_slice(&[b'A' + index as u8, b':', b'\\', 0]);
+        }
+    }
+    multi_sz.push(0);
     let (capacity, buffer) = (p.arg(0) as usize, p.arg(1));
-    if capacity < MULTI_SZ.len() {
+    if capacity < multi_sz.len() {
         p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
-        return Ok(MULTI_SZ.len() as u64);
+        return Ok(multi_sz.len() as u64);
     }
     if buffer == 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
     }
-    p.write_bytes(buffer, MULTI_SZ)?;
+    p.write_bytes(buffer, &multi_sz)?;
     p.set_last_error(0);
-    Ok((MULTI_SZ.len() - 1) as u64)
+    Ok((multi_sz.len() - 1) as u64)
 }
 
 fn get_volume_information(p: &mut Process, wide: bool) -> R {
@@ -4111,11 +5905,8 @@ fn get_volume_information(p: &mut Process, wide: bool) -> R {
         return Ok(0);
     }
     let root = absolute(&root, &p.current_directory);
-    if !root
-        .get(..2)
-        .is_some_and(|drive| drive.eq_ignore_ascii_case("C:"))
-        || !virtual_path_exists(p, &root)
-    {
+    let is_alias_drive = drive_mask_for_path(&root) & p.vfs.root_alias_drive_mask() != 0;
+    if !is_virtual_drive_mounted(p, &root) || (!virtual_path_exists(p, &root) && !is_alias_drive) {
         p.set_last_error(ERROR_PATH_NOT_FOUND);
         return Ok(0);
     }
@@ -5395,6 +7186,21 @@ fn load_library(p: &mut Process, name: &str) -> R {
         let i = p.register_hle_module(&n, group);
         return Ok(p.modules[i].base);
     }
+    // This executable uses D3D8 and DirectPlay as DirectX installation probes only: it loads
+    // and immediately frees both modules, without resolving or calling any exports. Keep their
+    // module identities available so the probe reflects the translated DirectX environment;
+    // any later attempt to resolve an API is reported as unimplemented below.
+    if matches!(canonical.as_str(), "d3d8" | "dpnhpast") {
+        let i = p.register_hle_module(
+            &n,
+            if canonical == "d3d8" {
+                "d3d8"
+            } else {
+                "dpnhpast"
+            },
+        );
+        return Ok(p.modules[i].base);
+    }
     let relative = absolute(&n, &p.current_directory);
     let file = if p.vfs.exists(&relative) {
         Some(p.vfs.normalize_path(&relative))
@@ -5454,6 +7260,12 @@ fn get_proc_address(p: &mut Process) -> R {
     if p.trace_imports || p.trace_modules_only {
         p.stderr
             .extend_from_slice(format!("[module] GetProcAddress {}!{name}\n", m.name).as_bytes());
+    }
+    if matches!(m.hle_group, Some("d3d8" | "dpnhpast")) {
+        return Err(Stop::Unimplemented {
+            dll: anywasm_pe::canonical_dll(crate::process::base_name(&m.name)),
+            name: format!("GetProcAddress {name}"),
+        });
     }
     if let Some(g) = m.hle_group {
         if crate::hle::lookup(g, &name).is_some() {
@@ -6168,9 +7980,9 @@ fn get_locale_info(p: &mut Process, wide: bool) -> R {
         }
         _ => {
             return Err(Stop::Crash(format!(
-            "untranslated: kernel32!GetLocaleInfo{} has no locale profile for LCID {locale:#010x}",
-            if wide { "W" } else { "A" }
-        )))
+                "untranslated: kernel32!GetLocaleInfo{} has no locale profile for LCID {locale:#010x}",
+                if wide { "W" } else { "A" }
+            )));
         }
     };
 
@@ -7070,7 +8882,10 @@ mod sleep_ex_tests {
         assert_eq!(sleep_ex(&mut p), Ok(0));
         assert_eq!(
             p.current_thread_state,
-            ThreadState::Blocked(ThreadWait::Sleep { deadline })
+            ThreadState::Blocked(ThreadWait::Sleep {
+                deadline,
+                alertable: true,
+            })
         );
     }
 
@@ -7258,6 +9073,37 @@ mod virtual_query_api_tests {
         );
         assert_eq!(p.rd64(BASE + 0x600).unwrap(), 0xfeed_face);
         assert_eq!(p.rd32(LAST_ERROR).unwrap(), 122); // ERROR_INSUFFICIENT_BUFFER
+
+        p.vfs.insert("Game\\Bin\\TS3W.exe", vec![1]);
+        p.vfs.set_root_alias(r"D:\The Sims 3").unwrap();
+        assert_eq!(call(&mut p, "GetLogicalDrives", &[]), 12); // C: and the streamed D: root
+        p.write_cstr(BASE + 0x100, "D:\\").unwrap();
+        assert_eq!(call(&mut p, "GetDriveTypeA", &[BASE + 0x100]), 3); // DRIVE_FIXED
+        p.write_cstr(BASE + 0x100, "D:\\Game\\Bin\\").unwrap();
+        assert_eq!(call(&mut p, "GetDriveTypeA", &[BASE + 0x100]), 3); // streamed-root directory
+        assert_eq!(
+            call(&mut p, "GetLogicalDriveStringsA", &[9, BASE + 0x200]),
+            8
+        );
+        assert_eq!(p.read_bytes(BASE + 0x200, 9).unwrap(), b"C:\\ D:\\  ");
+        p.write_cstr(BASE + 0x100, "D:\\").unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetVolumeInformationA",
+                &[
+                    BASE + 0x100,
+                    BASE + 0x300,
+                    16,
+                    BASE + 0x340,
+                    BASE + 0x344,
+                    BASE + 0x348,
+                    BASE + 0x380,
+                    16,
+                ],
+            ),
+            1
+        );
     }
 
     #[test]
@@ -8263,6 +10109,7 @@ mod kernel32_stub_audit_tests {
 
         let handle = p.new_handle(Handle::Thread {
             id: 0x2000,
+            access: 0x001f_ffff,
             start: 0,
             parameter: 0,
             exit_code: None,
@@ -9007,7 +10854,7 @@ mod change_notification_tests {
     }
 
     #[test]
-    fn change_notification_rejects_missing_directories_and_unobservable_filter_types() {
+    fn change_notification_rejects_missing_directories_and_security_filters() {
         let mut p = process();
         let missing = wide(&mut p, BASE + 0x100, r"C:\Game\Missing");
         assert_eq!(
@@ -9030,16 +10877,30 @@ mod change_notification_tests {
         assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 50); // security metadata is not modeled
 
         assert_eq!(
-            call(&mut p, "FindFirstChangeNotificationW", &[path, 1, 0x20]),
-            u64::MAX
-        );
-        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 50); // access timestamps are not modeled
-
-        assert_eq!(
             call(&mut p, "FindFirstChangeNotificationW", &[path, 1, 0x200]),
             u64::MAX
         );
         assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn last_access_host_changes_are_delivered_to_guest_change_notifications() {
+        let mut p = process();
+        let watch = watcher(&mut p, 1, super::FILE_NOTIFY_CHANGE_LAST_ACCESS);
+        assert_ne!(watch, INVALID_HANDLE);
+        assert_eq!(
+            call(&mut p, "WaitForSingleObject", &[watch, 0]),
+            WAIT_TIMEOUT
+        );
+
+        p.notify_vfs_change(
+            r"C:\Game\Bin\seed.dat",
+            super::FILE_NOTIFY_CHANGE_LAST_ACCESS,
+        );
+        assert_eq!(
+            call(&mut p, "WaitForSingleObject", &[watch, 0]),
+            WAIT_OBJECT_0
+        );
     }
 
     #[test]
@@ -9353,8 +11214,8 @@ mod remove_directory_tests {
 
 #[cfg(test)]
 mod import_batch_tests {
-    use super::lookup;
-    use crate::process::{Process, Stop, TEB_ADDR};
+    use super::*;
+    use crate::process::{Handle, Process, Stop, TEB_ADDR};
     use crate::vfs::Vfs;
     use anywasm_cpu::cpu::{CpuMode, RSP};
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
@@ -9383,6 +11244,10 @@ mod import_batch_tests {
         lookup(api).unwrap_or_else(|| panic!("kernel32!{api} must be explicitly bound"))(process)
     }
 
+    fn call_x86(process: &mut Process, api: &str, args: &[u32]) -> u64 {
+        invoke_x86(process, api, args).unwrap()
+    }
+
     #[test]
     fn get_user_geo_id_reports_virtual_nation_and_fails_closed_for_unmodeled_region() {
         let mut process = process();
@@ -9399,6 +11264,50 @@ mod import_batch_tests {
             Err(Stop::Unimplemented { dll, name })
                 if dll == "kernel32" && name.contains("GetUserGeoID") && name.contains("user-region GEOID")
         ));
+    }
+
+    #[test]
+    fn gta_directx_probe_loads_d3d8_and_directplay_without_claiming_untranslated_exports() {
+        let mut process = process();
+        let module_name = (BASE + 0x100) as u32;
+        let export_name = (BASE + 0x180) as u32;
+        process.write_cstr(module_name as u64, "D3D8.DLL").unwrap();
+
+        let d3d8 = invoke_x86(&mut process, "LoadLibraryA", &[module_name]).unwrap() as u32;
+        assert_ne!(d3d8, 0, "the translated DirectX environment includes D3D8");
+        let module = process.module_by_base(d3d8 as u64).unwrap();
+        assert_eq!(process.modules[module].hle_group, Some("d3d8"));
+        assert_eq!(invoke_x86(&mut process, "FreeLibrary", &[d3d8]).unwrap(), 1);
+
+        process
+            .write_cstr(export_name as u64, "Direct3DCreate8")
+            .unwrap();
+        assert!(matches!(
+            invoke_x86(&mut process, "GetProcAddress", &[d3d8, export_name]),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "d3d8" && name.contains("Direct3DCreate8")
+        ));
+
+        process
+            .write_cstr(module_name as u64, "dpnhpast.dll")
+            .unwrap();
+        let directplay = invoke_x86(&mut process, "LoadLibraryA", &[module_name]).unwrap() as u32;
+        assert_ne!(
+            directplay, 0,
+            "the translated DirectX environment includes DirectPlay"
+        );
+        assert!(matches!(
+            invoke_x86(&mut process, "GetProcAddress", &[directplay, export_name]),
+            Err(Stop::Unimplemented { dll, .. }) if dll == "dpnhpast"
+        ));
+
+        process
+            .write_cstr(module_name as u64, "not-installed.dll")
+            .unwrap();
+        assert_eq!(
+            invoke_x86(&mut process, "LoadLibraryA", &[module_name]).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -9465,29 +11374,1312 @@ mod import_batch_tests {
     }
 
     #[test]
-    fn unsupported_kernel32_batch_is_bound_but_never_reports_fake_success() {
-        for api in [
-            "QueueUserAPC",
-            "DisconnectNamedPipe",
-            "ConnectNamedPipe",
+    fn writable_file_views_flush_partial_offsets_and_unmap_remaining_changes() {
+        let path = r"users\anywasm\Documents\slot.sav";
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        p.vmem_next = 0x40000;
+        p.vfs.insert(path, vec![0x22; 0x10020]);
+        p.handles.insert(
+            0x400,
+            Handle::File {
+                path: path.into(),
+                pos: 0,
+                write: true,
+                overlapped: false,
+            },
+        );
+        p.write_wstr(OUTPUT, r"C:\Users\AnyWASM\Documents").unwrap();
+        let last_write_watch = call_x86(
+            &mut p,
+            "FindFirstChangeNotificationW",
+            &[OUTPUT as u32, 1, FILE_NOTIFY_CHANGE_LAST_WRITE],
+        ) as u32;
+        let size_watch = call_x86(
+            &mut p,
+            "FindFirstChangeNotificationW",
+            &[OUTPUT as u32, 1, FILE_NOTIFY_CHANGE_SIZE],
+        ) as u32;
+        assert_ne!(last_write_watch, INVALID_HANDLE as u32);
+        assert_ne!(size_watch, INVALID_HANDLE as u32);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[last_write_watch, 0]),
+            WAIT_TIMEOUT
+        );
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[size_watch, 0]),
+            WAIT_TIMEOUT
+        );
+
+        let mapping = call_x86(
+            &mut p,
+            "CreateFileMappingA",
+            &[0x400, 0, 0x04, 0, 0x10020, 0],
+        ) as u32;
+        assert_ne!(mapping, 0);
+        let view = call_x86(&mut p, "MapViewOfFile", &[mapping, 0x02, 0, 0x10000, 16]);
+        assert_eq!(view, 0x40000);
+        assert_eq!(p.read_bytes(view, 16).unwrap(), [0x22; 16]);
+        assert_eq!(
+            call_x86(&mut p, "VirtualFree", &[view as u32, 0, 0x8000]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+        assert!(p.extra.file_mapping_views.contains_key(&view));
+
+        p.write_bytes(view + 2, &[0xaa]).unwrap();
+        p.write_bytes(view + 9, &[0xbb]).unwrap();
+        let generation_before_flush = p.vfs.user_profile_generation();
+        assert_eq!(
+            call_x86(&mut p, "FlushViewOfFile", &[view as u32 + 2, 1]),
+            1
+        );
+        assert_eq!(p.vfs.get(path).unwrap()[0x10002], 0xaa);
+        assert_eq!(p.vfs.get(path).unwrap()[0x10009], 0x22);
+        assert!(p.vfs.user_profile_generation() > generation_before_flush);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[last_write_watch, 0]),
+            WAIT_OBJECT_0
+        );
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[size_watch, 0]),
+            WAIT_TIMEOUT,
+            "a same-length mapped write must not report FILE_NOTIFY_CHANGE_SIZE"
+        );
+        assert_eq!(
+            call_x86(&mut p, "FindNextChangeNotification", &[last_write_watch]),
+            1
+        );
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[last_write_watch, 0]),
+            WAIT_TIMEOUT
+        );
+        assert_eq!(
+            call_x86(&mut p, "FlushViewOfFile", &[view as u32 + 2, 1]),
+            1
+        );
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[last_write_watch, 0]),
+            WAIT_TIMEOUT,
+            "flushing bytes already committed to the VFS must not emit another change"
+        );
+
+        // A zero length flush means through the end of this partial view.
+        assert_eq!(
+            call_x86(&mut p, "FlushViewOfFile", &[view as u32 + 15, 0]),
+            1
+        );
+        // A range crossing the view boundary and a non-base unmap both fail truthfully.
+        assert_eq!(
+            call_x86(&mut p, "FlushViewOfFile", &[view as u32 + 14, 3]),
+            0
+        );
+        assert_eq!(
+            p.rd32(TEB_ADDR + 0x34).unwrap(),
+            super::ERROR_INVALID_ADDRESS
+        );
+        assert_eq!(call_x86(&mut p, "UnmapViewOfFile", &[view as u32 + 1]), 0);
+        assert_eq!(
+            p.rd32(TEB_ADDR + 0x34).unwrap(),
+            super::ERROR_INVALID_ADDRESS
+        );
+        assert!(p.extra.file_mapping_views.contains_key(&view));
+
+        assert_eq!(call_x86(&mut p, "UnmapViewOfFile", &[view as u32]), 1);
+        assert_eq!(p.vfs.get(path).unwrap()[0x10002], 0xaa);
+        assert_eq!(p.vfs.get(path).unwrap()[0x10009], 0xbb);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[last_write_watch, 0]),
+            WAIT_OBJECT_0,
+            "unmapping must notify about the final changed bytes written back to the VFS"
+        );
+        assert!(!p.extra.file_mapping_views.contains_key(&view));
+        assert!(!p.vmem.contains_key(&view));
+        assert!(!p.mem.is_mapped(view));
+    }
+
+    #[test]
+    fn copy_on_write_views_stay_private_and_readonly_handles_cannot_share_writes() {
+        let path = r"users\anywasm\Documents\copy.bin";
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        p.vmem_next = 0x40000;
+        p.vfs.insert(path, vec![1, 2, 3, 4]);
+        p.handles.insert(
+            0x400,
+            Handle::File {
+                path: path.into(),
+                pos: 0,
+                write: false,
+                overlapped: false,
+            },
+        );
+
+        assert_eq!(
+            call_x86(&mut p, "CreateFileMappingA", &[0x400, 0, 0x04, 0, 4, 0]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_ACCESS_DENIED);
+
+        let mapping = call_x86(&mut p, "CreateFileMappingA", &[0x400, 0, 0x08, 0, 4, 0]) as u32;
+        assert_ne!(mapping, 0);
+        // An unaligned file offset is rejected before reserving a view.
+        assert_eq!(call_x86(&mut p, "MapViewOfFile", &[mapping, 1, 0, 1, 2]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+
+        let view = call_x86(&mut p, "MapViewOfFile", &[mapping, 1, 0, 0, 4]);
+        assert_eq!(view, 0x40000);
+        let generation_before_guest_write = p.vfs.user_profile_generation();
+        p.write_bytes(view, &[9, 8, 7, 6]).unwrap();
+        assert_eq!(call_x86(&mut p, "FlushViewOfFile", &[view as u32, 4]), 1);
+        assert_eq!(call_x86(&mut p, "UnmapViewOfFile", &[view as u32]), 1);
+        assert_eq!(p.vfs.get(path).unwrap(), &[1, 2, 3, 4]);
+        assert_eq!(
+            p.vfs.user_profile_generation(),
+            generation_before_guest_write
+        );
+    }
+
+    #[test]
+    fn remaining_kernel32_diagnostics_validate_inputs_and_stop_only_on_unsupported_valid_work() {
+        let mut p = process();
+        assert_eq!(call_x86(&mut p, "QueueUserAPC", &[0, u32::MAX - 1, 0]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+        assert_eq!(call_x86(&mut p, "QueueUserAPC", &[1, u32::MAX - 1, 0]), 1);
+        assert!(p.has_queued_user_apcs(p.current_thread_id));
+
+        let startup = (BASE + 0x100) as u32;
+        let process_info = (BASE + 0x180) as u32;
+        p.wr32(startup as u64, 68).unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "CreateProcessW",
+                &[0, 0, 0, 0, 0, 0, 0, 0, startup, process_info]
+            ),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+        let missing_app = (BASE + 0x220) as u32;
+        p.write_wstr(missing_app as u64, r"C:\missing.exe").unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "CreateProcessW",
+                &[missing_app, 0, 0, 0, 0, 0, 0, 0, startup, process_info]
+            ),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_FILE_NOT_FOUND);
+        p.vfs.insert(r"C:\present.exe", vec![b'M', b'Z']);
+        let present_app = (BASE + 0x260) as u32;
+        p.write_wstr(present_app as u64, r"C:\present.exe").unwrap();
+        assert!(matches!(
+            invoke_x86(
+                &mut p,
+                "CreateProcessW",
+                &[present_app, 0, 0, 0, 0, 0, 0, 0, startup, process_info]
+            ),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "kernel32" && name.contains("CreateProcessW")
+        ));
+
+        p.vmem.insert(BASE, (PAGE_SIZE, PROT_RW));
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    2,
+                    BASE as u32,
+                    16,
+                    OUTPUT as u32,
+                    OUTPUT as u32 + 4,
+                    OUTPUT as u32 + 8
+                ]
+            ),
+            ERROR_INVALID_PARAMETER as u64
+        );
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    0,
+                    BASE as u32,
+                    16,
+                    OUTPUT as u32,
+                    OUTPUT as u32 + 4,
+                    OUTPUT as u32 + 8
+                ]
+            ),
+            ERROR_INVALID_PARAMETER as u64,
+            "ordinary VirtualAlloc memory is not write-watch memory"
+        );
+        assert_ne!(
+            invoke_x86(&mut p, "VirtualAlloc", &[0, 4096, 0x203000, 4]).unwrap(),
+            0,
+            "valid MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH is implemented"
+        );
+
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "QueueUserAPC"),
+            Some(12)
+        );
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "CreateProcessW"),
+            Some(40)
+        );
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "GetWriteWatch"),
+            Some(24)
+        );
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "DeviceIoControl"),
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn device_io_control_pipe_peek_returns_real_queue_state_without_consuming_data() {
+        let mut p = process();
+        let name = (BASE + 0x100) as u32;
+        let data = BASE + 0x200;
+        let output = BASE + 0x300;
+        let bytes_returned = (BASE + 0x380) as u32;
+        let count = (BASE + 0x390) as u32;
+        p.write_wstr(name as u64, r"\\.\pipe\PeekFixture").unwrap();
+        let server = call_x86(
+            &mut p,
             "CreateNamedPipeW",
-            "CreateProcessW",
-            "DeviceIoControl",
-            "GetWriteWatch",
-            "CreatePipe",
-            "OpenMutexW",
-            "OpenSemaphoreW",
-            "OpenEventW",
+            &[name, 3, PIPE_NOWAIT, 1, 64, 64, 0, 0],
+        ) as u32;
+        let client = call_x86(
+            &mut p,
+            "CreateFileW",
+            &[name, GENERIC_READ | GENERIC_WRITE, 0, 0, 3, 0, 0],
+        ) as u32;
+        assert_ne!(server, INVALID_HANDLE as u32);
+        assert_ne!(client, INVALID_HANDLE as u32);
+        p.write_bytes(data, b"peek!").unwrap();
+        assert_eq!(
+            call_x86(&mut p, "WriteFile", &[client, data as u32, 5, count, 0]),
+            1
+        );
+
+        p.wr32(TEB_ADDR + 0x34, 0xfeed_beef).unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "DeviceIoControl",
+                &[
+                    server,
+                    FSCTL_PIPE_PEEK,
+                    data as u32,
+                    0,
+                    output as u32,
+                    64,
+                    bytes_returned,
+                    data as u32,
+                ]
+            ),
+            1
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 0xfeed_beef);
+        assert_eq!(p.rd32(bytes_returned as u64).unwrap(), 21);
+        assert_eq!(p.rd32(output).unwrap(), PIPE_STATE_CONNECTED);
+        assert_eq!(p.rd32(output + 4).unwrap(), 5);
+        assert_eq!(p.rd32(output + 8).unwrap(), 0);
+        assert_eq!(p.rd32(output + 12).unwrap(), 0);
+        assert_eq!(p.read_bytes(output + 16, 5).unwrap(), b"peek!");
+
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "DeviceIoControl",
+                &[
+                    server,
+                    FSCTL_PIPE_PEEK,
+                    0,
+                    0,
+                    output as u32,
+                    19,
+                    bytes_returned,
+                    0,
+                ]
+            ),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_MORE_DATA);
+        assert_eq!(p.rd32(bytes_returned as u64).unwrap(), 19);
+        assert_eq!(p.rd32(output + 4).unwrap(), 5);
+        assert_eq!(p.read_bytes(output + 16, 3).unwrap(), b"pee");
+
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "DeviceIoControl",
+                &[server, FSCTL_PIPE_PEEK, 0, 0, output as u32, 64, 0, 0,]
+            ),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+        assert_eq!(p.rd32(bytes_returned as u64).unwrap(), 19);
+
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[server, data as u32, 5, count, 0]),
+            1
+        );
+        assert_eq!(p.read_bytes(data, 5).unwrap(), b"peek!");
+        assert!(matches!(
+            invoke_x86(
+                &mut p,
+                "DeviceIoControl",
+                &[server, 0xdead_beef, 0, 0, output as u32, 64, bytes_returned, 0]
+            ),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "kernel32" && name.contains("DeviceIoControl")
+        ));
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "DeviceIoControl",
+                &[
+                    server,
+                    FSCTL_PIPE_PEEK,
+                    0,
+                    0,
+                    output as u32,
+                    8,
+                    bytes_returned,
+                    0
+                ]
+            ),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    #[test]
+    fn anonymous_pipe_transfers_bytes_and_tracks_peer_close() {
+        let mut p = process();
+        let read_out = (BASE + 0x100) as u32;
+        let write_out = (BASE + 0x104) as u32;
+        let data = BASE + 0x200;
+        let count = (BASE + 0x300) as u32;
+        assert_eq!(
+            call_x86(&mut p, "CreatePipe", &[read_out, write_out, 0, 128]),
+            1
+        );
+        let read_handle = p.rd32(read_out as u64).unwrap();
+        let write_handle = p.rd32(write_out as u64).unwrap();
+
+        p.write_bytes(data, b"anonymous byte stream").unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "WriteFile",
+                &[write_handle, data as u32, 21, count, 0]
+            ),
+            1
+        );
+        assert_eq!(p.rd32(count as u64).unwrap(), 21);
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[read_handle, data as u32, 9, count, 0]),
+            1
+        );
+        assert_eq!(p.rd32(count as u64).unwrap(), 9);
+        assert_eq!(p.read_bytes(data, 9).unwrap(), b"anonymous");
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "ReadFile",
+                &[read_handle, data as u32, 32, count, 0]
+            ),
+            1
+        );
+        assert_eq!(p.rd32(count as u64).unwrap(), 12);
+        assert_eq!(p.read_bytes(data, 12).unwrap(), b" byte stream");
+
+        assert!(p.close_handle(write_handle as u64).is_some());
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[read_handle, data as u32, 1, count, 0]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_BROKEN_PIPE);
+        assert_eq!(p.rd32(count as u64).unwrap(), 0);
+    }
+
+    #[test]
+    fn named_pipe_client_connection_transfers_both_directions_and_disconnects() {
+        let mut p = process();
+        let name = (BASE + 0x100) as u32;
+        let data = BASE + 0x200;
+        let count = (BASE + 0x300) as u32;
+        p.write_wstr(name as u64, r"\\.\pipe\UnitTest").unwrap();
+
+        let server = call_x86(
+            &mut p,
+            "CreateNamedPipeW",
+            &[name, 3, PIPE_NOWAIT, 1, 64, 64, 0, 0],
+        ) as u32;
+        assert_ne!(server, u32::MAX);
+        assert_eq!(call_x86(&mut p, "ConnectNamedPipe", &[server, 0]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_PIPE_LISTENING);
+
+        let client = call_x86(
+            &mut p,
+            "CreateFileW",
+            &[name, (GENERIC_READ | GENERIC_WRITE), 0, 0, 3, 0, 0],
+        ) as u32;
+        assert_ne!(client, u32::MAX);
+        assert_eq!(call_x86(&mut p, "ConnectNamedPipe", &[server, 0]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_PIPE_CONNECTED);
+
+        p.write_bytes(data, b"request").unwrap();
+        assert_eq!(
+            call_x86(&mut p, "WriteFile", &[client, data as u32, 7, count, 0]),
+            1
+        );
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[server, data as u32, 7, count, 0]),
+            1
+        );
+        assert_eq!(p.read_bytes(data, 7).unwrap(), b"request");
+        p.write_bytes(data, b"reply").unwrap();
+        assert_eq!(
+            call_x86(&mut p, "WriteFile", &[server, data as u32, 5, count, 0]),
+            1
+        );
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[client, data as u32, 5, count, 0]),
+            1
+        );
+        assert_eq!(p.read_bytes(data, 5).unwrap(), b"reply");
+
+        assert_eq!(call_x86(&mut p, "DisconnectNamedPipe", &[server]), 1);
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[client, data as u32, 1, count, 0]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_PIPE_NOT_CONNECTED);
+
+        // The disconnected client handle remains valid but does not occupy the server instance.
+        let next_client = call_x86(
+            &mut p,
+            "CreateFileW",
+            &[name, (GENERIC_READ | GENERIC_WRITE), 0, 0, 3, 0, 0],
+        ) as u32;
+        assert_ne!(next_client, u32::MAX);
+        assert_eq!(call_x86(&mut p, "ConnectNamedPipe", &[server, 0]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_PIPE_CONNECTED);
+
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[client]), 1);
+        p.write_bytes(data, b"next").unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "WriteFile",
+                &[next_client, data as u32, 4, count, 0]
+            ),
+            1
+        );
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[server, data as u32, 4, count, 0]),
+            1
+        );
+        assert_eq!(p.read_bytes(data, 4).unwrap(), b"next");
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[next_client]), 1);
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[server]), 1);
+    }
+
+    #[test]
+    fn named_pipe_rejects_wrong_access_direction_and_instance_overcommit() {
+        let mut p = process();
+        let name = (BASE + 0x100) as u32;
+        p.write_wstr(name as u64, r"\\.\pipe\DirectionFixture")
+            .unwrap();
+        let inbound_server = call_x86(
+            &mut p,
+            "CreateNamedPipeW",
+            &[name, PIPE_ACCESS_INBOUND, PIPE_NOWAIT, 1, 64, 64, 0, 0],
+        ) as u32;
+        assert_ne!(inbound_server, INVALID_HANDLE as u32);
+
+        // An inbound server reads, so its client must write. Asking for client-side read access
+        // has no compatible server instance and reports the native busy result.
+        assert_eq!(
+            call_x86(&mut p, "CreateFileW", &[name, GENERIC_READ, 0, 0, 3, 0, 0]),
+            INVALID_HANDLE
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_PIPE_BUSY);
+
+        let client = call_x86(&mut p, "CreateFileW", &[name, GENERIC_WRITE, 0, 0, 3, 0, 0]) as u32;
+        assert_ne!(client, INVALID_HANDLE as u32);
+        // The pipe has a one-instance limit and an active client, so another open cannot share it.
+        assert_eq!(
+            call_x86(&mut p, "CreateFileW", &[name, GENERIC_WRITE, 0, 0, 3, 0, 0]),
+            INVALID_HANDLE
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_PIPE_BUSY);
+    }
+
+    #[test]
+    fn pipe_blocking_waits_and_unsupported_modes_fail_explicitly() {
+        let mut p = process();
+        let read_out = (BASE + 0x100) as u32;
+        let write_out = (BASE + 0x104) as u32;
+        let count = (BASE + 0x300) as u32;
+        assert_eq!(
+            call_x86(&mut p, "CreatePipe", &[read_out, write_out, 0, 4]),
+            1
+        );
+        let read_handle = p.rd32(read_out as u64).unwrap();
+        assert!(matches!(
+            invoke_x86(
+                &mut p,
+                "ReadFile",
+                &[read_handle, (BASE + 0x200) as u32, 1, count, 0]
+            ),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "kernel32" && name.contains("blocking ReadFile")
+        ));
+
+        let name = (BASE + 0x180) as u32;
+        p.write_wstr(name as u64, r"\\.\pipe\MessageMode").unwrap();
+        assert!(matches!(
+            invoke_x86(
+                &mut p,
+                "CreateNamedPipeW",
+                &[name, 3, PIPE_TYPE_MESSAGE, 1, 64, 64, 0, 0]
+            ),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "kernel32" && name.contains("message-type pipes")
+        ));
+    }
+
+    #[test]
+    fn duplicate_pipe_handle_keeps_endpoint_alive_after_original_closes() {
+        let mut p = process();
+        let read_out = (BASE + 0x100) as u32;
+        let write_out = (BASE + 0x104) as u32;
+        let duplicated_out = (BASE + 0x108) as u32;
+        let data = BASE + 0x200;
+        let count = (BASE + 0x300) as u32;
+        assert_eq!(
+            call_x86(&mut p, "CreatePipe", &[read_out, write_out, 0, 32]),
+            1
+        );
+        let read_handle = p.rd32(read_out as u64).unwrap();
+        let write_handle = p.rd32(write_out as u64).unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "DuplicateHandle",
+                &[
+                    u32::MAX,
+                    write_handle,
+                    u32::MAX,
+                    duplicated_out,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS
+                ]
+            ),
+            1
+        );
+        let duplicate = p.rd32(duplicated_out as u64).unwrap();
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[write_handle]), 1);
+        p.write_bytes(data, b"alive").unwrap();
+        assert_eq!(
+            call_x86(&mut p, "WriteFile", &[duplicate, data as u32, 5, count, 0]),
+            1
+        );
+        assert_eq!(
+            call_x86(&mut p, "ReadFile", &[read_handle, data as u32, 5, count, 0]),
+            1
+        );
+        assert_eq!(p.read_bytes(data, 5).unwrap(), b"alive");
+    }
+
+    #[test]
+    fn named_event_create_open_shares_state_and_preserves_existing_configuration() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let name_a = (BASE + 0x100) as u32;
+        let name_w = (BASE + 0x180) as u32;
+        p.write_cstr(name_a as u64, "Global\\AnyWasmEvent").unwrap();
+        p.write_wstr(name_w as u64, "Global\\AnyWasmEvent").unwrap();
+        p.wr32(TEB_ADDR + 0x34, 0x777).unwrap();
+
+        let original = call_x86(&mut p, "CreateEventA", &[0, 1, 0, name_a]);
+        assert_ne!(original, 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 0x777);
+        let opened_by_create = call_x86(&mut p, "CreateEventW", &[0, 0, 1, name_w]);
+        assert_ne!(opened_by_create, 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_ALREADY_EXISTS);
+
+        let opened = call_x86(&mut p, "OpenEventW", &[EVENT_ALL_ACCESS, 0, name_w]);
+        assert_ne!(opened, 0);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[opened as u32, 0]),
+            WAIT_TIMEOUT
+        );
+        assert_eq!(call_x86(&mut p, "SetEvent", &[opened as u32]), 1);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[original as u32, 0]),
+            WAIT_OBJECT_0
+        );
+        assert_eq!(call_x86(&mut p, "ResetEvent", &[original as u32]), 1);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[opened as u32, 0]),
+            WAIT_TIMEOUT
+        );
+
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "CreateEventExW"),
+            Some(16)
+        );
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "OpenEventW"),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn named_objects_reject_type_mismatches_and_open_of_absent_names() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let name = (BASE + 0x100) as u32;
+        p.write_wstr(name as u64, "KernelObjectCollision").unwrap();
+        let event = call_x86(&mut p, "CreateEventW", &[0, 0, 0, name]);
+        assert_ne!(event, 0);
+
+        assert_eq!(call_x86(&mut p, "CreateMutexW", &[0, 0, name]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_HANDLE);
+        assert_eq!(
+            call_x86(&mut p, "OpenSemaphoreW", &[SEMAPHORE_ALL_ACCESS, 0, name]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_HANDLE);
+
+        p.write_wstr(name as u64, "MissingKernelObject").unwrap();
+        for (api, args) in [
+            ("OpenEventW", [EVENT_ALL_ACCESS, 0, name]),
+            ("OpenMutexW", [MUTEX_ALL_ACCESS, 0, name]),
+            ("OpenSemaphoreW", [SEMAPHORE_ALL_ACCESS, 0, name]),
         ] {
-            let mut process = process();
-            assert!(
-                matches!(
-                    invoke_x86(&mut process, api, &[]),
-                    Err(Stop::Unimplemented { dll, name })
-                        if dll == "kernel32" && name.contains(api)
-                ),
-                "{api} must fail closed with an explicit unsupported reason"
+            assert_eq!(call_x86(&mut p, api, &args), 0, "{api}");
+            assert_eq!(
+                p.rd32(TEB_ADDR + 0x34).unwrap(),
+                ERROR_FILE_NOT_FOUND,
+                "{api}"
             );
         }
+    }
+
+    #[test]
+    fn named_mutex_and_semaphore_state_is_shared_across_open_handles() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let mutex_name = (BASE + 0x100) as u32;
+        let sem_name = (BASE + 0x180) as u32;
+        p.write_wstr(mutex_name as u64, "SharedMutex").unwrap();
+        p.write_wstr(sem_name as u64, "SharedSemaphore").unwrap();
+
+        let mutex = call_x86(&mut p, "CreateMutexW", &[0, 0, mutex_name]);
+        let mutex_open = call_x86(&mut p, "OpenMutexW", &[MUTEX_ALL_ACCESS, 0, mutex_name]);
+        assert_ne!(mutex, 0);
+        assert_ne!(mutex_open, 0);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[mutex as u32, 0]),
+            WAIT_OBJECT_0
+        );
+        assert_eq!(call_x86(&mut p, "ReleaseMutex", &[mutex_open as u32]), 1);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[mutex as u32, 0]),
+            WAIT_OBJECT_0
+        );
+        assert_eq!(call_x86(&mut p, "ReleaseMutex", &[mutex as u32]), 1);
+
+        let semaphore = call_x86(&mut p, "CreateSemaphoreW", &[0, 1, 2, sem_name]);
+        let semaphore_open = call_x86(
+            &mut p,
+            "OpenSemaphoreW",
+            &[SEMAPHORE_ALL_ACCESS, 0, sem_name],
+        );
+        assert_ne!(semaphore, 0);
+        assert_ne!(semaphore_open, 0);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[semaphore as u32, 0]),
+            WAIT_OBJECT_0
+        );
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[semaphore_open as u32, 0]),
+            WAIT_TIMEOUT
+        );
+        let previous = (BASE + 0x240) as u32;
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "ReleaseSemaphore",
+                &[semaphore_open as u32, 1, previous]
+            ),
+            1
+        );
+        assert_eq!(p.rd32(previous as u64).unwrap(), 0);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[semaphore as u32, 0]),
+            WAIT_OBJECT_0
+        );
+    }
+
+    #[test]
+    fn extended_mutex_and_semaphore_creates_use_documented_argument_layouts() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let mutex_name = (BASE + 0x100) as u32;
+        let semaphore_name = (BASE + 0x180) as u32;
+        p.write_wstr(mutex_name as u64, "ExtendedMutex").unwrap();
+        p.write_wstr(semaphore_name as u64, "ExtendedSemaphore")
+            .unwrap();
+
+        let mutex = call_x86(
+            &mut p,
+            "CreateMutexExW",
+            &[0, mutex_name, 1, MUTEX_ALL_ACCESS],
+        );
+        assert_ne!(mutex, 0);
+        let mutex_open = call_x86(&mut p, "OpenMutexW", &[MUTEX_ALL_ACCESS, 0, mutex_name]);
+        assert_ne!(mutex_open, 0);
+        assert_eq!(call_x86(&mut p, "ReleaseMutex", &[mutex_open as u32]), 1);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[mutex as u32, 0]),
+            WAIT_OBJECT_0
+        );
+
+        let semaphore = call_x86(
+            &mut p,
+            "CreateSemaphoreExW",
+            &[0, semaphore_name, 1, 3, SEMAPHORE_ALL_ACCESS, 0],
+        );
+        assert_ne!(semaphore, 0);
+        let semaphore_open = call_x86(
+            &mut p,
+            "OpenSemaphoreW",
+            &[SEMAPHORE_ALL_ACCESS, 0, semaphore_name],
+        );
+        assert_ne!(semaphore_open, 0);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[semaphore as u32, 0]),
+            WAIT_OBJECT_0
+        );
+        let previous = (BASE + 0x240) as u32;
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "ReleaseSemaphore",
+                &[semaphore_open as u32, 2, previous]
+            ),
+            1
+        );
+        assert_eq!(p.rd32(previous as u64).unwrap(), 0);
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "CreateMutexExW"),
+            Some(16)
+        );
+        assert_eq!(
+            crate::process::x86_import_cleanup_bytes("kernel32", "CreateSemaphoreExW"),
+            Some(24)
+        );
+    }
+
+    #[test]
+    fn named_object_access_inheritance_and_duplicate_close_lifetime_are_enforced() {
+        let mut p = process();
+        p.cpu.mode = CpuMode::X86_32;
+        let attributes = (BASE + 0x100) as u32;
+        let name = (BASE + 0x140) as u32;
+        let duplicate_output = (BASE + 0x1c0) as u32;
+        p.wr32(attributes as u64, 12).unwrap();
+        p.wr32(attributes as u64 + 4, 0).unwrap();
+        p.wr32(attributes as u64 + 8, 1).unwrap();
+        p.write_wstr(name as u64, "HandleLifetime").unwrap();
+
+        let original = call_x86(&mut p, "CreateEventW", &[attributes, 0, 0, name]);
+        assert!(matches!(
+            p.handles.get(&original),
+            Some(Handle::KernelObject {
+                inheritable: true,
+                ..
+            })
+        ));
+        let duplicate = call_x86(
+            &mut p,
+            "DuplicateHandle",
+            &[
+                u32::MAX,
+                original as u32,
+                u32::MAX,
+                duplicate_output,
+                0,
+                0,
+                3,
+            ],
+        );
+        assert_eq!(duplicate, 1);
+        let duplicate = p.rd32(duplicate_output as u64).unwrap() as u64;
+        assert!(!p.handles.contains_key(&original));
+        assert!(p.handles.contains_key(&duplicate));
+
+        let opened = call_x86(&mut p, "OpenEventW", &[EVENT_ALL_ACCESS, 0, name]);
+        assert_ne!(opened, 0, "duplicate keeps the named object alive");
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[duplicate as u32]), 1);
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[opened as u32]), 1);
+        assert_eq!(
+            call_x86(&mut p, "OpenEventW", &[EVENT_ALL_ACCESS, 0, name]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_FILE_NOT_FOUND);
+
+        p.wr32(attributes as u64 + 4, 0xdead_beef).unwrap();
+        assert_eq!(
+            call_x86(&mut p, "CreateEventW", &[attributes, 0, 0, name]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_NOT_SUPPORTED);
+
+        let sync_only = call_x86(&mut p, "CreateEventExW", &[0, name, 0, SYNCHRONIZE]);
+        assert_ne!(sync_only, 0);
+        assert_eq!(call_x86(&mut p, "SetEvent", &[sync_only as u32]), 0);
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_ACCESS_DENIED);
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObject", &[sync_only as u32, 0]),
+            WAIT_TIMEOUT
+        );
+        assert_eq!(
+            call_x86(&mut p, "CreateEventExW", &[0, name, 4, EVENT_ALL_ACCESS]),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_PARAMETER);
+    }
+}
+
+#[cfg(test)]
+mod write_watch_tests {
+    use super::lookup;
+    use crate::process::{Process, TEB_ADDR};
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+    const BASE: u64 = 0x70000;
+    const STACK: u64 = BASE + 0x800;
+    const OUTPUT: u64 = BASE + 0x100;
+
+    fn process() -> Process {
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        p.vmem_next = 0x90000;
+        p.wr32(STACK, 0).unwrap();
+        p
+    }
+
+    fn call(p: &mut Process, api: &str, args: &[u32]) -> u64 {
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK, 0).unwrap();
+        for (index, value) in args.iter().enumerate() {
+            p.wr32(STACK + 4 + index as u64 * 4, *value).unwrap();
+        }
+        lookup(api).unwrap_or_else(|| panic!("kernel32!{api} should resolve"))(p).unwrap()
+    }
+
+    #[test]
+    fn get_write_watch_reports_pages_and_reset_only_clears_returned_capacity() {
+        const MEM_RESERVE_COMMIT_WRITE_WATCH: u32 = 0x203000;
+        let mut p = process();
+        let allocation = call(
+            &mut p,
+            "VirtualAlloc",
+            &[0, (2 * PAGE_SIZE) as u32, MEM_RESERVE_COMMIT_WRITE_WATCH, 4],
+        );
+        assert_ne!(allocation, 0);
+        p.write_bytes(allocation + 0x20, &[0x11]).unwrap();
+        p.write_bytes(allocation + PAGE_SIZE + 0x30, &[0x22])
+            .unwrap();
+
+        let addresses = OUTPUT;
+        let count = OUTPUT + 8;
+        let granularity = OUTPUT + 12;
+        p.wr32(count, 2).unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    0,
+                    allocation as u32,
+                    (2 * PAGE_SIZE) as u32,
+                    addresses as u32,
+                    count as u32,
+                    granularity as u32,
+                ],
+            ),
+            0
+        );
+        assert_eq!(p.rd32(count).unwrap(), 2);
+        assert_eq!(p.rd32(addresses).unwrap(), allocation as u32);
+        assert_eq!(
+            p.rd32(addresses + 4).unwrap(),
+            (allocation + PAGE_SIZE) as u32
+        );
+        assert_eq!(p.rd32(granularity).unwrap(), PAGE_SIZE as u32);
+
+        // The documented reset flag clears only pages returned within the supplied capacity.
+        p.wr32(count, 1).unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    1,
+                    allocation as u32,
+                    (2 * PAGE_SIZE) as u32,
+                    addresses as u32,
+                    count as u32,
+                    granularity as u32,
+                ],
+            ),
+            0
+        );
+        assert_eq!(p.rd32(count).unwrap(), 1);
+        assert_eq!(p.rd32(addresses).unwrap(), allocation as u32);
+
+        p.wr32(count, 2).unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    0,
+                    allocation as u32,
+                    (2 * PAGE_SIZE) as u32,
+                    addresses as u32,
+                    count as u32,
+                    granularity as u32,
+                ],
+            ),
+            0
+        );
+        assert_eq!(p.rd32(count).unwrap(), 1);
+        assert_eq!(p.rd32(addresses).unwrap(), (allocation + PAGE_SIZE) as u32);
+
+        p.wr32(count, 2).unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    1,
+                    allocation as u32,
+                    (2 * PAGE_SIZE) as u32,
+                    addresses as u32,
+                    count as u32,
+                    granularity as u32,
+                ],
+            ),
+            0
+        );
+        assert_eq!(p.rd32(count).unwrap(), 1);
+        p.wr32(count, 2).unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    0,
+                    allocation as u32,
+                    (2 * PAGE_SIZE) as u32,
+                    addresses as u32,
+                    count as u32,
+                    granularity as u32,
+                ],
+            ),
+            0
+        );
+        assert_eq!(p.rd32(count).unwrap(), 0);
+    }
+
+    #[test]
+    fn write_watch_can_be_reserved_then_committed_and_rejects_invalid_flags() {
+        const MEM_RESERVE_WRITE_WATCH: u32 = 0x202000;
+        const MEM_COMMIT: u32 = 0x1000;
+        let mut p = process();
+        let allocation = call(
+            &mut p,
+            "VirtualAlloc",
+            &[0, PAGE_SIZE as u32, MEM_RESERVE_WRITE_WATCH, 4],
+        );
+        assert_ne!(allocation, 0);
+        assert_eq!(
+            call(
+                &mut p,
+                "VirtualAlloc",
+                &[allocation as u32, PAGE_SIZE as u32, MEM_COMMIT, 4],
+            ),
+            allocation
+        );
+        p.write_bytes(allocation + 4, &[0x44]).unwrap();
+
+        p.wr32(OUTPUT + 8, 1).unwrap();
+        assert_eq!(
+            call(
+                &mut p,
+                "GetWriteWatch",
+                &[
+                    0,
+                    allocation as u32,
+                    PAGE_SIZE as u32,
+                    OUTPUT as u32,
+                    (OUTPUT + 8) as u32,
+                    (OUTPUT + 12) as u32,
+                ],
+            ),
+            0
+        );
+        assert_eq!(p.rd32(OUTPUT + 8).unwrap(), 1);
+        assert_eq!(p.rd32(OUTPUT).unwrap(), allocation as u32);
+
+        assert_eq!(
+            call(&mut p, "VirtualAlloc", &[0, PAGE_SIZE as u32, 0x200000, 4],),
+            0,
+            "MEM_WRITE_WATCH requires MEM_RESERVE"
+        );
+    }
+}
+
+#[cfg(test)]
+mod user_apc_runtime_tests {
+    use super::{
+        lookup, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, THREAD_SET_CONTEXT, WAIT_IO_COMPLETION,
+    };
+    use crate::process::{Handle, Process, ThreadState, ThreadWait, TEB_ADDR};
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
+
+    const BASE: u64 = 0x50000;
+    const STACK: u64 = BASE + 0x800;
+    const OUTPUT_COUNT: u64 = BASE + 0x400;
+    const OUTPUT_VALUES: u64 = BASE + 0x410;
+    const CURRENT_THREAD_PSEUDO_HANDLE: u32 = u32::MAX - 1;
+
+    fn process() -> Process {
+        let mut p = Process::new(Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RWX));
+        assert!(p.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        p
+    }
+
+    fn call_x86(p: &mut Process, name: &str, args: &[u32]) -> Result<u64, crate::process::Stop> {
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK, 0)?;
+        for (index, value) in args.iter().enumerate() {
+            p.wr32(STACK + 4 + index as u64 * 4, *value)?;
+        }
+        lookup(name).unwrap_or_else(|| panic!("kernel32!{name} should resolve"))(p)
+    }
+
+    fn recording_apc(counter: u64, values: u64) -> Vec<u8> {
+        let mut code = vec![0x8b, 0x0d]; // mov ecx, dword ptr [counter]
+        code.extend_from_slice(&(counter as u32).to_le_bytes());
+        code.extend_from_slice(&[0x8b, 0x44, 0x24, 0x04]); // mov eax, [esp+4]
+        code.extend_from_slice(&[0x89, 0x04, 0x8d]); // mov [values+ecx*4], eax
+        code.extend_from_slice(&(values as u32).to_le_bytes());
+        code.push(0x41); // inc ecx
+        code.extend_from_slice(&[0x89, 0x0d]); // mov [counter], ecx
+        code.extend_from_slice(&(counter as u32).to_le_bytes());
+        code.extend_from_slice(&[0xc2, 0x04, 0x00]); // ret 4 (PAPCFUNC stdcall)
+        code
+    }
+
+    #[test]
+    fn queue_user_apc_delivers_all_pending_callbacks_fifo_at_alertable_sleep() {
+        let mut p = process();
+        let callback = BASE + 0x100;
+        p.write_bytes(callback, &recording_apc(OUTPUT_COUNT, OUTPUT_VALUES))
+            .unwrap();
+
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, CURRENT_THREAD_PSEUDO_HANDLE, 0x1111]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, CURRENT_THREAD_PSEUDO_HANDLE, 0x2222]
+            )
+            .unwrap(),
+            1
+        );
+
+        assert_eq!(
+            call_x86(&mut p, "WaitForSingleObjectEx", &[0xdead_beef, 50, 1]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_HANDLE);
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 0);
+        assert_eq!(
+            call_x86(&mut p, "SleepEx", &[50, 1]).unwrap(),
+            WAIT_IO_COMPLETION
+        );
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 2);
+        assert_eq!(p.rd32(OUTPUT_VALUES).unwrap(), 0x1111);
+        assert_eq!(p.rd32(OUTPUT_VALUES + 4).unwrap(), 0x2222);
+        assert!(!p.has_queued_user_apcs(p.current_thread_id));
+
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, CURRENT_THREAD_PSEUDO_HANDLE, 0x3333]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(call_x86(&mut p, "SleepEx", &[0, 0]).unwrap(), 0);
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 2);
+        assert_eq!(
+            call_x86(&mut p, "SleepEx", &[0, 1]).unwrap(),
+            WAIT_IO_COMPLETION
+        );
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 3);
+        assert_eq!(p.rd32(OUTPUT_VALUES + 8).unwrap(), 0x3333);
+
+        let event = p.new_handle(Handle::Event {
+            signaled: false,
+            manual: true,
+        });
+        let handle_array = BASE + 0x300;
+        p.wr32(handle_array, event as u32).unwrap();
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, CURRENT_THREAD_PSEUDO_HANDLE, 0x7777]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "WaitForMultipleObjectsEx",
+                &[1, handle_array as u32, 0, 50, 1]
+            )
+            .unwrap(),
+            WAIT_IO_COMPLETION
+        );
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 4);
+        assert_eq!(p.rd32(OUTPUT_VALUES + 12).unwrap(), 0x7777);
+    }
+
+    #[test]
+    fn queue_user_apc_enforces_thread_set_context_and_runs_before_thread_start() {
+        let mut p = process();
+        let callback = BASE + 0x100;
+        p.write_bytes(callback, &recording_apc(OUTPUT_COUNT, OUTPUT_VALUES))
+            .unwrap();
+        let target_id = 0x2000;
+        p.vmem_next = 0x0010_0000;
+        p.create_guest_thread(target_id, BASE + 0x200, 0, false)
+            .unwrap();
+
+        let no_context_rights = call_x86(&mut p, "OpenThread", &[0, 0, target_id]).unwrap() as u32;
+        assert_ne!(no_context_rights, 0);
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, no_context_rights, 0x4444]
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_ACCESS_DENIED);
+
+        let context_rights =
+            call_x86(&mut p, "OpenThread", &[THREAD_SET_CONTEXT, 0, target_id]).unwrap() as u32;
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, context_rights, 0x5555]
+            )
+            .unwrap(),
+            1
+        );
+
+        p.request_thread_yield();
+        assert!(p.schedule_thread().unwrap());
+        assert_eq!(p.current_thread_id, target_id);
+        assert!(p.dispatch_current_user_apcs().unwrap());
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 1);
+        assert_eq!(p.rd32(OUTPUT_VALUES).unwrap(), 0x5555);
+    }
+
+    #[test]
+    fn queued_apc_interrupts_an_alertable_wait_and_resumes_its_thread() {
+        let mut p = process();
+        let callback = BASE + 0x100;
+        p.write_bytes(callback, &recording_apc(OUTPUT_COUNT, OUTPUT_VALUES))
+            .unwrap();
+        let target_id = 0x2000;
+        p.vmem_next = 0x0010_0000;
+        p.create_guest_thread(target_id, BASE + 0x200, 0, false)
+            .unwrap();
+        p.ready_threads.retain(|id| *id != target_id);
+        let deadline = p.now_ticks() + 50_000_000;
+        p.guest_threads.get_mut(&target_id).unwrap().state =
+            ThreadState::Blocked(ThreadWait::Sleep {
+                deadline,
+                alertable: true,
+            });
+
+        let thread_handle =
+            call_x86(&mut p, "OpenThread", &[THREAD_SET_CONTEXT, 0, target_id]).unwrap() as u32;
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, thread_handle, 0x6666]
+            )
+            .unwrap(),
+            1
+        );
+        assert!(matches!(
+            p.guest_threads.get(&target_id).unwrap().state,
+            ThreadState::Ready
+        ));
+        p.request_thread_yield();
+        assert!(p.schedule_thread().unwrap());
+        assert_eq!(p.current_thread_id, target_id);
+        assert_eq!(p.cpu.gpr[0], WAIT_IO_COMPLETION);
+        assert!(p.dispatch_current_user_apcs().unwrap());
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 1);
+        assert_eq!(p.rd32(OUTPUT_VALUES).unwrap(), 0x6666);
     }
 }
