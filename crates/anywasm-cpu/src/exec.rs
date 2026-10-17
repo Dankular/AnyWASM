@@ -1,6 +1,6 @@
 //! x86 instruction executor shared by the process interpreter and isolated CPU workers.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 
 use crate::cpu::*;
 use crate::decode::{decode_mode, Inst, MemOp, Op, Opnd};
@@ -282,30 +282,32 @@ impl BlockCache {
             self.code_epoch = Some(mem.code_epoch);
             self.mode = Some(mode);
         }
-        if !self.blocks.contains_key(&start) {
-            if self.blocks.len() >= MAX_CACHED_BLOCKS {
-                self.blocks.clear();
-            }
-            let decoded = decode_block(start, mem, mode)?;
-            let instructions = decoded
-                .instructions
-                .iter()
-                .copied()
-                .map(translate_instruction)
-                .collect();
-            let block = CachedBlock {
-                decoded,
-                instructions,
-                #[cfg(target_arch = "wasm32")]
-                emitted: None,
-                #[cfg(target_arch = "wasm32")]
-                jit_hits: 0,
-                #[cfg(target_arch = "wasm32")]
-                jit_attempted: false,
-            };
-            self.blocks.insert(start, block);
+        if self.blocks.len() >= MAX_CACHED_BLOCKS && !self.blocks.contains_key(&start) {
+            self.blocks.clear();
         }
-        Ok(self.blocks.get(&start).unwrap())
+        match self.blocks.entry(start) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let decoded = decode_block(start, mem, mode)?;
+                let instructions = decoded
+                    .instructions
+                    .iter()
+                    .copied()
+                    .map(translate_instruction)
+                    .collect();
+                let block = CachedBlock {
+                    decoded,
+                    instructions,
+                    #[cfg(target_arch = "wasm32")]
+                    emitted: None,
+                    #[cfg(target_arch = "wasm32")]
+                    jit_hits: 0,
+                    #[cfg(target_arch = "wasm32")]
+                    jit_attempted: false,
+                };
+                Ok(entry.insert(block))
+            }
+        }
     }
 }
 
