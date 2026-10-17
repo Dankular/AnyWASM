@@ -5222,14 +5222,6 @@ fn map_view_of_file(p: &mut Process) -> R {
         p.set_last_error(ERROR_ACCESS_DENIED);
         return Ok(0);
     }
-    if shared_write
-        && file_path
-            .as_deref()
-            .is_some_and(|path| p.vfs.get(path).is_none())
-    {
-        p.set_last_error(ERROR_NOT_SUPPORTED);
-        return Ok(0);
-    }
     if p.trace_gta_eventvol {
         let path = file_path.as_deref().unwrap_or("<pagefile>");
         p.stderr.extend_from_slice(
@@ -5261,20 +5253,61 @@ fn map_view_of_file(p: &mut Process) -> R {
             return Ok(0);
         }
     };
+    let mut materialized_asset = None;
     let contents = if let Some(path) = file_path.as_deref() {
-        match p.vfs.read_range(path, offset, view_len) {
-            Ok(data) if data.len() == view_len => data,
-            Ok(_) | Err(AssetReadError::NotFound) => {
+        if shared_write && p.vfs.get(path).is_none() {
+            let Some(file_len) = p.vfs.file_len(path) else {
                 p.set_last_error(ERROR_FILE_INVALID);
                 return Ok(0);
-            }
-            Err(AssetReadError::TooLarge) => {
+            };
+            let Ok(file_len_usize) = usize::try_from(file_len) else {
                 p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
                 return Ok(0);
-            }
-            Err(AssetReadError::Unavailable | AssetReadError::Failed) => {
-                p.set_last_error(ERROR_READ_FAULT);
+            };
+            let asset = match p.vfs.read_range(path, 0, file_len_usize) {
+                Ok(data) if data.len() == file_len_usize => data,
+                Ok(_) | Err(AssetReadError::NotFound) => {
+                    p.set_last_error(ERROR_FILE_INVALID);
+                    return Ok(0);
+                }
+                Err(AssetReadError::TooLarge) => {
+                    p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                    return Ok(0);
+                }
+                Err(AssetReadError::Unavailable | AssetReadError::Failed) => {
+                    p.set_last_error(ERROR_READ_FAULT);
+                    return Ok(0);
+                }
+            };
+            let Ok(start) = usize::try_from(offset) else {
+                p.set_last_error(ERROR_INVALID_PARAMETER);
                 return Ok(0);
+            };
+            let Some(end) = start.checked_add(view_len) else {
+                p.set_last_error(ERROR_INVALID_PARAMETER);
+                return Ok(0);
+            };
+            let Some(view_contents) = asset.get(start..end).map(|slice| slice.to_vec()) else {
+                p.set_last_error(ERROR_FILE_INVALID);
+                return Ok(0);
+            };
+            materialized_asset = Some((path.to_owned(), asset));
+            view_contents
+        } else {
+            match p.vfs.read_range(path, offset, view_len) {
+                Ok(data) if data.len() == view_len => data,
+                Ok(_) | Err(AssetReadError::NotFound) => {
+                    p.set_last_error(ERROR_FILE_INVALID);
+                    return Ok(0);
+                }
+                Err(AssetReadError::TooLarge) => {
+                    p.set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                    return Ok(0);
+                }
+                Err(AssetReadError::Unavailable | AssetReadError::Failed) => {
+                    p.set_last_error(ERROR_READ_FAULT);
+                    return Ok(0);
+                }
             }
         }
     } else {
@@ -5302,6 +5335,12 @@ fn map_view_of_file(p: &mut Process) -> R {
         return Err(Stop::Crash(format!(
             "mapped file initialization failed: {error:?}"
         )));
+    }
+    if let Some((path, bytes)) = materialized_asset {
+        // Shared writable mappings of streamed assets use a guest VFS overlay. Flushing the
+        // mapping then commits changed ranges there and notifies guest directory watchers, while
+        // preserving the mounted host installation as a read source.
+        p.vfs.insert(&path, bytes);
     }
     p.extra.file_mapping_views.insert(
         address,
@@ -10900,6 +10939,27 @@ mod change_notification_tests {
         assert_eq!(
             call(&mut p, "WaitForSingleObject", &[watch, 0]),
             WAIT_OBJECT_0
+        );
+    }
+
+    #[test]
+    fn shared_writable_mapping_of_streamed_assets_reads_before_overlay_writeback() {
+        let mut p = process_with_streamed_assets();
+        let file_path = wide(&mut p, BASE + 0x100, r"C:\Game\Bin\seed.dat");
+        let file = call(
+            &mut p,
+            "CreateFileW",
+            &[file_path, 0x4000_0000, 1, 0, 3, 0, 0],
+        ) as u32;
+        assert_ne!(file, INVALID_HANDLE);
+
+        let mapping = call(&mut p, "CreateFileMappingA", &[file, 0, 0x04, 0, 3, 0]) as u32;
+        assert_ne!(mapping, 0);
+        assert_eq!(call(&mut p, "MapViewOfFile", &[mapping, 0x02, 0, 0, 3]), 0);
+        assert_eq!(
+            p.rd32(TEB_ADDR + 0x34).unwrap(),
+            super::ERROR_READ_FAULT,
+            "native unit tests have no remote asset reader; a browser host supplies the mapped bytes"
         );
     }
 
