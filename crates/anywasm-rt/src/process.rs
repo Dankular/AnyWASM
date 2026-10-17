@@ -4341,8 +4341,18 @@ impl Process {
                     Ok(None) => executed += 1,
                     Err(Stop::Crash(message)) => {
                         let trace = recent.into_iter().collect::<Vec<_>>().join("\n");
+                        let stack_pointer = self.cpu.gpr[RSP] as u32 as u64;
+                        let stack = (0..16)
+                            .map(|index| {
+                                self.mem
+                                    .read_u32(stack_pointer.wrapping_add(index * 4))
+                                    .map(|word| format!("{word:#010x}"))
+                                    .unwrap_or_else(|_| "??????????".into())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         return Err(Stop::Crash(format!(
-                            "{message}\nrecent x86 instructions:\n{trace}"
+                            "{message}\nrecent x86 instructions:\n{trace}\ncrash x86 stack @ {stack_pointer:#010x}: {stack}"
                         )));
                     }
                     Err(stop) => return Err(stop),

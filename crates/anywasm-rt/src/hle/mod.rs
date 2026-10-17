@@ -17,15 +17,18 @@ pub mod gdi;
 pub mod gpu;
 pub mod heap;
 pub mod imm32;
+pub mod iphlpapi;
 pub mod kernel32;
 pub mod ntdll;
 pub mod ole32;
 pub mod printf;
+pub mod psapi;
 pub mod shell32;
 pub mod shlwapi;
 pub mod user32;
 pub mod version;
 pub mod vtables;
+pub mod ws2_32;
 
 use crate::process::{HleFn, Process, Stop};
 use std::collections::HashMap;
@@ -35,6 +38,7 @@ use std::collections::HashMap;
 pub struct Extra {
     pub advapi32: advapi32::AdvapiState,
     pub imm32: imm32::ImmState,
+    pub ws2_32: ws2_32::Ws2State,
     pub version: version::VersionState,
     /// Process-local byte-range locks made through kernel32 LockFile.
     pub file_range_locks: Vec<kernel32::FileRangeLock>,
@@ -127,6 +131,9 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         "ole32" => Some("ole32"),
         "version" => Some("version"),
         "imm32" => Some("imm32"),
+        "ws2_32" => Some("ws2_32"),
+        "psapi" => Some("psapi"),
+        "iphlpapi" => Some("iphlpapi"),
         _ => None,
     }
 }
@@ -141,6 +148,9 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "ole32" => ole32::lookup(name),
         "version" => version::lookup(name),
         "imm32" => imm32::lookup(name),
+        "ws2_32" => ws2_32::lookup(name),
+        "psapi" => psapi::lookup(name),
+        "iphlpapi" => iphlpapi::lookup(name),
         "crt" => crt::lookup(name),
         "advapi32" => advapi32::lookup(name),
         "dbghelp" => dbghelp::lookup(name),
@@ -165,6 +175,7 @@ pub fn data_symbol(group: &str, name: &str) -> Option<u64> {
     if group == "msvcp" {
         return match name {
             crt::MSVC_STD_COUT_SYMBOL | crt::MSVC_STD_CERR_SYMBOL => Some(0xe0),
+            crt::MSVC_STD_CIN_SYMBOL => Some(0x80),
             crt::MSVC_WCHAR_CTYPE_ID_SYMBOL => Some(8),
             crt::MSVC_LOCALE_ID_COUNT_SYMBOL => Some(4),
             _ => None,
@@ -174,6 +185,8 @@ pub fn data_symbol(group: &str, name: &str) -> Option<u64> {
         return None;
     }
     match name {
+        "_HUGE" => Some(8),
+        "_adjust_fdiv" => Some(4),
         "_fmode" | "_commode" | "__argc" | "_osver" | "_winver" | "_winmajor" | "_winminor"
         | "__mb_cur_max" => Some(8),
         "__initenv" | "__winitenv" | "_environ" | "_wenviron" | "__argv" | "__wargv"
@@ -194,6 +207,25 @@ pub fn data_cell(p: &mut Process, key: &str, size: u64) -> u64 {
     p.extra.data_next += (size + 15) & !15;
     p.extra.data_cells.insert(key.to_string(), a);
     a
+}
+
+#[cfg(test)]
+mod import_coverage_batch_tests {
+    use super::crt::{MSVC_STD_CIN_SYMBOL, MSVC_STD_COUT_SYMBOL};
+    use super::{data_symbol, group_of, lookup};
+
+    #[test]
+    fn psapi_module_information_and_vc80_data_imports_are_wired() {
+        assert_eq!(group_of("psapi"), Some("psapi"));
+        assert!(lookup("psapi", "GetModuleInformation").is_some());
+        assert_eq!(group_of("iphlpapi"), Some("iphlpapi"));
+        assert!(lookup("iphlpapi", "GetAdaptersInfo").is_some());
+        assert!(lookup("iphlpapi", "GetAdaptersAddresses").is_some());
+        assert_eq!(data_symbol("msvcp", MSVC_STD_CIN_SYMBOL), Some(0x80));
+        assert_eq!(data_symbol("msvcp", MSVC_STD_COUT_SYMBOL), Some(0xe0));
+        assert_eq!(data_symbol("crt", "_HUGE"), Some(8));
+        assert_eq!(data_symbol("crt", "_adjust_fdiv"), Some(4));
+    }
 }
 
 #[cfg(test)]

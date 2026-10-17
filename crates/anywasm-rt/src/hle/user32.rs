@@ -157,6 +157,7 @@ const SPI_GETMOUSETRAILS: u32 = 0x005e;
 const SPI_GETMOUSESONAR: u32 = 0x101c;
 const SPI_GETWORKAREA: u32 = 0x0030;
 const SPI_GETWHEELSCROLLLINES: u32 = 0x0068;
+const SPI_SETFOREGROUNDLOCKTIMEOUT: u32 = 0x2001;
 const SPI_SETCURSORSHADOW: u32 = 0x101b;
 const SPI_SETMOUSESONAR: u32 = 0x101d;
 
@@ -718,6 +719,19 @@ fn system_parameters_info_w(p: &mut Process) -> R {
 
 fn system_parameters_info(p: &mut Process, api: &str) -> R {
     let action = p.arg(0) as u32;
+    if action == SPI_SETFOREGROUNDLOCKTIMEOUT {
+        // This action reads the new timeout through pvParam. GTA SA supplies NULL, which is an
+        // invalid request on Win32; return the real failure so startup can continue without
+        // pretending that a setting or profile update occurred.
+        if p.arg(2) == 0 {
+            p.set_last_error(87); // ERROR_INVALID_PARAMETER
+            return Ok(0);
+        }
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: format!("{api}(SPI_SETFOREGROUNDLOCKTIMEOUT profile and foreground policy)"),
+        });
+    }
     if action == SPI_GETWORKAREA {
         // The virtual desktop has no emulated taskbar, so its entire screen is the work area.
         let output = p.arg(2);
@@ -4961,6 +4975,17 @@ mod tests {
 
         assert_eq!(handler(&mut p), Ok(1));
         assert_eq!(p.rd32(output).unwrap(), 3);
+    }
+
+    #[test]
+    fn set_foreground_lock_timeout_rejects_the_games_null_pv_param() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        let handler = lookup("SystemParametersInfoA").unwrap();
+        set_args(&mut p, &[SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, 2]);
+
+        assert_eq!(handler(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
     }
 
     #[test]

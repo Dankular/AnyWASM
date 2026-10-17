@@ -27,12 +27,19 @@ pub struct CFile {
 const FILE_SIZE: u64 = 0x30;
 pub const MSVC_STD_COUT_SYMBOL: &str = "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
 pub const MSVC_STD_CERR_SYMBOL: &str = "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A";
+pub const MSVC_STD_CIN_SYMBOL: &str = "?cin@std@@3V?$basic_istream@DU?$char_traits@D@std@@@1@A";
 pub const MSVC_WCHAR_CTYPE_ID_SYMBOL: &str = "?id@?$ctype@_W@std@@2V0locale@2@A";
 pub const MSVC_LOCALE_ID_COUNT_SYMBOL: &str = "?_Id_cnt@id@locale@std@@0HA";
 const MSVC_STD_COUT_OBJECT: &str = "msvcp:std::cout:object";
 const MSVC_STD_CERR_OBJECT: &str = "msvcp:std::cerr:object";
 const MSVC_STD_COUT_BUFFER: &str = "msvcp:std::cout:streambuf";
 const MSVC_STD_CERR_BUFFER: &str = "msvcp:std::cerr:streambuf";
+const MSVC_STD_COUT_OBJECT_X86: &str = "msvcp:std::cout:object:x86";
+const MSVC_STD_CERR_OBJECT_X86: &str = "msvcp:std::cerr:object:x86";
+const MSVC_STD_COUT_BUFFER_X86: &str = "msvcp:std::cout:streambuf:x86";
+const MSVC_STD_CERR_BUFFER_X86: &str = "msvcp:std::cerr:streambuf:x86";
+const MSVC_STD_CIN_OBJECT_X86: &str = "msvcp:std::cin:object:x86";
+const MSVC_STD_CIN_BUFFER_X86: &str = "msvcp:std::cin:streambuf:x86";
 const MSVC_STD_OSTREAM_VTABLE: &str = "msvcp:std::ostream:vtable";
 const MSVC_STD_STREAMBUF_VTABLE: &str = "msvcp:std::streambuf:vtable";
 const MSVC_STD_OSTREAM_VBTABLE: &str = "msvcp:std::ostream:vbtable";
@@ -42,8 +49,11 @@ const ONEXIT_MAX_ENTRIES: u64 = 1 << 20;
 
 /// Data imports (variables): returns the guest address of the cell and initialises it.
 pub fn data_import(p: &mut Process, name: &str, size: u64) -> Result<u64, Stop> {
-    if matches!(name, MSVC_STD_COUT_SYMBOL | MSVC_STD_CERR_SYMBOL) {
-        return msvc_standard_ostream_import(p, name);
+    if matches!(
+        name,
+        MSVC_STD_COUT_SYMBOL | MSVC_STD_CERR_SYMBOL | MSVC_STD_CIN_SYMBOL
+    ) {
+        return msvc_standard_stream_import(p, name);
     }
 
     let a = data_cell(p, name, size);
@@ -99,6 +109,15 @@ pub fn data_import(p: &mut Process, name: &str, size: u64) -> Result<u64, Stop> 
         }
         "__mb_cur_max" => {
             p.wr32(a, 1)?;
+        }
+        "_HUGE" => {
+            // The installed VC80 CRT exports the IEEE-754 positive infinity value here.
+            p.wr64(a, f64::INFINITY.to_bits())?;
+        }
+        "_adjust_fdiv" => {
+            // VC80's startup test sets this to IsProcessorFeaturePresent(0), which is
+            // false for the emulated CPU. A zero cell therefore means no FDIV correction.
+            p.wr32(a, 0)?;
         }
         "_winmajor" => {
             p.wr32(a, 10)?;
@@ -1202,6 +1221,581 @@ fn msvc_standard_ostream_init(
     p.wr64(ios + 0x50, tied_to)?;
     p.wr8(ios + 0x58, 0x20)?;
     msvc_standard_streambuf_init(p, streambuf)
+}
+
+// MSVCP80 x86 member imports are thiscall: `this` is in ECX and explicit arguments remain on
+// the guest stack. The installed DLL bodies confirm the PE32 basic_ios offsets below.
+const MSVC80_X86_IOS_STATE: u64 = 0x08;
+const MSVC80_X86_IOS_EXCEPT: u64 = 0x0c;
+const MSVC80_X86_IOS_FLAGS: u64 = 0x10;
+const MSVC80_X86_IOS_WIDTH: u64 = 0x18;
+const MSVC80_X86_IOS_STREAMBUF: u64 = 0x28;
+const MSVC80_X86_IOS_FILL: u64 = 0x30;
+
+fn msvc80_x86_unimplemented(p: &mut Process, name: impl Into<String>) -> Stop {
+    Stop::Unimplemented {
+        dll: "msvcp".into(),
+        name: name.into(),
+    }
+    .record(p)
+}
+
+fn msvc80_x86_this(p: &mut Process, name: &str) -> Result<u64, Stop> {
+    if p.cpu.mode != CpuMode::X86_32 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            format!("{name} requires the PE32 MSVCP80 thiscall ABI"),
+        ));
+    }
+    let this = p.cpu.gpr[RCX] as u32 as u64;
+    if this == 0 {
+        return Err(Stop::Crash(format!("{name}: null this pointer")));
+    }
+    Ok(this)
+}
+
+fn msvc80_x86_arg(p: &Process, index: usize) -> Result<u64, Stop> {
+    let offset = 4u64
+        .checked_add(
+            (index as u64)
+                .checked_mul(4)
+                .ok_or_else(|| Stop::Crash("MSVCP80 x86 argument index overflow".into()))?,
+        )
+        .ok_or_else(|| Stop::Crash("MSVCP80 x86 stack offset overflow".into()))?;
+    let address = (p.cpu.gpr[RSP] as u32 as u64)
+        .checked_add(offset)
+        .ok_or_else(|| Stop::Crash("MSVCP80 x86 stack address overflow".into()))?;
+    Ok(p.rd32(address)? as u64)
+}
+
+fn msvc80_x86_call_this(
+    p: &mut Process,
+    target: u64,
+    this: u64,
+    args: &[u64],
+) -> Result<u64, Stop> {
+    let saved_ecx = p.cpu.gpr[RCX];
+    p.cpu.gpr[RCX] = this as u32 as u64;
+    let result = p.call_guest(target, args);
+    p.cpu.gpr[RCX] = saved_ecx;
+    result
+}
+
+fn msvc80_x86_ostream_ios(p: &Process, ostream: u64) -> Result<u64, Stop> {
+    let vbtable = p.rd32(ostream)? as u64;
+    if vbtable == 0 {
+        return Err(Stop::Crash(format!(
+            "MSVCP80 ostream {ostream:#x} has a null virtual-base table"
+        )));
+    }
+    let displacement = p.rd32(vbtable + 4)? as i32;
+    if displacement >= 0 {
+        ostream
+            .checked_add(displacement as u64)
+            .ok_or_else(|| Stop::Crash("MSVCP80 ostream ios offset overflow".into()))
+    } else {
+        ostream
+            .checked_sub(displacement.unsigned_abs() as u64)
+            .ok_or_else(|| Stop::Crash("MSVCP80 ostream ios offset underflow".into()))
+    }
+}
+
+fn msvc80_x86_streambuf(p: &Process, ios: u64) -> Result<u64, Stop> {
+    let streambuf = p.rd32(ios + MSVC80_X86_IOS_STREAMBUF)? as u64;
+    if streambuf == 0 {
+        return Err(Stop::Crash("MSVCP80 basic_ios has a null streambuf".into()));
+    }
+    Ok(streambuf)
+}
+
+fn msvc80_x86_streambuf_kind(p: &Process, streambuf: u64) -> Option<u8> {
+    if p.extra.data_cells.get(MSVC_STD_COUT_BUFFER_X86).copied() == Some(streambuf) {
+        Some(1)
+    } else if p.extra.data_cells.get(MSVC_STD_CERR_BUFFER_X86).copied() == Some(streambuf) {
+        Some(2)
+    } else if p.extra.data_cells.get(MSVC_STD_CIN_BUFFER_X86).copied() == Some(streambuf) {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+fn msvc80_x86_streambuf_write(
+    p: &mut Process,
+    streambuf: u64,
+    bytes: &[u8],
+) -> Result<usize, Stop> {
+    match msvc80_x86_streambuf_kind(p, streambuf) {
+        Some(1) => p.stdout.extend_from_slice(bytes),
+        Some(2) => p.stderr.extend_from_slice(bytes),
+        Some(0) => {
+            return Err(msvc80_x86_unimplemented(
+                p,
+                "writing through std::cin's streambuf",
+            ));
+        }
+        Some(_) => {
+            return Err(msvc80_x86_unimplemented(
+                p,
+                format!("writing through unknown standard streambuf {streambuf:#x}"),
+            ));
+        }
+        None => {
+            return Err(msvc80_x86_unimplemented(
+                p,
+                format!("basic_streambuf output for object {streambuf:#x}"),
+            ));
+        }
+    }
+    Ok(bytes.len())
+}
+
+fn msvc80_x86_streambuf_sputn(p: &mut Process, streambuf: u64, data: u64, count: i32) -> R {
+    if count <= 0 {
+        return Ok(0);
+    }
+    if msvc80_x86_streambuf_kind(p, streambuf).is_some() {
+        if data == 0 {
+            return Err(Stop::Crash(
+                "basic_streambuf::sputn received a null source".into(),
+            ));
+        }
+        let bytes = p.read_bytes(data, count as usize)?;
+        return Ok(msvc80_x86_streambuf_write(p, streambuf, &bytes)? as u64);
+    }
+    let vtable = p.rd32(streambuf)? as u64;
+    let xsputn = if vtable == 0 {
+        0
+    } else {
+        p.rd32(vtable + 0x20)? as u64
+    };
+    if xsputn == 0 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            format!("basic_streambuf::sputn on {streambuf:#x} without an xsputn target"),
+        ));
+    }
+    msvc80_x86_call_this(p, xsputn, streambuf, &[data, count as u32 as u64])
+}
+
+fn msvc80_x86_streambuf_sputc(p: &mut Process, streambuf: u64, character: u8) -> R {
+    if msvc80_x86_streambuf_kind(p, streambuf).is_some() {
+        msvc80_x86_streambuf_write(p, streambuf, &[character])?;
+        return Ok(character as u64);
+    }
+
+    // VC80 sputc reads the put pointer/count via +0x24/+0x34 and dispatches overflow at vtable +4.
+    let pptr_cell = p.rd32(streambuf + 0x24)? as u64;
+    let pcount_cell = p.rd32(streambuf + 0x34)? as u64;
+    let next = if pptr_cell == 0 {
+        0
+    } else {
+        p.rd32(pptr_cell)? as u64
+    };
+    let count = if next == 0 || pcount_cell == 0 {
+        0
+    } else {
+        p.rd32(pcount_cell)? as i32
+    };
+    if next != 0 && count > 0 {
+        p.wr8(next, character)?;
+        p.wr32(pptr_cell, next.wrapping_add(1) as u32)?;
+        p.wr32(pcount_cell, (count - 1) as u32)?;
+        return Ok(character as u64);
+    }
+    let vtable = p.rd32(streambuf)? as u64;
+    let overflow = if vtable == 0 {
+        0
+    } else {
+        p.rd32(vtable + 4)? as u64
+    };
+    if overflow == 0 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            format!("basic_streambuf::sputc overflow for object {streambuf:#x}"),
+        ));
+    }
+    msvc80_x86_call_this(p, overflow, streambuf, &[character as u64])
+}
+
+fn msvc80_x86_setstate(p: &mut Process, ios: u64, add: u32) -> Result<(), Stop> {
+    let state = (p.rd32(ios + MSVC80_X86_IOS_STATE)? | add) & 0x17;
+    p.wr32(ios + MSVC80_X86_IOS_STATE, state)?;
+    if state & p.rd32(ios + MSVC80_X86_IOS_EXCEPT)? != 0 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            "basic_ios transition throwing ios_base::failure",
+        ));
+    }
+    Ok(())
+}
+
+fn msvc80_x86_ostream_flush(p: &mut Process, ostream: u64) -> Result<(), Stop> {
+    let ios = msvc80_x86_ostream_ios(p, ostream)?;
+    if p.rd32(ios + MSVC80_X86_IOS_STATE)? & 0x6 == 0 {
+        let streambuf = msvc80_x86_streambuf(p, ios)?;
+        let result = if msvc80_x86_streambuf_kind(p, streambuf).is_some() {
+            0
+        } else {
+            let vtable = p.rd32(streambuf)? as u64;
+            let sync = if vtable == 0 {
+                0
+            } else {
+                p.rd32(vtable + 0x30)? as u64
+            };
+            if sync == 0 {
+                return Err(msvc80_x86_unimplemented(
+                    p,
+                    format!("basic_ostream::flush sync for streambuf {streambuf:#x}"),
+                ));
+            }
+            msvc80_x86_call_this(p, sync, streambuf, &[])? as u32 as i32
+        };
+        if result == -1 {
+            msvc80_x86_setstate(p, ios, 0x4)?;
+        }
+    }
+    Ok(())
+}
+
+fn msvc80_x86_ostream_osfx(p: &mut Process, ostream: u64) -> Result<(), Stop> {
+    let ios = msvc80_x86_ostream_ios(p, ostream)?;
+    if p.rd32(ios + MSVC80_X86_IOS_FLAGS)? & 0x2 != 0 {
+        msvc80_x86_ostream_flush(p, ostream)?;
+    }
+    Ok(())
+}
+
+fn msvc80_x86_ostream_insert_i32(p: &mut Process, ostream: u64, value: i32) -> R {
+    let ios = msvc80_x86_ostream_ios(p, ostream)?;
+    if p.rd32(ios + MSVC80_X86_IOS_STATE)? != 0 {
+        return Ok(ostream);
+    }
+    let streambuf = msvc80_x86_streambuf(p, ios)?;
+    let flags = p.rd32(ios + MSVC80_X86_IOS_FLAGS)?;
+    let basefield = flags & 0x0e00;
+    let (base, upper) = match basefield {
+        0x0400 => (8u32, false),
+        0x0800 => (16u32, flags & 0x4 != 0),
+        _ => (10u32, false),
+    };
+    let negative = value < 0 && base == 10;
+    let mut magnitude = if value < 0 && base != 10 {
+        (value as u32).wrapping_neg()
+    } else {
+        value.unsigned_abs()
+    };
+    let alphabet = if upper {
+        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    } else {
+        b"0123456789abcdefghijklmnopqrstuvwxyz"
+    };
+    let mut digits = [0u8; 32];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = alphabet[(magnitude % base) as usize];
+        magnitude /= base;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    let mut body = Vec::with_capacity(36);
+    if negative {
+        body.push(b'-');
+    } else if flags & 0x20 != 0 {
+        body.push(b'+');
+    }
+    if flags & 0x8 != 0 {
+        if base == 16 && digits[start] != b'0' {
+            body.extend_from_slice(if upper { b"0X" } else { b"0x" });
+        } else if base == 8 && digits[start] != b'0' {
+            body.push(b'0');
+        }
+    }
+    let prefix_len = body.len();
+    body.extend_from_slice(&digits[start..]);
+    let width = p.rd32(ios + MSVC80_X86_IOS_WIDTH)? as i32;
+    p.wr32(ios + MSVC80_X86_IOS_WIDTH, 0)?;
+    let padding = (width - body.len() as i32).max(0) as usize;
+    if padding > 1_048_576 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            "basic_ostream width above 1048576",
+        ));
+    }
+    let fill = p.rd8(ios + MSVC80_X86_IOS_FILL)?;
+    let left = flags & 0x40 != 0;
+    let internal = !left && flags & 0x100 != 0;
+    let mut output = Vec::with_capacity(body.len() + padding);
+    if !left && !internal {
+        output.resize(padding, fill);
+        output.extend_from_slice(&body);
+    } else if internal {
+        output.extend_from_slice(&body[..prefix_len]);
+        output.resize(prefix_len + padding, fill);
+        output.extend_from_slice(&body[prefix_len..]);
+    } else {
+        output.extend_from_slice(&body);
+        output.resize(body.len() + padding, fill);
+    }
+    if msvc80_x86_streambuf_write(p, streambuf, &output)? != output.len() {
+        msvc80_x86_setstate(p, ios, 0x4)?;
+    }
+    if p.rd32(ios + MSVC80_X86_IOS_STATE)? == 0 {
+        msvc80_x86_ostream_osfx(p, ostream)?;
+    }
+    Ok(ostream)
+}
+
+fn msvc80_x86_ostream_insert_int(p: &mut Process) -> R {
+    let ostream = msvc80_x86_this(p, "basic_ostream::operator<<(int)")?;
+    let value = msvc80_x86_arg(p, 0)? as u32 as i32;
+    msvc80_x86_ostream_insert_i32(p, ostream, value)
+}
+
+fn msvc80_x86_istream_read(p: &mut Process) -> R {
+    let istream = msvc80_x86_this(p, "basic_istream::read")?;
+    let data = msvc80_x86_arg(p, 0)?;
+    let count = msvc80_x86_arg(p, 1)? as u32 as i32;
+    if count < 0 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            "basic_istream::read with a negative count",
+        ));
+    }
+    let ios = msvc80_x86_ostream_ios(p, istream)?;
+    if p.rd32(ios + MSVC80_X86_IOS_STATE)? != 0 {
+        return Ok(istream);
+    }
+    let streambuf = msvc80_x86_streambuf(p, ios)?;
+    if msvc80_x86_streambuf_kind(p, streambuf) != Some(0) {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            format!("basic_istream::read through non-standard streambuf {streambuf:#x}"),
+        ));
+    }
+    if count > 0 && data == 0 {
+        return Err(Stop::Crash(
+            "basic_istream::read received a null destination".into(),
+        ));
+    }
+    let mut read = 0usize;
+    while read < count as usize {
+        let Some(byte) = p.stdin.pop_front() else {
+            break;
+        };
+        p.wr8(data + read as u64, byte)?;
+        read += 1;
+    }
+    if read != count as usize {
+        msvc80_x86_setstate(p, ios, 0x1 | 0x2)?;
+    }
+    Ok(istream)
+}
+
+fn msvc80_x86_char_traits_length(p: &mut Process) -> R {
+    let text = p.arg(0);
+    if text == 0 {
+        return Err(Stop::Crash(
+            "char_traits<char>::length received a null pointer".into(),
+        ));
+    }
+    Ok(p.read_cstr_raw(text)?.len() as u64)
+}
+
+fn msvc80_x86_char_traits_eof(_p: &mut Process) -> R {
+    Ok(u32::MAX as u64)
+}
+
+fn msvc80_x86_char_traits_eq_int_type(p: &mut Process) -> R {
+    let left = p.arg(0);
+    let right = p.arg(1);
+    if left == 0 || right == 0 {
+        return Err(Stop::Crash(
+            "char_traits<char>::eq_int_type received a null reference".into(),
+        ));
+    }
+    Ok(u64::from(p.rd32(left)? == p.rd32(right)?))
+}
+
+fn msvc80_x86_basic_ios_setstate(p: &mut Process) -> R {
+    let ios = msvc80_x86_this(p, "basic_ios::setstate")?;
+    let state = msvc80_x86_arg(p, 0)? as u32;
+    let _reraise = msvc80_x86_arg(p, 1)? != 0;
+    msvc80_x86_setstate(p, ios, state)?;
+    Ok(0)
+}
+
+fn msvc80_x86_basic_streambuf_sputc(p: &mut Process) -> R {
+    let streambuf = msvc80_x86_this(p, "basic_streambuf::sputc")?;
+    let character = msvc80_x86_arg(p, 0)? as u8;
+    msvc80_x86_streambuf_sputc(p, streambuf, character)
+}
+
+fn msvc80_x86_basic_streambuf_sputn(p: &mut Process) -> R {
+    let streambuf = msvc80_x86_this(p, "basic_streambuf::sputn")?;
+    let data = msvc80_x86_arg(p, 0)?;
+    let count = msvc80_x86_arg(p, 1)? as u32 as i32;
+    if count < 0 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            "basic_streambuf::sputn with a negative count",
+        ));
+    }
+    msvc80_x86_streambuf_sputn(p, streambuf, data, count)
+}
+
+fn msvc80_x86_ostream_insert_manipulator(p: &mut Process) -> R {
+    let ostream = msvc80_x86_this(p, "basic_ostream manipulator insertion")?;
+    let manipulator = msvc80_x86_arg(p, 0)?;
+    if manipulator == 0 {
+        return Err(Stop::Crash(
+            "basic_ostream manipulator insertion received a null function".into(),
+        ));
+    }
+    p.call_guest(manipulator, &[ostream])
+}
+
+fn msvc80_x86_ostream_write(p: &mut Process) -> R {
+    let ostream = msvc80_x86_this(p, "basic_ostream::write")?;
+    let data = msvc80_x86_arg(p, 0)?;
+    let count = msvc80_x86_arg(p, 1)? as u32 as i32;
+    if count < 0 {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            "basic_ostream::write with a negative count",
+        ));
+    }
+    let ios = msvc80_x86_ostream_ios(p, ostream)?;
+    if p.rd32(ios + MSVC80_X86_IOS_STATE)? & 0x6 == 0 {
+        let streambuf = msvc80_x86_streambuf(p, ios)?;
+        let written = msvc80_x86_streambuf_sputn(p, streambuf, data, count)? as u32 as i32;
+        if written != count {
+            msvc80_x86_setstate(p, ios, 0x4)?;
+        }
+        if p.rd32(ios + MSVC80_X86_IOS_STATE)? == 0 {
+            msvc80_x86_ostream_osfx(p, ostream)?;
+        }
+    }
+    Ok(ostream)
+}
+
+fn msvc80_x86_ostream_flush_import(p: &mut Process) -> R {
+    let ostream = msvc80_x86_this(p, "basic_ostream::flush")?;
+    msvc80_x86_ostream_flush(p, ostream)?;
+    Ok(ostream)
+}
+
+fn msvc80_x86_ostream_osfx_import(p: &mut Process) -> R {
+    let ostream = msvc80_x86_this(p, "basic_ostream::_Osfx")?;
+    msvc80_x86_ostream_osfx(p, ostream)?;
+    Ok(0)
+}
+
+fn msvc80_x86_ostream_endl(p: &mut Process) -> R {
+    let ostream = p.arg(0) as u32 as u64;
+    if ostream == 0 {
+        return Err(Stop::Crash(
+            "std::endl received a null ostream reference".into(),
+        ));
+    }
+    let ios = msvc80_x86_ostream_ios(p, ostream)?;
+    if p.rd32(ios + MSVC80_X86_IOS_STATE)? & 0x6 == 0 {
+        let streambuf = msvc80_x86_streambuf(p, ios)?;
+        if msvc80_x86_streambuf_sputc(p, streambuf, b'\n')? as u32 == u32::MAX {
+            msvc80_x86_setstate(p, ios, 0x4)?;
+        }
+        if p.rd32(ios + MSVC80_X86_IOS_STATE)? == 0 {
+            msvc80_x86_ostream_osfx(p, ostream)?;
+        }
+    }
+    msvc80_x86_ostream_flush(p, ostream)?;
+    Ok(ostream)
+}
+
+fn msvc80_x86_mutex_lock(p: &mut Process) -> R {
+    let this = msvc80_x86_this(p, "_Mutex::_Lock")?;
+    let mutex = p.rd32(this)? as u64;
+    if mutex == 0 {
+        return Err(Stop::Crash(
+            "_Mutex::_Lock found a null runtime mutex".into(),
+        ));
+    }
+    msvc_lock_acquire(p, mutex)?;
+    Ok(0)
+}
+
+fn msvc80_x86_mutex_unlock(p: &mut Process) -> R {
+    let this = msvc80_x86_this(p, "_Mutex::_Unlock")?;
+    let mutex = p.rd32(this)? as u64;
+    if mutex == 0 {
+        return Err(Stop::Crash(
+            "_Mutex::_Unlock found a null runtime mutex".into(),
+        ));
+    }
+    if !p.release_critical(mutex, p.current_thread_id) {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            format!("_Mutex::_Unlock without owning runtime mutex {mutex:#x}"),
+        ));
+    }
+    Ok(0)
+}
+
+fn msvc80_x86_data_stream_import(p: &mut Process, name: &str) -> Result<u64, Stop> {
+    let (object_key, streambuf_key, unitbuf) = match name {
+        MSVC_STD_COUT_SYMBOL => (MSVC_STD_COUT_OBJECT_X86, MSVC_STD_COUT_BUFFER_X86, false),
+        MSVC_STD_CERR_SYMBOL => (MSVC_STD_CERR_OBJECT_X86, MSVC_STD_CERR_BUFFER_X86, true),
+        MSVC_STD_CIN_SYMBOL => (MSVC_STD_CIN_OBJECT_X86, MSVC_STD_CIN_BUFFER_X86, false),
+        _ => {
+            return Err(Stop::Crash(format!(
+                "unknown MSVCP80 standard stream {name}"
+            )))
+        }
+    };
+    let object = data_cell(p, object_key, 0x80);
+    let initialized_key = format!("{object_key}:initialized");
+    if p.extra.data_cells.contains_key(&initialized_key) {
+        return Ok(object);
+    }
+    let vbtable = data_cell(p, &format!("{object_key}:vbtable"), 8);
+    p.wr32(vbtable, 0)?;
+    p.wr32(vbtable + 4, 0x10)?;
+    p.wr32(object, vbtable as u32)?;
+    let ios = object + 0x10;
+    p.wr32(ios, 0)?;
+    p.wr32(ios + 4, 0)?;
+    p.wr32(ios + MSVC80_X86_IOS_STATE, 0)?;
+    p.wr32(ios + MSVC80_X86_IOS_EXCEPT, 0)?;
+    p.wr32(
+        ios + MSVC80_X86_IOS_FLAGS,
+        0x201 | if unitbuf { 0x2 } else { 0 },
+    )?;
+    p.wr32(ios + 0x14, 6)?;
+    p.wr32(ios + MSVC80_X86_IOS_WIDTH, 0)?;
+    let streambuf = object + 0x40;
+    p.extra.data_cells.insert(streambuf_key.into(), streambuf);
+    p.wr32(ios + MSVC80_X86_IOS_STREAMBUF, streambuf as u32)?;
+    p.wr8(ios + MSVC80_X86_IOS_FILL, b' ')?;
+    p.wr32(streambuf, 0)?;
+    p.wr32(streambuf + 0x24, 0)?;
+    p.wr32(streambuf + 0x34, 0)?;
+    p.extra.data_cells.insert(initialized_key, 1);
+    Ok(object)
+}
+
+fn msvc_standard_stream_import(p: &mut Process, name: &str) -> Result<u64, Stop> {
+    if p.cpu.mode == CpuMode::X86_32 {
+        return msvc80_x86_data_stream_import(p, name);
+    }
+    if name == MSVC_STD_CIN_SYMBOL {
+        return Err(msvc80_x86_unimplemented(
+            p,
+            "std::cin data object outside the PE32 model",
+        ));
+    }
+    msvc_standard_ostream_import(p, name)
 }
 
 fn msvc_standard_ostream_import(p: &mut Process, name: &str) -> Result<u64, Stop> {
@@ -2650,6 +3244,49 @@ fn crt_wcstod(p: &mut Process) -> R {
     Ok(0)
 }
 
+fn crt_atoflt(p: &mut Process) -> R {
+    if p.cpu.mode != CpuMode::X86_32 {
+        return Err(Stop::Unimplemented {
+            dll: "crt".into(),
+            name: "_atoflt outside the verified PE32 ABI".into(),
+        }
+        .record(p));
+    }
+    let result = p.arg(0);
+    let input = p.arg(1);
+    if result == 0 || input == 0 {
+        return Err(Stop::Crash("_atoflt received a null argument".into()));
+    }
+
+    let text = p.read_cstr(input)?;
+    let (value, used) = parse_float(&text);
+    let parsed = &text[..used.min(text.len())];
+    let lower = parsed
+        .trim_start()
+        .trim_start_matches(['+', '-'])
+        .to_ascii_lowercase();
+    let explicit_nonfinite = lower.starts_with("inf") || lower.starts_with("nan");
+    let nonzero_decimal = parsed
+        .bytes()
+        .take_while(|byte| !matches!(byte, b'e' | b'E'))
+        .any(|byte| byte.is_ascii_digit() && byte != b'0');
+    let converted = value as f32;
+    let status =
+        if used != 0 && !explicit_nonfinite && (value.is_infinite() || converted.is_infinite()) {
+            3 // VC80 INTRNCVT_OVERFLOW
+        } else if used != 0
+            && !explicit_nonfinite
+            && nonzero_decimal
+            && (converted == 0.0 || converted.abs() < f32::MIN_POSITIVE)
+        {
+            4 // VC80 INTRNCVT_UNDERFLOW
+        } else {
+            0
+        };
+    p.wr32(result, converted.to_bits())?;
+    Ok(status)
+}
+
 fn crt_set_double_return(p: &mut Process, value: f64) {
     if p.cpu.mode == CpuMode::X86_32 {
         let top = p.cpu.fpu_top as usize & 7;
@@ -3314,6 +3951,43 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "__anywasm_standard_streambuf_char_overflow" => msvc_standard_streambuf_char_overflow,
         "__anywasm_standard_streambuf_xsputn" => msvc_standard_streambuf_xsputn,
         "__anywasm_standard_streambuf_sync" => msvc_standard_streambuf_sync,
+        "?length@?$char_traits@D@std@@SAIPBD@Z" => msvc80_x86_char_traits_length,
+        "?eof@?$char_traits@D@std@@SAHXZ" => msvc80_x86_char_traits_eof,
+        "?eq_int_type@?$char_traits@D@std@@SA_NABH0@Z" => {
+            msvc80_x86_char_traits_eq_int_type
+        }
+        "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z" => {
+            msvc80_x86_basic_streambuf_sputc
+        }
+        "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHPBDH@Z" => {
+            msvc80_x86_basic_streambuf_sputn
+        }
+        "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z" => {
+            msvc80_x86_basic_ios_setstate
+        }
+        "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ" => {
+            msvc80_x86_ostream_osfx_import
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z" => {
+            msvc80_x86_ostream_insert_int
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z" => {
+            msvc80_x86_ostream_insert_manipulator
+        }
+        "?_Lock@_Mutex@std@@QAEXXZ" => msvc80_x86_mutex_lock,
+        "?_Unlock@_Mutex@std@@QAEXXZ" => msvc80_x86_mutex_unlock,
+        "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADH@Z" => {
+            msvc80_x86_istream_read
+        }
+        "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z" => {
+            msvc80_x86_ostream_write
+        }
+        "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ" => {
+            msvc80_x86_ostream_flush_import
+        }
+        "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z" => {
+            msvc80_x86_ostream_endl
+        }
         "??1?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAA@XZ" => {
             msvc_basic_streambuf_char_destructor
         }
@@ -3821,6 +4495,7 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             p.set_retf(parse_float(&s).0);
             Ok(0)
         },
+        "_atoflt" => crt_atoflt,
         "strtol" | "strtoul" | "strtoll" | "strtoull" | "_strtoi64" | "_strtoui64" => strtol_family,
         "strtod" => |p| {
             let (s, end) = (p.arg(0), p.arg(1));
@@ -7113,6 +7788,233 @@ mod initterm_tests {
         assert_eq!(initterm(&mut p, false), Ok(0));
         assert_eq!(p.rd32(FIRST_MARKER).unwrap(), 0x1357_2468);
         assert_eq!(p.rd32(SECOND_MARKER).unwrap(), 0x89ab_cdef);
+    }
+}
+
+#[cfg(test)]
+mod msvcp80_x86_import_tests {
+    use super::{data_import, lookup, MSVC_STD_CIN_SYMBOL, MSVC_STD_COUT_SYMBOL};
+    use crate::process::{Process, Stop};
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, RCX, RSP};
+    use anywasm_cpu::mem::{PROT_RW, PROT_RWX};
+
+    const STREAMBUF_SPUTC: &str = "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z";
+    const STREAMBUF_SPUTN: &str =
+        "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHPBDH@Z";
+    const OSTREAM_INT: &str = "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z";
+    const OSTREAM_WRITE: &str =
+        "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z";
+    const OSTREAM_ENDL: &str = "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z";
+    const ISTREAM_READ: &str = "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADH@Z";
+
+    fn process() -> Process {
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        p.vmem_next = 0x2000_0000;
+        let stack = p.alloc_virtual(0x2000, PROT_RW);
+        p.cpu.gpr[RSP] = stack + 0x800;
+        p.wr32(p.cpu.gpr[RSP], 0).unwrap();
+        p
+    }
+
+    fn args(p: &mut Process, values: &[u32]) {
+        let rsp = p.cpu.gpr[RSP];
+        for (index, value) in values.iter().enumerate() {
+            p.wr32(rsp + 4 + index as u64 * 4, *value).unwrap();
+        }
+    }
+
+    fn call(p: &mut Process, name: &str) -> Result<u64, Stop> {
+        lookup(name).unwrap()(p)
+    }
+
+    #[test]
+    fn all_installed_vc80_batch_imports_resolve() {
+        for name in [
+            "_atoflt",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@H@Z",
+            "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z",
+            "?length@?$char_traits@D@std@@SAIPBD@Z",
+            "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHD@Z",
+            "?eof@?$char_traits@D@std@@SAHXZ",
+            "?eq_int_type@?$char_traits@D@std@@SA_NABH0@Z",
+            "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QAEHPBDH@Z",
+            "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z",
+            "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ",
+            "?_Unlock@_Mutex@std@@QAEXXZ",
+            "?_Lock@_Mutex@std@@QAEXXZ",
+            "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QAEAAV12@PADH@Z",
+            "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@PBDH@Z",
+            "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ",
+            "?endl@std@@YAAAV?$basic_ostream@DU?$char_traits@D@std@@@1@AAV21@@Z",
+        ] {
+            assert!(lookup(name).is_some(), "missing HLE for {name}");
+        }
+    }
+
+    #[test]
+    fn atoflt_converts_float_and_reports_range_status() {
+        let mut p = process();
+        let input = p.alloc_virtual(0x1000, PROT_RW);
+        let output = input + 0x100;
+        for (text, expected_status, expected_value) in [
+            (" -12.5tail", 0, -12.5f32),
+            ("1e39", 3, f32::INFINITY),
+            ("1e-46", 4, 0.0f32),
+        ] {
+            p.write_cstr(input, text).unwrap();
+            args(&mut p, &[output as u32, input as u32]);
+            assert_eq!(call(&mut p, "_atoflt"), Ok(expected_status));
+            assert_eq!(p.rd32(output).unwrap(), expected_value.to_bits());
+        }
+        p.write_cstr(input, "nonsense").unwrap();
+        args(&mut p, &[output as u32, input as u32]);
+        assert_eq!(call(&mut p, "_atoflt"), Ok(0));
+        assert_eq!(p.rd32(output).unwrap(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn pe32_ostream_and_streambuf_imports_write_real_output() {
+        let mut p = process();
+        let ostream = data_import(&mut p, MSVC_STD_COUT_SYMBOL, 0x80).unwrap();
+        let streambuf = ostream + 0x40;
+        p.cpu.gpr[RCX] = ostream;
+        args(&mut p, &[73]);
+        assert_eq!(call(&mut p, OSTREAM_INT), Ok(ostream));
+
+        let data = p.alloc_virtual(0x1000, PROT_RW);
+        p.write_bytes(data, b" + raw").unwrap();
+        p.cpu.gpr[RCX] = streambuf;
+        args(&mut p, &[data as u32, 6]);
+        assert_eq!(call(&mut p, STREAMBUF_SPUTN), Ok(6));
+
+        p.cpu.gpr[RCX] = ostream;
+        args(&mut p, &[data as u32, 6]);
+        assert_eq!(call(&mut p, OSTREAM_WRITE), Ok(ostream));
+
+        p.cpu.gpr[RCX] = streambuf;
+        args(&mut p, &[b'!'.into()]);
+        assert_eq!(call(&mut p, STREAMBUF_SPUTC), Ok(b'!' as u64));
+
+        p.cpu.gpr[RCX] = ostream;
+        args(&mut p, &[ostream as u32]);
+        assert_eq!(call(&mut p, OSTREAM_ENDL), Ok(ostream));
+        assert_eq!(p.stdout, b"73 + raw + raw!\n");
+    }
+
+    #[test]
+    fn pe32_istream_reads_from_process_stdin_and_sets_short_read_state() {
+        let mut p = process();
+        let istream = data_import(&mut p, MSVC_STD_CIN_SYMBOL, 0x80).unwrap();
+        let output = p.alloc_virtual(0x1000, PROT_RW);
+        p.stdin.extend([b'a', b'b']);
+        p.cpu.gpr[RCX] = istream;
+        args(&mut p, &[output as u32, 3]);
+        assert_eq!(call(&mut p, ISTREAM_READ), Ok(istream));
+        assert_eq!(p.read_bytes(output, 2).unwrap(), b"ab");
+        assert_eq!(p.rd32(istream + 0x10 + 0x08).unwrap(), 0x3);
+    }
+
+    #[test]
+    fn pe32_traits_setstate_flush_and_mutex_handlers_use_guest_state() {
+        let mut p = process();
+        let text = p.alloc_virtual(0x1000, PROT_RW);
+        p.write_cstr(text, "stream").unwrap();
+        args(&mut p, &[text as u32]);
+        assert_eq!(call(&mut p, "?length@?$char_traits@D@std@@SAIPBD@Z"), Ok(6));
+        assert_eq!(
+            call(&mut p, "?eof@?$char_traits@D@std@@SAHXZ"),
+            Ok(u32::MAX as u64)
+        );
+        let left = text + 0x100;
+        let right = text + 0x104;
+        p.wr32(left, 0x1234).unwrap();
+        p.wr32(right, 0x1234).unwrap();
+        args(&mut p, &[left as u32, right as u32]);
+        assert_eq!(
+            call(&mut p, "?eq_int_type@?$char_traits@D@std@@SA_NABH0@Z"),
+            Ok(1)
+        );
+
+        let ostream = data_import(&mut p, MSVC_STD_COUT_SYMBOL, 0x80).unwrap();
+        let ios = ostream + 0x10;
+        p.cpu.gpr[RCX] = ios;
+        args(&mut p, &[0x2, 0]);
+        assert_eq!(
+            call(
+                &mut p,
+                "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QAEXH_N@Z"
+            ),
+            Ok(0)
+        );
+        assert_eq!(p.rd32(ios + 8).unwrap(), 2);
+        p.cpu.gpr[RCX] = ostream;
+        assert_eq!(
+            call(
+                &mut p,
+                "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV12@XZ"
+            ),
+            Ok(ostream)
+        );
+
+        let cerr = data_import(
+            &mut p,
+            "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+            0x80,
+        )
+        .unwrap();
+        p.cpu.gpr[RCX] = cerr;
+        assert_eq!(
+            call(
+                &mut p,
+                "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEXXZ"
+            ),
+            Ok(0)
+        );
+
+        let mutex_this = p.alloc_virtual(0x1000, PROT_RW);
+        let runtime_mutex = mutex_this + 0x100;
+        p.wr32(mutex_this, runtime_mutex as u32).unwrap();
+        p.cpu.gpr[RCX] = mutex_this;
+        assert_eq!(call(&mut p, "?_Lock@_Mutex@std@@QAEXXZ"), Ok(0));
+        assert!(p
+            .critical_sections
+            .get(&runtime_mutex)
+            .unwrap()
+            .owner
+            .is_some());
+        p.cpu.gpr[RCX] = mutex_this;
+        assert_eq!(call(&mut p, "?_Unlock@_Mutex@std@@QAEXXZ"), Ok(0));
+        assert_eq!(p.critical_sections.get(&runtime_mutex).unwrap().owner, None);
+    }
+
+    #[test]
+    fn pe32_manipulator_insertion_calls_guest_function_with_ostream_reference() {
+        let mut p = process();
+        let ostream = data_import(&mut p, MSVC_STD_COUT_SYMBOL, 0x80).unwrap();
+        let manipulator = p.alloc_virtual(0x1000, PROT_RWX);
+        // `return *ostream;` for `ostream& manipulator(ostream&)`.
+        p.write_bytes(manipulator, &[0x8b, 0x44, 0x24, 0x04, 0xc3])
+            .unwrap();
+        p.cpu.gpr[RCX] = ostream;
+        args(&mut p, &[manipulator as u32]);
+        assert_eq!(
+            call(
+                &mut p,
+                "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z",
+            ),
+            Ok(ostream)
+        );
+    }
+
+    #[test]
+    fn msvcr80_data_import_values_match_installed_exports() {
+        let mut p = process();
+        let huge = data_import(&mut p, "_HUGE", 8).unwrap();
+        let adjust_fdiv = data_import(&mut p, "_adjust_fdiv", 4).unwrap();
+        assert_eq!(p.rd64(huge).unwrap(), f64::INFINITY.to_bits());
+        assert_eq!(p.rd32(adjust_fdiv).unwrap(), 0);
     }
 }
 

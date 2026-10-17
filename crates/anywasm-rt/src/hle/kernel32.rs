@@ -57,6 +57,7 @@ const DUPLICATE_SAME_ACCESS: u32 = 2;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const GENERIC_ALL: u32 = 0x1000_0000;
+const VIRTUAL_ANSI_CODE_PAGE: u32 = 1252;
 pub const QUERY_PERFORMANCE_FREQUENCY: u64 = 10_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +90,14 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SetThreadIdealProcessor" => set_thread_ideal_processor,
         "GetCurrentThreadId" => |p| Ok(p.current_thread_id as u64),
         "OpenThread" => open_thread,
+        // The scheduler does not yet queue APC routines for alertable delivery. Report the
+        // missing execution service explicitly instead of accepting an APC that can never run.
+        "QueueUserAPC" => |_| {
+            unsupported_kernel32(
+                "QueueUserAPC",
+                "APC queuing and alertable delivery are not modeled",
+            )
+        },
         "SuspendThread" => suspend_thread,
         "TerminateThread" => terminate_thread,
         "GetExitCodeProcess" => get_exit_code_process,
@@ -197,6 +206,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "VirtualFree" => virtual_free,
         "VirtualProtect" => virtual_protect,
         "VirtualQuery" => virtual_query,
+        "GetWriteWatch" => |_| {
+            unsupported_kernel32(
+                "GetWriteWatch",
+                "page write-watch tracking is not modeled by guest memory",
+            )
+        },
         // Guest code writes advance Memory's code epoch, so the interpreter drops stale decoded
         // blocks without requiring an explicit cache flush.
         "FlushInstructionCache" => |_| Ok(1),
@@ -230,6 +245,42 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "ReadFile" => read_file,
         "LockFile" => lock_file,
         "UnlockFile" => unlock_file,
+        "CreatePipe" => |_| {
+            unsupported_kernel32(
+                "CreatePipe",
+                "anonymous pipe buffering, blocking reads, and inherited-handle lifetime are not modeled",
+            )
+        },
+        "CreateNamedPipeW" => |_| {
+            unsupported_kernel32(
+                "CreateNamedPipeW",
+                "named-pipe server/client IPC is not modeled",
+            )
+        },
+        "ConnectNamedPipe" => |_| {
+            unsupported_kernel32(
+                "ConnectNamedPipe",
+                "named-pipe server/client IPC is not modeled",
+            )
+        },
+        "DisconnectNamedPipe" => |_| {
+            unsupported_kernel32(
+                "DisconnectNamedPipe",
+                "named-pipe server/client IPC is not modeled",
+            )
+        },
+        "CreateProcessW" => |_| {
+            unsupported_kernel32(
+                "CreateProcessW",
+                "the runtime does not load and schedule a second guest process",
+            )
+        },
+        "DeviceIoControl" => |_| {
+            unsupported_kernel32(
+                "DeviceIoControl",
+                "device and filesystem control-code dispatch is not modeled",
+            )
+        },
         "GetOverlappedResult" => get_overlapped_result,
         "WriteConsoleA" => write_console_a,
         "WriteConsoleW" => write_console_w,
@@ -616,6 +667,12 @@ pub fn lookup(name: &str) -> Option<HleFn> {
                 manual,
             }))
         },
+        "OpenEventW" => |_| {
+            unsupported_kernel32(
+                "OpenEventW",
+                "the named kernel-object namespace is not modeled",
+            )
+        },
         "CreateEventExW" => |p| {
             let flags = p.arg(2) as u32;
             Ok(p.new_handle(Handle::Event {
@@ -645,9 +702,21 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "CreateMutexA" | "CreateMutexW" => create_mutex,
         "CreateMutexExW" => create_mutex_ex,
+        "OpenMutexW" => |_| {
+            unsupported_kernel32(
+                "OpenMutexW",
+                "the named kernel-object namespace is not modeled",
+            )
+        },
         "ReleaseMutex" => release_mutex,
         "CreateSemaphoreA" | "CreateSemaphoreW" => create_semaphore,
         "CreateSemaphoreExW" => create_semaphore_ex,
+        "OpenSemaphoreW" => |_| {
+            unsupported_kernel32(
+                "OpenSemaphoreW",
+                "the named kernel-object namespace is not modeled",
+            )
+        },
         "ReleaseSemaphore" => release_semaphore,
         "WaitForSingleObject" => |p| wait_for_single_object(p, false),
         "WaitForSingleObjectEx" => |p| wait_for_single_object(p, p.arg(2) != 0),
@@ -706,13 +775,15 @@ pub fn lookup(name: &str) -> Option<HleFn> {
             Ok(1)
         },
         // strings / locale
-        "GetACP" => |_| Ok(1252),
+        "GetACP" => |_| Ok(VIRTUAL_ANSI_CODE_PAGE as u64),
         "GetOEMCP" => |_| Ok(437),
         "IsValidCodePage" => is_valid_code_page,
         "GetCPInfo" => get_cp_info,
         "GetUserDefaultLCID" | "GetSystemDefaultLCID" | "GetThreadLocale" => |_| Ok(0x409),
         "GetUserDefaultLangID" => |_| Ok(0x0409),
         "IsValidLocale" => is_valid_locale,
+        "GetGeoInfoA" => get_geo_info_a,
+        "GetUserGeoID" => get_user_geo_id,
         "EnumSystemLocalesA" => enum_system_locales_a,
         "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => get_default_locale_name,
         "GetLocaleInfoA" => |p| get_locale_info(p, false),
@@ -5660,6 +5731,111 @@ fn write_format_a(p: &mut Process, text: &str, output: u64, capacity: i32) -> R 
     Ok(bytes.len() as u64)
 }
 
+/// Fail at the unsupported service boundary instead of returning an invented Win32 result.
+/// These entries make the missing subsystem explicit to the guest and analyzer alike.
+fn unsupported_kernel32(api: &'static str, reason: &'static str) -> R {
+    Err(Stop::Unimplemented {
+        dll: "kernel32".into(),
+        name: format!("{api}: {reason}"),
+    })
+}
+
+const GEOCLASS_NATION: u32 = 16;
+const GEOCLASS_REGION: u32 = 14;
+const GEOID_US: u32 = 244;
+
+fn get_user_geo_id(p: &mut Process) -> R {
+    match p.arg(0) as u32 {
+        // This runtime's virtual locale profile is English (United States).
+        GEOCLASS_NATION => Ok(GEOID_US as u64),
+        // Region IDs are host/user-configured and are not part of the virtual locale profile.
+        GEOCLASS_REGION => unsupported_kernel32(
+            "GetUserGeoID",
+            "the user-region GEOID is not configured in the virtual locale profile",
+        ),
+        // GEOID_NOT_AVAILABLE is the documented result for unsupported classes.
+        _ => Ok(u32::MAX as u64),
+    }
+}
+
+fn get_geo_info_a(p: &mut Process) -> R {
+    let (location, geo_type, output, capacity, langid) = (
+        p.arg(0) as u32,
+        p.arg(1) as u32,
+        p.arg(2),
+        p.arg(3) as i32,
+        p.arg(4) as u16,
+    );
+    if capacity < 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if location == 0 || location == u32::MAX || location >= 0x8000_0000 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if location != GEOID_US {
+        return unsupported_kernel32(
+            "GetGeoInfoA",
+            "geo data is only populated for the runtime's United States locale profile",
+        );
+    }
+
+    // Values and character counts match the Windows GEO_* table for GEOID 244. The fixed profile
+    // uses LANGID 0x0409; zero asks for the same default language.
+    let value = match geo_type {
+        1 | 18 => "244",                 // GEO_NATION / GEO_ID
+        2 => "39.450",                   // GEO_LATITUDE
+        3 => "-98.908",                  // GEO_LONGITUDE
+        4 => "US",                       // GEO_ISO2
+        5 => "USA",                      // GEO_ISO3
+        6 => "en-us",                    // GEO_RFC1766
+        7 => "00000409",                 // GEO_LCID
+        8 => "United States",            // GEO_FRIENDLYNAME
+        9 => "United States of America", // GEO_OFFICIALNAME
+        12 => "840",                     // GEO_ISO_UN_NUMBER
+        14 => "1",                       // GEO_DIALINGCODE
+        15 => "USD",                     // GEO_CURRENCYCODE
+        16 => "$",                       // GEO_CURRENCYSYMBOL
+        17 => "US",                      // GEO_NAME
+        10 | 11 | 13 => {
+            return unsupported_kernel32(
+                "GetGeoInfoA",
+                "timezone, official-language, and parent-region datasets are not modeled",
+            );
+        }
+        _ => {
+            p.set_last_error(ERROR_INVALID_FLAGS);
+            return Ok(0);
+        }
+    };
+    if langid != 0 && langid != 0x0409 {
+        return unsupported_kernel32(
+            "GetGeoInfoA",
+            "localized geo names are only available for the virtual English (United States) locale",
+        );
+    }
+
+    let mut bytes = value.as_bytes().to_vec();
+    bytes.push(0);
+    let required = bytes.len();
+    // Like Windows, a null/zero buffer is a size query and returns the required ANSI character
+    // count including the terminator.
+    if capacity == 0 {
+        return Ok(required as u64);
+    }
+    if output == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if (capacity as usize) < required {
+        p.set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return Ok(0);
+    }
+    p.write_bytes(output, &bytes)?;
+    Ok(required as u64)
+}
+
 fn get_date_format_a(p: &mut Process) -> R {
     const DATE_SHORTDATE: u32 = 1;
     const DATE_LONGDATE: u32 = 2;
@@ -5892,6 +6068,14 @@ fn is_supported_code_page(code_page: u32) -> bool {
     matches!(code_page, 437 | 1252 | 65001)
 }
 
+fn conversion_code_page(code_page: u32) -> u32 {
+    if code_page == 0 {
+        VIRTUAL_ANSI_CODE_PAGE // CP_ACP resolves to GetACP(), but is not itself a registered page ID.
+    } else {
+        code_page
+    }
+}
+
 fn is_valid_code_page(p: &mut Process) -> R {
     Ok(is_supported_code_page(p.arg(0) as u32) as u64)
 }
@@ -6119,7 +6303,7 @@ pub fn cp1252(b: u8) -> u16 {
 
 fn multi_byte_to_wide_char(p: &mut Process) -> R {
     // Both lengths are Win32 ints; upper bits in their x64 argument slots are unspecified.
-    let (cp, _fl, src, n, dst, dn) = (
+    let (requested_cp, _fl, src, n, dst, dn) = (
         p.arg(0) as u32,
         p.arg(1),
         p.arg(2),
@@ -6127,6 +6311,7 @@ fn multi_byte_to_wide_char(p: &mut Process) -> R {
         p.arg(4),
         p.arg(5) as u32 as i32,
     );
+    let cp = conversion_code_page(requested_cp);
     if n == 0 || n < -1 || dn < 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
@@ -6164,7 +6349,7 @@ fn multi_byte_to_wide_char(p: &mut Process) -> R {
 
 fn wide_char_to_multi_byte(p: &mut Process) -> R {
     // Both length parameters are Win32 ints, not pointer-sized values.
-    let (cp, _fl, src, n, dst, dn) = (
+    let (requested_cp, _fl, src, n, dst, dn) = (
         p.arg(0) as u32,
         p.arg(1),
         p.arg(2),
@@ -6172,6 +6357,7 @@ fn wide_char_to_multi_byte(p: &mut Process) -> R {
         p.arg(4),
         p.arg(5) as u32 as i32,
     );
+    let cp = conversion_code_page(requested_cp);
     if n == 0 || n < -1 || dn < 0 {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(0);
@@ -6448,6 +6634,17 @@ mod lc_map_string_tests {
     use anywasm_cpu::cpu::{CpuMode, R8, R9, RCX, RDX, RSP};
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
 
+    fn invoke_x86(p: &mut Process, name: &str, args: &[u32]) -> Result<u64, Stop> {
+        const STACK: u64 = 0x80800;
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK, 0).unwrap();
+        for (index, value) in args.iter().enumerate() {
+            p.wr32(STACK + 4 + index as u64 * 4, *value).unwrap();
+        }
+        lookup(name).expect("kernel32 API should resolve")(p)
+    }
+
     #[test]
     fn lstrcat_a_appends_ansi_bytes_and_returns_the_original_destination() {
         const BASE: u64 = 0x80000;
@@ -6692,6 +6889,63 @@ mod lc_map_string_tests {
             .unwrap(); // cbMultiByte == 0
 
         assert_eq!(wide_char_to_multi_byte(&mut p), Ok(4));
+    }
+
+    #[test]
+    fn multi_byte_to_wide_char_resolves_cp_acp_to_the_virtual_ansi_page() {
+        const BASE: u64 = 0x80000;
+        const SOURCE: u64 = BASE + 0x100;
+        const OUTPUT: u64 = BASE + 0x200;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        p.write_bytes(SOURCE, &[0xe9, 0]).unwrap();
+
+        assert_eq!(invoke_x86(&mut p, "GetACP", &[]), Ok(1252));
+        assert_eq!(
+            invoke_x86(
+                &mut p,
+                "MultiByteToWideChar",
+                &[0, 0, SOURCE as u32, u32::MAX, 0, 0]
+            ),
+            Ok(2)
+        );
+        assert_eq!(
+            invoke_x86(
+                &mut p,
+                "MultiByteToWideChar",
+                &[0, 0, SOURCE as u32, u32::MAX, OUTPUT as u32, 2]
+            ),
+            Ok(2)
+        );
+        assert_eq!(p.read_bytes(OUTPUT, 4).unwrap(), [0xe9, 0, 0, 0]);
+    }
+
+    #[test]
+    fn wide_char_to_multi_byte_resolves_cp_acp_to_the_virtual_ansi_page() {
+        const BASE: u64 = 0x80000;
+        const SOURCE: u64 = BASE + 0x100;
+        const OUTPUT: u64 = BASE + 0x200;
+        let mut p = Process::new(crate::vfs::Vfs::new());
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        p.write_wstr(SOURCE, "é").unwrap();
+
+        assert_eq!(
+            invoke_x86(
+                &mut p,
+                "WideCharToMultiByte",
+                &[0, 0, SOURCE as u32, u32::MAX, 0, 0, 0, 0]
+            ),
+            Ok(2)
+        );
+        assert_eq!(
+            invoke_x86(
+                &mut p,
+                "WideCharToMultiByte",
+                &[0, 0, SOURCE as u32, u32::MAX, OUTPUT as u32, 2, 0, 0]
+            ),
+            Ok(2)
+        );
+        assert_eq!(p.read_bytes(OUTPUT, 2).unwrap(), [0xe9, 0]);
     }
 }
 
@@ -9052,5 +9306,146 @@ mod remove_directory_tests {
         assert_eq!(remove_directory(&mut process, r"C:\Game\save.dat"), 0);
         assert_eq!(process.rd32(TEB_ADDR + 0x34).unwrap(), 267); // ERROR_DIRECTORY
         assert!(process.vfs.exists(r"C:\Game\save.dat"));
+    }
+}
+
+#[cfg(test)]
+mod import_batch_tests {
+    use super::lookup;
+    use crate::process::{Process, Stop, TEB_ADDR};
+    use crate::vfs::Vfs;
+    use anywasm_cpu::cpu::{CpuMode, RSP};
+    use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW};
+
+    const BASE: u64 = 0x70000;
+    const STACK: u64 = BASE + 0x800;
+    const OUTPUT: u64 = BASE + 0x100;
+
+    fn process() -> Process {
+        let mut process = Process::new(Vfs::new());
+        assert!(process.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.gpr[RSP] = STACK;
+        process.wr32(STACK, 0).unwrap();
+        process
+    }
+
+    fn invoke_x86(process: &mut Process, api: &str, args: &[u32]) -> Result<u64, Stop> {
+        process.cpu.mode = CpuMode::X86_32;
+        process.cpu.gpr[RSP] = STACK;
+        process.wr32(STACK, 0).unwrap();
+        for (index, value) in args.iter().enumerate() {
+            process.wr32(STACK + 4 + index as u64 * 4, *value).unwrap();
+        }
+        lookup(api).unwrap_or_else(|| panic!("kernel32!{api} must be explicitly bound"))(process)
+    }
+
+    #[test]
+    fn get_user_geo_id_reports_virtual_nation_and_fails_closed_for_unmodeled_region() {
+        let mut process = process();
+        assert_eq!(
+            invoke_x86(&mut process, "GetUserGeoID", &[16]).unwrap(),
+            244
+        );
+        assert_eq!(
+            invoke_x86(&mut process, "GetUserGeoID", &[0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert!(matches!(
+            invoke_x86(&mut process, "GetUserGeoID", &[14]),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "kernel32" && name.contains("GetUserGeoID") && name.contains("user-region GEOID")
+        ));
+    }
+
+    #[test]
+    fn get_geo_info_a_matches_us_windows_values_and_buffer_rules() {
+        let mut process = process();
+        for (geo_type, value) in [
+            (1, "244"),
+            (2, "39.450"),
+            (3, "-98.908"),
+            (4, "US"),
+            (5, "USA"),
+            (6, "en-us"),
+            (7, "00000409"),
+            (8, "United States"),
+            (9, "United States of America"),
+            (12, "840"),
+            (14, "1"),
+            (15, "USD"),
+            (16, "$"),
+            (17, "US"),
+            (18, "244"),
+        ] {
+            let required = value.len() as u32 + 1;
+            assert_eq!(
+                invoke_x86(&mut process, "GetGeoInfoA", &[244, geo_type, 0, 0, 0]).unwrap(),
+                required as u64,
+                "GEO type {geo_type} size query"
+            );
+            assert_eq!(
+                invoke_x86(
+                    &mut process,
+                    "GetGeoInfoA",
+                    &[244, geo_type, OUTPUT as u32, required, 0x0409]
+                )
+                .unwrap(),
+                required as u64,
+                "GEO type {geo_type} output"
+            );
+            assert_eq!(
+                process.read_cstr(OUTPUT).unwrap(),
+                value,
+                "GEO type {geo_type}"
+            );
+        }
+
+        process.write_bytes(OUTPUT, &[0xa5; 8]).unwrap();
+        assert_eq!(
+            invoke_x86(&mut process, "GetGeoInfoA", &[244, 4, OUTPUT as u32, 2, 0]).unwrap(),
+            0
+        );
+        assert_eq!(process.rd32(TEB_ADDR + 0x34).unwrap(), 122); // ERROR_INSUFFICIENT_BUFFER
+        assert_eq!(process.read_bytes(OUTPUT, 8).unwrap(), [0xa5; 8]);
+
+        assert_eq!(
+            invoke_x86(&mut process, "GetGeoInfoA", &[0xdead_beef, 4, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(process.rd32(TEB_ADDR + 0x34).unwrap(), 87); // ERROR_INVALID_PARAMETER
+        assert_eq!(
+            invoke_x86(&mut process, "GetGeoInfoA", &[244, 99, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(process.rd32(TEB_ADDR + 0x34).unwrap(), 1004); // ERROR_INVALID_FLAGS
+    }
+
+    #[test]
+    fn unsupported_kernel32_batch_is_bound_but_never_reports_fake_success() {
+        for api in [
+            "QueueUserAPC",
+            "DisconnectNamedPipe",
+            "ConnectNamedPipe",
+            "CreateNamedPipeW",
+            "CreateProcessW",
+            "DeviceIoControl",
+            "GetWriteWatch",
+            "CreatePipe",
+            "OpenMutexW",
+            "OpenSemaphoreW",
+            "OpenEventW",
+        ] {
+            let mut process = process();
+            assert!(
+                matches!(
+                    invoke_x86(&mut process, api, &[]),
+                    Err(Stop::Unimplemented { dll, name })
+                        if dll == "kernel32" && name.contains(api)
+                ),
+                "{api} must fail closed with an explicit unsupported reason"
+            );
+        }
     }
 }
