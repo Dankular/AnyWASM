@@ -8,6 +8,7 @@ pub mod com;
 pub mod crt;
 pub mod d3d11;
 pub mod d3d9;
+pub mod d3dx9_31;
 pub mod dbghelp;
 pub mod ddraw;
 pub mod directinput8;
@@ -19,15 +20,20 @@ pub mod heap;
 pub mod imm32;
 pub mod iphlpapi;
 pub mod kernel32;
+pub mod netapi32;
 pub mod ntdll;
 pub mod ole32;
+pub mod oleaut32;
 pub mod printf;
 pub mod psapi;
+pub mod setupapi;
 pub mod shell32;
 pub mod shlwapi;
 pub mod user32;
+pub mod usp10;
 pub mod version;
 pub mod vtables;
+pub mod wininet;
 pub mod ws2_32;
 
 use crate::process::{HleFn, Process, Stop};
@@ -39,6 +45,7 @@ pub struct Extra {
     pub advapi32: advapi32::AdvapiState,
     pub imm32: imm32::ImmState,
     pub ws2_32: ws2_32::Ws2State,
+    pub wininet: wininet::WinInetState,
     pub version: version::VersionState,
     /// Process-local byte-range locks made through kernel32 LockFile.
     pub file_range_locks: Vec<kernel32::FileRangeLock>,
@@ -117,6 +124,7 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         // continues to its D3D9 startup path; this maps the module load only, not D3D8 exports.
         "d3d8" => Some("d3d8"),
         "dsound" => Some("dsound"),
+        "d3dx9_31" => Some("d3dx9_31"),
         // GTA loads this DirectPlay helper as part of its DirectX runtime check. No exports are
         // supplied until a guest call demonstrates that the game needs one.
         "dpnhpast" => Some("dpnhpast"),
@@ -128,12 +136,17 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         "advapi32" => Some("advapi32"),
         "dbghelp" => Some("dbghelp"),
         "shell32" => Some("shell32"),
+        "setupapi" => Some("setupapi"),
         "ole32" => Some("ole32"),
+        "oleaut32" => Some("oleaut32"),
         "version" => Some("version"),
         "imm32" => Some("imm32"),
         "ws2_32" => Some("ws2_32"),
         "psapi" => Some("psapi"),
         "iphlpapi" => Some("iphlpapi"),
+        "wininet" => Some("wininet"),
+        "usp10" => Some("usp10"),
+        "netapi32" => Some("netapi32"),
         _ => None,
     }
 }
@@ -146,22 +159,28 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "ntdll" => ntdll::lookup(name).or_else(|| crt::lookup(name)),
         "msvcp" => crt::lookup(name),
         "ole32" => ole32::lookup(name),
+        "oleaut32" => oleaut32::lookup(name),
         "version" => version::lookup(name),
         "imm32" => imm32::lookup(name),
         "ws2_32" => ws2_32::lookup(name),
         "psapi" => psapi::lookup(name),
         "iphlpapi" => iphlpapi::lookup(name),
+        "wininet" => wininet::lookup(name),
+        "usp10" => usp10::lookup(name),
+        "netapi32" => netapi32::lookup(name),
         "crt" => crt::lookup(name),
         "advapi32" => advapi32::lookup(name),
         "dbghelp" => dbghelp::lookup(name),
         "user32" => user32::lookup(name),
         "gdi32" => gdi::lookup(name),
         "shell32" => shell32::lookup(name),
+        "setupapi" => setupapi::lookup(name),
         "shlwapi" => shlwapi::lookup(name),
         "winmm" => user32::lookup_winmm(name),
         "d3d11" => d3d11::lookup(name),
         "d3d9" => d3d9::lookup(name),
         "dsound" => dsound::lookup(name),
+        "d3dx9_31" => d3dx9_31::lookup(name),
         "ddraw" => ddraw::lookup(name),
         "dinput8" => directinput8::lookup(name),
         "dxgi" => dxgi::lookup(name),
@@ -221,6 +240,19 @@ mod import_coverage_batch_tests {
         assert_eq!(group_of("iphlpapi"), Some("iphlpapi"));
         assert!(lookup("iphlpapi", "GetAdaptersInfo").is_some());
         assert!(lookup("iphlpapi", "GetAdaptersAddresses").is_some());
+        assert_eq!(group_of("oleaut32"), Some("oleaut32"));
+        assert!(lookup("oleaut32", "#4").is_some());
+        assert_eq!(group_of("wininet"), Some("wininet"));
+        assert!(lookup("wininet", "InternetOpenA").is_some());
+        assert_eq!(group_of("d3dx9_31"), Some("d3dx9_31"));
+        assert!(lookup("d3dx9_31", "D3DXGetShaderSize").is_some());
+        assert_eq!(group_of("setupapi"), Some("setupapi"));
+        assert!(lookup("setupapi", "SetupDiGetClassDevsA").is_some());
+        assert!(lookup("shell32", "ShellExecuteExW").is_some());
+        assert_eq!(group_of("usp10"), Some("usp10"));
+        assert!(lookup("usp10", "ScriptItemize").is_some());
+        assert_eq!(group_of("netapi32"), Some("netapi32"));
+        assert!(lookup("netapi32", "Netbios").is_some());
         assert_eq!(data_symbol("msvcp", MSVC_STD_CIN_SYMBOL), Some(0x80));
         assert_eq!(data_symbol("msvcp", MSVC_STD_COUT_SYMBOL), Some(0xe0));
         assert_eq!(data_symbol("crt", "_HUGE"), Some(8));

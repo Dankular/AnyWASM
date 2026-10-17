@@ -12,11 +12,21 @@ const SIMS_REGISTRY_ROOT: &str = "hkey_local_machine\\software\\sims(steam)";
 const EA_SIMS_REGISTRY_ROOT: &str = "hkey_local_machine\\software\\electronic arts\\sims(steam)";
 const HOST_CPU_REGISTRY_ROOT: &str =
     "hkey_local_machine\\hardware\\description\\system\\centralprocessor\\0";
-const HOST_REGISTRY_ROOTS: [&str; 3] = [
+const HOST_SHELL_FOLDERS_REGISTRY_ROOT: &str =
+    "hkey_current_user\\software\\microsoft\\windows\\currentversion\\explorer\\shell folders";
+const HOST_REGISTRY_ROOTS: [&str; 4] = [
     SIMS_REGISTRY_ROOT,
     EA_SIMS_REGISTRY_ROOT,
     HOST_CPU_REGISTRY_ROOT,
+    HOST_SHELL_FOLDERS_REGISTRY_ROOT,
 ];
+
+fn is_allowed_host_registry_path(path: &str) -> bool {
+    HOST_REGISTRY_ROOTS.iter().any(|root| {
+        path == *root
+            || (*root != HOST_SHELL_FOLDERS_REGISTRY_ROOT && path.starts_with(&format!("{root}\\")))
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistryValueRecord {
@@ -112,10 +122,7 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, Strin
     for _ in 0..key_count {
         let path = reader.text()?;
         let normalized = normalize_path(&path)?;
-        if !HOST_REGISTRY_ROOTS
-            .iter()
-            .any(|root| normalized == *root || normalized.starts_with(&format!("{root}\\")))
-        {
+        if !is_allowed_host_registry_path(&normalized) {
             return Err(format!(
                 "registry snapshot key is outside the supplied host roots: {path}"
             ));
@@ -227,18 +234,14 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, Strin
     Ok(records)
 }
 
-/// Installs a validated, read-only snapshot of the active Sims registry registration.
+/// Installs a validated, read-only snapshot of allowlisted host registry keys.
 pub fn load_host_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), String> {
     let records = parse_host_snapshot(bytes)?;
 
     let old_paths = process
         .registry_host_paths
         .iter()
-        .filter(|path| {
-            HOST_REGISTRY_ROOTS
-                .iter()
-                .any(|root| path.as_str() == *root || path.starts_with(&format!("{root}\\")))
-        })
+        .filter(|path| is_allowed_host_registry_path(path))
         .cloned()
         .collect::<HashSet<_>>();
     process
@@ -289,9 +292,12 @@ pub fn load_host_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        load_host_snapshot, parse_host_snapshot, HOST_CPU_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
+        is_allowed_host_registry_path, load_host_snapshot, parse_host_snapshot,
+        HOST_CPU_REGISTRY_ROOT, HOST_SHELL_FOLDERS_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
     };
     use crate::{process::Process, vfs::Vfs};
+    use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
+    use anywasm_cpu::mem::PROT_RW;
 
     const EA_SIMS_REGISTRY_ROOT: &str =
         "hkey_local_machine\\software\\electronic arts\\sims(steam)";
@@ -357,6 +363,27 @@ mod tests {
         bytes
     }
 
+    fn snapshot_with_shell_folders() -> Vec<u8> {
+        let mut snapshot = sample_snapshot();
+        let key_count = u32::from_le_bytes(snapshot[8..12].try_into().unwrap());
+        snapshot[8..12].copy_from_slice(&(key_count + 1).to_le_bytes());
+        text(&mut snapshot, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
+        text(&mut snapshot, "");
+        snapshot.extend_from_slice(&0u32.to_le_bytes());
+        snapshot.extend_from_slice(&0u64.to_le_bytes());
+        snapshot.extend_from_slice(&0u32.to_le_bytes());
+        snapshot.extend_from_slice(&1u32.to_le_bytes());
+        text(&mut snapshot, "Personal");
+        snapshot.extend_from_slice(&1u32.to_le_bytes()); // REG_SZ
+        let data = "C:\\Users\\tester\\Documents\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        snapshot.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        snapshot.extend_from_slice(&data);
+        snapshot
+    }
+
     #[test]
     fn parses_and_installs_native_registry_data() {
         let snapshot = sample_snapshot();
@@ -406,5 +433,94 @@ mod tests {
         bad[root_start..root_start + SIMS_REGISTRY_ROOT.len()]
             .copy_from_slice(b"hkey_local_machine\\software\\sims(other)");
         assert!(parse_host_snapshot(&bad).is_err());
+    }
+
+    #[test]
+    fn host_snapshot_manager_installs_only_the_scoped_current_user_shell_folders_key() {
+        let snapshot = snapshot_with_shell_folders();
+        let mut process = Process::new(Vfs::new());
+        load_host_snapshot(&mut process, &snapshot).unwrap();
+        assert!(process
+            .registry_paths
+            .contains(HOST_SHELL_FOLDERS_REGISTRY_ROOT));
+        let (value_type, value_data) = process
+            .registry_values
+            .get(&(
+                HOST_SHELL_FOLDERS_REGISTRY_ROOT.to_owned(),
+                "personal".to_owned(),
+            ))
+            .unwrap();
+        assert_eq!(*value_type, 1);
+        assert_eq!(
+            String::from_utf16_lossy(
+                &value_data
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            ),
+            "C:\\Users\\tester\\Documents\0"
+        );
+        assert!(process
+            .registry_host_paths
+            .contains(HOST_SHELL_FOLDERS_REGISTRY_ROOT));
+        assert!(is_allowed_host_registry_path(
+            HOST_SHELL_FOLDERS_REGISTRY_ROOT
+        ));
+        assert!(!is_allowed_host_registry_path(&format!(
+            "{HOST_SHELL_FOLDERS_REGISTRY_ROOT}\\private"
+        )));
+    }
+
+    #[test]
+    fn advapi_opens_and_reads_the_exact_host_shell_folders_key() {
+        let mut process = Process::new(Vfs::new());
+        load_host_snapshot(&mut process, &snapshot_with_shell_folders()).unwrap();
+
+        let args = process.alloc_virtual(0x1000, PROT_RW);
+        let subkey = args + 0x100;
+        let opened_key = args + 0x200;
+        let value_name = args + 0x300;
+        let value_data = args + 0x400;
+        let value_type = args + 0x800;
+        let value_size = args + 0x804;
+        process
+            .write_cstr(
+                subkey,
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
+            )
+            .unwrap();
+        process.write_cstr(value_name, "Personal").unwrap();
+
+        let stack = args + 0xc00;
+        process.cpu.gpr[RCX] = 0x8000_0001; // HKEY_CURRENT_USER
+        process.cpu.gpr[RDX] = subkey;
+        process.cpu.gpr[R8] = 0;
+        process.cpu.gpr[R9] = 0x0002_0019; // KEY_READ
+        process.cpu.gpr[RSP] = stack;
+        process.wr64(stack + 40, opened_key).unwrap();
+
+        let open = crate::hle::lookup("advapi32", "RegOpenKeyExA").unwrap();
+        assert_eq!(open(&mut process), Ok(0));
+        let key = process.rd64(opened_key).unwrap();
+        assert_eq!(
+            process.registry_key_paths.get(&key).map(String::as_str),
+            Some(HOST_SHELL_FOLDERS_REGISTRY_ROOT)
+        );
+
+        process.cpu.gpr[RCX] = key;
+        process.cpu.gpr[RDX] = value_name;
+        process.cpu.gpr[R8] = 0;
+        process.cpu.gpr[R9] = value_type;
+        process.wr64(stack + 40, value_data).unwrap();
+        process.wr64(stack + 48, value_size).unwrap();
+        process.wr32(value_size, 512).unwrap();
+
+        let query = crate::hle::lookup("advapi32", "RegQueryValueExA").unwrap();
+        assert_eq!(query(&mut process), Ok(0));
+        assert_eq!(process.rd32(value_type).unwrap(), 1); // REG_SZ
+        assert_eq!(
+            process.read_cstr(value_data).unwrap(),
+            "C:\\Users\\tester\\Documents"
+        );
     }
 }

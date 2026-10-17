@@ -101,7 +101,8 @@ function Normalize-InstallPath([string] $Path) {
 function Get-RegistrySnapshot(
     [Microsoft.Win32.RegistryKey] $Root,
     [string] $Prefix,
-    [System.Collections.Generic.List[object]] $Records
+    [System.Collections.Generic.List[object]] $Records,
+    [bool] $IncludeSubkeys = $true
 ) {
     function Visit-Key([Microsoft.Win32.RegistryKey] $Key, [string] $Path) {
         $info = [AnyWasmRegistryNative]::QueryKeyInfo($Key.Handle.DangerousGetHandle())
@@ -125,6 +126,7 @@ function Get-RegistrySnapshot(
             values = $values.ToArray()
         })
 
+        if (-not $IncludeSubkeys) { return }
         foreach ($subkeyName in $subkeys) {
             $child = $Key.OpenSubKey($subkeyName, $false)
             if ($null -eq $child) {
@@ -188,6 +190,23 @@ try {
                 Get-RegistrySnapshot $cpuRoot 'hkey_local_machine\hardware\description\system\centralprocessor\0' $keys
             } finally {
                 $cpuRoot.Dispose()
+            }
+            $userBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::CurrentUser,
+                [Microsoft.Win32.RegistryView]::Registry32)
+            try {
+                $shellFolders = $userBase.OpenSubKey(
+                    'Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders',
+                    $false)
+                if ($null -ne $shellFolders) {
+                    try {
+                        Get-RegistrySnapshot $shellFolders 'hkey_current_user\software\microsoft\windows\currentversion\explorer\shell folders' $keys $false
+                    } finally {
+                        $shellFolders.Dispose()
+                    }
+                }
+            } finally {
+                $userBase.Dispose()
             }
         } finally {
             $root.Dispose()

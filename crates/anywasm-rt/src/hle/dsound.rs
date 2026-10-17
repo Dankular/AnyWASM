@@ -9,12 +9,34 @@ use crate::process::Process;
 
 const E_INVALIDARG: u64 = 0x8007_0057;
 const E_NOINTERFACE: u64 = 0x8000_4002;
+const CLASS_E_NOAGGREGATION: u64 = 0x8004_0110;
+const DSERR_INVALIDPARAM: u64 = 0x8878_000a;
 const DSBUFFERDESC_SIZE: u32 = 36;
 const DSBCAPS_SIZE: u32 = 20;
 const MAX_SOUND_BUFFER: u32 = 16 * 1024 * 1024;
 pub const DSBCAPS_PRIMARYBUFFER: u32 = 0x1;
 pub const DSBCAPS_CTRL3D: u32 = 0x10;
 const IID_IDIRECTSOUND3DLISTENER: &str = "279afa84-4981-11ce-a521-0020af0be560";
+const IID_IDIRECTSOUND: &str = "279afa85-4981-11ce-a521-0020af0be560";
+
+// The translation runtime exposes one virtual playback device. Keeping its ID stable lets
+// callers round-trip the result through GetDeviceID and DirectSoundCreate without pretending
+// that a host audio endpoint or capture device exists.
+const DSDEVID_DEFAULT_PLAYBACK: [u8; 16] = [
+    0x00, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47, 0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03,
+];
+const DSDEVID_DEFAULT_CAPTURE: [u8; 16] = [
+    0x01, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47, 0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03,
+];
+const DSDEVID_DEFAULT_VOICE_PLAYBACK: [u8; 16] = [
+    0x02, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47, 0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03,
+];
+const DSDEVID_DEFAULT_VOICE_CAPTURE: [u8; 16] = [
+    0x03, 0x00, 0xf0, 0xde, 0x6d, 0x9c, 0xed, 0x47, 0xaa, 0xf1, 0x4d, 0xda, 0x8f, 0x2b, 0x5c, 0x03,
+];
+const VIRTUAL_PLAYBACK_DEVICE: [u8; 16] = [
+    0xa4, 0x7d, 0x39, 0x2c, 0x8a, 0x13, 0x4f, 0x40, 0x9d, 0x2a, 0x41, 0x57, 0x53, 0x4d, 0x00, 0x01,
+];
 
 macro_rules! unimplemented_method {
     ($function:ident, $name:literal) => {
@@ -118,14 +140,31 @@ pub fn methods(interface: &str) -> Option<&'static [&'static str]> {
 }
 
 pub fn iid_name(iid: &str) -> Option<&'static str> {
-    (iid == IID_IDIRECTSOUND3DLISTENER).then_some("IDirectSound3DListener")
+    match iid {
+        IID_IDIRECTSOUND3DLISTENER => Some("IDirectSound3DListener"),
+        // DirectSoundCreate returns the base interface. Its vtable is prefix-compatible with
+        // IDirectSound8, which is the modeled object used for the virtual device.
+        IID_IDIRECTSOUND => Some("IDirectSound8"),
+        _ => None,
+    }
 }
 
 pub fn lookup(name: &str) -> Option<HleFn> {
     Some(match name {
+        "#1" => direct_sound_create,
+        "#9" => get_device_id,
         "#11" => direct_sound_create8,
         _ => return None,
     })
+}
+
+/// Number of guest stack bytes consumed by a DSOUND export on x86 stdcall.
+pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
+    match name {
+        "#1" | "#11" => Some(12), // (device GUID, output pointer, outer unknown)
+        "#9" => Some(8),          // (source GUID, destination GUID)
+        _ => None,
+    }
 }
 
 pub fn method(iface: &str, name: &str) -> Option<HleFn> {
@@ -189,6 +228,57 @@ fn direct_sound_create8(p: &mut Process) -> R {
     let sound = com::create(p, "IDirectSound8", Kind::DirectSound);
     p.wrptr(out, sound)?;
     Ok(S_OK)
+}
+
+fn direct_sound_create(p: &mut Process) -> R {
+    let (device_guid, out, outer) = (p.arg(0), p.arg(1), p.arg(2));
+    if out == 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    p.wrptr(out, 0)?;
+    if outer != 0 {
+        return Ok(CLASS_E_NOAGGREGATION);
+    }
+    if !supports_playback_guid(p, device_guid)? {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+
+    let sound = com::create(p, "IDirectSound8", Kind::DirectSound);
+    p.wrptr(out, sound)?;
+    Ok(S_OK)
+}
+
+fn supports_playback_guid(p: &Process, guid: u64) -> Result<bool, Stop> {
+    if guid == 0 {
+        return Ok(true);
+    }
+    let bytes = p.read_bytes(guid, 16)?;
+    Ok(bytes == DSDEVID_DEFAULT_PLAYBACK
+        || bytes == DSDEVID_DEFAULT_VOICE_PLAYBACK
+        || bytes == VIRTUAL_PLAYBACK_DEVICE)
+}
+
+fn get_device_id(p: &mut Process) -> R {
+    let (source, destination) = (p.arg(0), p.arg(1));
+    if source == 0 || destination == 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    let source = p.read_bytes(source, 16)?;
+    if source == DSDEVID_DEFAULT_PLAYBACK || source == DSDEVID_DEFAULT_VOICE_PLAYBACK {
+        p.write_bytes(destination, &VIRTUAL_PLAYBACK_DEVICE)?;
+        return Ok(S_OK);
+    }
+    if source == VIRTUAL_PLAYBACK_DEVICE {
+        p.write_bytes(destination, &source)?;
+        return Ok(S_OK);
+    }
+    // Capture and voice-capture defaults cannot be represented by this playback-only model.
+    // Other GUIDs have no corresponding virtual device, so report the documented invalid-ID
+    // result instead of echoing arbitrary values as if they identified a device.
+    if source == DSDEVID_DEFAULT_CAPTURE || source == DSDEVID_DEFAULT_VOICE_CAPTURE {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    Ok(DSERR_INVALIDPARAM)
 }
 
 fn create_sound_buffer(p: &mut Process) -> R {
@@ -459,6 +549,31 @@ fn playback_not_implemented(_p: &mut Process) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anywasm_cpu::{
+        cpu::RSP,
+        mem::{PAGE_SIZE, PROT_RW},
+        CpuMode,
+    };
+
+    const STACK: u64 = 0x10000;
+    const INPUT_GUID: u64 = 0x20000;
+    const OUTPUT: u64 = 0x21000;
+
+    fn x86_process() -> Process {
+        let mut process = Process::new(crate::vfs::Vfs::new());
+        process.cpu.mode = CpuMode::X86_32;
+        for base in [STACK, INPUT_GUID, OUTPUT] {
+            assert!(process.mem.map(base, PAGE_SIZE, PROT_RW));
+        }
+        process.cpu.gpr[RSP] = STACK;
+        process
+    }
+
+    fn set_args(process: &mut Process, args: &[u32]) {
+        for (index, value) in args.iter().enumerate() {
+            process.wr32(STACK + 4 + 4 * index as u64, *value).unwrap();
+        }
+    }
 
     #[test]
     fn playback_reports_a_coverage_gap_without_an_audio_backend() {
@@ -483,5 +598,81 @@ mod tests {
                     if dll == "dsound" && name.contains(method_name)
             ));
         }
+    }
+
+    #[test]
+    fn direct_sound_create_resolves_the_virtual_default_playback_device() {
+        let mut process = x86_process();
+        set_args(&mut process, &[0, OUTPUT as u32, 0]);
+
+        assert_eq!(lookup("#1").unwrap()(&mut process).unwrap(), S_OK);
+        let object = process.rdptr(OUTPUT).unwrap();
+        assert_ne!(object, 0);
+        assert!(matches!(
+            com::kind_of(&process, object),
+            Some(Kind::DirectSound)
+        ));
+        assert_eq!(stdcall_stack_bytes("#1"), Some(12));
+    }
+
+    #[test]
+    fn get_device_id_maps_playback_aliases_and_rejects_unmodeled_devices() {
+        let mut process = x86_process();
+        process
+            .write_bytes(INPUT_GUID, &DSDEVID_DEFAULT_PLAYBACK)
+            .unwrap();
+        set_args(&mut process, &[INPUT_GUID as u32, OUTPUT as u32]);
+
+        assert_eq!(lookup("#9").unwrap()(&mut process).unwrap(), S_OK);
+        assert_eq!(
+            process.read_bytes(OUTPUT, 16).unwrap(),
+            VIRTUAL_PLAYBACK_DEVICE
+        );
+        assert_eq!(stdcall_stack_bytes("#9"), Some(8));
+
+        process
+            .write_bytes(INPUT_GUID, &DSDEVID_DEFAULT_VOICE_PLAYBACK)
+            .unwrap();
+        assert_eq!(lookup("#9").unwrap()(&mut process).unwrap(), S_OK);
+        assert_eq!(
+            process.read_bytes(OUTPUT, 16).unwrap(),
+            VIRTUAL_PLAYBACK_DEVICE
+        );
+
+        process
+            .write_bytes(INPUT_GUID, &DSDEVID_DEFAULT_CAPTURE)
+            .unwrap();
+        assert_eq!(
+            lookup("#9").unwrap()(&mut process).unwrap(),
+            DSERR_INVALIDPARAM
+        );
+
+        process.write_bytes(INPUT_GUID, &[0x77; 16]).unwrap();
+        assert_eq!(
+            lookup("#9").unwrap()(&mut process).unwrap(),
+            DSERR_INVALIDPARAM
+        );
+    }
+
+    #[test]
+    fn direct_sound_create_rejects_non_playback_guids_and_aggregation() {
+        let mut process = x86_process();
+        process
+            .write_bytes(INPUT_GUID, &DSDEVID_DEFAULT_CAPTURE)
+            .unwrap();
+        set_args(&mut process, &[INPUT_GUID as u32, OUTPUT as u32, 0]);
+
+        assert_eq!(
+            lookup("#1").unwrap()(&mut process).unwrap(),
+            DSERR_INVALIDPARAM
+        );
+        assert_eq!(process.rdptr(OUTPUT).unwrap(), 0);
+
+        set_args(&mut process, &[0, OUTPUT as u32, 1]);
+        assert_eq!(
+            lookup("#1").unwrap()(&mut process).unwrap(),
+            CLASS_E_NOAGGREGATION
+        );
+        assert_eq!(process.rdptr(OUTPUT).unwrap(), 0);
     }
 }

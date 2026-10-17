@@ -480,6 +480,8 @@ pub struct Process {
     pub unimplemented_log: Vec<(String, String)>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Change notifications on streamed assets lack host-folder and mapped-writeback observation.
+    pub change_notification_coverage_reported: bool,
     pub stdin: VecDeque<u8>,
     /// Process standard device handles; they may be redirected through SetStdHandle.
     pub std_handles: [u64; 3],
@@ -628,6 +630,36 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
             return Some(bytes);
         }
         if let Some(bytes) = hle::d3d9::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "dsound" {
+        if let Some(bytes) = hle::dsound::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "d3dx9_31" {
+        if let Some(bytes) = hle::d3dx9_31::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "oleaut32" {
+        if let Some(bytes) = hle::oleaut32::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "wininet" {
+        if let Some(bytes) = hle::wininet::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "usp10" {
+        if let Some(bytes) = hle::usp10::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "netapi32" {
+        if let Some(bytes) = hle::netapi32::stdcall_stack_bytes(name) {
             return Some(bytes);
         }
     }
@@ -1264,6 +1296,7 @@ impl Process {
             unimplemented_log: Vec::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            change_notification_coverage_reported: false,
             stdin: VecDeque::new(),
             std_handles: [0x10, 0x14, 0x18],
             error_mode: 0,
@@ -5921,6 +5954,14 @@ mod scheduler_tests {
         assert_eq!(stdcall_stack_bytes("ole32", "CoCreateGuid"), Some(4));
         assert_eq!(stdcall_stack_bytes("ole32", "IIDFromString"), Some(8));
         assert_eq!(stdcall_stack_bytes("ole32", "StringFromGUID2"), Some(12));
+        assert_eq!(
+            stdcall_stack_bytes("setupapi", "SetupDiGetClassDevsA"),
+            Some(16)
+        );
+        assert_eq!(stdcall_stack_bytes("shell32", "ShellExecuteW"), Some(24));
+        assert_eq!(stdcall_stack_bytes("usp10", "ScriptItemize"), Some(28));
+        assert_eq!(stdcall_stack_bytes("usp10", "ScriptBreak"), Some(16));
+        assert_eq!(stdcall_stack_bytes("netapi32", "Netbios"), Some(4));
         assert_eq!(stdcall_stack_bytes("gdi32", "CreateDCA"), Some(16));
         assert_eq!(stdcall_stack_bytes("gdi32", "CreateBitmap"), Some(20));
         assert_eq!(stdcall_stack_bytes("gdi32", "CreateDIBSection"), Some(24));
@@ -5971,6 +6012,21 @@ mod scheduler_tests {
             x86_abi_cleanup_bytes("msvcp", "?uncaught_exception@std@@YA_NXZ"),
             Ok(0)
         );
+        assert_eq!(x86_abi_cleanup_bytes("dsound", "#1"), Ok(12));
+        assert_eq!(x86_abi_cleanup_bytes("dsound", "#9"), Ok(8));
+        assert_eq!(
+            x86_abi_cleanup_bytes("d3dx9_31", "D3DXGetShaderSize"),
+            Ok(4)
+        );
+        assert_eq!(
+            x86_abi_cleanup_bytes("d3dx9_31", "D3DXFillVolumeTexture"),
+            Ok(12)
+        );
+        assert_eq!(x86_abi_cleanup_bytes("oleaut32", "#4"), Ok(8));
+        assert_eq!(x86_abi_cleanup_bytes("oleaut32", "#9"), Ok(4));
+        assert_eq!(x86_abi_cleanup_bytes("wininet", "InternetConnectA"), Ok(32));
+        assert_eq!(x86_abi_cleanup_bytes("wininet", "InternetReadFile"), Ok(16));
+        assert_eq!(x86_abi_cleanup_bytes("wininet", "HttpQueryInfoA"), Ok(20));
     }
 
     #[test]

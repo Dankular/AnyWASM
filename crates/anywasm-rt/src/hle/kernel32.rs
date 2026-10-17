@@ -3895,10 +3895,11 @@ fn find_first_change_notification(p: &mut Process, wide: bool) -> R {
         p.set_last_error(ERROR_PATH_NOT_FOUND);
         return Ok(INVALID_HANDLE);
     }
-    if p.vfs.has_streamed_assets_below(&absolute_path) {
+    if p.vfs.has_streamed_assets_below(&absolute_path) && !p.change_notification_coverage_reported {
         p.stderr.extend_from_slice(
             b"[coverage] kernel32!FindFirstChangeNotificationW on streamed assets observes guest VFS mutations; host-folder changes and mapped-file writeback are not connected.\n",
         );
+        p.change_notification_coverage_reported = true;
     }
     p.set_last_error(0);
     Ok(p.new_handle(Handle::ChangeNotification {
@@ -8843,6 +8844,30 @@ mod change_notification_tests {
         p
     }
 
+    fn process_with_streamed_assets() -> Process {
+        const ASSET_PATH: &[u8] = b"Game\\Bin\\seed.dat";
+        let index_len = 2 + ASSET_PATH.len() + 16;
+        let data_start = 24 + index_len;
+        let mut package = b"AGP1".to_vec();
+        package.extend(1u32.to_le_bytes());
+        package.extend((index_len as u64).to_le_bytes());
+        package.extend((data_start as u64 + 3).to_le_bytes());
+        package.extend((ASSET_PATH.len() as u16).to_le_bytes());
+        package.extend(ASSET_PATH);
+        package.extend((data_start as u64).to_le_bytes());
+        package.extend(3u64.to_le_bytes());
+        package.extend([1, 2, 3]);
+
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..data_start]).unwrap();
+        let mut p = Process::new(vfs);
+        assert!(p.mem.map(BASE, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        p.cpu.mode = CpuMode::X86_64;
+        p.cpu.gpr[RSP] = STACK;
+        p
+    }
+
     fn wide(p: &mut Process, address: u64, value: &str) -> u32 {
         p.write_wstr(address, value).unwrap();
         address as u32
@@ -8962,6 +8987,20 @@ mod change_notification_tests {
             u32::MAX as u64
         );
         assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), ERROR_INVALID_HANDLE);
+    }
+
+    #[test]
+    fn streamed_change_notification_coverage_is_reported_once_per_process() {
+        let mut p = process_with_streamed_assets();
+        for _ in 0..3 {
+            assert_ne!(watcher(&mut p, 1, 0x51), INVALID_HANDLE);
+        }
+        let warning_count = p
+            .stderr
+            .split(|byte| *byte == b'\n')
+            .filter(|line| line.starts_with(b"[coverage] kernel32!FindFirstChangeNotificationW"))
+            .count();
+        assert_eq!(warning_count, 1);
     }
 
     #[test]

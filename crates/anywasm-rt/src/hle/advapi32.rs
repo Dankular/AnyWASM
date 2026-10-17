@@ -87,6 +87,8 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "CryptDeriveKey" => Some(crypt_derive_key),
         "CryptEncrypt" => Some(crypt_encrypt),
         "CryptDecrypt" => Some(crypt_decrypt),
+        "CryptImportKey" => Some(crypt_import_key),
+        "CryptVerifySignatureA" => Some(crypt_verify_signature_a),
         "CryptDestroyKey" => Some(crypt_destroy_key),
         "CryptDestroyHash" => Some(crypt_destroy_hash),
         "CryptGenRandom" => Some(crypt_gen_random),
@@ -94,6 +96,10 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "SystemFunction036" => Some(system_function_036),
         "AllocateAndInitializeSid" => Some(allocate_and_initialize_sid),
         "BuildTrusteeWithSidW" => Some(build_trustee_with_sid_w),
+        "GetEffectiveRightsFromAclW" => Some(get_effective_rights_from_acl_w),
+        "SetEntriesInAclW" => Some(set_entries_in_acl_w),
+        "SetNamedSecurityInfoW" => Some(set_named_security_info_w),
+        "GetNamedSecurityInfoW" => Some(get_named_security_info_w),
         "CopySid" => Some(copy_sid),
         "FreeSid" => Some(free_sid),
         "GetLengthSid" => Some(get_length_sid),
@@ -657,6 +663,325 @@ fn build_trustee_with_sid_w(process: &mut Process) -> Result<u64, Stop> {
     Ok(0)
 }
 
+const ERROR_INVALID_ACL: u32 = 1336;
+const ERROR_INVALID_SID: u32 = 1337;
+const ACL_REVISION: u8 = 2;
+const ACL_REVISION_DS: u8 = 4;
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+const SYSTEM_AUDIT_ACE_TYPE: u8 = 2;
+const SYSTEM_ALARM_ACE_TYPE: u8 = 3;
+const INHERITED_ACE: u8 = 0x10;
+
+#[derive(Clone)]
+struct ParsedAcl {
+    revision: u8,
+    aces: Vec<Vec<u8>>,
+}
+
+fn read_acl(process: &Process, acl: u64) -> Result<Option<ParsedAcl>, Stop> {
+    if acl == 0 {
+        return Ok(None);
+    }
+    let revision = process.rd8(acl)?;
+    let size = process.rd16(acl + 2)? as usize;
+    let count = process.rd16(acl + 4)? as usize;
+    if !matches!(revision, ACL_REVISION | ACL_REVISION_DS) || size < 8 || size % 4 != 0 {
+        return Ok(None);
+    }
+    let bytes = process.read_bytes(acl, size)?;
+    let mut cursor = 8usize;
+    let mut aces = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cursor + 4 > bytes.len() {
+            return Ok(None);
+        }
+        let ace_size = u16::from_le_bytes([bytes[cursor + 2], bytes[cursor + 3]]) as usize;
+        if ace_size < 4
+            || ace_size % 4 != 0
+            || cursor
+                .checked_add(ace_size)
+                .is_none_or(|end| end > bytes.len())
+        {
+            return Ok(None);
+        }
+        aces.push(bytes[cursor..cursor + ace_size].to_vec());
+        cursor += ace_size;
+    }
+    Ok(Some(ParsedAcl { revision, aces }))
+}
+
+fn trustee_sid(process: &Process, trustee: u64) -> Result<Result<Vec<u8>, u32>, Stop> {
+    if trustee == 0 {
+        return Ok(Err(ERROR_INVALID_PARAMETER));
+    }
+    let pointer_size = if process.cpu.mode == anywasm_cpu::cpu::CpuMode::X86_32 {
+        4u64
+    } else {
+        8u64
+    };
+    let multiple = process.rdptr(trustee)?;
+    let form = process.rd32(trustee + pointer_size + 4)?;
+    let sid_ptr = process.rdptr(trustee + if pointer_size == 4 { 16 } else { 24 })?;
+    if multiple != 0 || form != 0 {
+        return Ok(Err(ERROR_NOT_SUPPORTED));
+    }
+    let Some(length) = sid_length(process, sid_ptr)? else {
+        return Ok(Err(ERROR_INVALID_SID));
+    };
+    Ok(Ok(process.read_bytes(sid_ptr, length)?))
+}
+
+fn ace_sid(ace: &[u8]) -> Option<&[u8]> {
+    if ace.len() < 16 {
+        return None;
+    }
+    let sid_length = 8usize.checked_add(ace[9] as usize * 4)?;
+    let end = 8usize.checked_add(sid_length)?;
+    if ace[8] != SID_REVISION || ace[9] > SID_MAX_SUB_AUTHORITIES || end > ace.len() {
+        return None;
+    }
+    Some(&ace[8..end])
+}
+
+fn get_effective_rights_from_acl_w(process: &mut Process) -> Result<u64, Stop> {
+    let (acl, trustee, rights_out) = (process.arg(0), process.arg(1), process.arg(2));
+    if rights_out == 0 {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    process.wr32(rights_out, 0)?;
+    let sid = match trustee_sid(process, trustee)? {
+        Ok(sid) => sid,
+        Err(error) => return Ok(error as u64),
+    };
+    let Some(acl) = read_acl(process, acl)? else {
+        return Ok(ERROR_INVALID_ACL as u64);
+    };
+
+    let mut rights = 0u32;
+    let mut denied = 0u32;
+    for ace in &acl.aces {
+        match ace[0] {
+            ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE => {
+                let Some(ace_sid) = ace_sid(ace) else {
+                    return Ok(ERROR_INVALID_ACL as u64);
+                };
+                if ace[0] == ACCESS_DENIED_ACE_TYPE && ace[1] & INHERITED_ACE != 0 {
+                    return Ok(ERROR_INVALID_ACL as u64);
+                }
+                // The host has no group-membership database. Do not claim complete effective
+                // rights when a different SID could represent a group containing this trustee.
+                if ace_sid != sid.as_slice() {
+                    return Ok(ERROR_NOT_SUPPORTED as u64);
+                }
+                let mask = u32::from_le_bytes([ace[4], ace[5], ace[6], ace[7]]);
+                if ace[0] == ACCESS_DENIED_ACE_TYPE {
+                    denied |= mask;
+                } else {
+                    rights |= mask;
+                }
+            }
+            SYSTEM_AUDIT_ACE_TYPE | SYSTEM_ALARM_ACE_TYPE => {}
+            _ => return Ok(ERROR_NOT_SUPPORTED as u64),
+        }
+    }
+    rights &= !denied;
+    process.wr32(rights_out, rights)?;
+    Ok(0)
+}
+
+fn make_access_ace(ace_type: u8, flags: u8, access_mask: u32, sid: &[u8]) -> Vec<u8> {
+    let size = 8 + sid.len();
+    let mut ace = Vec::with_capacity(size);
+    ace.extend_from_slice(&[ace_type, flags]);
+    ace.extend_from_slice(&(size as u16).to_le_bytes());
+    ace.extend_from_slice(&access_mask.to_le_bytes());
+    ace.extend_from_slice(sid);
+    ace
+}
+
+fn allocate_acl(process: &mut Process, acl: &ParsedAcl, output: u64) -> Result<u64, Stop> {
+    let Some(size) = acl
+        .aces
+        .iter()
+        .try_fold(8usize, |size, ace| size.checked_add(ace.len()))
+    else {
+        return Ok(ERROR_NOT_ENOUGH_MEMORY as u64);
+    };
+    if size > u16::MAX as usize || acl.aces.len() > u16::MAX as usize {
+        return Ok(ERROR_NOT_ENOUGH_MEMORY as u64);
+    }
+    let mut bytes = Vec::with_capacity(size);
+    bytes.extend_from_slice(&[acl.revision, 0]);
+    bytes.extend_from_slice(&(size as u16).to_le_bytes());
+    bytes.extend_from_slice(&(acl.aces.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&[0, 0]);
+    for ace in &acl.aces {
+        bytes.extend_from_slice(ace);
+    }
+    let mut mapped = Vec::new();
+    let Some(address) = process.heap.alloc(size as u64, &mut |base, length| {
+        mapped.push((base, length));
+        true
+    }) else {
+        return Ok(ERROR_NOT_ENOUGH_MEMORY as u64);
+    };
+    for (base, length) in mapped {
+        if !process.mem.map(base, length, anywasm_cpu::mem::PROT_RW) {
+            process.heap.free(address);
+            return Ok(ERROR_NOT_ENOUGH_MEMORY as u64);
+        }
+    }
+    if let Err(error) = process.write_bytes(address, &bytes) {
+        process.heap.free(address);
+        return Err(error);
+    }
+    if let Err(error) = process.wrptr(output, address) {
+        process.heap.free(address);
+        return Err(error);
+    }
+    Ok(0)
+}
+
+fn set_entries_in_acl_w(process: &mut Process) -> Result<u64, Stop> {
+    const GRANT_ACCESS: u32 = 1;
+    const SET_ACCESS: u32 = 2;
+    const DENY_ACCESS: u32 = 3;
+    const REVOKE_ACCESS: u32 = 4;
+    const INHERITANCE_MASK: u32 = 0x0f;
+    let (entry_count, entries, old_acl_ptr, new_acl_out) = (
+        process.arg(0) as u32 as usize,
+        process.arg(1),
+        process.arg(2),
+        process.arg(3),
+    );
+    if new_acl_out == 0 {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    process.wrptr(new_acl_out, 0)?;
+    if entry_count > 4096 || (entry_count != 0 && entries == 0) {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    let mut acl = if old_acl_ptr == 0 {
+        ParsedAcl {
+            revision: ACL_REVISION,
+            aces: Vec::new(),
+        }
+    } else {
+        let Some(acl) = read_acl(process, old_acl_ptr)? else {
+            return Ok(ERROR_INVALID_ACL as u64);
+        };
+        acl
+    };
+    let pointer_size = if process.cpu.mode == anywasm_cpu::cpu::CpuMode::X86_32 {
+        4u64
+    } else {
+        8u64
+    };
+    let trustee_offset = if pointer_size == 4 { 12u64 } else { 16u64 };
+    let entry_size = if pointer_size == 4 { 32u64 } else { 48u64 };
+    for index in 0..entry_count {
+        let entry = entries + index as u64 * entry_size;
+        let mask = process.rd32(entry)?;
+        let mode = process.rd32(entry + 4)?;
+        let inheritance = process.rd32(entry + 8)?;
+        if inheritance & !INHERITANCE_MASK != 0 {
+            return Ok(ERROR_INVALID_PARAMETER as u64);
+        }
+        let sid = match trustee_sid(process, entry + trustee_offset)? {
+            Ok(sid) => sid,
+            Err(error) => return Ok(error as u64),
+        };
+        if !valid_sid_bytes(&sid) {
+            return Ok(ERROR_INVALID_SID as u64);
+        }
+        if !matches!(
+            mode,
+            GRANT_ACCESS | SET_ACCESS | DENY_ACCESS | REVOKE_ACCESS
+        ) {
+            return Ok(ERROR_NOT_SUPPORTED as u64);
+        }
+        if matches!(mode, SET_ACCESS | REVOKE_ACCESS) {
+            acl.aces.retain(|ace| {
+                if ace[0] != ACCESS_ALLOWED_ACE_TYPE && ace[0] != ACCESS_DENIED_ACE_TYPE {
+                    return true;
+                }
+                if ace[1] & INHERITED_ACE != 0 {
+                    return true;
+                }
+                ace_sid(ace) != Some(sid.as_slice())
+            });
+        }
+        if mode == REVOKE_ACCESS {
+            continue;
+        }
+        let ace_type = if mode == DENY_ACCESS {
+            ACCESS_DENIED_ACE_TYPE
+        } else {
+            ACCESS_ALLOWED_ACE_TYPE
+        };
+        let new_ace = make_access_ace(ace_type, inheritance as u8, mask, &sid);
+        let insertion = if ace_type == ACCESS_DENIED_ACE_TYPE {
+            acl.aces
+                .iter()
+                .position(|ace| ace[1] & INHERITED_ACE != 0 || ace[0] == ACCESS_ALLOWED_ACE_TYPE)
+                .unwrap_or(acl.aces.len())
+        } else {
+            acl.aces
+                .iter()
+                .position(|ace| ace[1] & INHERITED_ACE != 0)
+                .unwrap_or(acl.aces.len())
+        };
+        acl.aces.insert(insertion, new_ace);
+    }
+    allocate_acl(process, &acl, new_acl_out)
+}
+
+fn named_security_info_args_valid(
+    process: &Process,
+    name: u64,
+    object_type: u64,
+) -> Result<bool, Stop> {
+    if name == 0 || !(1..=12).contains(&(object_type as u32)) {
+        return Ok(false);
+    }
+    process.read_wstr(name)?;
+    Ok(true)
+}
+
+fn set_named_security_info_w(process: &mut Process) -> Result<u64, Stop> {
+    let (name, object_type, security_info) =
+        (process.arg(0), process.arg(1), process.arg(2) as u32);
+    if security_info == 0 || !named_security_info_args_valid(process, name, object_type)? {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    // The virtual filesystem and registry do not yet carry Windows security descriptors, so
+    // report the missing backing model instead of pretending an ACL was applied.
+    Ok(ERROR_NOT_SUPPORTED as u64)
+}
+
+fn get_named_security_info_w(process: &mut Process) -> Result<u64, Stop> {
+    let (name, object_type, security_info) =
+        (process.arg(0), process.arg(1), process.arg(2) as u32);
+    if security_info == 0 || !named_security_info_args_valid(process, name, object_type)? {
+        return Ok(ERROR_INVALID_PARAMETER as u64);
+    }
+    for output in [
+        process.arg(3),
+        process.arg(4),
+        process.arg(5),
+        process.arg(6),
+        process.arg(7),
+    ] {
+        if output != 0 {
+            process.wrptr(output, 0)?;
+        }
+    }
+    // The guest has no security-descriptor object model. Null outputs and an explicit error keep
+    // callers from treating an empty descriptor as a successful query.
+    Ok(ERROR_NOT_SUPPORTED as u64)
+}
+
 fn crypt_acquire_context_a(process: &mut Process) -> Result<u64, Stop> {
     const ERROR_INVALID_PARAMETER: u32 = 87;
     const NTE_BAD_FLAGS: u32 = 0x8009_0009;
@@ -989,6 +1314,148 @@ fn crypt_encrypt(process: &mut Process) -> Result<u64, Stop> {
 
 fn crypt_decrypt(process: &mut Process) -> Result<u64, Stop> {
     crypt_rc4(process, false)
+}
+
+fn crypt_import_key(process: &mut Process) -> Result<u64, Stop> {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const NTE_BAD_UID: u32 = 0x8009_0001;
+    const NTE_BAD_KEY: u32 = 0x8009_0003;
+    const NTE_BAD_LEN: u32 = 0x8009_0004;
+    const NTE_BAD_DATA: u32 = 0x8009_0005;
+    const NTE_BAD_FLAGS: u32 = 0x8009_0009;
+    const NTE_BAD_ALGID: u32 = 0x8009_0008;
+    const NTE_BAD_TYPE: u32 = 0x8009_000a;
+    const NTE_BAD_VER: u32 = 0x8009_0007;
+    const PLAINTEXTKEYBLOB: u8 = 8;
+    const PUBLICKEYBLOB: u8 = 6;
+    const CUR_BLOB_VERSION: u8 = 2;
+    const CALG_RC4: u32 = 0x0000_6801;
+    const CALG_RSA_SIGN: u32 = 0x0000_2400;
+    const CALG_RSA_KEYX: u32 = 0x0000_a400;
+    const CRYPT_EXPORTABLE: u32 = 0x0000_0001;
+    const PROV_RSA_FULL: u32 = 1;
+
+    let (provider, blob, blob_length, public_key, flags, key_out) = (
+        process.arg(0),
+        process.arg(1),
+        process.arg(2) as u32 as usize,
+        process.arg(3),
+        process.arg(4) as u32,
+        process.arg(5),
+    );
+    if key_out == 0 {
+        process.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    process.wrptr(key_out, 0)?;
+    let Some(provider_state) = process.crypto_providers.get(&provider) else {
+        process.set_last_error(NTE_BAD_UID);
+        return Ok(0);
+    };
+    if provider_state.provider_type != PROV_RSA_FULL {
+        process.set_last_error(NTE_BAD_UID);
+        return Ok(0);
+    }
+    if public_key != 0 {
+        process.set_last_error(NTE_BAD_KEY);
+        return Ok(0);
+    }
+    if flags & !CRYPT_EXPORTABLE != 0 {
+        process.set_last_error(NTE_BAD_FLAGS);
+        return Ok(0);
+    }
+    if blob == 0 || blob_length < 12 {
+        process.set_last_error(NTE_BAD_LEN);
+        return Ok(0);
+    }
+    let header = process.read_bytes(blob, 12)?;
+    if header[1] != CUR_BLOB_VERSION {
+        process.set_last_error(NTE_BAD_VER);
+        return Ok(0);
+    }
+    if header[2] != 0 || header[3] != 0 {
+        process.set_last_error(NTE_BAD_DATA);
+        return Ok(0);
+    }
+    let algorithm = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    if header[0] == PUBLICKEYBLOB && matches!(algorithm, CALG_RSA_SIGN | CALG_RSA_KEYX) {
+        // TS3W supplies a PUBLICKEYBLOB for RSA signature verification. The current provider
+        // state contains only RC4 keys; report that unsupported algorithm instead of creating
+        // a dummy handle that would make the subsequent verification appear to succeed.
+        process.set_last_error(NTE_BAD_ALGID);
+        return Ok(0);
+    }
+    if header[0] != PLAINTEXTKEYBLOB {
+        process.set_last_error(NTE_BAD_TYPE);
+        return Ok(0);
+    }
+    if algorithm != CALG_RC4 {
+        process.set_last_error(NTE_BAD_ALGID);
+        return Ok(0);
+    }
+    let key_length = u32::from_le_bytes([header[8], header[9], header[10], header[11]]) as usize;
+    if key_length < 5 || key_length > 7 || key_length.checked_add(12) != Some(blob_length) {
+        process.set_last_error(NTE_BAD_LEN);
+        return Ok(0);
+    }
+    let key_material = process.read_bytes(blob + 12, key_length)?;
+    let Some(rc4) = Rc4State::new(&key_material) else {
+        process.set_last_error(NTE_BAD_LEN);
+        return Ok(0);
+    };
+    let handle = process.new_crypto_key(CryptoKeyState {
+        provider,
+        algorithm,
+        key_material,
+        exportable: flags & CRYPT_EXPORTABLE != 0,
+        rc4: Some(rc4),
+    });
+    if let Err(stop) = process.wrptr(key_out, handle) {
+        process.crypto_keys.remove(&handle);
+        return Err(stop);
+    }
+    Ok(1)
+}
+
+fn crypt_verify_signature_a(process: &mut Process) -> Result<u64, Stop> {
+    const NTE_BAD_HASH: u32 = 0x8009_0002;
+    const NTE_BAD_KEY: u32 = 0x8009_0003;
+    const NTE_BAD_FLAGS: u32 = 0x8009_0009;
+    const NTE_BAD_ALGID: u32 = 0x8009_0008;
+    const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
+
+    let (hash, signature, signature_length, public_key, description, flags) = (
+        process.arg(0),
+        process.arg(1),
+        process.arg(2) as u32 as usize,
+        process.arg(3),
+        process.arg(4),
+        process.arg(5) as u32,
+    );
+    let Some(hash_state) = process.crypto_hashes.get(&hash) else {
+        process.set_last_error(NTE_BAD_HASH);
+        return Ok(0);
+    };
+    let Some(key_state) = process.crypto_keys.get(&public_key) else {
+        process.set_last_error(NTE_BAD_KEY);
+        return Ok(0);
+    };
+    if key_state.provider != hash_state.provider {
+        process.set_last_error(NTE_BAD_KEY);
+        return Ok(0);
+    }
+    if flags != 0 || description != 0 {
+        process.set_last_error(NTE_BAD_FLAGS);
+        return Ok(0);
+    }
+    if signature_length == 0 || signature == 0 {
+        process.set_last_error(NTE_BAD_SIGNATURE);
+        return Ok(0);
+    }
+    // The current CryptoAPI model has no RSA/public-key state, so an RC4 session key cannot
+    // verify signatures. Keep the hash unfinalized and report the unsupported algorithm.
+    process.set_last_error(NTE_BAD_ALGID);
+    Ok(0)
 }
 
 fn crypt_rc4(process: &mut Process, encrypt: bool) -> Result<u64, Stop> {
@@ -3298,5 +3765,230 @@ mod tests {
         let decrypt = lookup("CryptDecrypt").expect("CryptDecrypt should translate RC4");
         assert_eq!(decrypt(&mut process), Ok(1));
         assert_eq!(process.read_bytes(data, 9), Ok(b"Plaintext".to_vec()));
+    }
+
+    fn test_sid() -> [u8; 12] {
+        [1, 1, 0, 0, 0, 0, 0, 5, 0xe9, 3, 0, 0]
+    }
+
+    fn write_test_trustee(process: &mut Process, trustee: u64, sid: u64) {
+        process.wr32(trustee, 0).unwrap();
+        process.wr32(trustee + 4, 0).unwrap();
+        process.wr32(trustee + 8, 0).unwrap(); // TRUSTEE_IS_SID
+        process.wr32(trustee + 12, 0).unwrap();
+        process.wr32(trustee + 16, sid as u32).unwrap();
+    }
+
+    #[test]
+    fn set_entries_builds_a_real_sid_acl_and_effective_rights_reads_it() {
+        let mut process = registry_x86_call(&[]);
+        let sid_address = BASE + 0x100;
+        let trustee = BASE + 0x120;
+        let entry = BASE + 0x180;
+        let output = BASE + 0x1e0;
+        process.write_bytes(sid_address, &test_sid()).unwrap();
+        write_test_trustee(&mut process, trustee, sid_address);
+        process.wr32(entry, 0x0012_3456).unwrap();
+        process.wr32(entry + 4, 1).unwrap(); // GRANT_ACCESS
+        process.wr32(entry + 8, 0).unwrap();
+        let trustee_bytes = process.read_bytes(trustee, 20).unwrap();
+        process.write_bytes(entry + 12, &trustee_bytes).unwrap();
+        let entry2 = entry + 32;
+        process.wr32(entry2, 0x8).unwrap();
+        process.wr32(entry2 + 4, 1).unwrap();
+        process.wr32(entry2 + 8, 0).unwrap();
+        process.write_bytes(entry2 + 12, &trustee_bytes).unwrap();
+
+        set_registry_x86_args(&mut process, &[2, entry as u32, 0, output as u32]);
+        let set_entries = lookup("SetEntriesInAclW").expect("SetEntriesInAclW should be mapped");
+        assert_eq!(set_entries(&mut process), Ok(0));
+        let acl = process.rd32(output).unwrap() as u64;
+        assert_ne!(acl, 0);
+        assert_eq!(process.rd8(acl), Ok(2));
+        assert_eq!(process.rd16(acl + 2), Ok(48));
+        assert_eq!(process.rd16(acl + 4), Ok(2));
+
+        let rights = BASE + 0x240;
+        set_registry_x86_args(&mut process, &[acl as u32, trustee as u32, rights as u32]);
+        let get_rights = lookup("GetEffectiveRightsFromAclW")
+            .expect("GetEffectiveRightsFromAclW should be mapped");
+        assert_eq!(get_rights(&mut process), Ok(0));
+        assert_eq!(process.rd32(rights), Ok(0x0012_345e));
+    }
+
+    #[test]
+    fn get_effective_rights_exposes_unknown_group_membership_and_inherited_deny() {
+        let mut process = registry_x86_call(&[]);
+        let trustee_sid = BASE + 0x100;
+        let other_sid = BASE + 0x120;
+        let trustee = BASE + 0x140;
+        let acl = BASE + 0x180;
+        let rights = BASE + 0x240;
+        process.write_bytes(trustee_sid, &test_sid()).unwrap();
+        let mut second_sid = test_sid();
+        second_sid[8] = 0xea;
+        process.write_bytes(other_sid, &second_sid).unwrap();
+        write_test_trustee(&mut process, trustee, trustee_sid);
+        let other_ace = super::make_access_ace(0, 0, 1, &second_sid);
+        let mut acl_bytes = vec![2, 0, 28, 0, 1, 0, 0, 0];
+        acl_bytes.extend_from_slice(&other_ace);
+        process.write_bytes(acl, &acl_bytes).unwrap();
+        set_registry_x86_args(&mut process, &[acl as u32, trustee as u32, rights as u32]);
+        let get_rights = lookup("GetEffectiveRightsFromAclW").unwrap();
+        assert_eq!(get_rights(&mut process), Ok(50));
+
+        let inherited_allow = super::make_access_ace(0, 0x10, 1, &test_sid());
+        let mut acl_bytes = vec![2, 0, 28, 0, 1, 0, 0, 0];
+        acl_bytes.extend_from_slice(&inherited_allow);
+        process.write_bytes(acl, &acl_bytes).unwrap();
+        assert_eq!(get_rights(&mut process), Ok(0));
+        assert_eq!(process.rd32(rights), Ok(1));
+
+        let inherited_deny = super::make_access_ace(1, 0x10, 1, &test_sid());
+        let mut acl_bytes = vec![2, 0, 28, 0, 1, 0, 0, 0];
+        acl_bytes.extend_from_slice(&inherited_deny);
+        process.write_bytes(acl, &acl_bytes).unwrap();
+        assert_eq!(get_rights(&mut process), Ok(1336));
+    }
+
+    #[test]
+    fn set_entries_orders_deny_access_and_revokes_matching_explicit_aces() {
+        let mut process = registry_x86_call(&[]);
+        let sid_address = BASE + 0x100;
+        let trustee = BASE + 0x120;
+        let entry = BASE + 0x180;
+        let acl_out = BASE + 0x1c0;
+        let rights = BASE + 0x240;
+        process.write_bytes(sid_address, &test_sid()).unwrap();
+        write_test_trustee(&mut process, trustee, sid_address);
+        let trustee_bytes = process.read_bytes(trustee, 20).unwrap();
+        process.wr32(entry, 3).unwrap();
+        process.wr32(entry + 4, 3).unwrap(); // DENY_ACCESS
+        process.wr32(entry + 8, 0).unwrap();
+        process.write_bytes(entry + 12, &trustee_bytes).unwrap();
+
+        let set_entries = lookup("SetEntriesInAclW").unwrap();
+        set_registry_x86_args(&mut process, &[1, entry as u32, 0, acl_out as u32]);
+        assert_eq!(set_entries(&mut process), Ok(0));
+        let deny_acl = process.rd32(acl_out).unwrap();
+
+        process.wr32(entry, 7).unwrap();
+        process.wr32(entry + 4, 1).unwrap(); // GRANT_ACCESS
+        set_registry_x86_args(&mut process, &[1, entry as u32, deny_acl, acl_out as u32]);
+        assert_eq!(set_entries(&mut process), Ok(0));
+        let combined_acl = process.rd32(acl_out).unwrap();
+        set_registry_x86_args(&mut process, &[combined_acl, trustee as u32, rights as u32]);
+        let get_rights = lookup("GetEffectiveRightsFromAclW").unwrap();
+        assert_eq!(get_rights(&mut process), Ok(0));
+        assert_eq!(process.rd32(rights), Ok(4));
+
+        process.wr32(entry + 4, 4).unwrap(); // REVOKE_ACCESS
+        set_registry_x86_args(
+            &mut process,
+            &[1, entry as u32, combined_acl, acl_out as u32],
+        );
+        assert_eq!(set_entries(&mut process), Ok(0));
+        let revoked_acl = process.rd32(acl_out).unwrap();
+        assert_eq!(process.rd16(revoked_acl as u64 + 4), Ok(0));
+    }
+
+    #[test]
+    fn named_security_info_returns_explicit_unsupported_status_and_null_outputs() {
+        let mut process = registry_x86_call(&[]);
+        let name = BASE + 0x100;
+        let owner = BASE + 0x180;
+        let descriptor = BASE + 0x190;
+        process.write_wstr(name, "C:\\unsupported.txt").unwrap();
+        for output in [owner, descriptor] {
+            process.wr32(output, 0xdead_beef).unwrap();
+        }
+        set_registry_x86_args(
+            &mut process,
+            &[name as u32, 1, 4, owner as u32, 0, 0, 0, descriptor as u32],
+        );
+        let get_security = lookup("GetNamedSecurityInfoW").unwrap();
+        assert_eq!(get_security(&mut process), Ok(50));
+        assert_eq!(process.rd32(owner), Ok(0));
+        assert_eq!(process.rd32(descriptor), Ok(0));
+
+        set_registry_x86_args(&mut process, &[name as u32, 1, 4, 0, 0, 0, 0]);
+        let set_security = lookup("SetNamedSecurityInfoW").unwrap();
+        assert_eq!(set_security(&mut process), Ok(50));
+    }
+
+    #[test]
+    fn crypt_import_key_imports_plaintext_rc4_blob_and_verify_does_not_fake_success() {
+        let mut process = registry_x86_call(&[]);
+        assert!(process.mem.map(TEB_ADDR, PAGE_SIZE, PROT_RW));
+        let provider = process.new_crypto_provider(CryptoProviderState {
+            provider_type: 1,
+            provider_name: "Microsoft Base Cryptographic Provider v1.0".into(),
+            container: None,
+            flags: 0xf000_0040,
+        });
+        let blob = BASE + 0x100;
+        let key_out = BASE + 0x180;
+        let mut plaintext_blob = vec![8, 2, 0, 0];
+        plaintext_blob.extend_from_slice(&0x6801u32.to_le_bytes());
+        plaintext_blob.extend_from_slice(&5u32.to_le_bytes());
+        plaintext_blob.extend_from_slice(b"Key42");
+        process.write_bytes(blob, &plaintext_blob).unwrap();
+        set_registry_x86_args(
+            &mut process,
+            &[
+                provider as u32,
+                blob as u32,
+                plaintext_blob.len() as u32,
+                0,
+                1,
+                key_out as u32,
+            ],
+        );
+        let import_key = lookup("CryptImportKey").expect("CryptImportKey should be mapped");
+        assert_eq!(import_key(&mut process), Ok(1));
+        let key = process.rd32(key_out).unwrap() as u64;
+        assert_eq!(process.crypto_keys[&key].key_material, b"Key42");
+        assert!(process.crypto_keys[&key].exportable);
+
+        let rsa_blob = BASE + 0x300;
+        let mut rsa_public_blob = vec![6, 2, 0, 0];
+        rsa_public_blob.extend_from_slice(&0x2400u32.to_le_bytes());
+        rsa_public_blob.extend_from_slice(&0x3141_5352u32.to_le_bytes()); // RSA1
+        rsa_public_blob.extend_from_slice(&512u32.to_le_bytes());
+        rsa_public_blob.extend_from_slice(&65537u32.to_le_bytes());
+        rsa_public_blob.extend_from_slice(&[0xa5; 64]);
+        process.write_bytes(rsa_blob, &rsa_public_blob).unwrap();
+        process.wr32(key_out, u32::MAX).unwrap();
+        set_registry_x86_args(
+            &mut process,
+            &[
+                provider as u32,
+                rsa_blob as u32,
+                rsa_public_blob.len() as u32,
+                0,
+                0,
+                key_out as u32,
+            ],
+        );
+        assert_eq!(import_key(&mut process), Ok(0));
+        assert_eq!(process.rd32(key_out), Ok(0));
+        assert_eq!(process.rd32(TEB_ADDR + 0x34), Ok(0x8009_0008));
+
+        let hash = process.new_crypto_hash(CryptoHashState {
+            provider,
+            algorithm: 0x8003,
+            data: b"payload".to_vec(),
+            finalized: false,
+        });
+        let signature = BASE + 0x200;
+        process.write_bytes(signature, &[0x55; 5]).unwrap();
+        set_registry_x86_args(
+            &mut process,
+            &[hash as u32, signature as u32, 5, key as u32, 0, 0],
+        );
+        let verify = lookup("CryptVerifySignatureA").expect("CryptVerifySignatureA should map");
+        assert_eq!(verify(&mut process), Ok(0));
+        assert_eq!(process.rd32(TEB_ADDR + 0x34), Ok(0x8009_0008));
+        assert!(!process.crypto_hashes[&hash].finalized);
     }
 }

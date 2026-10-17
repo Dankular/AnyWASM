@@ -30,7 +30,7 @@ function decodeBase64(value, label) {
 
 export function encodeHostRegistrySnapshot(snapshot) {
   if (snapshot?.available !== true || !Array.isArray(snapshot.keys) || snapshot.keys.length === 0 || snapshot.keys.length > 4096) {
-    throw new Error('host Sims registry snapshot is unavailable or has an invalid key list');
+    throw new Error('host registry snapshot is unavailable or has an invalid key list');
   }
   const chunks = [signature];
   const header = new Uint8Array(4);
@@ -39,7 +39,7 @@ export function encodeHostRegistrySnapshot(snapshot) {
   let totalBytes = 12;
   const push = (bytes) => {
     totalBytes += bytes.length;
-    if (totalBytes > 32 * 1024 * 1024) throw new Error('host Sims registry snapshot exceeds 32 MiB');
+    if (totalBytes > 32 * 1024 * 1024) throw new Error('host registry snapshot exceeds 32 MiB');
     chunks.push(bytes);
   };
   const pushU32 = (value, label) => {

@@ -459,7 +459,7 @@ pub extern "C" fn aw_set_host_system_parameters(
     0
 }
 
-/// Install a scoped, read-only Windows Sims registry snapshot after process load.
+/// Install a scoped, read-only snapshot of allowlisted Windows registry keys after process load.
 /// Returns 0 on success; invalid snapshots leave the process registry unchanged.
 ///
 /// # Safety

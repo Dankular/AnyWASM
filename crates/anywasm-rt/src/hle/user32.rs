@@ -422,6 +422,13 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         },
         "SetWindowPlacement" => set_window_placement,
         "UpdateWindow" => update_window,
+        "DialogBoxParamA" => dialog_box_param_a_unimplemented,
+        "EndDialog" => end_dialog,
+        "CreateIconIndirect" => create_icon_indirect_unimplemented,
+        "CreateIconFromResource" => create_icon_from_resource_unimplemented,
+        "RegisterDeviceNotificationA" => register_device_notification_a_unimplemented,
+        "WaitForInputIdle" => wait_for_input_idle_unimplemented,
+        "FillRect" => fill_rect_unimplemented,
         "RegisterDeviceNotificationW" => register_device_notification_unimplemented,
         "UnregisterDeviceNotification" => |p| Ok(p.handles.remove(&p.arg(0)).is_some() as u64),
         "EnumDisplayDevicesW" => enum_display_devices_w,
@@ -706,6 +713,206 @@ fn message_box_w_unimplemented(p: &mut Process) -> R {
     Err(Stop::Unimplemented {
         dll: "user32".into(),
         name: format!("MessageBoxW interactive dialog (type={flags:#x})"),
+    })
+}
+
+fn pointer_sized_minus_one(p: &Process) -> u64 {
+    if p.cpu.mode == CpuMode::X86_32 {
+        u32::MAX as u64
+    } else {
+        u64::MAX
+    }
+}
+
+fn dialog_box_param_a_unimplemented(p: &mut Process) -> R {
+    let (template, parent, dialog_proc) = (p.arg(1), p.arg(2), p.arg(3));
+    if template == 0 || dialog_proc == 0 {
+        p.set_last_error(87); // ERROR_INVALID_PARAMETER
+        return Ok(pointer_sized_minus_one(p));
+    }
+    if parent != 0 && parent != HWND_DESKTOP && !p.extra.win.windows.contains_key(&parent) {
+        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(pointer_sized_minus_one(p));
+    }
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!(
+            "DialogBoxParamA template={template:#x} callback={dialog_proc:#x}; dialog templates and modal message loops are not translated"
+        ),
+    })
+}
+
+fn end_dialog(p: &mut Process) -> R {
+    let dialog = p.arg(0);
+    if !p.extra.win.windows.contains_key(&dialog) {
+        p.set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(0);
+    }
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!("EndDialog hwnd={dialog:#x}; the runtime has no active modal dialog state"),
+    })
+}
+
+fn create_icon_indirect_unimplemented(p: &mut Process) -> R {
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    let info = p.arg(0);
+    if info == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+
+    // ICONINFO contains three 32-bit scalar fields followed by two handles.
+    // The handles are pointer-aligned in the 64-bit ABI.
+    let handle_offset = if p.cpu.mode == CpuMode::X86_32 {
+        12
+    } else {
+        16
+    };
+    let mask = p.rdptr(info + handle_offset)?;
+    let color =
+        p.rdptr(info + handle_offset + if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 })?;
+    if mask == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    for bitmap in [mask, color].into_iter().filter(|&handle| handle != 0) {
+        if !matches!(p.handles.get(&bitmap), Some(Handle::Other)) {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            return Ok(0);
+        }
+    }
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!(
+            "CreateIconIndirect mask={mask:#x} color={color:#x}; GDI bitmap pixels are not connected to the USER32 icon model"
+        ),
+    })
+}
+
+fn create_icon_from_resource_unimplemented(p: &mut Process) -> R {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    let (bits, size, version) = (p.arg(0), p.arg(1) as u32, p.arg(3) as u32);
+    if bits == 0 || size == 0 || !(0x0002_0000..=0x0003_0000).contains(&version) {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    // Confirm the guest buffer is readable before failing closed on the unsupported image decode.
+    let _ = p.read_bytes(bits, 1)?;
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!(
+            "CreateIconFromResource bytes={size} icon={} version={version:#x}; icon/cursor resource decoding is not translated",
+            p.arg(2) != 0
+        ),
+    })
+}
+
+fn register_device_notification_a_unimplemented(p: &mut Process) -> R {
+    const DEVICE_NOTIFY_SERVICE_HANDLE: u32 = 0x0000_0001;
+    const DEVICE_NOTIFY_ALL_INTERFACE_CLASSES: u32 = 0x0000_0004;
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    let (recipient, filter, flags) = (p.arg(0), p.arg(1), p.arg(2) as u32);
+    if filter == 0
+        || flags & !(DEVICE_NOTIFY_SERVICE_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES) != 0
+    {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    let filter_size = p.rd32(filter)?;
+    let device_type = p.rd32(filter + 4)?;
+    let reserved = p.rd32(filter + 8)?;
+    let handle_size = if p.cpu.mode == CpuMode::X86_32 { 4 } else { 8 };
+    let minimum_size = match device_type {
+        5 => 29, // header + class GUID + one ANSI terminator byte
+        6 => {
+            (if p.cpu.mode == CpuMode::X86_32 { 12 } else { 16 })
+            + handle_size
+            + 16 // class GUID
+            + 4 // name offset
+            + 1
+        } // device-specific payload
+        _ => 0,
+    };
+    if filter_size < minimum_size || reserved != 0 || minimum_size == 0 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if flags & DEVICE_NOTIFY_ALL_INTERFACE_CLASSES != 0 && device_type != 5 {
+        p.set_last_error(ERROR_INVALID_PARAMETER);
+        return Ok(0);
+    }
+    if flags & DEVICE_NOTIFY_SERVICE_HANDLE != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: "RegisterDeviceNotificationA service recipient; service control handles are not modeled".into(),
+        });
+    }
+    if !p.extra.win.windows.contains_key(&recipient) {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(0);
+    }
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!(
+            "RegisterDeviceNotificationA hwnd={recipient:#x} filter_type={device_type}; device arrival/removal broadcasts are not modeled"
+        ),
+    })
+}
+
+fn wait_for_input_idle_unimplemented(p: &mut Process) -> R {
+    const WAIT_FAILED: u32 = u32::MAX;
+    const ERROR_INVALID_HANDLE: u32 = 6;
+    let process = p.arg(0);
+    let is_current_process_pseudo = process == u32::MAX as u64 || process == u64::MAX;
+    let is_process_handle = matches!(p.handles.get(&process), Some(Handle::Process { .. }));
+    if !is_current_process_pseudo && !is_process_handle {
+        p.set_last_error(ERROR_INVALID_HANDLE);
+        return Ok(WAIT_FAILED as u64);
+    }
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!(
+            "WaitForInputIdle process={process:#x} timeout={}ms; process message-queue idle state is not observable",
+            p.arg(1) as u32
+        ),
+    })
+}
+
+fn fill_rect_unimplemented(p: &mut Process) -> R {
+    let (hdc, rect_ptr, brush) = (p.arg(0), p.arg(1), p.arg(2));
+    if rect_ptr == 0 || brush == 0 {
+        return Ok(0);
+    }
+    let rect = read_rect(p, rect_ptr)?;
+    let is_window_dc = p
+        .extra
+        .win
+        .device_context_refs
+        .keys()
+        .any(|&(_, handle)| handle == hdc)
+        || p.extra
+            .win
+            .paint_windows
+            .iter()
+            .any(|&hwnd| hdc == 0x7000_0000 + hwnd);
+    if !is_window_dc && !matches!(p.handles.get(&hdc), Some(Handle::Other)) {
+        return Ok(0);
+    }
+    let is_color_brush = (1..=31).contains(&brush);
+    if !is_color_brush && !matches!(p.handles.get(&brush), Some(Handle::Other)) {
+        return Ok(0);
+    }
+    Err(Stop::Unimplemented {
+        dll: "user32".into(),
+        name: format!(
+            "FillRect hdc={hdc:#x} rect=({},{},{},{}) brush={brush:#x}; the runtime has no translated GDI raster target",
+            rect.0, rect.1, rect.2, rect.3
+        ),
     })
 }
 
@@ -4041,7 +4248,7 @@ mod tests {
     use anywasm_cpu::mem::PROT_RWX;
 
     #[test]
-    fn target_imported_user32_apis_resolve_only_when_the_runtime_has_a_state_model() {
+    fn target_imported_user32_apis_have_explicit_runtime_coverage() {
         for name in [
             "GetTopWindow",
             "FindWindowA",
@@ -4057,10 +4264,6 @@ mod tests {
             "CloseClipboard",
             "ChangeClipboardChain",
             "GetWindowThreadProcessId",
-        ] {
-            assert!(lookup(name).is_some(), "{name} should be translated");
-        }
-        for name in [
             "DialogBoxParamA",
             "EndDialog",
             "CreateIconIndirect",
@@ -4069,11 +4272,177 @@ mod tests {
             "WaitForInputIdle",
             "FillRect",
         ] {
-            assert!(
-                lookup(name).is_none(),
-                "{name} must remain exposed as untranslated"
-            );
+            assert!(lookup(name).is_some(), "{name} should be translated");
         }
+    }
+
+    #[test]
+    fn sims_user32_imports_have_exact_x86_stdcall_stack_cleanup() {
+        for (name, bytes) in [
+            ("DialogBoxParamA", 20),
+            ("EndDialog", 8),
+            ("CreateIconIndirect", 4),
+            ("CreateIconFromResource", 16),
+            ("RegisterDeviceNotificationA", 12),
+            ("WaitForInputIdle", 8),
+            ("FillRect", 12),
+        ] {
+            assert_eq!(
+                crate::x86_abi_generated::cleanup_bytes("user32", name),
+                Some(bytes),
+                "{name} x86 ABI"
+            );
+            assert!(lookup(name).is_some(), "{name} dispatch");
+        }
+    }
+
+    #[test]
+    fn modal_dialog_apis_fail_explicitly_until_modal_dialogs_are_modeled() {
+        const PARENT: u64 = HWND_BASE + 0x40;
+        let mut p = test_process_with_args(&[]);
+        p.extra.win.windows.insert(PARENT, test_window(true, 0));
+
+        set_args(&mut p, &[0x400000, 10, PARENT as u32, 0x1234, 0x55]);
+        assert!(matches!(
+            lookup("DialogBoxParamA").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("DialogBoxParamA") && name.contains("callback=0x1234")
+        ));
+
+        set_args(&mut p, &[PARENT as u32, 1]);
+        assert!(matches!(
+            lookup("EndDialog").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("EndDialog") && name.contains("no active modal dialog")
+        ));
+    }
+
+    #[test]
+    fn icon_creation_validates_parameters_and_fails_closed_for_untranslated_images() {
+        const INFO: u64 = 0x0003_5000;
+        const BITS: u64 = 0x0003_6000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(INFO, 0x1000, PROT_RW));
+        assert!(p.mem.map(BITS, 0x1000, PROT_RW));
+
+        set_args(&mut p, &[0]);
+        assert_eq!(lookup("CreateIconIndirect").unwrap()(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        // ICONINFO on x86: fIcon, xHotspot, yHotspot, hbmMask, hbmColor.
+        p.handles.insert(0x1111, Handle::Other);
+        p.handles.insert(0x2222, Handle::Other);
+        p.wr32(INFO, 1).unwrap();
+        p.wr32(INFO + 4, 0).unwrap();
+        p.wr32(INFO + 8, 0).unwrap();
+        p.wr32(INFO + 12, 0x1111).unwrap();
+        p.wr32(INFO + 16, 0x2222).unwrap();
+        set_args(&mut p, &[INFO as u32]);
+        assert!(matches!(
+            lookup("CreateIconIndirect").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("CreateIconIndirect") && name.contains("GDI bitmap pixels")
+        ));
+
+        set_args(&mut p, &[BITS as u32, 1, 1, 0x0001ffff]);
+        assert_eq!(lookup("CreateIconFromResource").unwrap()(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        p.wr8(BITS, 0).unwrap();
+        set_args(&mut p, &[BITS as u32, 1, 1, 0x00030000]);
+        assert!(matches!(
+            lookup("CreateIconFromResource").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("CreateIconFromResource") && name.contains("resource decoding")
+        ));
+    }
+
+    #[test]
+    fn device_notification_registration_validates_filters_and_exposes_missing_device_delivery() {
+        const WINDOW: u64 = HWND_BASE + 0x50;
+        const FILTER: u64 = 0x0003_7000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(FILTER, 0x1000, PROT_RW));
+        p.extra.win.windows.insert(WINDOW, test_window(true, 0));
+
+        p.wr32(FILTER, 29).unwrap();
+        p.wr32(FILTER + 4, 5).unwrap(); // DBT_DEVTYP_DEVICEINTERFACE
+        p.wr32(FILTER + 8, 0).unwrap();
+        set_args(&mut p, &[WINDOW as u32, FILTER as u32, 0x80]);
+        assert_eq!(
+            lookup("RegisterDeviceNotificationA").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        p.wr32(FILTER + 4, 2).unwrap(); // Volume filters are not registrable.
+        set_args(&mut p, &[WINDOW as u32, FILTER as u32, 0]);
+        assert_eq!(
+            lookup("RegisterDeviceNotificationA").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        p.wr32(FILTER + 4, 5).unwrap();
+        p.wr32(FILTER, 12).unwrap();
+        set_args(&mut p, &[WINDOW as u32, FILTER as u32, 0]);
+        assert_eq!(
+            lookup("RegisterDeviceNotificationA").unwrap()(&mut p),
+            Ok(0)
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        p.wr32(FILTER, 29).unwrap();
+        set_args(&mut p, &[WINDOW as u32, FILTER as u32, 4]);
+        assert!(matches!(
+            lookup("RegisterDeviceNotificationA").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("RegisterDeviceNotificationA") && name.contains("device arrival/removal")
+        ));
+    }
+
+    #[test]
+    fn wait_for_input_idle_rejects_bad_handles_and_stops_for_unobservable_process_state() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+
+        set_args(&mut p, &[0x1234, 0]);
+        assert_eq!(
+            lookup("WaitForInputIdle").unwrap()(&mut p),
+            Ok(u32::MAX as u64)
+        );
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 6);
+
+        let process = p.new_handle(Handle::Process {
+            id: 999,
+            inheritable: false,
+        });
+        set_args(&mut p, &[process as u32, 5000]);
+        assert!(matches!(
+            lookup("WaitForInputIdle").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("WaitForInputIdle") && name.contains("idle state is not observable")
+        ));
+    }
+
+    #[test]
+    fn fill_rect_does_not_report_success_without_a_gdi_raster_target() {
+        const WINDOW: u64 = HWND_BASE + 0x60;
+        const RECT: u64 = 0x0003_8000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(RECT, 0x1000, PROT_RW));
+        p.extra.win.windows.insert(WINDOW, test_window(true, 0));
+        let hdc = call(&mut p, "GetDC", &[WINDOW as u32]);
+        write_rect(&mut p, RECT, 3, 5, 20, 30).unwrap();
+
+        set_args(&mut p, &[hdc as u32, RECT as u32, 6]); // COLOR_WINDOW + 1
+        assert!(matches!(
+            lookup("FillRect").unwrap()(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("FillRect") && name.contains("no translated GDI raster target")
+        ));
     }
 
     #[test]
