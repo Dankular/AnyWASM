@@ -445,6 +445,8 @@ pub extern "C" fn aw_set_host_system_parameters(
     mouse_trails: u32,
     mouse_sonar: u32,
     wheel_scroll_lines: u32,
+    sticky_keys_flags: u32,
+    sticky_keys_available: u32,
 ) -> i32 {
     let Some(s) = state() else { return 1 };
     if !s.loaded {
@@ -455,6 +457,8 @@ pub extern "C" fn aw_set_host_system_parameters(
     s.p.system_parameters.mouse_trails = Some(mouse_trails);
     s.p.system_parameters.mouse_sonar = Some(mouse_sonar != 0);
     s.p.system_parameters.wheel_scroll_lines = Some(wheel_scroll_lines);
+    s.p.system_parameters.sticky_keys_flags =
+        (sticky_keys_available != 0).then_some(sticky_keys_flags);
     s.message.clear();
     0
 }
@@ -487,6 +491,195 @@ pub unsafe extern "C" fn aw_set_host_registry_snapshot(ptr: *const u8, len: usiz
             1
         }
     }
+}
+
+/// Load the browser's durable virtual HKCU registry values before guest execution.
+/// Returns 0 on success; malformed or out-of-scope profile data is rejected.
+///
+/// # Safety
+/// `ptr` must reference `len` readable bytes allocated by `aw_alloc`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_set_user_profile_registry_snapshot(ptr: *const u8, len: usize) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if !s.loaded {
+        s.message = b"user profile snapshot arrived before process load completed".to_vec();
+        return 1;
+    }
+    if ptr.is_null() || len == 0 || len > 32 * 1024 * 1024 {
+        s.message = b"user profile snapshot has an invalid buffer".to_vec();
+        return 1;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    match anywasm_rt::registry::load_user_profile_snapshot(&mut s.p, bytes) {
+        Ok(()) => {
+            s.message.clear();
+            0
+        }
+        Err(error) => {
+            s.message = format!("user profile snapshot rejected: {error}").into_bytes();
+            1
+        }
+    }
+}
+
+/// Enable durable writes to the virtual HKCU overlay after the host has opened its profile store.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn aw_enable_user_profile_persistence() -> i32 {
+    let Some(s) = state() else { return 1 };
+    if !s.loaded {
+        s.message = b"user profile storage was enabled before process load completed".to_vec();
+        return 1;
+    }
+    s.p.user_profile_persistence_enabled = true;
+    s.message.clear();
+    0
+}
+
+/// Number of virtual HKCU changes made since the last user-profile snapshot was loaded.
+#[no_mangle]
+pub extern "C" fn aw_user_profile_registry_generation() -> u32 {
+    state()
+        .map(|s| s.p.user_profile_registry_generation)
+        .unwrap_or(0)
+}
+
+/// Required byte count for the current virtual HKCU snapshot, or zero if serialization failed.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn aw_user_profile_registry_snapshot_size() -> u32 {
+    let Some(s) = state() else { return 0 };
+    match anywasm_rt::registry::serialize_user_profile_snapshot(&s.p) {
+        Ok(bytes) if bytes.len() <= u32::MAX as usize => bytes.len() as u32,
+        Ok(_) => {
+            s.message = b"user profile snapshot exceeds the ABI size limit".to_vec();
+            0
+        }
+        Err(error) => {
+            s.message = format!("user profile snapshot serialization failed: {error}").into_bytes();
+            0
+        }
+    }
+}
+
+/// Copy the current virtual HKCU snapshot into host memory.
+/// Returns 0 on success; `ptr` must be at least the size returned by the size export.
+///
+/// # Safety
+/// `ptr` must reference `len` writable bytes allocated by `aw_alloc`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_copy_user_profile_registry_snapshot(ptr: *mut u8, len: usize) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if ptr.is_null() || len == 0 || len > 32 * 1024 * 1024 {
+        s.message = b"user profile snapshot destination has an invalid buffer".to_vec();
+        return 1;
+    }
+    let bytes = match anywasm_rt::registry::serialize_user_profile_snapshot(&s.p) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            s.message = format!("user profile snapshot serialization failed: {error}").into_bytes();
+            return 1;
+        }
+    };
+    if bytes.len() != len {
+        s.message = b"user profile snapshot destination has the wrong size".to_vec();
+        return 1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len);
+    s.message.clear();
+    0
+}
+
+/// Load the browser's durable virtual profile filesystem before guest execution.
+/// Returns 0 on success; malformed or out-of-profile paths are rejected.
+///
+/// # Safety
+/// `ptr` must reference `len` readable bytes allocated by `aw_alloc`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_set_user_profile_filesystem_snapshot(
+    ptr: *const u8,
+    len: usize,
+) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if !s.loaded {
+        s.message =
+            b"user profile filesystem snapshot arrived before process load completed".to_vec();
+        return 1;
+    }
+    if ptr.is_null() || len == 0 || len > 512 * 1024 * 1024 {
+        s.message = b"user profile filesystem snapshot has an invalid buffer".to_vec();
+        return 1;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    match s.p.vfs.load_user_profile_snapshot(bytes) {
+        Ok(()) => {
+            s.message.clear();
+            0
+        }
+        Err(error) => {
+            s.message = format!("user profile filesystem snapshot rejected: {error}").into_bytes();
+            1
+        }
+    }
+}
+
+/// Number of virtual user-profile filesystem changes since the last snapshot was loaded.
+#[no_mangle]
+pub extern "C" fn aw_user_profile_filesystem_generation() -> u32 {
+    state()
+        .map(|s| s.p.vfs.user_profile_generation())
+        .unwrap_or(0)
+}
+
+/// Required byte count for the current virtual user-profile filesystem snapshot, or zero on error.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn aw_user_profile_filesystem_snapshot_size() -> u32 {
+    let Some(s) = state() else { return 0 };
+    match s.p.vfs.serialize_user_profile_snapshot() {
+        Ok(bytes) if bytes.len() <= u32::MAX as usize => bytes.len() as u32,
+        Ok(_) => {
+            s.message = b"user profile filesystem snapshot exceeds the ABI size limit".to_vec();
+            0
+        }
+        Err(error) => {
+            s.message = format!("user profile filesystem snapshot serialization failed: {error}")
+                .into_bytes();
+            0
+        }
+    }
+}
+
+/// Copy the current virtual user-profile filesystem snapshot to host memory.
+///
+/// # Safety
+/// `ptr` must reference `len` writable bytes allocated by `aw_alloc`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn aw_copy_user_profile_filesystem_snapshot(ptr: *mut u8, len: usize) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if ptr.is_null() || len == 0 || len > 512 * 1024 * 1024 {
+        s.message = b"user profile filesystem snapshot destination has an invalid buffer".to_vec();
+        return 1;
+    }
+    let bytes = match s.p.vfs.serialize_user_profile_snapshot() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            s.message = format!("user profile filesystem snapshot serialization failed: {error}")
+                .into_bytes();
+            return 1;
+        }
+    };
+    if bytes.len() != len {
+        s.message = b"user profile filesystem snapshot destination has the wrong size".to_vec();
+        return 1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len);
+    s.message.clear();
+    0
 }
 
 /// Current guest instruction pointer for targeted browser diagnostics.

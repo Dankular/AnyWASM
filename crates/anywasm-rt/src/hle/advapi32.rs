@@ -1781,6 +1781,10 @@ fn registry_child_names(process: &Process, path: &str) -> Vec<String> {
     children
 }
 
+fn is_user_profile_key(path: &str) -> bool {
+    path == "hkey_current_user" || path.starts_with("hkey_current_user\\")
+}
+
 fn registry_value_bytes(
     process: &Process,
     path: &str,
@@ -1970,6 +1974,13 @@ fn reg_create_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
     }
     let existed =
         path == base && is_predefined_root(root) || process.registry_paths.contains(&path);
+    if !existed
+        && options == REG_OPTION_NON_VOLATILE
+        && is_user_profile_key(&base)
+        && !process.user_profile_persistence_enabled
+    {
+        return Ok(50); // ERROR_NOT_SUPPORTED: nonvolatile HKCU storage is unavailable.
+    }
     if process.trace_imports {
         process.stderr.extend_from_slice(
             format!(
@@ -1979,6 +1990,7 @@ fn reg_create_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
         );
     }
     let mut parent = base;
+    let mut profile_key_created = false;
     for component in subkey.split('\\').filter(|part| !part.is_empty()) {
         let existed = process
             .registry_paths
@@ -1986,6 +1998,7 @@ fn reg_create_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
         let child_list = process.registry_children.entry(parent.clone()).or_default();
         if !existed {
             child_list.push(component.to_owned());
+            profile_key_created = true;
         }
         parent.push('\\');
         parent.push_str(&component.to_lowercase());
@@ -1995,9 +2008,12 @@ fn reg_create_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
             .registry_key_metadata
             .entry(parent.clone())
             .or_default();
+        if options == REG_OPTION_VOLATILE {
+            process.registry_volatile_paths.insert(parent.clone());
+        }
     }
     let desired_access = process.arg(6) as u32;
-    create_registry_handle(process, path, desired_access, result_ptr)?;
+    create_registry_handle(process, path.clone(), desired_access, result_ptr)?;
     if disposition_ptr != 0 {
         process.wr32(
             disposition_ptr,
@@ -2007,6 +2023,12 @@ fn reg_create_key_ex_a(process: &mut Process) -> Result<u64, Stop> {
                 REG_CREATED_NEW_KEY
             },
         )?;
+    }
+    if profile_key_created
+        && path.starts_with("hkey_current_user\\")
+        && !process.is_registry_volatile_path(&path)
+    {
+        process.mark_user_profile_registry_dirty();
     }
     let _ = class_ptr;
     Ok(ERROR_SUCCESS)
@@ -2046,8 +2068,22 @@ fn reg_create_key_a(process: &mut Process) -> Result<u64, Stop> {
             format!("registry path {base:?} is not represented by the guest registry"),
         ));
     }
+    if is_user_profile_key(&base) && !process.user_profile_persistence_enabled {
+        let mut probe = base.clone();
+        let mut creates_key = false;
+        for component in subkey.split('\\').filter(|part| !part.is_empty()) {
+            probe.push('\\');
+            probe.push_str(&component.to_lowercase());
+            creates_key |= !process.registry_paths.contains(&probe);
+        }
+        if creates_key {
+            return Ok(50); // ERROR_NOT_SUPPORTED: RegCreateKey creates nonvolatile keys.
+        }
+    }
+    let mut profile_key_created = false;
     for component in subkey.split('\\').filter(|part| !part.is_empty()) {
         let next = format!("{}\\{}", base, component.to_lowercase());
+        profile_key_created |= !process.registry_paths.contains(&next);
         process.registry_paths.insert(next.clone());
         process.registry_children.entry(next.clone()).or_default();
         process
@@ -2063,7 +2099,13 @@ fn reg_create_key_a(process: &mut Process) -> Result<u64, Stop> {
         }
         base = next;
     }
-    create_registry_handle(process, path, KEY_ALL_ACCESS, result_ptr)?;
+    create_registry_handle(process, path.clone(), KEY_ALL_ACCESS, result_ptr)?;
+    if profile_key_created
+        && path.starts_with("hkey_current_user\\")
+        && !process.is_registry_volatile_path(&path)
+    {
+        process.mark_user_profile_registry_dirty();
+    }
     Ok(ERROR_SUCCESS)
 }
 
@@ -2096,6 +2138,11 @@ fn reg_set_value_ex_a(process: &mut Process) -> Result<u64, Stop> {
             format!("registry path {path:?} is not represented by the guest registry"),
         ));
     }
+    let persist_profile_value =
+        is_user_profile_key(&path) && !process.is_registry_volatile_path(&path);
+    if persist_profile_value && !process.user_profile_persistence_enabled {
+        return Ok(50); // ERROR_NOT_SUPPORTED: durable virtual HKCU storage is unavailable.
+    }
     let name = if value_name == 0 {
         String::new()
     } else {
@@ -2111,6 +2158,9 @@ fn reg_set_value_ex_a(process: &mut Process) -> Result<u64, Stop> {
         .registry_values
         .insert(value_key.clone(), (value_type, bytes));
     process.registry_host_values.remove(&value_key);
+    if persist_profile_value {
+        process.mark_user_profile_registry_dirty();
+    }
     Ok(ERROR_SUCCESS)
 }
 
@@ -2145,6 +2195,11 @@ fn reg_set_value_ex_w(process: &mut Process) -> Result<u64, Stop> {
             format!("registry path {path:?} is not represented by the guest registry"),
         ));
     }
+    let persist_profile_value =
+        is_user_profile_key(&path) && !process.is_registry_volatile_path(&path);
+    if persist_profile_value && !process.user_profile_persistence_enabled {
+        return Ok(50); // ERROR_NOT_SUPPORTED: durable virtual HKCU storage is unavailable.
+    }
     let name = if value_name == 0 {
         String::new()
     } else {
@@ -2163,6 +2218,9 @@ fn reg_set_value_ex_w(process: &mut Process) -> Result<u64, Stop> {
         process.registry_host_values.insert(value_key);
     } else {
         process.registry_host_values.remove(&value_key);
+    }
+    if persist_profile_value {
+        process.mark_user_profile_registry_dirty();
     }
     Ok(ERROR_SUCCESS)
 }
@@ -2746,6 +2804,7 @@ mod tests {
 
     fn registry_x86_call(args: &[u32]) -> Process {
         let mut process = Process::new(Vfs::new());
+        process.user_profile_persistence_enabled = true;
         assert!(process.mem.map(BASE, PAGE_SIZE, PROT_RW));
         process.cpu.mode = anywasm_cpu::cpu::CpuMode::X86_32;
         let stack = BASE + 0x800;
@@ -3224,6 +3283,41 @@ mod tests {
             .unwrap()
             .iter()
             .any(|name| name == "Settings"));
+    }
+
+    #[test]
+    fn nonvolatile_hkcu_writes_fail_when_profile_storage_is_unavailable() {
+        const HKEY_CURRENT_USER: u32 = 0x8000_0001;
+        let mut process = registry_x86_call(&[]);
+        process.user_profile_persistence_enabled = false;
+        let path = "hkey_current_user\\software\\settings";
+        let key = registry_x86_key(&mut process, path);
+        let value_name = BASE + 0x100;
+        let value_data = BASE + 0x180;
+        process.write_cstr(value_name, "mode").unwrap();
+        process.write_bytes(value_data, b"fast").unwrap();
+        set_registry_x86_args(
+            &mut process,
+            &[key, value_name as u32, 0, 1, value_data as u32, 4],
+        );
+        assert_eq!(lookup("RegSetValueExA").unwrap()(&mut process), Ok(50));
+        assert!(!process
+            .registry_values
+            .contains_key(&(path.to_owned(), "mode".to_owned())));
+
+        let subkey = BASE + 0x200;
+        let output = BASE + 0x280;
+        process
+            .write_cstr(subkey, "Software\\AnyWASM\\New")
+            .unwrap();
+        set_registry_x86_args(
+            &mut process,
+            &[HKEY_CURRENT_USER, subkey as u32, output as u32],
+        );
+        assert_eq!(lookup("RegCreateKeyA").unwrap()(&mut process), Ok(50));
+        assert!(!process
+            .registry_paths
+            .contains("hkey_current_user\\software\\anywasm\\new"));
     }
 
     #[test]

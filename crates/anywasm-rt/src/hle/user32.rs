@@ -24,6 +24,7 @@ pub const WM_CLOSE: u64 = 0x0010;
 pub const WM_QUIT: u64 = 0x0012;
 pub const WM_ERASEBKGND: u64 = 0x0014;
 pub const WM_SHOWWINDOW: u64 = 0x0018;
+pub const WM_SETTINGCHANGE: u64 = 0x001a;
 pub const WM_TIMER: u64 = 0x0113;
 pub const WM_DESTROYCLIPBOARD: u64 = 0x0307;
 pub const WM_DRAWCLIPBOARD: u64 = 0x0308;
@@ -152,14 +153,22 @@ const SWP_FRAMECHANGED: u32 = 0x0020;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const SWP_HIDEWINDOW: u32 = 0x0080;
 const SPI_GETCURSORSHADOW: u32 = 0x101a;
+const SPI_GETSCREENSAVEACTIVE: u32 = 0x0010;
+const SPI_SETSCREENSAVEACTIVE: u32 = 0x0011;
+const SPI_SETLOWPOWERACTIVE: u32 = 0x0055;
+const SPI_SETPOWEROFFACTIVE: u32 = 0x0056;
 const SPI_SETMOUSETRAILS: u32 = 0x005d;
 const SPI_GETMOUSETRAILS: u32 = 0x005e;
 const SPI_GETMOUSESONAR: u32 = 0x101c;
 const SPI_GETWORKAREA: u32 = 0x0030;
+const SPI_GETSTICKYKEYS: u32 = 0x003a;
+const SPI_SETSTICKYKEYS: u32 = 0x003b;
 const SPI_GETWHEELSCROLLLINES: u32 = 0x0068;
 const SPI_SETFOREGROUNDLOCKTIMEOUT: u32 = 0x2001;
 const SPI_SETCURSORSHADOW: u32 = 0x101b;
 const SPI_SETMOUSESONAR: u32 = 0x101d;
+const SPIF_UPDATEINIFILE: u32 = 0x0001;
+const SPIF_SENDCHANGE: u32 = 0x0002;
 
 const TIME_PERIOD_MIN_MS: u32 = 1;
 const TIME_PERIOD_MAX_MS: u32 = 1_000_000;
@@ -926,6 +935,117 @@ fn system_parameters_info_w(p: &mut Process) -> R {
 
 fn system_parameters_info(p: &mut Process, api: &str) -> R {
     let action = p.arg(0) as u32;
+    if matches!(action, SPI_SETLOWPOWERACTIVE | SPI_SETPOWEROFFACTIVE) {
+        // Microsoft documents these legacy screensaver power actions as unsupported on
+        // current Windows. Report the native API failure instead of fabricating a setting change.
+        p.set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+        return Ok(0);
+    }
+    if action == SPI_SETSCREENSAVEACTIVE {
+        if p.arg(2) != 0 {
+            p.set_last_error(87); // ERROR_INVALID_PARAMETER: pvParam must be NULL.
+            return Ok(0);
+        }
+        let flags = p.arg(3) as u32;
+        if flags & !(SPIF_UPDATEINIFILE | SPIF_SENDCHANGE) != 0 {
+            return Err(Stop::Unimplemented {
+                dll: "user32".into(),
+                name: format!(
+                    "{api}(SPI_SETSCREENSAVEACTIVE fWinIni={flags:#x}; unknown notification flags)"
+                ),
+            });
+        }
+        if flags & SPIF_UPDATEINIFILE != 0 && !p.user_profile_persistence_enabled {
+            p.set_last_error(50); // ERROR_NOT_SUPPORTED: the host supplied no durable profile store.
+            return Ok(0);
+        }
+        let active = p.arg(1) != 0;
+        if flags & SPIF_UPDATEINIFILE != 0 {
+            if !write_screen_saver_profile(p, active) {
+                return Ok(0);
+            }
+        }
+        if flags & SPIF_SENDCHANGE != 0 {
+            if !set_screen_saver_active_and_broadcast(p, active, action, "Control Panel\\Desktop")?
+            {
+                return Ok(0);
+            }
+        } else {
+            p.system_parameters.screen_saver_active = active;
+        }
+        return Ok(1);
+    }
+    if action == SPI_GETSCREENSAVEACTIVE {
+        let output = p.arg(2);
+        if output == 0 {
+            p.set_last_error(87); // ERROR_INVALID_PARAMETER
+            return Ok(0);
+        }
+        p.wr32(output, u32::from(p.system_parameters.screen_saver_active))?;
+        return Ok(1);
+    }
+    if action == SPI_GETSTICKYKEYS {
+        const STICKYKEYS_SIZE: u32 = 8;
+        let output = p.arg(2);
+        if output == 0 || p.arg(1) as u32 != STICKYKEYS_SIZE {
+            p.set_last_error(87); // ERROR_INVALID_PARAMETER
+            return Ok(0);
+        }
+        if p.rd32(output)? != STICKYKEYS_SIZE {
+            p.set_last_error(87); // ERROR_INVALID_PARAMETER: cbSize must match STICKYKEYS.
+            return Ok(0);
+        }
+        let Some(flags) = p.system_parameters.sticky_keys_flags else {
+            return Err(Stop::Unimplemented {
+                dll: "user32".into(),
+                name: format!("{api}(SPI_GETSTICKYKEYS host value unavailable)"),
+            });
+        };
+        p.wr32(output + 4, flags)?;
+        return Ok(1);
+    }
+    if action == SPI_SETSTICKYKEYS {
+        const STICKYKEYS_SIZE: u32 = 8;
+        const SKF_STICKYKEYSON: u32 = 0x0000_0001;
+        const SPIF_FLAGS: u32 = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE;
+        // Windows ignores the transient latched and locked modifier flags when setting this
+        // structure. Preserve the current virtual latch state instead of accepting forged state.
+        const IGNORED_STATE_FLAGS: u32 = 0x3f3f_0000;
+        let output = p.arg(2);
+        if output == 0 || p.arg(1) as u32 != STICKYKEYS_SIZE || p.rd32(output)? != STICKYKEYS_SIZE {
+            p.set_last_error(87); // ERROR_INVALID_PARAMETER
+            return Ok(0);
+        }
+        let win_ini = p.arg(3) as u32;
+        if win_ini & !SPIF_FLAGS != 0 {
+            return Err(Stop::Unimplemented {
+                dll: "user32".into(),
+                name: format!("{api}(SPI_SETSTICKYKEYS fWinIni={win_ini:#x}; unknown flags)"),
+            });
+        }
+        if win_ini & SPIF_UPDATEINIFILE != 0 && !p.user_profile_persistence_enabled {
+            p.set_last_error(50); // ERROR_NOT_SUPPORTED: no durable virtual profile is available.
+            return Ok(0);
+        }
+        let requested = p.rd32(output + 4)?;
+        let current = p.system_parameters.sticky_keys_flags.unwrap_or(0);
+        if requested & SKF_STICKYKEYSON != 0 && current & SKF_STICKYKEYSON == 0 {
+            // Enabling StickyKeys changes modifier-key input semantics. Turning it off is fully
+            // translated because ordinary guest keyboard input already has those semantics.
+            p.set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+            return Ok(0);
+        }
+        let flags = (requested & !IGNORED_STATE_FLAGS) | (current & IGNORED_STATE_FLAGS);
+        if win_ini & SPIF_UPDATEINIFILE != 0 && !write_sticky_keys_profile(p, flags) {
+            return Ok(0);
+        }
+        p.system_parameters.sticky_keys_flags = Some(flags);
+        if win_ini & SPIF_SENDCHANGE != 0 && !broadcast_setting_change(p, action, "Accessibility")?
+        {
+            return Ok(0);
+        }
+        return Ok(1);
+    }
     if action == SPI_SETFOREGROUNDLOCKTIMEOUT {
         // This action reads the new timeout through pvParam. GTA SA supplies NULL, which is an
         // invalid request on Win32; return the real failure so startup can continue without
@@ -1056,6 +1176,121 @@ fn system_parameters_info(p: &mut Process, api: &str) -> R {
     };
     p.wr32(output, value)?;
     Ok(1)
+}
+
+fn write_screen_saver_profile(p: &mut Process, active: bool) -> bool {
+    const PROFILE_KEY: &str = "hkey_current_user\\control panel\\desktop";
+    const PROFILE_VALUE: &str = "screensaveactive";
+    const REG_SZ: u32 = 1;
+    if p.registry_host_paths.contains(PROFILE_KEY) {
+        p.set_last_error(5); // ERROR_ACCESS_DENIED: the host supplied a read-only key.
+        return false;
+    }
+
+    let mut parent = String::from("hkey_current_user");
+    p.registry_paths.insert(parent.clone());
+    p.registry_children.entry(parent.clone()).or_default();
+    p.registry_key_metadata.entry(parent.clone()).or_default();
+    for component in ["control panel", "desktop"] {
+        let path = format!("{parent}\\{component}");
+        let children = p.registry_children.entry(parent.clone()).or_default();
+        if !children
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(component))
+        {
+            children.push(component.to_owned());
+        }
+        p.registry_paths.insert(path.clone());
+        p.registry_children.entry(path.clone()).or_default();
+        p.registry_key_metadata.entry(path.clone()).or_default();
+        parent = path;
+    }
+    let value_key = (PROFILE_KEY.to_owned(), PROFILE_VALUE.to_owned());
+    p.registry_values.insert(
+        value_key.clone(),
+        (REG_SZ, vec![if active { b'1' } else { b'0' }, 0]),
+    );
+    p.registry_host_values.remove(&value_key);
+    p.system_parameters.screen_saver_active = active;
+    p.mark_user_profile_registry_dirty();
+    true
+}
+
+fn broadcast_setting_change(p: &mut Process, action: u32, section: &str) -> Result<bool, Stop> {
+    let recipients = p
+        .extra
+        .win
+        .windows
+        .iter()
+        .filter_map(|(&hwnd, window)| (window.style & WS_CHILD == 0).then_some(hwnd))
+        .collect::<Vec<_>>();
+    if recipients.is_empty() {
+        return Ok(true);
+    }
+
+    let Some(section_ptr) = p.try_alloc_virtual(0x1000, PROT_RW) else {
+        p.set_last_error(8); // ERROR_NOT_ENOUGH_MEMORY
+        return Ok(false);
+    };
+    if let Err(error) = p.write_cstr(section_ptr, section) {
+        if let Some((size, _)) = p.vmem.remove(&section_ptr) {
+            p.mem.unmap(section_ptr, size);
+        }
+        return Err(error);
+    }
+
+    let result = recipients.into_iter().try_for_each(|hwnd| {
+        send(p, hwnd, WM_SETTINGCHANGE, action as u64, section_ptr).map(|_| ())
+    });
+    if let Some((size, _)) = p.vmem.remove(&section_ptr) {
+        p.mem.unmap(section_ptr, size);
+    }
+    result?;
+    Ok(true)
+}
+
+fn write_sticky_keys_profile(p: &mut Process, flags: u32) -> bool {
+    const PROFILE_KEY: &str = "hkey_current_user\\control panel\\accessibility\\stickykeys";
+    const REG_SZ: u32 = 1;
+    if p.registry_host_paths.contains(PROFILE_KEY) {
+        p.set_last_error(5); // ERROR_ACCESS_DENIED: host registry data is read-only.
+        return false;
+    }
+    let mut parent = String::from("hkey_current_user");
+    p.registry_paths.insert(parent.clone());
+    p.registry_children.entry(parent.clone()).or_default();
+    p.registry_key_metadata.entry(parent.clone()).or_default();
+    for component in ["control panel", "accessibility", "stickykeys"] {
+        let path = format!("{parent}\\{component}");
+        let children = p.registry_children.entry(parent.clone()).or_default();
+        if !children
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(component))
+        {
+            children.push(component.to_owned());
+        }
+        p.registry_paths.insert(path.clone());
+        p.registry_children.entry(path.clone()).or_default();
+        p.registry_key_metadata.entry(path.clone()).or_default();
+        parent = path;
+    }
+    let value_key = (PROFILE_KEY.to_owned(), "flags".to_owned());
+    let mut data = flags.to_string().into_bytes();
+    data.push(0);
+    p.registry_values.insert(value_key.clone(), (REG_SZ, data));
+    p.registry_host_values.remove(&value_key);
+    p.mark_user_profile_registry_dirty();
+    true
+}
+
+fn set_screen_saver_active_and_broadcast(
+    p: &mut Process,
+    active: bool,
+    action: u32,
+    section: &str,
+) -> Result<bool, Stop> {
+    p.system_parameters.screen_saver_active = active;
+    broadcast_setting_change(p, action, section)
 }
 
 fn root_parent_window(p: &Process, hwnd: u64) -> u64 {
@@ -3892,7 +4127,7 @@ fn def_window_proc(p: &mut Process, h: u64, msg: u64, w: u64, l: u64) -> R {
         }
         // This notification lets the clipboard owner release resources it allocated for
         // delayed rendering. DefWindowProc has no work to perform for the message.
-        WM_DESTROYCLIPBOARD => Ok(0),
+        WM_DESTROYCLIPBOARD | WM_SETTINGCHANGE => Ok(0),
         WM_ERASEBKGND => Ok(1),
         WM_PAINT => {
             if let Some(w) = p.extra.win.windows.get_mut(&h) {
@@ -5313,6 +5548,218 @@ mod tests {
             Err(Stop::Unimplemented { dll, name })
                 if dll == "user32" && name.contains("host value unavailable")
         ));
+    }
+
+    #[test]
+    fn system_parameters_info_reports_legacy_power_actions_as_unsupported() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        let handler = lookup("SystemParametersInfoA").unwrap();
+        for action in [SPI_SETLOWPOWERACTIVE, SPI_SETPOWEROFFACTIVE] {
+            set_args(&mut p, &[action, 0, 0, SPIF_SENDCHANGE]);
+            assert_eq!(handler(&mut p), Ok(0));
+            assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 120); // ERROR_CALL_NOT_IMPLEMENTED
+        }
+    }
+
+    #[test]
+    fn system_parameters_info_get_sticky_keys_returns_host_flags_and_validates_size() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        p.system_parameters.sticky_keys_flags = Some(0x0000_0044);
+        let output = p.alloc_virtual(0x1000, PROT_RW);
+        p.wr32(output, 8).unwrap();
+        let handler = lookup("SystemParametersInfoA").unwrap();
+
+        set_args(&mut p, &[SPI_GETSTICKYKEYS, 8, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(1));
+        assert_eq!(p.rd32(output).unwrap(), 8);
+        assert_eq!(p.rd32(output + 4).unwrap(), 0x0000_0044);
+
+        set_args(&mut p, &[SPI_GETSTICKYKEYS, 4, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87);
+
+        p.system_parameters.sticky_keys_flags = None;
+        set_args(&mut p, &[SPI_GETSTICKYKEYS, 8, output as u32, 0]);
+        assert!(matches!(
+            handler(&mut p),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "user32" && name.contains("host value unavailable")
+        ));
+    }
+
+    #[test]
+    fn system_parameters_info_set_sticky_keys_updates_virtual_flags_and_profile() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        p.user_profile_persistence_enabled = true;
+        p.system_parameters.sticky_keys_flags = Some(0x0000_0002);
+        let output = p.alloc_virtual(0x1000, PROT_RW);
+        p.wr32(output, 8).unwrap();
+        p.wr32(output + 4, 0x0000_0006).unwrap(); // Preserve availability; enable the hotkey.
+        let handler = lookup("SystemParametersInfoA").unwrap();
+
+        set_args(
+            &mut p,
+            &[SPI_SETSTICKYKEYS, 8, output as u32, SPIF_UPDATEINIFILE],
+        );
+        assert_eq!(handler(&mut p), Ok(1));
+        assert_eq!(p.system_parameters.sticky_keys_flags, Some(0x0000_0006));
+        assert_eq!(p.user_profile_registry_generation, 1);
+        let stored = p
+            .registry_values
+            .get(&(
+                "hkey_current_user\\control panel\\accessibility\\stickykeys".into(),
+                "flags".into(),
+            ))
+            .unwrap();
+        assert_eq!(stored.0, 1); // REG_SZ
+        assert_eq!(stored.1, b"6\0");
+
+        set_args(&mut p, &[SPI_GETSTICKYKEYS, 8, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(1));
+        assert_eq!(p.rd32(output + 4).unwrap(), 0x0000_0006);
+    }
+
+    #[test]
+    fn system_parameters_info_set_sticky_keys_requires_storage_for_profile_update() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        p.system_parameters.sticky_keys_flags = Some(2);
+        let output = p.alloc_virtual(0x1000, PROT_RW);
+        p.wr32(output, 8).unwrap();
+        p.wr32(output + 4, 6).unwrap();
+        let handler = lookup("SystemParametersInfoA").unwrap();
+
+        set_args(
+            &mut p,
+            &[SPI_SETSTICKYKEYS, 8, output as u32, SPIF_UPDATEINIFILE],
+        );
+        assert_eq!(handler(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 50); // ERROR_NOT_SUPPORTED
+        assert_eq!(p.system_parameters.sticky_keys_flags, Some(2));
+        assert_eq!(p.user_profile_registry_generation, 0);
+    }
+
+    #[test]
+    fn system_parameters_info_set_sticky_keys_rejects_bad_structure_and_untranslated_input_mode() {
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        p.system_parameters.sticky_keys_flags = Some(2);
+        let output = p.alloc_virtual(0x1000, PROT_RW);
+        p.wr32(output, 4).unwrap();
+        p.wr32(output + 4, 2).unwrap();
+        let handler = lookup("SystemParametersInfoA").unwrap();
+
+        set_args(&mut p, &[SPI_SETSTICKYKEYS, 8, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 87); // ERROR_INVALID_PARAMETER
+
+        p.wr32(output, 8).unwrap();
+        p.wr32(output + 4, 3).unwrap(); // Enabling StickyKeys changes guest modifier semantics.
+        set_args(&mut p, &[SPI_SETSTICKYKEYS, 8, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 120); // ERROR_CALL_NOT_IMPLEMENTED
+        assert_eq!(p.system_parameters.sticky_keys_flags, Some(2));
+
+        // Disabling host-enabled StickyKeys is translated: the guest input path is already
+        // ordinary, non-StickyKeys input, so the virtual state can accurately turn it off.
+        p.system_parameters.sticky_keys_flags = Some(3);
+        p.wr32(output + 4, 0x0000_0100).unwrap(); // SKF_TWOKEYSOFF; StickyKeys disabled.
+        set_args(
+            &mut p,
+            &[SPI_SETSTICKYKEYS, 8, output as u32, SPIF_SENDCHANGE],
+        );
+        assert_eq!(handler(&mut p), Ok(1));
+        assert_eq!(p.system_parameters.sticky_keys_flags, Some(0x0000_0100));
+    }
+
+    #[test]
+    fn system_parameters_info_sets_virtual_screensaver_and_broadcasts_setting_change() {
+        const TOP: u64 = 0x10020;
+        const CHILD: u64 = 0x10030;
+        const WNDPROC: u64 = 0x0040_0000;
+        const CAPTURE: u64 = 0x0040_1000;
+        let mut p = test_process_with_args(&[]);
+        assert!(p.mem.map(WNDPROC, 0x2000, PROT_RWX));
+        assert!(p.mem.map(0x2000_f000, 0x1000, PROT_RW));
+        let mut wndproc = vec![
+            0x8b, 0x44, 0x24, 0x0c, // mov eax, [esp+12] (wParam)
+            0xa3, // mov [CAPTURE], eax
+        ];
+        wndproc.extend_from_slice(&(CAPTURE as u32).to_le_bytes());
+        wndproc.extend_from_slice(&[
+            0x8b, 0x4c, 0x24, 0x10, // mov ecx, [esp+16] (lParam)
+            0x89, 0x0d, // mov [CAPTURE+8], ecx
+        ]);
+        wndproc.extend_from_slice(&((CAPTURE + 8) as u32).to_le_bytes());
+        wndproc.extend_from_slice(&[0x8b, 0x01, 0xa3]); // mov eax, [ecx]; mov [CAPTURE+4], eax
+        wndproc.extend_from_slice(&((CAPTURE + 4) as u32).to_le_bytes());
+        wndproc.extend_from_slice(&[0x31, 0xc0, 0xc2, 0x10, 0x00]); // xor eax,eax; ret 16
+        p.write_bytes(WNDPROC, &wndproc).unwrap();
+
+        let mut top = test_window(true, 0);
+        top.wndproc = WNDPROC;
+        p.extra.win.windows.insert(TOP, top);
+        let mut child = test_window(true, TOP);
+        child.wndproc = WNDPROC;
+        child.style = WS_CHILD;
+        p.extra.win.windows.insert(CHILD, child);
+
+        let handler = lookup("SystemParametersInfoA").unwrap();
+        set_args(&mut p, &[SPI_SETSCREENSAVEACTIVE, 0, 0, SPIF_SENDCHANGE]);
+        assert_eq!(handler(&mut p), Ok(1));
+        assert!(!p.system_parameters.screen_saver_active);
+        assert_eq!(p.rd32(CAPTURE).unwrap(), SPI_SETSCREENSAVEACTIVE);
+        assert_ne!(p.rd32(CAPTURE + 8).unwrap(), 0);
+        assert_eq!(p.rd32(CAPTURE + 4).unwrap(), u32::from_le_bytes(*b"Cont"));
+
+        let output = p.alloc_virtual(0x1000, PROT_RW);
+        set_args(&mut p, &[SPI_GETSCREENSAVEACTIVE, 0, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(1));
+        assert_eq!(p.rd32(output).unwrap(), 0);
+
+        set_args(&mut p, &[SPI_SETSCREENSAVEACTIVE, 1, 0, 0]);
+        assert_eq!(handler(&mut p), Ok(1));
+        set_args(&mut p, &[SPI_GETSCREENSAVEACTIVE, 0, output as u32, 0]);
+        assert_eq!(handler(&mut p), Ok(1));
+        assert_eq!(p.rd32(output).unwrap(), 1);
+
+        p.user_profile_persistence_enabled = true;
+        set_args(&mut p, &[SPI_SETSCREENSAVEACTIVE, 0, 0, SPIF_UPDATEINIFILE]);
+        assert_eq!(handler(&mut p), Ok(1));
+        assert!(!p.system_parameters.screen_saver_active);
+        assert_eq!(p.user_profile_registry_generation, 1);
+        assert_eq!(
+            p.registry_values.get(&(
+                "hkey_current_user\\control panel\\desktop".into(),
+                "screensaveactive".into(),
+            )),
+            Some(&(1, b"0\0".to_vec()))
+        );
+
+        let snapshot = crate::registry::serialize_user_profile_snapshot(&p).unwrap();
+        let mut restored = Process::new(crate::vfs::Vfs::new());
+        crate::registry::load_user_profile_snapshot(&mut restored, &snapshot).unwrap();
+        assert!(!restored.system_parameters.screen_saver_active);
+        assert_eq!(restored.user_profile_registry_generation, 0);
+        assert_eq!(
+            restored.registry_values.get(&(
+                "hkey_current_user\\control panel\\desktop".into(),
+                "screensaveactive".into(),
+            )),
+            Some(&(1, b"0\0".to_vec()))
+        );
+
+        let mut unavailable = test_process_with_args(&[]);
+        unavailable.system_parameters.screen_saver_active = true;
+        set_args(
+            &mut unavailable,
+            &[SPI_SETSCREENSAVEACTIVE, 0, 0, SPIF_UPDATEINIFILE],
+        );
+        assert_eq!(handler(&mut unavailable), Ok(0));
+        assert!(unavailable.system_parameters.screen_saver_active);
     }
 
     #[test]

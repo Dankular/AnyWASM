@@ -18,6 +18,31 @@ const D3DERR_NOTAVAILABLE: u64 = 0x8876_086a;
 const D3DERR_NOTFOUND: u64 = 0x8876_0866;
 const D3DERR_MOREDATA: u64 = 0x8876_0867;
 const D3D9_GAMMA_RAMP_BYTES: usize = 256 * 3 * 2;
+const D3DTS_VIEW: u32 = 2;
+const D3DTS_PROJECTION: u32 = 3;
+const D3DTS_TEXTURE0: u32 = 16;
+const D3DTS_TEXTURE7: u32 = 23;
+const D3DTS_WORLD: u32 = 256;
+const D3DTS_WORLDMATRIX_MAX: u32 = 511;
+
+const IDENTITY_MATRIX: [u32; 16] = [
+    1.0f32.to_bits(),
+    0,
+    0,
+    0,
+    0,
+    1.0f32.to_bits(),
+    0,
+    0,
+    0,
+    0,
+    1.0f32.to_bits(),
+    0,
+    0,
+    0,
+    0,
+    1.0f32.to_bits(),
+];
 
 const IID_D3D9: &str = "81bdcbca-64d4-426d-ae8d-ad0147f4275c";
 const IID_D3D9_DEVICE: &str = "d0223b96-bf7a-43fd-92bd-a43b0d82b9eb";
@@ -375,6 +400,7 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ) => 3,
         ("IDirect3DDevice9", "GetGammaRamp") => 3,
         ("IDirect3DDevice9", "SetGammaRamp") => 4,
+        ("IDirect3DDevice9", "SetTransform" | "GetTransform" | "MultiplyTransform") => 3,
         (
             "IDirect3DDevice9",
             "GetCreationParameters"
@@ -397,10 +423,7 @@ pub fn stdcall_stack_bytes(name: &str) -> Option<u64> {
         ("IDirect3DDevice9", "SetVertexDeclaration" | "GetVertexDeclaration") => 2,
         ("IDirect3DDevice9", "Present") => 5,
         ("IDirect3DDevice9", "Clear") => 7,
-        (
-            "IDirect3DDevice9",
-            "SetRenderTarget" | "SetTexture" | "SetRenderState" | "SetTransform",
-        ) => 3,
+        ("IDirect3DDevice9", "SetRenderTarget" | "SetTexture" | "SetRenderState") => 3,
         ("IDirect3DDevice9", "GetRenderState") => 3,
         (
             "IDirect3DDevice9",
@@ -497,8 +520,10 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "GetCreationParameters") => get_creation_parameters,
         // Device creation always installs one virtual presentation chain.
         ("IDirect3DDevice9", "GetNumberOfSwapChains") => |_| Ok(1),
+        ("IDirect3DDevice9", "EvictManagedResources") => evict_managed_resources,
         ("IDirect3DDevice9", "SetGammaRamp") => set_gamma_ramp,
         ("IDirect3DDevice9", "GetGammaRamp") => get_gamma_ramp,
+        ("IDirect3DDevice9", "Reset") => reset_device,
         ("IDirect3DDevice9", "Present") => present,
         ("IDirect3DDevice9", "GetBackBuffer") => get_backbuffer,
         ("IDirect3DDevice9", "CreateRenderTarget") => create_render_target,
@@ -530,6 +555,9 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DDevice9", "SetIndices") => set_indices,
         ("IDirect3DDevice9", "SetRenderState") => set_render_state,
         ("IDirect3DDevice9", "GetRenderState") => get_render_state,
+        ("IDirect3DDevice9", "SetTransform") => set_transform,
+        ("IDirect3DDevice9", "GetTransform") => get_transform,
+        ("IDirect3DDevice9", "MultiplyTransform") => multiply_transform,
         ("IDirect3DDevice9", "SetVertexShader") => |p| set_shader9(p, true),
         ("IDirect3DDevice9", "SetPixelShader") => |p| set_shader9(p, false),
         ("IDirect3DDevice9", "GetVertexShader") => |p| get_shader9(p, true),
@@ -581,6 +609,22 @@ pub fn method(iface: &str, method: &str) -> Option<HleFn> {
         ("IDirect3DVertexBuffer9" | "IDirect3DIndexBuffer9", "GetDesc") => buffer9_get_desc,
         _ => return None,
     })
+}
+
+fn evict_managed_resources(p: &mut Process) -> R {
+    let device = p.arg(0);
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+
+    // WebGPU exposes no D3DPOOL_MANAGED residency copy to evict. Resource
+    // contents are retained in the runtime's host resource model and WebGPU's
+    // device/driver owns residency, so this D3D9 memory-pressure hint is
+    // completed by delegating residency to that device.
+    Ok(S_OK)
 }
 
 fn direct3d_create9(_p: &mut Process) -> R {
@@ -2700,6 +2744,249 @@ fn present(p: &mut Process) -> R {
     Ok(S_OK)
 }
 
+fn reset_device(p: &mut Process) -> R {
+    let (device, params) = (p.arg(0), p.arg(1));
+    if params == 0 {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let Some((_, swapchain, backbuffer, rtv, _, _, _)) = device_state(p, device) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let Some(com::Kind::SwapChain {
+        id: swapchain_id, ..
+    }) = com::kind_of(p, swapchain)
+    else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    let Some(com::Kind::Texture2D { id: texture_id }) = com::kind_of(p, backbuffer) else {
+        return Ok(D3DERR_INVALIDCALL);
+    };
+
+    // D3DPRESENT_PARAMETERS is the 56-byte x86 structure. Windowed mode permits
+    // D3DFMT_UNKNOWN and zero dimensions; resolve those against hDeviceWindow.
+    let requested_width = p.rd32(params)?;
+    let requested_height = p.rd32(params + 4)?;
+    let requested_format = p.rd32(params + 8)?;
+    let _buffers = p.rd32(params + 12)?.max(1);
+    let multisample_type = p.rd32(params + 16)?;
+    let multisample_quality = p.rd32(params + 20)?;
+    let requested_window = p.rd32(params + 28)? as u64;
+    let windowed = p.rd32(params + 32)? != 0;
+    let auto_depth = p.rd32(params + 36)? != 0;
+    let depth_format = p.rd32(params + 40)?;
+    if multisample_type != 0 || multisample_quality != 0 {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    if auto_depth && !matches!(depth_format, 71 | 75 | 77 | 80) {
+        return Ok(D3DERR_NOTAVAILABLE);
+    }
+    let d3d_format = if requested_format == 0 {
+        if !windowed {
+            return Ok(D3DERR_INVALIDCALL);
+        }
+        22 // the virtual desktop's X8R8G8B8 format
+    } else {
+        requested_format
+    };
+    let Some(format) = dxgi_format(d3d_format) else {
+        return Ok(D3DERR_NOTAVAILABLE);
+    };
+    let existing_window = match com::kind_of(p, device) {
+        Some(com::Kind::Direct3DDevice9 { window, .. }) => window,
+        _ => return Ok(D3DERR_INVALIDCALL),
+    };
+    let window = if requested_window == 0 {
+        existing_window
+    } else {
+        requested_window
+    };
+    let (client_width, client_height) = p
+        .extra
+        .win
+        .windows
+        .get(&window)
+        .map(|w| (w.client_w.max(1) as u32, w.client_h.max(1) as u32))
+        .unwrap_or((640, 480));
+    let width = if requested_width == 0 {
+        if windowed {
+            client_width
+        } else {
+            return Ok(D3DERR_INVALIDCALL);
+        }
+    } else {
+        requested_width
+    };
+    let height = if requested_height == 0 {
+        if windowed {
+            client_height
+        } else {
+            return Ok(D3DERR_INVALIDCALL);
+        }
+    } else {
+        requested_height
+    };
+
+    // Create the replacement managed depth surface before changing the live
+    // device, so unsupported formats do not partially resize its swap chain.
+    let new_depth = if auto_depth {
+        let surface = create_depth_surface(p, device, width, height, depth_format)?;
+        if surface == 0 {
+            return Ok(D3DERR_NOTAVAILABLE);
+        }
+        surface
+    } else {
+        0
+    };
+
+    let Some(resource) = p.extra.com.res.get_mut(&texture_id) else {
+        if new_depth != 0 {
+            com::release_obj(p, new_depth);
+        }
+        return Ok(D3DERR_INVALIDCALL);
+    };
+    resource.width = width;
+    resource.height = height;
+    resource.format = format;
+    p.extra.gpu.emit(
+        op::RESIZE_SWAPCHAIN,
+        Pk::new()
+            .u32(swapchain_id)
+            .u32(texture_id)
+            .u32(width)
+            .u32(height)
+            .u32(format),
+    );
+    p.extra.gpu.emit(op::CLEAR_STATE, Pk::new());
+
+    let old_depth = p.extra.com.d3d9_depth_surfaces.remove(&device).unwrap_or(0);
+    if old_depth != 0 {
+        com::release_obj(p, old_depth);
+    }
+    if let Some(object) = p.extra.com.objs.get_mut(&device) {
+        if let com::Kind::Direct3DDevice9 {
+            current_rtv,
+            window: current_window,
+            width: current_width,
+            height: current_height,
+            fvf,
+            ..
+        } = &mut object.kind
+        {
+            *current_rtv = rtv;
+            *current_window = window;
+            *current_width = width;
+            *current_height = height;
+            *fvf = 0;
+        }
+    }
+
+    // Reset loses the old D3D9 device state. Drop its retained texture and
+    // sampler bindings, then restore the new backbuffer and default viewport.
+    let bound_textures = p
+        .extra
+        .com
+        .d3d9_bound_textures
+        .iter()
+        .filter_map(|(&(bound_device, stage), &texture)| {
+            (bound_device == device).then_some((stage, texture))
+        })
+        .collect::<Vec<_>>();
+    for (stage, texture) in bound_textures {
+        p.extra.com.d3d9_bound_textures.remove(&(device, stage));
+        p.extra
+            .gpu
+            .emit(op::SET_SRVS, Pk::new().u32(0).u32(stage).u32(1).u32(0));
+        com::release_obj(p, texture);
+    }
+    let samplers = p
+        .extra
+        .com
+        .d3d9_sampler_objects
+        .iter()
+        .filter_map(|(&(bound_device, stage), &sampler)| {
+            (bound_device == device).then_some((stage, sampler))
+        })
+        .collect::<Vec<_>>();
+    for (stage, sampler) in samplers {
+        p.extra.com.d3d9_sampler_objects.remove(&(device, stage));
+        p.extra
+            .gpu
+            .emit(op::SET_SAMPLERS, Pk::new().u32(0).u32(stage).u32(1).u32(0));
+        p.extra.gpu.emit(op::RELEASE, Pk::new().u32(sampler));
+    }
+    p.extra
+        .com
+        .d3d9_sampler_states
+        .retain(|(bound_device, _, _), _| *bound_device != device);
+    p.extra
+        .com
+        .d3d9_texture_stage_states
+        .retain(|(bound_device, _, _), _| *bound_device != device);
+    p.extra
+        .com
+        .d3d9_render_states
+        .retain(|(bound_device, _), _| *bound_device != device);
+    p.extra
+        .com
+        .d3d9_transforms
+        .retain(|(bound_device, _), _| *bound_device != device);
+    p.extra.com.d3d9_gamma_ramps.remove(&device);
+    p.extra.com.d3d9_stream0.remove(&device);
+    p.extra.com.d3d9_indices.remove(&device);
+    p.extra.com.d3d9_vertex_declarations.remove(&device);
+    p.extra.com.d3d9_vertex_shaders.remove(&device);
+    p.extra.com.d3d9_pixel_shaders.remove(&device);
+    p.extra.gpu.emit(
+        op::SET_VERTEX_BUFFERS,
+        Pk::new().u32(0).u32(1).u32(0).u32(0).u32(0),
+    );
+    p.extra
+        .gpu
+        .emit(op::SET_INDEX_BUFFER, Pk::new().u32(0).u32(57).u32(0));
+    p.extra.gpu.emit(op::SET_INPUT_LAYOUT, Pk::new().u32(0));
+    p.extra.gpu.emit(op::SET_SHADER, Pk::new().u32(0).u32(0));
+    p.extra.gpu.emit(op::SET_SHADER, Pk::new().u32(1).u32(0));
+
+    let viewport = [0, 0, width, height, 0.0f32.to_bits(), 1.0f32.to_bits()];
+    p.extra.com.d3d9_viewports.insert(device, viewport);
+    p.extra
+        .com
+        .d3d9_scissor_rects
+        .insert(device, [0, 0, width, height]);
+    p.extra.gpu.emit(
+        op::SET_VIEWPORTS,
+        Pk::new()
+            .u32(1)
+            .f32(0.0)
+            .f32(0.0)
+            .f32(width as f32)
+            .f32(height as f32)
+            .f32(0.0)
+            .f32(1.0),
+    );
+    p.extra.gpu.emit(
+        op::SET_SCISSORS,
+        Pk::new()
+            .u32(1)
+            .i32(0)
+            .i32(0)
+            .i32(width as i32)
+            .i32(height as i32),
+    );
+    bind_depth_surface(p, device, new_depth)?;
+    if !windowed {
+        super::user32::set_fullscreen_window(p, window, width, height)?;
+    }
+
+    // Win32 zeroes these input/output fields after a successful Reset.
+    p.wr32(params, 0)?;
+    p.wr32(params + 4, 0)?;
+    p.wr32(params + 8, if windowed { 0 } else { d3d_format })?;
+    p.wr32(params + 12, 0)?;
+    p.wr32(params + 28, window as u32)?;
+    Ok(S_OK)
+}
+
 fn gamma_identity() -> Vec<u8> {
     let mut ramp = Vec::with_capacity(D3D9_GAMMA_RAMP_BYTES);
     for _channel in 0..3 {
@@ -3009,37 +3296,166 @@ fn apply_fvf(p: &mut Process, device: u64, fvf: u32) -> R {
             .copied()
             .unwrap_or(default)
     };
-    p.extra.gpu.emit(
-        op::SET_FIXED_FUNCTION,
-        Pk::new()
-            .u32(fvf)
-            .u32(width)
-            .u32(height)
-            .u32(stage_state(0, 1, 4)) // D3DTSS_COLOROP = D3DTOP_MODULATE
-            .u32(stage_state(0, 2, 2)) // D3DTSS_COLORARG1 = D3DTA_TEXTURE
-            .u32(stage_state(0, 3, 1)) // D3DTSS_COLORARG2 = D3DTA_CURRENT
-            .u32(stage_state(0, 4, 2)) // D3DTSS_ALPHAOP = D3DTOP_SELECTARG1
-            .u32(stage_state(0, 5, 2)) // D3DTSS_ALPHAARG1 = D3DTA_TEXTURE
-            .u32(stage_state(0, 6, 1)) // D3DTSS_ALPHAARG2 = D3DTA_CURRENT
-            .u32(
-                p.extra
-                    .com
-                    .d3d9_render_states
-                    .get(&(device, 60))
-                    .copied()
-                    .unwrap_or(u32::MAX),
-            )
-            .u32(stage_state(0, 26, 1)) // D3DTSS_COLORARG0 = D3DTA_CURRENT
-            .u32(stage_state(0, 27, 1)) // D3DTSS_ALPHAARG0 = D3DTA_CURRENT
-            .u32(stage_state(1, 1, 1)) // stage 1 defaults to D3DTOP_DISABLE
-            .u32(stage_state(1, 26, 1))
-            .u32(stage_state(1, 2, 2))
-            .u32(stage_state(1, 3, 1))
-            .u32(stage_state(1, 4, 1))
-            .u32(stage_state(1, 27, 1))
-            .u32(stage_state(1, 5, 2))
-            .u32(stage_state(1, 6, 1)),
-    );
+    let mut payload = Pk::new()
+        .u32(fvf)
+        .u32(width)
+        .u32(height)
+        .u32(stage_state(0, 1, 4)) // D3DTSS_COLOROP = D3DTOP_MODULATE
+        .u32(stage_state(0, 2, 2)) // D3DTSS_COLORARG1 = D3DTA_TEXTURE
+        .u32(stage_state(0, 3, 1)) // D3DTSS_COLORARG2 = D3DTA_CURRENT
+        .u32(stage_state(0, 4, 2)) // D3DTSS_ALPHAOP = D3DTOP_SELECTARG1
+        .u32(stage_state(0, 5, 2)) // D3DTSS_ALPHAARG1 = D3DTA_TEXTURE
+        .u32(stage_state(0, 6, 1)) // D3DTSS_ALPHAARG2 = D3DTA_CURRENT
+        .u32(
+            p.extra
+                .com
+                .d3d9_render_states
+                .get(&(device, 60))
+                .copied()
+                .unwrap_or(u32::MAX),
+        )
+        .u32(stage_state(0, 26, 1)) // D3DTSS_COLORARG0 = D3DTA_CURRENT
+        .u32(stage_state(0, 27, 1)) // D3DTSS_ALPHAARG0 = D3DTA_CURRENT
+        .u32(stage_state(1, 1, 1)) // stage 1 defaults to D3DTOP_DISABLE
+        .u32(stage_state(1, 26, 1))
+        .u32(stage_state(1, 2, 2))
+        .u32(stage_state(1, 3, 1))
+        .u32(stage_state(1, 4, 1))
+        .u32(stage_state(1, 27, 1))
+        .u32(stage_state(1, 5, 2))
+        .u32(stage_state(1, 6, 1));
+    for word in d3d9_world_view_projection(p, device) {
+        payload = payload.u32(word);
+    }
+    p.extra.gpu.emit(op::SET_FIXED_FUNCTION, payload);
+    Ok(S_OK)
+}
+
+fn valid_transform_state(state: u32) -> bool {
+    matches!(state, D3DTS_VIEW | D3DTS_PROJECTION)
+        || (D3DTS_TEXTURE0..=D3DTS_TEXTURE7).contains(&state)
+        || (D3DTS_WORLD..=D3DTS_WORLDMATRIX_MAX).contains(&state)
+}
+
+fn matrix_for(p: &Process, device: u64, state: u32) -> [u32; 16] {
+    p.extra
+        .com
+        .d3d9_transforms
+        .get(&(device, state))
+        .copied()
+        .unwrap_or(IDENTITY_MATRIX)
+}
+
+fn multiply_d3d_matrices(left: [u32; 16], right: [u32; 16]) -> [u32; 16] {
+    let mut result = [0; 16];
+    for row in 0..4 {
+        for column in 0..4 {
+            let mut value = 0.0f32;
+            for inner in 0..4 {
+                value += f32::from_bits(left[row * 4 + inner])
+                    * f32::from_bits(right[inner * 4 + column]);
+            }
+            result[row * 4 + column] = value.to_bits();
+        }
+    }
+    result
+}
+
+fn d3d9_world_view_projection(p: &Process, device: u64) -> [u32; 16] {
+    let world = matrix_for(p, device, D3DTS_WORLD);
+    let view = matrix_for(p, device, D3DTS_VIEW);
+    let projection = matrix_for(p, device, D3DTS_PROJECTION);
+    multiply_d3d_matrices(multiply_d3d_matrices(world, view), projection)
+}
+
+fn refresh_fixed_function_transform(p: &mut Process, device: u64, state: u32) -> R {
+    if !matches!(
+        state,
+        D3DTS_WORLD..=D3DTS_WORLDMATRIX_MAX | D3DTS_VIEW | D3DTS_PROJECTION
+    ) {
+        return Ok(S_OK);
+    }
+    let vertex_shader = p
+        .extra
+        .com
+        .d3d9_vertex_shaders
+        .get(&device)
+        .copied()
+        .unwrap_or(0);
+    if vertex_shader != 0 {
+        return Ok(S_OK);
+    }
+    let fvf = p
+        .extra
+        .com
+        .objs
+        .get(&device)
+        .and_then(|object| match object.kind {
+            com::Kind::Direct3DDevice9 { fvf, .. } => Some(fvf),
+            _ => None,
+        })
+        .unwrap_or(0);
+    if fvf_stride(fvf).is_some() {
+        apply_fvf(p, device, fvf)?;
+    }
+    Ok(S_OK)
+}
+
+fn set_transform(p: &mut Process) -> R {
+    let (device, state, matrix_ptr) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || !valid_transform_state(state)
+        || matrix_ptr == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let mut matrix = [0; 16];
+    for (index, word) in matrix.iter_mut().enumerate() {
+        *word = p.rd32(matrix_ptr + index as u64 * 4)?;
+    }
+    p.extra.com.d3d9_transforms.insert((device, state), matrix);
+    refresh_fixed_function_transform(p, device, state)?;
+    Ok(S_OK)
+}
+
+fn get_transform(p: &mut Process) -> R {
+    let (device, state, matrix_ptr) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if matrix_ptr == 0 {
+        return Ok(E_POINTER);
+    }
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || !valid_transform_state(state)
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    for (index, word) in matrix_for(p, device, state).into_iter().enumerate() {
+        p.wr32(matrix_ptr + index as u64 * 4, word)?;
+    }
+    Ok(S_OK)
+}
+
+fn multiply_transform(p: &mut Process) -> R {
+    let (device, state, matrix_ptr) = (p.arg(0), p.arg(1) as u32, p.arg(2));
+    if !matches!(
+        com::kind_of(p, device),
+        Some(com::Kind::Direct3DDevice9 { .. })
+    ) || !valid_transform_state(state)
+        || matrix_ptr == 0
+    {
+        return Ok(D3DERR_INVALIDCALL);
+    }
+    let mut matrix = [0; 16];
+    for (index, word) in matrix.iter_mut().enumerate() {
+        *word = p.rd32(matrix_ptr + index as u64 * 4)?;
+    }
+    // Direct3D 9 defines MultiplyTransform as pMatrix * the current state matrix.
+    let product = multiply_d3d_matrices(matrix, matrix_for(p, device, state));
+    p.extra.com.d3d9_transforms.insert((device, state), product);
+    refresh_fixed_function_transform(p, device, state)?;
     Ok(S_OK)
 }
 
@@ -3530,9 +3946,6 @@ mod tests {
         for method_name in [
             "RegisterSoftwareDevice",
             "GetAvailableTextureMem",
-            "EvictManagedResources",
-            "Reset",
-            "SetTransform",
             "SetVertexShaderConstantF",
             "SetPixelShaderConstantF",
             "SetPriority",
@@ -3546,9 +3959,6 @@ mod tests {
             let iface = match method_name {
                 "RegisterSoftwareDevice" => "IDirect3D9",
                 "GetAvailableTextureMem"
-                | "EvictManagedResources"
-                | "Reset"
-                | "SetTransform"
                 | "SetVertexShaderConstantF"
                 | "SetPixelShaderConstantF" => "IDirect3DDevice9",
                 "SetPriority" => "IDirect3DResource9",
@@ -3565,6 +3975,210 @@ mod tests {
                 "{iface}::{method_name} should be visibly unsupported"
             );
         }
+    }
+
+    #[test]
+    fn d3d9_transform_state_roundtrips_multiplies_and_reaches_fixed_function_draws() {
+        const STACK: u64 = 0x10000;
+        const MATRIX: u64 = 0x11000;
+        const OUT: u64 = 0x12000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        assert!(p.mem.map(STACK, PAGE_SIZE * 3, PROT_RW));
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+
+        p.wr32(STACK + 4, device as u32).unwrap();
+        p.wr32(STACK + 8, 0x42).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "SetFVF").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+
+        let mut translation = IDENTITY_MATRIX;
+        translation[12] = 2.0f32.to_bits();
+        for (index, word) in translation.into_iter().enumerate() {
+            p.wr32(MATRIX + index as u64 * 4, word).unwrap();
+        }
+        for (offset, value) in [(4, device as u32), (8, D3DTS_WORLD), (12, MATRIX as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "SetTransform").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+
+        for (offset, value) in [(4, device as u32), (8, D3DTS_WORLD), (12, OUT as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "GetTransform").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        for (index, word) in translation.into_iter().enumerate() {
+            assert_eq!(p.rd32(OUT + index as u64 * 4).unwrap(), word);
+        }
+
+        let mut scale = IDENTITY_MATRIX;
+        scale[0] = 2.0f32.to_bits();
+        for (index, word) in scale.into_iter().enumerate() {
+            p.wr32(MATRIX + index as u64 * 4, word).unwrap();
+        }
+        for (offset, value) in [(4, device as u32), (8, D3DTS_WORLD), (12, MATRIX as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "MultiplyTransform").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        for (offset, value) in [(4, device as u32), (8, D3DTS_WORLD), (12, OUT as u32)] {
+            p.wr32(STACK + offset, value).unwrap();
+        }
+        assert_eq!(
+            method("IDirect3DDevice9", "GetTransform").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        assert_eq!(p.rd32(OUT).unwrap(), 2.0f32.to_bits());
+        assert_eq!(p.rd32(OUT + 12 * 4).unwrap(), 2.0f32.to_bits());
+
+        let (_, payload) = gpu::decode(&p.extra.gpu.buf)
+            .into_iter()
+            .rev()
+            .find(|(opcode, _)| *opcode == op::SET_FIXED_FUNCTION)
+            .expect("transform update should refresh the active fixed-function state");
+        assert_eq!(payload.len(), 144);
+        assert_eq!(
+            u32::from_le_bytes(payload[80..84].try_into().unwrap()),
+            2.0f32.to_bits()
+        );
+        assert_eq!(
+            u32::from_le_bytes(payload[128..132].try_into().unwrap()),
+            2.0f32.to_bits()
+        );
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::SetTransform"),
+            Some(12)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::GetTransform"),
+            Some(12)
+        );
+        assert_eq!(
+            stdcall_stack_bytes("IDirect3DDevice9::MultiplyTransform"),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn device_reset_resizes_swap_chain_recreates_depth_and_zeroes_documented_outputs() {
+        const STACK: u64 = 0x10000;
+        const PARAMS: u64 = 0x11000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        p.cpu.gpr[RSP] = STACK;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        assert!(p.mem.map(PARAMS, PAGE_SIZE, PROT_RW));
+
+        let swapchain = dxgi::make_swap_chain(&mut p, 0, 640, 480, 87, 1);
+        let Some(com::Kind::SwapChain {
+            id: swapchain_id,
+            backbuffer,
+        }) = com::kind_of(&p, swapchain)
+        else {
+            panic!("D3D9 setup needs a translated swap chain");
+        };
+        let rtv = create_backbuffer_view(&mut p, backbuffer).unwrap();
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain,
+                backbuffer,
+                rtv,
+                current_rtv: rtv,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0x42,
+            },
+        );
+        p.extra
+            .com
+            .d3d9_viewports
+            .insert(device, [0, 0, 640, 480, 0.0f32.to_bits(), 1.0f32.to_bits()]);
+        p.extra
+            .com
+            .d3d9_scissor_rects
+            .insert(device, [0, 0, 640, 480]);
+
+        for (offset, value) in [
+            (0, 320),
+            (4, 240),
+            (8, 21), // D3DFMT_A8R8G8B8 -> DXGI_FORMAT_B8G8R8A8_UNORM
+            (12, 1),
+            (16, 0), // no multisampling
+            (20, 0),
+            (24, 1),  // discard swap effect
+            (28, 0),  // use the device's current window
+            (32, 1),  // windowed
+            (36, 1),  // automatic depth stencil
+            (40, 75), // D3DFMT_D24S8
+        ] {
+            p.wr32(PARAMS + offset, value).unwrap();
+        }
+        p.wr32(STACK + 4, device as u32).unwrap();
+        p.wr32(STACK + 8, PARAMS as u32).unwrap();
+
+        assert_eq!(
+            method("IDirect3DDevice9", "Reset").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+        assert_eq!(p.rd32(PARAMS).unwrap(), 0);
+        assert_eq!(p.rd32(PARAMS + 4).unwrap(), 0);
+        assert_eq!(p.rd32(PARAMS + 8).unwrap(), 0);
+        assert_eq!(p.rd32(PARAMS + 12).unwrap(), 0);
+        assert_eq!(
+            device_state(&p, device).unwrap(),
+            (0, swapchain, backbuffer, rtv, 320, 240, rtv as u32)
+        );
+        assert!(p.extra.com.d3d9_depth_surfaces.contains_key(&device));
+        assert_eq!(
+            p.extra.com.d3d9_viewports.get(&device),
+            Some(&[0, 0, 320, 240, 0.0f32.to_bits(), 1.0f32.to_bits()])
+        );
+        let commands = gpu::decode(&p.extra.gpu.buf);
+        assert!(commands.iter().any(|(opcode, payload)| {
+            *opcode == op::RESIZE_SWAPCHAIN
+                && payload
+                    == &Pk::new()
+                        .u32(swapchain_id)
+                        .u32(match com::kind_of(&p, backbuffer).unwrap() {
+                            com::Kind::Texture2D { id } => id,
+                            _ => unreachable!(),
+                        })
+                        .u32(320)
+                        .u32(240)
+                        .u32(87)
+                        .into_bytes()
+        }));
+        assert!(commands
+            .iter()
+            .any(|(opcode, _)| *opcode == op::CLEAR_STATE));
     }
 
     #[test]
@@ -3589,6 +4203,44 @@ mod tests {
         assert_eq!(
             method("IDirect3DBaseTexture9", "GetLOD").unwrap()(&mut p),
             Ok(0)
+        );
+    }
+
+    #[test]
+    fn evict_managed_resources_validates_device_and_delegates_residency_to_webgpu() {
+        const STACK: u64 = 0x10000;
+        let mut p = Process::new(Vfs::new());
+        p.cpu.mode = CpuMode::X86_32;
+        assert!(p.mem.map(STACK, PAGE_SIZE, PROT_RW));
+        let device = com::create(
+            &mut p,
+            "IDirect3DDevice9",
+            com::Kind::Direct3DDevice9 {
+                d3d9: 0,
+                swapchain: 0,
+                backbuffer: 0,
+                rtv: 0,
+                current_rtv: 0,
+                window: 0,
+                width: 640,
+                height: 480,
+                fvf: 0,
+            },
+        );
+        p.cpu.gpr[RSP] = STACK;
+        p.wr32(STACK + 4, device as u32).unwrap();
+
+        // The WebGPU device owns managed-resource residency. D3D9's eviction
+        // request is accepted for a real device; no host residency API exists.
+        assert_eq!(
+            method("IDirect3DDevice9", "EvictManagedResources").unwrap()(&mut p),
+            Ok(S_OK)
+        );
+
+        p.wr32(STACK + 4, 0x1234).unwrap();
+        assert_eq!(
+            method("IDirect3DDevice9", "EvictManagedResources").unwrap()(&mut p),
+            Ok(D3DERR_INVALIDCALL)
         );
     }
 
@@ -4798,8 +5450,8 @@ mod tests {
                 .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
                 .collect::<Vec<_>>();
             assert_eq!(
-                words,
-                [
+                &words[..20],
+                &[
                     0x144,
                     64,
                     64,
@@ -4844,8 +5496,8 @@ mod tests {
                 .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
                 .collect::<Vec<_>>();
             assert_eq!(
-                words,
-                [
+                &words[..20],
+                &[
                     0x144,
                     64,
                     64,
@@ -4889,8 +5541,8 @@ mod tests {
                 .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
                 .collect::<Vec<_>>();
             assert_eq!(
-                words,
-                [
+                &words[..20],
+                &[
                     0x144,
                     64,
                     64,
@@ -4942,8 +5594,8 @@ mod tests {
             .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(
-            words,
-            [
+            &words[..20],
+            &[
                 0x144,
                 64,
                 64,
@@ -5073,8 +5725,8 @@ mod tests {
             .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(
-            words,
-            [
+            &words[..20],
+            &[
                 0x144,
                 64,
                 64,
@@ -5292,13 +5944,14 @@ mod tests {
                 op::RELEASE,
             ]
         );
+        let fixed_function_words = commands[0]
+            .1
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            commands[0]
-                .1
-                .chunks_exact(4)
-                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
-                .collect::<Vec<_>>(),
-            vec![
+            &fixed_function_words[..20],
+            &[
                 0x44,
                 640,
                 480,
@@ -5321,6 +5974,7 @@ mod tests {
                 1,
             ]
         );
+        assert_eq!(&fixed_function_words[20..], &IDENTITY_MATRIX);
         let buffer_id = u32::from_le_bytes(commands[1].1[0..4].try_into().unwrap());
         assert_eq!(
             commands[1]

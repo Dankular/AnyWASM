@@ -37,7 +37,17 @@ function readHostSystemParameters() {
       && Number.isInteger(value.mouseTrails)
       && value.mouseTrails >= 0
       && Number.isInteger(value.wheelScrollLines)
-      && value.wheelScrollLines >= 0) return value;
+      && value.wheelScrollLines >= 0) {
+      const stickyKeysAvailable = value.stickyKeysAvailable === true
+        && Number.isInteger(value.stickyKeysFlags)
+        && value.stickyKeysFlags >= 0
+        && value.stickyKeysFlags <= 0xffff_ffff;
+      return {
+        ...value,
+        stickyKeysAvailable,
+        stickyKeysFlags: stickyKeysAvailable ? value.stickyKeysFlags : 0,
+      };
+    }
     return { available: false, reason: 'Windows returned invalid system parameter values' };
   } catch (error) {
     return { available: false, reason: `could not parse Windows cursor-shadow setting: ${error.message}` };

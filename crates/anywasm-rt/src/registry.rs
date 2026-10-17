@@ -1,9 +1,10 @@
-//! Read-only host registry snapshots used by direct-folder launches.
+//! Read-only host registry snapshots and the durable virtual HKCU profile overlay.
 
 use crate::process::{Process, RegistryKeyMetadata};
 use std::collections::{HashMap, HashSet};
 
 const MAGIC: &[u8; 8] = b"AWREG1\0\0";
+const USER_PROFILE_MAGIC: &[u8; 8] = b"AWUPR1\0\0";
 const MAX_KEYS: usize = 4096;
 const MAX_ITEMS: usize = 65_536;
 const MAX_TEXT: usize = 1 << 20;
@@ -107,6 +108,296 @@ fn normalize_path(path: &str) -> Result<String, String> {
     Ok(path.to_lowercase())
 }
 
+fn is_user_profile_path(path: &str) -> bool {
+    path == "hkey_current_user" || path.starts_with("hkey_current_user\\")
+}
+
+fn is_host_snapshot_path(path: &str) -> bool {
+    HOST_REGISTRY_ROOTS.iter().any(|root| {
+        path == *root
+            || (*root != HOST_SHELL_FOLDERS_REGISTRY_ROOT && path.starts_with(&format!("{root}\\")))
+            || (*root == HOST_SHELL_FOLDERS_REGISTRY_ROOT && path.starts_with(&format!("{root}\\")))
+    })
+}
+
+fn push_text(bytes: &mut Vec<u8>, text: &str) -> Result<(), String> {
+    let length = u32::try_from(text.len())
+        .map_err(|_| "user profile text exceeds the format limit".to_owned())?;
+    if text.len() > MAX_TEXT || text.contains('\0') {
+        return Err("user profile contains an invalid or oversized text field".to_owned());
+    }
+    bytes.extend_from_slice(&length.to_le_bytes());
+    bytes.extend_from_slice(text.as_bytes());
+    Ok(())
+}
+
+/// Installs a validated, writable per-origin HKCU snapshot. The records are kept separate from
+/// host registry keys, which remain read-only and are never written back to browser storage.
+pub fn load_user_profile_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), String> {
+    let mut reader = Reader { bytes, offset: 0 };
+    if reader.take(USER_PROFILE_MAGIC.len())? != USER_PROFILE_MAGIC {
+        return Err("user profile snapshot has an invalid signature".to_owned());
+    }
+    let key_count = reader.u32()? as usize;
+    let value_count = reader.u32()? as usize;
+    if key_count > MAX_KEYS || value_count > MAX_ITEMS {
+        return Err("user profile snapshot has too many registry values".to_owned());
+    }
+    let mut keys = HashSet::with_capacity(key_count);
+    let mut key_paths = Vec::with_capacity(key_count);
+    for _ in 0..key_count {
+        let path = normalize_path(&reader.text()?)?;
+        if path == "hkey_current_user"
+            || !is_user_profile_path(&path)
+            || is_host_snapshot_path(&path)
+            || !keys.insert(path.clone())
+        {
+            return Err(format!(
+                "user profile snapshot contains an invalid or duplicate key: {path}"
+            ));
+        }
+        key_paths.push(path);
+    }
+    for path in &key_paths {
+        let parent = path
+            .rsplit_once('\\')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        if parent != "hkey_current_user" && !keys.contains(parent) {
+            return Err(format!("user profile snapshot omits the parent of {path}"));
+        }
+    }
+    let mut values = Vec::with_capacity(value_count);
+    let mut seen = HashSet::with_capacity(value_count);
+    for _ in 0..value_count {
+        let path = normalize_path(&reader.text()?)?;
+        if !is_user_profile_path(&path)
+            || is_host_snapshot_path(&path)
+            || (path != "hkey_current_user" && !keys.contains(&path))
+        {
+            return Err(format!(
+                "user profile snapshot contains a non-profile key: {path}"
+            ));
+        }
+        let name = reader.text()?.to_lowercase();
+        let key = (path.clone(), name.clone());
+        if !seen.insert(key) {
+            return Err(format!(
+                "user profile snapshot repeats value {name:?} under {path}"
+            ));
+        }
+        let value_type = reader.u32()?;
+        let wide_data = reader.u32()?;
+        if wide_data > 1 || (wide_data != 0 && !matches!(value_type, 1 | 2 | 7)) {
+            return Err("user profile snapshot has an invalid registry string encoding".to_owned());
+        }
+        let data_length = reader.u32()? as usize;
+        if data_length > MAX_VALUE_BYTES {
+            return Err("user profile registry value exceeds the data limit".to_owned());
+        }
+        let data = reader.take(data_length)?.to_vec();
+        if wide_data != 0 && data.len() % 2 != 0 {
+            return Err("user profile contains an odd-length UTF-16 registry string".to_owned());
+        }
+        values.push((path, name, value_type, data, wide_data != 0));
+    }
+    if reader.offset != bytes.len() {
+        return Err("user profile snapshot has trailing bytes".to_owned());
+    }
+
+    // Replace only the writable virtual HKCU overlay. Host snapshot records stay intact.
+    process.registry_values.retain(|(path, _), _| {
+        !is_user_profile_path(path) || process.registry_host_paths.contains(path)
+    });
+    process.registry_host_values.retain(|(path, _)| {
+        !is_user_profile_path(path) || process.registry_host_paths.contains(path)
+    });
+    process.registry_paths.retain(|path| {
+        !is_user_profile_path(path)
+            || process.registry_host_paths.contains(path)
+            || path == "hkey_current_user"
+    });
+    process.registry_children.retain(|path, _| {
+        !is_user_profile_path(path)
+            || process.registry_host_paths.contains(path)
+            || path == "hkey_current_user"
+    });
+    process.registry_key_metadata.retain(|path, _| {
+        !is_user_profile_path(path)
+            || process.registry_host_paths.contains(path)
+            || path == "hkey_current_user"
+    });
+    process
+        .registry_volatile_paths
+        .retain(|path| !is_user_profile_path(path));
+
+    let root = String::from("hkey_current_user");
+    process.registry_paths.insert(root.clone());
+    process.registry_children.entry(root.clone()).or_default();
+    process
+        .registry_key_metadata
+        .entry(root.clone())
+        .or_default();
+    for path in key_paths {
+        let mut parent = root.clone();
+        for component in path
+            .strip_prefix("hkey_current_user\\")
+            .unwrap()
+            .split('\\')
+        {
+            let child_path = format!("{parent}\\{component}");
+            let children = process.registry_children.entry(parent.clone()).or_default();
+            if !children
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(component))
+            {
+                children.push(component.to_owned());
+            }
+            process.registry_paths.insert(child_path.clone());
+            process
+                .registry_children
+                .entry(child_path.clone())
+                .or_default();
+            process
+                .registry_key_metadata
+                .entry(child_path.clone())
+                .or_default();
+            parent = child_path;
+        }
+    }
+    for (path, name, value_type, data, wide_data) in values {
+        let value_key = (path.clone(), name);
+        process
+            .registry_values
+            .insert(value_key.clone(), (value_type, data));
+        if wide_data {
+            process.registry_host_values.insert(value_key);
+        } else {
+            process.registry_host_values.remove(&value_key);
+        }
+    }
+    if let Some((1 | 2, data)) = process.registry_values.get(&(
+        "hkey_current_user\\control panel\\desktop".to_owned(),
+        "screensaveactive".to_owned(),
+    )) {
+        let value = if data.len() >= 4 && data.len() % 2 == 0 {
+            String::from_utf16_lossy(
+                &data
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .take_while(|unit| *unit != 0)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            String::from_utf8_lossy(data.split(|byte| *byte == 0).next().unwrap_or_default())
+                .into_owned()
+        };
+        match value.trim() {
+            "1" | "true" => process.system_parameters.screen_saver_active = true,
+            "0" | "false" => process.system_parameters.screen_saver_active = false,
+            _ => {}
+        }
+    }
+    let sticky_path = "hkey_current_user\\control panel\\accessibility\\stickykeys";
+    let sticky_name = "flags";
+    if let Some((1 | 2, data)) = process
+        .registry_values
+        .get(&(sticky_path.to_owned(), sticky_name.to_owned()))
+    {
+        let key = (sticky_path.to_owned(), sticky_name.to_owned());
+        let value = if process.registry_host_values.contains(&key) {
+            String::from_utf16_lossy(
+                &data
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .take_while(|unit| *unit != 0)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            String::from_utf8_lossy(data.split(|byte| *byte == 0).next().unwrap_or_default())
+                .into_owned()
+        };
+        let parsed = value
+            .trim()
+            .strip_prefix("0x")
+            .or_else(|| value.trim().strip_prefix("0X"))
+            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+            .or_else(|| value.trim().parse::<u32>().ok());
+        if let Some(flags) = parsed {
+            process.system_parameters.sticky_keys_flags = Some(flags);
+        }
+    }
+    process.user_profile_registry_generation = 0;
+    Ok(())
+}
+
+/// Serializes writable virtual HKCU values to the bounded profile storage format.
+pub fn serialize_user_profile_snapshot(process: &Process) -> Result<Vec<u8>, String> {
+    let mut entries = process
+        .registry_values
+        .iter()
+        .filter(|((path, _), _)| {
+            is_user_profile_path(path)
+                && !process.registry_host_paths.contains(path)
+                && !is_host_snapshot_path(path)
+                && !process.is_registry_volatile_path(path)
+        })
+        .map(|((path, name), (value_type, data))| {
+            (
+                path.as_str(),
+                name.as_str(),
+                *value_type,
+                data.as_slice(),
+                process
+                    .registry_host_values
+                    .contains(&(path.clone(), name.clone())),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+    if entries.len() > MAX_ITEMS {
+        return Err("user profile has too many registry values to serialize".to_owned());
+    }
+    let mut keys = process
+        .registry_paths
+        .iter()
+        .filter(|path| {
+            is_user_profile_path(path)
+                && path.as_str() != "hkey_current_user"
+                && !process.registry_host_paths.contains(*path)
+                && !is_host_snapshot_path(path)
+                && !process.is_registry_volatile_path(path)
+        })
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    if keys.len() > MAX_KEYS {
+        return Err("user profile has too many registry keys to serialize".to_owned());
+    }
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(USER_PROFILE_MAGIC);
+    bytes.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for path in keys {
+        push_text(&mut bytes, path)?;
+    }
+    for (path, name, value_type, data, wide_data) in entries {
+        if data.len() > MAX_VALUE_BYTES {
+            return Err("user profile registry value exceeds the data limit".to_owned());
+        }
+        push_text(&mut bytes, path)?;
+        push_text(&mut bytes, name)?;
+        bytes.extend_from_slice(&value_type.to_le_bytes());
+        bytes.extend_from_slice(&u32::from(wide_data).to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(data);
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err("user profile snapshot exceeds 32 MiB".to_owned());
+        }
+    }
+    Ok(bytes)
+}
+
 pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, String> {
     let mut reader = Reader { bytes, offset: 0 };
     if reader.take(MAGIC.len())? != MAGIC {
@@ -190,10 +481,15 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, Strin
 
     let record_paths = by_path.keys().cloned().collect::<HashSet<_>>();
     let root_present = record_paths.contains(SIMS_REGISTRY_ROOT);
-    if !root_present {
+    // Non-Sims launches may receive only the narrowly scoped shared folders
+    // key. Keep the normal Sims snapshot requirements intact and reject every
+    // other partial host snapshot.
+    let shell_folders_only =
+        records.len() == 1 && record_paths.contains(HOST_SHELL_FOLDERS_REGISTRY_ROOT);
+    if !root_present && !shell_folders_only {
         return Err("registry snapshot omits the Sims registration root".to_owned());
     }
-    if !record_paths.contains(EA_SIMS_REGISTRY_ROOT) {
+    if root_present && !record_paths.contains(EA_SIMS_REGISTRY_ROOT) {
         return Err(
             "registry snapshot omits the Electronic Arts Sims registration root".to_owned(),
         );
@@ -292,8 +588,9 @@ pub fn load_host_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_host_registry_path, load_host_snapshot, parse_host_snapshot,
-        HOST_CPU_REGISTRY_ROOT, HOST_SHELL_FOLDERS_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
+        is_allowed_host_registry_path, load_host_snapshot, load_user_profile_snapshot,
+        parse_host_snapshot, serialize_user_profile_snapshot, HOST_CPU_REGISTRY_ROOT,
+        HOST_SHELL_FOLDERS_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
     };
     use crate::{process::Process, vfs::Vfs};
     use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
@@ -305,6 +602,75 @@ mod tests {
     fn text(output: &mut Vec<u8>, value: &str) {
         output.extend_from_slice(&(value.len() as u32).to_le_bytes());
         output.extend_from_slice(value.as_bytes());
+    }
+
+    #[test]
+    fn user_profile_snapshot_roundtrips_values_and_empty_keys_but_omits_volatile_keys() {
+        let mut process = Process::new(Vfs::new());
+        let desktop = "hkey_current_user\\control panel\\desktop".to_owned();
+        let software = "hkey_current_user\\software".to_owned();
+        let empty = "hkey_current_user\\software\\anywasm\\empty".to_owned();
+        let volatile = "hkey_current_user\\volatile settings".to_owned();
+        process.registry_paths.extend([
+            "hkey_current_user".to_owned(),
+            "hkey_current_user\\control panel".to_owned(),
+            desktop.clone(),
+            software.clone(),
+            "hkey_current_user\\software\\anywasm".to_owned(),
+            empty.clone(),
+            volatile.clone(),
+        ]);
+        process.registry_values.insert(
+            (desktop.clone(), "screensaveactive".to_owned()),
+            (1, b"1\0".to_vec()),
+        );
+        let wide_name = (desktop.clone(), "widevalue".to_owned());
+        process.registry_values.insert(
+            wide_name.clone(),
+            (
+                1,
+                "wide\0".encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            ),
+        );
+        process.registry_host_values.insert(wide_name.clone());
+        process.registry_volatile_paths.insert(volatile.clone());
+        process.registry_values.insert(
+            (volatile.clone(), "sessiononly".to_owned()),
+            (4, 7u32.to_le_bytes().to_vec()),
+        );
+        process.system_parameters.screen_saver_active = true;
+
+        let snapshot = serialize_user_profile_snapshot(&process).unwrap();
+        let mut restored = Process::new(Vfs::new());
+        load_user_profile_snapshot(&mut restored, &snapshot).unwrap();
+
+        assert!(restored.registry_paths.contains(&empty));
+        assert!(!restored.registry_paths.contains(&volatile));
+        assert_eq!(
+            restored
+                .registry_values
+                .get(&(desktop.clone(), "screensaveactive".to_owned(),)),
+            Some(&(1, b"1\0".to_vec()))
+        );
+        assert_eq!(
+            restored.registry_values.get(&wide_name),
+            Some(&(
+                1,
+                "wide\0".encode_utf16().flat_map(u16::to_le_bytes).collect()
+            ))
+        );
+        assert!(restored.registry_host_values.contains(&wide_name));
+        assert!(restored.system_parameters.screen_saver_active);
+    }
+
+    #[test]
+    fn user_profile_snapshot_rejects_host_registry_paths() {
+        let mut bytes = b"AWUPR1\0\0".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // one key
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no values
+        text(&mut bytes, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
+        let error = load_user_profile_snapshot(&mut Process::new(Vfs::new()), &bytes).unwrap_err();
+        assert!(error.contains("invalid or duplicate key"));
     }
 
     fn sample_snapshot() -> Vec<u8> {
@@ -364,9 +730,8 @@ mod tests {
     }
 
     fn snapshot_with_shell_folders() -> Vec<u8> {
-        let mut snapshot = sample_snapshot();
-        let key_count = u32::from_le_bytes(snapshot[8..12].try_into().unwrap());
-        snapshot[8..12].copy_from_slice(&(key_count + 1).to_le_bytes());
+        let mut snapshot = b"AWREG1\0\0".to_vec();
+        snapshot.extend_from_slice(&1u32.to_le_bytes());
         text(&mut snapshot, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
         text(&mut snapshot, "");
         snapshot.extend_from_slice(&0u32.to_le_bytes());
@@ -433,6 +798,21 @@ mod tests {
         bad[root_start..root_start + SIMS_REGISTRY_ROOT.len()]
             .copy_from_slice(b"hkey_local_machine\\software\\sims(other)");
         assert!(parse_host_snapshot(&bad).is_err());
+    }
+
+    #[test]
+    fn accepts_only_the_exact_shell_folders_key_as_a_partial_host_snapshot() {
+        let records = parse_host_snapshot(&snapshot_with_shell_folders()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
+
+        let mut process = Process::new(Vfs::new());
+        let mut partial_sims = sample_snapshot();
+        partial_sims[8..12].copy_from_slice(&1u32.to_le_bytes());
+        // Keep the malformed remainder intact: either way this is not the
+        // exact one-key exception and must not be accepted as a partial view.
+        assert!(load_host_snapshot(&mut process, &partial_sims).is_err());
+        assert!(process.registry_paths.is_empty());
     }
 
     #[test]

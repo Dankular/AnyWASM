@@ -28,6 +28,11 @@ let sharedParallelBatches = 0;
 let sharedMaxConcurrentWorkerSlices = 0;
 let graphicsUnavailableReason = '';
 let surfacedGpuErrorCount = 0;
+let userProfileStore = null;
+let userProfileSavedGeneration = 0;
+let userProfileFilesystemSavedGeneration = 0;
+let userProfileLastError = '';
+let userProfileLastErrorAt = 0;
 const dec = new TextDecoder();
 const inPlaceCpuEnabled = new URL(self.location.href).searchParams.has('inPlaceCpu');
 const sharedCpuWorkersEnabled = inPlaceCpuEnabled || new URL(self.location.href).searchParams.has('sharedCpuWorkers');
@@ -43,7 +48,17 @@ async function readHostSystemParameters() {
       && Number.isInteger(value.mouseTrails)
       && value.mouseTrails >= 0
       && Number.isInteger(value.wheelScrollLines)
-      && value.wheelScrollLines >= 0) return value;
+      && value.wheelScrollLines >= 0) {
+      const stickyKeysAvailable = value.stickyKeysAvailable === true
+        && Number.isInteger(value.stickyKeysFlags)
+        && value.stickyKeysFlags >= 0
+        && value.stickyKeysFlags <= 0xffff_ffff;
+      return {
+        ...value,
+        stickyKeysAvailable,
+        stickyKeysFlags: stickyKeysAvailable ? value.stickyKeysFlags : 0,
+      };
+    }
     return { available: false, reason: value?.reason || 'Windows cursor-shadow setting is unavailable' };
   } catch (error) {
     return { available: false, reason: error.message || String(error) };
@@ -58,6 +73,191 @@ async function readHostSims3Registry() {
     return { available: false, reason: value?.reason || 'Windows Sims registry snapshot is unavailable' };
   } catch (error) {
     return { available: false, reason: error.message || String(error) };
+  }
+}
+
+const USER_PROFILE_DB = 'anywasm-user-profile';
+const USER_PROFILE_DB_VERSION = 1;
+const USER_PROFILE_STORE = 'registry';
+const USER_PROFILE_REGISTRY_RECORD = 'hkcu';
+const USER_PROFILE_FILESYSTEM_RECORD = 'filesystem';
+
+async function openUserProfileStore() {
+  if (!globalThis.indexedDB) throw new Error('IndexedDB is unavailable in this worker');
+  const db = await new Promise((resolve, reject) => {
+    const request = indexedDB.open(USER_PROFILE_DB, USER_PROFILE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(USER_PROFILE_STORE)) {
+        request.result.createObjectStore(USER_PROFILE_STORE, { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('could not open the virtual user profile'));
+    request.onblocked = () => reject(new Error('virtual user profile database upgrade is blocked'));
+  });
+  db.onversionchange = () => db.close();
+  const requestResult = (request) => new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('virtual user profile request failed'));
+  });
+  const transactionDone = (transaction) => new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('virtual user profile transaction failed'));
+    transaction.onabort = () => reject(transaction.error || new Error('virtual user profile transaction was aborted'));
+  });
+  return {
+    async load(key, maxBytes) {
+      const transaction = db.transaction(USER_PROFILE_STORE, 'readonly');
+      const done = transactionDone(transaction);
+      const record = await requestResult(transaction.objectStore(USER_PROFILE_STORE).get(key));
+      await done;
+      if (!record) return null;
+      const saved = record.snapshot;
+      const bytes = saved instanceof ArrayBuffer
+        ? new Uint8Array(saved)
+        : ArrayBuffer.isView(saved)
+          ? new Uint8Array(saved.buffer, saved.byteOffset, saved.byteLength)
+          : null;
+      if (!bytes || bytes.byteLength === 0 || bytes.byteLength > maxBytes) {
+        throw new Error('saved virtual user profile has an invalid snapshot buffer');
+      }
+      return Uint8Array.from(bytes);
+    },
+    async save(key, snapshot) {
+      const transaction = db.transaction(USER_PROFILE_STORE, 'readwrite');
+      const done = transactionDone(transaction);
+      transaction.objectStore(USER_PROFILE_STORE).put({ key, snapshot: Uint8Array.from(snapshot) });
+      await done;
+    },
+    close() { db.close(); },
+  };
+}
+
+function installUserProfileSnapshot(runtime, bytes) {
+  if (typeof runtime.x.aw_set_user_profile_registry_snapshot !== 'function') {
+    throw new Error('runtime is missing the virtual user-profile snapshot entry point');
+  }
+  const pointer = runtime.x.aw_alloc(bytes.byteLength) >>> 0;
+  try {
+    new Uint8Array(runtime.x.memory.buffer, pointer, bytes.byteLength).set(bytes);
+    const result = runtime.x.aw_set_user_profile_registry_snapshot(pointer, bytes.byteLength);
+    if (result !== 0) throw new Error(runtime.message() || `could not install virtual user profile (${result})`);
+  } finally {
+    runtime.x.aw_free(pointer, bytes.byteLength);
+  }
+}
+
+function installUserProfileFilesystemSnapshot(runtime, bytes) {
+  if (typeof runtime.x.aw_set_user_profile_filesystem_snapshot !== 'function') {
+    throw new Error('runtime is missing the virtual user-profile filesystem snapshot entry point');
+  }
+  const pointer = runtime.x.aw_alloc(bytes.byteLength) >>> 0;
+  try {
+    new Uint8Array(runtime.x.memory.buffer, pointer, bytes.byteLength).set(bytes);
+    const result = runtime.x.aw_set_user_profile_filesystem_snapshot(pointer, bytes.byteLength);
+    if (result !== 0) throw new Error(runtime.message() || `could not install virtual user profile files (${result})`);
+  } finally {
+    runtime.x.aw_free(pointer, bytes.byteLength);
+  }
+}
+
+async function initializeUserProfile(runtime) {
+  userProfileStore?.close();
+  userProfileStore = null;
+  userProfileSavedGeneration = 0;
+  userProfileLastError = '';
+  userProfileLastErrorAt = 0;
+  let store = null;
+  try {
+    if (typeof runtime.x.aw_enable_user_profile_persistence !== 'function'
+      || typeof runtime.x.aw_user_profile_registry_generation !== 'function'
+      || typeof runtime.x.aw_user_profile_registry_snapshot_size !== 'function'
+      || typeof runtime.x.aw_copy_user_profile_registry_snapshot !== 'function'
+      || typeof runtime.x.aw_set_user_profile_filesystem_snapshot !== 'function'
+      || typeof runtime.x.aw_user_profile_filesystem_generation !== 'function'
+      || typeof runtime.x.aw_user_profile_filesystem_snapshot_size !== 'function'
+      || typeof runtime.x.aw_copy_user_profile_filesystem_snapshot !== 'function') {
+      throw new Error('runtime is missing virtual user-profile registry or filesystem persistence entry points');
+    }
+    store = await openUserProfileStore();
+    const registrySnapshot = await store.load(USER_PROFILE_REGISTRY_RECORD, 32 * 1024 * 1024);
+    const filesystemSnapshot = await store.load(USER_PROFILE_FILESYSTEM_RECORD, 512 * 1024 * 1024);
+    if (registrySnapshot) installUserProfileSnapshot(runtime, registrySnapshot);
+    if (filesystemSnapshot) installUserProfileFilesystemSnapshot(runtime, filesystemSnapshot);
+    const rc = runtime.x.aw_enable_user_profile_persistence();
+    if (rc !== 0) throw new Error(runtime.message() || `could not enable virtual user-profile persistence (${rc})`);
+    userProfileStore = store;
+    userProfileSavedGeneration = Number(runtime.x.aw_user_profile_registry_generation() || 0);
+    userProfileFilesystemSavedGeneration = Number(runtime.x.aw_user_profile_filesystem_generation() || 0);
+    postMessage({
+      type: 'out',
+      stream: 'stderr',
+      text: registrySnapshot || filesystemSnapshot
+        ? `[profile] loaded persistent virtual profile${registrySnapshot ? ' registry' : ''}${filesystemSnapshot ? ' files' : ''} from this browser origin\n`
+        : '[profile] virtual registry and Documents storage are ready for this browser origin\n',
+    });
+  } catch (error) {
+    store?.close();
+    userProfileStore?.close();
+    userProfileStore = null;
+    postMessage({
+      type: 'out',
+      stream: 'stderr',
+      text: `[profile] durable storage unavailable; profile update requests will fail with ERROR_NOT_SUPPORTED: ${error.message || error}\n`,
+    });
+  }
+}
+
+async function flushUserProfileUpdates() {
+  if (!userProfileStore || !w) return null;
+  const registryGeneration = Number(w.x.aw_user_profile_registry_generation?.() || 0);
+  const filesystemGeneration = Number(w.x.aw_user_profile_filesystem_generation?.() || 0);
+  if (registryGeneration === userProfileSavedGeneration
+      && filesystemGeneration === userProfileFilesystemSavedGeneration) return null;
+  try {
+    const snapshotRecord = async (key, sizeExport, copyExport, maximum) => {
+      const size = Number(w.x[sizeExport]?.() || 0);
+      if (size <= 0 || size > maximum) {
+        throw new Error(w.message() || `virtual user-profile snapshot size is invalid (${size})`);
+      }
+      const pointer = w.x.aw_alloc(size) >>> 0;
+      let snapshot;
+      try {
+        if (w.x[copyExport](pointer, size) !== 0) {
+          throw new Error(w.message() || `could not serialize virtual user-profile ${key}`);
+        }
+        snapshot = new Uint8Array(w.x.memory.buffer, pointer, size).slice();
+      } finally {
+        w.x.aw_free(pointer, size);
+      }
+      await userProfileStore.save(key, snapshot);
+    };
+    if (registryGeneration !== userProfileSavedGeneration) {
+      await snapshotRecord(USER_PROFILE_REGISTRY_RECORD,
+        'aw_user_profile_registry_snapshot_size', 'aw_copy_user_profile_registry_snapshot', 32 * 1024 * 1024);
+      userProfileSavedGeneration = registryGeneration;
+    }
+    if (filesystemGeneration !== userProfileFilesystemSavedGeneration) {
+      await snapshotRecord(USER_PROFILE_FILESYSTEM_RECORD,
+        'aw_user_profile_filesystem_snapshot_size', 'aw_copy_user_profile_filesystem_snapshot', 512 * 1024 * 1024);
+      userProfileFilesystemSavedGeneration = filesystemGeneration;
+    }
+    userProfileLastError = '';
+    postMessage({ type: 'out', stream: 'stderr', text: '[profile] saved virtual registry and filesystem changes\n' });
+    return null;
+  } catch (error) {
+    const message = error.message || String(error);
+    const now = performance.now();
+    if (message !== userProfileLastError || now - userProfileLastErrorAt >= 5000) {
+      userProfileLastError = message;
+      userProfileLastErrorAt = now;
+      postMessage({
+        type: 'out',
+        stream: 'stderr',
+        text: `[profile] could not persist virtual HKCU changes; will retry: ${message}\n`,
+      });
+    }
+    return message;
   }
 }
 
@@ -187,6 +387,8 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
         hostSystemParameters.mouseTrails,
         hostSystemParameters.mouseSonar ? 1 : 0,
         hostSystemParameters.wheelScrollLines,
+        hostSystemParameters.stickyKeysFlags,
+        hostSystemParameters.stickyKeysAvailable ? 1 : 0,
       );
       if (rc !== 0) throw new Error(w.message() || `could not supply host system parameters (${rc})`);
     } else {
@@ -196,8 +398,8 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
         text: `[host] ${hostSystemParameters.reason}; SystemParametersInfo queries will remain untranslated.\n`,
       });
     }
+    const hostRegistry = await readHostSims3Registry();
     if (directSource) {
-      const hostRegistry = await readHostSims3Registry();
       if (hostRegistry.available && sameWindowsPath(hostRegistry.installPath, directSource.rootPath)) {
         installHostRegistrySnapshot(w, hostRegistry);
         postMessage({
@@ -212,7 +414,32 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
           text: `[host registry] ${hostRegistry.reason || `snapshot install path ${hostRegistry.installPath} does not match ${directSource.rootPath}`}; registry reads outside translated data will stop explicitly.\n`,
         });
       }
+    } else if (hostRegistry.available) {
+      const shellFoldersPath = 'hkey_current_user\\software\\microsoft\\windows\\currentversion\\explorer\\shell folders';
+      const shellFoldersKey = hostRegistry.keys.find((key) =>
+        typeof key.path === 'string' && key.path.toLowerCase() === shellFoldersPath);
+      if (shellFoldersKey) {
+        installHostRegistrySnapshot(w, { available: true, keys: [shellFoldersKey] });
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: '[host registry] loaded the shared HKCU Shell Folders key (read-only snapshot)\n',
+        });
+      } else {
+        postMessage({
+          type: 'out',
+          stream: 'stderr',
+          text: '[host registry] shared HKCU Shell Folders key is absent from the read-only snapshot; registry reads outside translated data will stop explicitly.\n',
+        });
+      }
+    } else {
+      postMessage({
+        type: 'out',
+        stream: 'stderr',
+        text: `[host registry] ${hostRegistry.reason || 'shared Shell Folders snapshot is unavailable'}; registry reads outside translated data will stop explicitly.\n`,
+      });
     }
+    await initializeUserProfile(w);
   } catch (e) {
     postMessage({ type: 'status', status: Status.CRASHED, exitCode: -1, message: e.message, instructions: 0, mips: 0 });
     return;
@@ -450,6 +677,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
   let status = Status.RUNNING;
   let terminalMessage = '';
   let frames = 0;
+  let userProfileFlushError = '';
   const SHARED_PUMP_INSTRUCTION_BUDGET = 250_000n;
   let sharedInstructionBudgetRemaining = SHARED_PUMP_INSTRUCTION_BUDGET;
   const chargeSharedInstructionBudget = (before) => {
@@ -570,6 +798,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       );
       if (pendingSharedCompletions.length) sharedNeedsCoordinatorTurn = true;
     }
+    userProfileFlushError = await flushUserProfileUpdates() || '';
     if (w.gpuPendingBytes()) {
       if (exec) w.consumeGpu((commands) => exec.execute(commands)); // executed in place: no copy
       else {
@@ -707,10 +936,14 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     else if (status === Status.RUNNING) await sleep(0);
   }
   const dt = (performance.now() - t0) / 1000;
+  userProfileFlushError = await flushUserProfileUpdates() || userProfileFlushError;
   const callbackSuspended = !!w?.callbackSuspended;
   const n = callbackSuspended ? 0 : w.instructions();
   if (exec) postMessage({ type: 'gpu', ...exec.stats, asyncify: w?.asyncifyStats });
-  const finalMessage = terminalMessage || (callbackSuspended ? 'stopped with a guest callback suspended' : w.message());
+  const finalMessage = [
+    terminalMessage || (callbackSuspended ? 'stopped with a guest callback suspended' : w.message()),
+    userProfileFlushError ? `Virtual user-profile persistence failed: ${userProfileFlushError}` : '',
+  ].filter(Boolean).join('\n');
   const exceptionSp = Number(finalMessage.match(/\besp=0x([0-9a-f]+)/i)?.[1] || 0) >>> 0;
   const exceptionStack = diagProgress && exceptionSp
     ? Array.from({ length: 64 }, (_, index) =>
@@ -725,6 +958,8 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
   sharedCpuPool?.dispose();
   sharedCpuPool = null;
   sharedCpuRequested = false;
+  userProfileStore?.close();
+  userProfileStore = null;
   if (disposeRequested) {
     close();
     return;

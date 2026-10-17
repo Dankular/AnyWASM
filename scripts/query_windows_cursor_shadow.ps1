@@ -4,11 +4,22 @@ $source = @'
 using System;
 using System.Runtime.InteropServices;
 
+[StructLayout(LayoutKind.Sequential)]
+public struct AnyWasmStickyKeys
+{
+    public uint cbSize;
+    public uint dwFlags;
+}
+
 public static class AnyWasmSystemParameters
 {
     [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool Get(uint action, uint parameter, ref int value, uint flags);
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetStickyKeys(uint action, uint parameter, ref AnyWasmStickyKeys value, uint flags);
 }
 '@
 Add-Type $source
@@ -37,10 +48,25 @@ if (-not [AnyWasmSystemParameters]::Get(0x0068, 0, [ref]$wheelScrollLines, 0)) {
     throw "SystemParametersInfoW(SPI_GETWHEELSCROLLLINES) failed with Win32 error $errorCode"
 }
 
+$stickyKeys = [AnyWasmStickyKeys]::new()
+$stickyKeys.cbSize = 8
+$stickyKeysAvailable = [AnyWasmSystemParameters]::GetStickyKeys(0x003a, 8, [ref]$stickyKeys, 0)
+$stickyKeysFlags = [uint32]0
+$stickyKeysReason = $null
+if ($stickyKeysAvailable) {
+    $stickyKeysFlags = [uint32]$stickyKeys.dwFlags
+} else {
+    $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    $stickyKeysReason = "SystemParametersInfoW(SPI_GETSTICKYKEYS) failed with Win32 error $errorCode"
+}
+
 [pscustomobject]@{
     available = $true
     cursorShadow = ($cursorShadow -ne 0)
     mouseTrails = [uint32]$mouseTrails
     mouseSonar = ($mouseSonar -ne 0)
     wheelScrollLines = [uint32]$wheelScrollLines
+    stickyKeysAvailable = $stickyKeysAvailable
+    stickyKeysFlags = $stickyKeysFlags
+    stickyKeysReason = $stickyKeysReason
 } | ConvertTo-Json -Compress

@@ -933,6 +933,9 @@ export class GpuExecutor {
   }
 
   reset() {
+    if (this.d3d9TransformBuffers) {
+      for (const buffer of this.d3d9TransformBuffers.values()) buffer.destroy();
+    }
     this.gammaTex?.destroy?.();
     this.gammaTex = null;
     this.gammaView = null;
@@ -943,6 +946,7 @@ export class GpuExecutor {
     this.samplers = new Map();
     this.fixedFunctionShaders = new Map();
     this.fixedFunctionPixelVariants = new Map();
+    this.d3d9TransformBuffers = new Map();
     this.fixedFunctionNextId = 0xfffffff0;
     this.blends = new Map();
     this.rasters = new Map();
@@ -1204,6 +1208,9 @@ export class GpuExecutor {
           dv.byteLength >= 72 ? u(17) : 1,
           dv.byteLength >= 76 ? u(18) : 2,
           dv.byteLength >= 80 ? u(19) : 1,
+          dv.byteLength >= 144
+            ? Array.from({ length: 16 }, (_, i) => f(20 + i))
+            : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
         );
         break;
       case OP.SET_SHADER: st.shader[u(0)] = u(1); break;
@@ -1545,7 +1552,7 @@ export class GpuExecutor {
   }
 
   // ── views ────────────────────────────────────────────────────────────────
-  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1, colorOp1 = 1, colorArg01 = 1, colorArg11 = 2, colorArg21 = 1, alphaOp1 = 1, alphaArg01 = 1, alphaArg11 = 2, alphaArg21 = 1) {
+  setFixedFunction(fvf, width, height, colorOp = 4, colorArg1 = 2, colorArg2 = 1, alphaOp = 2, alphaArg1 = 2, alphaArg2 = 1, textureFactor = 0xffffffff, colorArg0 = 1, alphaArg0 = 1, colorOp1 = 1, colorArg01 = 1, colorArg11 = 2, colorArg21 = 1, alphaOp1 = 1, alphaArg01 = 1, alphaArg11 = 2, alphaArg21 = 1, transform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) {
     if (fvf === 0) {
       this.st.shader[0] = 0;
       this.st.shader[1] = 0;
@@ -1556,6 +1563,16 @@ export class GpuExecutor {
       throw new Error(`unsupported D3D9 FVF 0x${fvf.toString(16)}`);
       return;
     }
+    const matrixBytes = new ArrayBuffer(64);
+    const matrixView = new DataView(matrixBytes);
+    for (let i = 0; i < 16; i++) matrixView.setFloat32(i * 4, transform[i], true);
+    const transformKey = Array.from({ length: 16 }, (_, i) => matrixView.getUint32(i * 4, true).toString(16).padStart(8, '0')).join('');
+    if (!this.d3d9TransformBuffers.has(transformKey)) {
+      const buffer = this.device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(buffer, 0, new Uint8Array(matrixBytes));
+      this.d3d9TransformBuffers.set(transformKey, buffer);
+    }
+    this.st.d3d9TransformKey = transformKey;
     const key = `${fvf}/${width}/${height}/${colorOp}/${colorArg0}/${colorArg1}/${colorArg2}/${alphaOp}/${alphaArg0}/${alphaArg1}/${alphaArg2}/${textureFactor >>> 24}/${colorOp1}/${colorArg01}/${colorArg11}/${colorArg21}/${alphaOp1}/${alphaArg01}/${alphaArg11}/${alphaArg21}`;
     let fixed = this.fixedFunctionShaders.get(key);
     if (!fixed) {
@@ -1578,7 +1595,7 @@ export class GpuExecutor {
              (input.position.x * (2.0 / ${Math.max(width, 1)}.0) - 1.0) * invW,
              (1.0 - input.position.y * (2.0 / ${Math.max(height, 1)}.0)) * invW,
              input.position.z * invW, invW);`
-        : 'output.position = vec4<f32>(input.position, 1.0);';
+        : 'output.position = d3d9Transform * vec4<f32>(input.position, 1.0);';
       const code = `
         struct VertexInput {
           @location(0) position: ${inputPosition},
@@ -1591,6 +1608,7 @@ export class GpuExecutor {
           @location(0) color: vec4<f32>,
           ${texcoordOutput}
         };
+        @group(3) @binding(1) var<uniform> d3d9Transform: mat4x4<f32>;
         @vertex fn vs(input: VertexInput) -> VertexOutput {
           var output: VertexOutput;
           ${positionCode}
@@ -1697,7 +1715,7 @@ export class GpuExecutor {
           { location: colorLocation, format: 28, slot: 0, offset: colorOffset, cls: 0, step: 0 },
           ...(textured ? [{ location: texcoordLocation, format: 16, slot: 0, offset: colorOffset + 4, cls: 0, step: 0 }] : []),
         ],
-        vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false },
+        vs: { stage: 0, module, entry: 'vs', descriptors: [], cbSizes: {}, usesDrawParameters: false, fixedFunctionD3D9: true },
         ps: {
           stage: 1, module, entry: 'fs', descriptors: [], cbSizes: {}, usesDrawParameters: false,
           fixedFunction: { source: code, output: 'input.color' },
@@ -2124,6 +2142,12 @@ export class GpuExecutor {
       const allocation = this.stage(data);
       layoutEntries[3].push({ binding: 0, visibility: drawParamVisibility, buffer: { type: 'uniform' } });
       resolved[3].push({ binding: 0, resource: { buffer: allocation.buffer, offset: allocation.offset, size: 16 } });
+    }
+    if (vs.fixedFunctionD3D9) {
+      const buffer = this.d3d9TransformBuffers.get(st.d3d9TransformKey);
+      if (!buffer) throw new Error('D3D9 fixed-function draw has no translated transform state');
+      layoutEntries[3].push({ binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } });
+      resolved[3].push({ binding: 1, resource: { buffer, offset: 0, size: 64 } });
     }
 
     // Pipeline.

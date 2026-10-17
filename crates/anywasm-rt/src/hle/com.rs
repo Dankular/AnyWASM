@@ -222,6 +222,9 @@ pub struct ComState {
     pub d3d9_scissor_rects: HashMap<u64, [u32; 4]>,
     /// Last guest-supplied Direct3D 9 RGB gamma ramp per device (three 256-entry WORD tables).
     pub d3d9_gamma_ramps: HashMap<u64, Vec<u8>>,
+    /// Direct3D 9 transform matrices keyed by `(device, D3DTRANSFORMSTATETYPE)`.
+    /// Matrix words retain the guest's exact IEEE-754 representation.
+    pub d3d9_transforms: HashMap<(u64, u32), [u32; 16]>,
     /// Direct3D 9 stream zero binding `(buffer, stride, offset)` per device.
     pub d3d9_stream0: HashMap<u64, (u64, u32, u32)>,
     /// Direct3D 9 index buffer binding per device.
@@ -659,6 +662,10 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
             p.extra.com.d3d9_viewports.remove(&this);
             p.extra.com.d3d9_scissor_rects.remove(&this);
             p.extra.com.d3d9_gamma_ramps.remove(&this);
+            p.extra
+                .com
+                .d3d9_transforms
+                .retain(|(device, _), _| *device != this);
             let bound = p
                 .extra
                 .com

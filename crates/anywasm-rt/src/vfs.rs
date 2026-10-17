@@ -3,6 +3,11 @@ use std::collections::{HashMap, HashSet};
 
 const ASSET_HEADER_LEN: usize = 24;
 const MAX_ASSET_READ_LEN: usize = 64 * 1024 * 1024 - 256 * 1024;
+const USER_PROFILE_ROOT: &str = "users\\anywasm";
+const USER_PROFILE_MAGIC: &[u8; 8] = b"AWPFS1\0\0";
+const MAX_USER_PROFILE_ENTRIES: usize = 65_536;
+const MAX_USER_PROFILE_FILE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_USER_PROFILE_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
 
 fn read_index<const N: usize>(bytes: &[u8], cursor: &mut usize) -> Option<[u8; N]> {
     let end = (*cursor).checked_add(N)?;
@@ -37,6 +42,7 @@ pub struct Vfs {
     attributes: HashMap<String, u32>,
     file_metadata: HashMap<String, FileMetadata>,
     root_alias: Option<String>,
+    user_profile_generation: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,14 +253,309 @@ impl Vfs {
     }
 
     pub fn insert(&mut self, path: &str, data: Vec<u8>) {
-        self.files.insert(self.normalize_path(path), data);
+        let path = self.normalize_path(path);
+        self.mark_user_profile_dirty(&path);
+        self.files.insert(path, data);
     }
     pub fn get(&self, path: &str) -> Option<&Vec<u8>> {
         self.files.get(&self.normalize_path(path))
     }
     pub fn get_mut(&mut self, path: &str) -> Option<&mut Vec<u8>> {
         let path = self.normalize_path(path);
+        self.mark_user_profile_dirty(&path);
         self.files.get_mut(&path)
+    }
+
+    fn is_user_profile_key(path: &str) -> bool {
+        path == USER_PROFILE_ROOT || path.starts_with(&format!("{USER_PROFILE_ROOT}\\"))
+    }
+
+    fn mark_user_profile_dirty(&mut self, path: &str) {
+        if Self::is_user_profile_key(path) {
+            self.user_profile_generation = self.user_profile_generation.wrapping_add(1);
+        }
+    }
+
+    /// Whether this path belongs to the virtual Windows user profile persisted by the host.
+    pub fn is_user_profile_path(&self, path: &str) -> bool {
+        Self::is_user_profile_key(&self.normalize_path(path))
+    }
+
+    /// Generation of guest mutations under `C:\\Users\\AnyWASM`.
+    pub fn user_profile_generation(&self) -> u32 {
+        self.user_profile_generation
+    }
+
+    /// Install a validated durable overlay for the virtual user-profile filesystem.
+    pub fn load_user_profile_snapshot(&mut self, bytes: &[u8]) -> Result<(), String> {
+        struct Reader<'a> {
+            bytes: &'a [u8],
+            offset: usize,
+        }
+        impl<'a> Reader<'a> {
+            fn take(&mut self, length: usize) -> Result<&'a [u8], String> {
+                let end = self
+                    .offset
+                    .checked_add(length)
+                    .ok_or_else(|| "user profile filesystem length overflow".to_owned())?;
+                let value = self
+                    .bytes
+                    .get(self.offset..end)
+                    .ok_or_else(|| "user profile filesystem snapshot is truncated".to_owned())?;
+                self.offset = end;
+                Ok(value)
+            }
+            fn u16(&mut self) -> Result<u16, String> {
+                Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+            }
+            fn u32(&mut self) -> Result<u32, String> {
+                Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+            }
+            fn u64(&mut self) -> Result<u64, String> {
+                Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+            }
+            fn i64(&mut self) -> Result<i64, String> {
+                Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+            }
+            fn text(&mut self) -> Result<String, String> {
+                let length = self.u32()? as usize;
+                if length > 1 << 20 {
+                    return Err("user profile filesystem path exceeds the limit".to_owned());
+                }
+                let text = std::str::from_utf8(self.take(length)?)
+                    .map_err(|_| "user profile filesystem path is not UTF-8".to_owned())?;
+                if text.contains('\0') {
+                    return Err("user profile filesystem path contains NUL".to_owned());
+                }
+                Ok(text.to_owned())
+            }
+        }
+        fn parse_metadata(reader: &mut Reader<'_>) -> Result<FileMetadata, String> {
+            let flags = reader.u32()?;
+            if flags & !0x1f != 0 {
+                return Err("user profile filesystem metadata has unknown flags".to_owned());
+            }
+            Ok(FileMetadata {
+                accessed: (flags & 1 != 0).then(|| reader.i64()).transpose()?,
+                modified: (flags & 2 != 0).then(|| reader.i64()).transpose()?,
+                created: (flags & 4 != 0).then(|| reader.i64()).transpose()?,
+                mode: (flags & 8 != 0).then(|| reader.u32()).transpose()?,
+                link_count: (flags & 16 != 0).then(|| reader.u16()).transpose()?,
+            })
+        }
+        fn validate_relative(path: &str) -> Result<String, String> {
+            let normalized = path.replace('/', "\\").to_ascii_lowercase();
+            if normalized.is_empty()
+                || normalized.starts_with('\\')
+                || normalized.as_bytes().get(1) == Some(&b':')
+                || normalized.split('\\').any(|part| {
+                    part.is_empty() || part == "." || part == ".." || part.contains(':')
+                })
+            {
+                return Err(format!("invalid user profile filesystem path: {path:?}"));
+            }
+            Ok(normalized)
+        }
+        if bytes.len() > MAX_USER_PROFILE_SNAPSHOT_BYTES {
+            return Err("user profile filesystem snapshot exceeds 512 MiB".to_owned());
+        }
+        let mut reader = Reader { bytes, offset: 0 };
+        if reader.take(USER_PROFILE_MAGIC.len())? != USER_PROFILE_MAGIC {
+            return Err("user profile filesystem snapshot has an invalid signature".to_owned());
+        }
+        let directory_count = reader.u32()? as usize;
+        let file_count = reader.u32()? as usize;
+        if directory_count > MAX_USER_PROFILE_ENTRIES || file_count > MAX_USER_PROFILE_ENTRIES {
+            return Err("user profile filesystem snapshot has too many entries".to_owned());
+        }
+        let mut directories = Vec::with_capacity(directory_count);
+        let mut seen_directories = HashSet::with_capacity(directory_count);
+        for _ in 0..directory_count {
+            let path = validate_relative(&reader.text()?)?;
+            if !seen_directories.insert(path.clone()) {
+                return Err(format!(
+                    "user profile filesystem repeats directory {path:?}"
+                ));
+            }
+            let attributes = reader.u32()?;
+            let metadata = parse_metadata(&mut reader)?;
+            directories.push((
+                path,
+                (attributes != u32::MAX).then_some(attributes),
+                metadata,
+            ));
+        }
+        let mut files = Vec::with_capacity(file_count);
+        let mut seen_files = HashSet::with_capacity(file_count);
+        for _ in 0..file_count {
+            let path = validate_relative(&reader.text()?)?;
+            if !seen_files.insert(path.clone()) || seen_directories.contains(&path) {
+                return Err(format!("user profile filesystem repeats entry {path:?}"));
+            }
+            let attributes = reader.u32()?;
+            let metadata = parse_metadata(&mut reader)?;
+            let length = usize::try_from(reader.u64()?)
+                .map_err(|_| "user profile file is too large for this runtime".to_owned())?;
+            if length > MAX_USER_PROFILE_FILE_BYTES {
+                return Err("user profile file exceeds 256 MiB".to_owned());
+            }
+            let data = reader.take(length)?.to_vec();
+            files.push((
+                path,
+                (attributes != u32::MAX).then_some(attributes),
+                metadata,
+                data,
+            ));
+        }
+        if reader.offset != bytes.len() {
+            return Err("user profile filesystem snapshot has trailing bytes".to_owned());
+        }
+
+        self.files
+            .retain(|path, _| !Self::is_user_profile_key(path));
+        self.directories
+            .retain(|path| !Self::is_user_profile_key(path));
+        self.attributes
+            .retain(|path, _| !Self::is_user_profile_key(path));
+        self.file_metadata
+            .retain(|path, _| !Self::is_user_profile_key(path));
+        for (relative, attributes, metadata) in directories {
+            let path = format!("{USER_PROFILE_ROOT}\\{relative}");
+            self.directories.insert(path.clone());
+            if let Some(attributes) = attributes {
+                self.attributes.insert(path.clone(), attributes);
+            }
+            if metadata != FileMetadata::default() {
+                self.file_metadata.insert(path, metadata);
+            }
+        }
+        for (relative, attributes, metadata, data) in files {
+            let path = format!("{USER_PROFILE_ROOT}\\{relative}");
+            self.files.insert(path.clone(), data);
+            if let Some(attributes) = attributes {
+                self.attributes.insert(path.clone(), attributes);
+            }
+            if metadata != FileMetadata::default() {
+                self.file_metadata.insert(path, metadata);
+            }
+        }
+        self.user_profile_generation = 0;
+        Ok(())
+    }
+
+    /// Serialize local guest files and explicit directories below the virtual user profile.
+    pub fn serialize_user_profile_snapshot(&self) -> Result<Vec<u8>, String> {
+        fn push_text(bytes: &mut Vec<u8>, text: &str) -> Result<(), String> {
+            let length = u32::try_from(text.len())
+                .map_err(|_| "user profile filesystem path is too long".to_owned())?;
+            if text.len() > 1 << 20 || text.contains('\0') {
+                return Err("user profile filesystem path exceeds the limit".to_owned());
+            }
+            bytes.extend_from_slice(&length.to_le_bytes());
+            bytes.extend_from_slice(text.as_bytes());
+            Ok(())
+        }
+        fn push_metadata(bytes: &mut Vec<u8>, metadata: FileMetadata) {
+            let flags = u32::from(metadata.accessed.is_some())
+                | (u32::from(metadata.modified.is_some()) << 1)
+                | (u32::from(metadata.created.is_some()) << 2)
+                | (u32::from(metadata.mode.is_some()) << 3)
+                | (u32::from(metadata.link_count.is_some()) << 4);
+            bytes.extend_from_slice(&flags.to_le_bytes());
+            for value in [metadata.accessed, metadata.modified, metadata.created]
+                .into_iter()
+                .flatten()
+            {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            if let Some(value) = metadata.mode {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            if let Some(value) = metadata.link_count {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        fn relative(path: &str) -> Option<&str> {
+            path.strip_prefix("users\\anywasm\\")
+        }
+        let mut directories = self
+            .directories
+            .iter()
+            .filter_map(|path| relative(path).map(|relative| (relative, path)))
+            .collect::<Vec<_>>();
+        directories.sort_unstable_by_key(|(relative, _)| *relative);
+        let mut files = self
+            .files
+            .iter()
+            .filter_map(|(path, data)| relative(path).map(|relative| (relative, path, data)))
+            .collect::<Vec<_>>();
+        files.sort_unstable_by_key(|(relative, _, _)| *relative);
+        if directories.len() > MAX_USER_PROFILE_ENTRIES || files.len() > MAX_USER_PROFILE_ENTRIES {
+            return Err("user profile filesystem has too many entries".to_owned());
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(USER_PROFILE_MAGIC);
+        bytes.extend_from_slice(&(directories.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        for (relative, path) in directories {
+            push_text(&mut bytes, relative)?;
+            bytes.extend_from_slice(
+                &self
+                    .attributes
+                    .get(path)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            push_metadata(
+                &mut bytes,
+                self.file_metadata.get(path).copied().unwrap_or_default(),
+            );
+        }
+        for (relative, path, data) in files {
+            if data.len() > MAX_USER_PROFILE_FILE_BYTES {
+                return Err(format!("user profile file {relative:?} exceeds 256 MiB"));
+            }
+            push_text(&mut bytes, relative)?;
+            bytes.extend_from_slice(
+                &self
+                    .attributes
+                    .get(path)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            push_metadata(
+                &mut bytes,
+                self.file_metadata.get(path).copied().unwrap_or_default(),
+            );
+            bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(data);
+            if bytes.len() > MAX_USER_PROFILE_SNAPSHOT_BYTES {
+                return Err("user profile filesystem snapshot exceeds 512 MiB".to_owned());
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// Write a range into an already materialized local file.
+    pub fn write_range(&mut self, path: &str, offset: u64, data: &[u8]) -> bool {
+        let path = self.normalize_path(path);
+        let Ok(offset) = usize::try_from(offset) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(data.len()) else {
+            return false;
+        };
+        let Some(file) = self.files.get_mut(&path) else {
+            return false;
+        };
+        if file.len() < end {
+            file.resize(end, 0);
+        }
+        file[offset..end].copy_from_slice(data);
+        self.mark_user_profile_dirty(&path);
+        true
     }
     pub fn exists(&self, path: &str) -> bool {
         let path = self.normalize_path(path);
@@ -296,6 +597,9 @@ impl Vfs {
     /// Store attributes for a path that the caller has already resolved as existing.
     pub fn set_file_attributes(&mut self, path: &str, attributes: u32) {
         let path = self.normalize_path(path);
+        if self.attributes.get(&path) != Some(&attributes) {
+            self.mark_user_profile_dirty(&path);
+        }
         self.attributes.insert(path, attributes);
     }
 
@@ -493,6 +797,9 @@ impl Vfs {
     /// Attach host or guest filesystem metadata to an existing file or directory.
     pub fn set_file_metadata(&mut self, path: &str, metadata: FileMetadata) {
         let path = self.normalize_path(path);
+        if self.file_metadata.get(&path) != Some(&metadata) {
+            self.mark_user_profile_dirty(&path);
+        }
         self.file_metadata.insert(path, metadata);
     }
 
@@ -581,7 +888,8 @@ impl Vfs {
         if !self.is_dir(parent) {
             return Err(CreateDirError::PathNotFound);
         }
-        self.directories.insert(dir);
+        self.directories.insert(dir.clone());
+        self.mark_user_profile_dirty(&dir);
         Ok(())
     }
 
@@ -607,6 +915,7 @@ impl Vfs {
         }
         self.attributes.remove(&dir);
         self.file_metadata.remove(&dir);
+        self.mark_user_profile_dirty(&dir);
         Ok(())
     }
     pub fn remove(&mut self, path: &str) -> bool {
@@ -617,6 +926,7 @@ impl Vfs {
         let local = self.files.remove(&path).is_some();
         let asset = self.assets.remove(&path).is_some();
         if local || asset {
+            self.mark_user_profile_dirty(&path);
             self.attributes.remove(&path);
             let mut parent = path.rsplit_once('\\').map(|(parent, _)| parent);
             while let Some(dir) = parent {
@@ -695,7 +1005,7 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute, norm, resolve, Vfs};
+    use super::{absolute, norm, resolve, FileMetadata, Vfs, USER_PROFILE_MAGIC};
 
     fn asset_package(files: &[(&str, &[u8])]) -> Vec<u8> {
         let index_len: usize = files.iter().map(|(name, _)| 2 + name.len() + 16).sum();
@@ -998,6 +1308,88 @@ mod tests {
             vec![8, 7]
         );
         assert_eq!(vfs.paths().count(), 1);
+    }
+
+    #[test]
+    fn user_profile_snapshot_roundtrips_files_directories_attributes_and_metadata() {
+        let mut vfs = Vfs::new();
+        for dir in [
+            r"C:\Users",
+            r"C:\Users\AnyWASM",
+            r"C:\Users\AnyWASM\Documents",
+            r"C:\Users\AnyWASM\Documents\Electronic Arts",
+            r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3",
+            r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3\Saves",
+        ] {
+            if !vfs.is_dir(dir) {
+                vfs.create_dir(dir).unwrap();
+            }
+        }
+        let save_path =
+            r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3\Saves\Sunset Valley.sims3";
+        vfs.insert(save_path, b"world-save-data".to_vec());
+        vfs.set_file_attributes(save_path, 0x20);
+        vfs.set_file_metadata(
+            save_path,
+            FileMetadata {
+                accessed: Some(11),
+                modified: Some(22),
+                created: Some(33),
+                mode: Some(0o100600),
+                link_count: Some(1),
+            },
+        );
+        let generation = vfs.user_profile_generation();
+        assert!(generation > 0);
+
+        let snapshot = vfs.serialize_user_profile_snapshot().unwrap();
+        let mut restored = Vfs::new();
+        restored.load_user_profile_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            restored.read_range(save_path, 0, 64).unwrap(),
+            b"world-save-data"
+        );
+        assert!(restored.is_dir(r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3\Saves"));
+        assert_eq!(restored.file_attributes(save_path), Some(0x20));
+        let status = restored.file_status(save_path).unwrap();
+        assert_eq!(
+            (status.accessed, status.modified, status.created),
+            (Some(11), Some(22), Some(33))
+        );
+        assert_eq!((status.mode, status.link_count), (Some(0o100600), Some(1)));
+        assert_eq!(restored.user_profile_generation(), 0);
+    }
+
+    #[test]
+    fn user_profile_snapshot_rejects_parent_traversal_without_partial_install() {
+        let mut snapshot = USER_PROFILE_MAGIC.to_vec();
+        snapshot.extend(0u32.to_le_bytes()); // directories
+        snapshot.extend(1u32.to_le_bytes()); // files
+        snapshot.extend(10u32.to_le_bytes());
+        snapshot.extend_from_slice(b"..\\outside");
+        snapshot.extend(u32::MAX.to_le_bytes());
+        snapshot.extend(0u32.to_le_bytes()); // metadata flags
+        snapshot.extend(0u64.to_le_bytes()); // file length
+        let mut vfs = Vfs::new();
+        vfs.insert(r"C:\Users\AnyWASM\Documents\old.dat", vec![1]);
+        assert!(vfs.load_user_profile_snapshot(&snapshot).is_err());
+        assert_eq!(
+            vfs.read_range(r"C:\Users\AnyWASM\Documents\old.dat", 0, 1)
+                .unwrap(),
+            [1]
+        );
+    }
+
+    #[test]
+    fn profile_write_range_marks_generation_and_updates_only_local_profile_file() {
+        let mut vfs = Vfs::new();
+        let path = r"C:\Users\AnyWASM\Documents\slot.dat";
+        vfs.insert(path, b"ab".to_vec());
+        let generation = vfs.user_profile_generation();
+        assert!(vfs.write_range(path, 1, b"XYZ"));
+        assert!(vfs.user_profile_generation() > generation);
+        assert_eq!(vfs.read_range(path, 0, 8).unwrap(), b"aXYZ");
+        assert!(!vfs.write_range(r"C:\Users\AnyWASM\Documents\missing.dat", 0, b"x"));
     }
 
     #[test]

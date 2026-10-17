@@ -14,6 +14,7 @@ pub mod ddraw;
 pub mod directinput8;
 pub mod dsound;
 pub mod dxgi;
+pub mod eax;
 pub mod gdi;
 pub mod gpu;
 pub mod heap;
@@ -32,6 +33,7 @@ pub mod shlwapi;
 pub mod user32;
 pub mod usp10;
 pub mod version;
+pub mod vorbisfile;
 pub mod vtables;
 pub mod wininet;
 pub mod ws2_32;
@@ -46,6 +48,7 @@ pub struct Extra {
     pub imm32: imm32::ImmState,
     pub ws2_32: ws2_32::Ws2State,
     pub wininet: wininet::WinInetState,
+    pub vorbisfile: vorbisfile::VorbisState,
     pub version: version::VersionState,
     /// Process-local byte-range locks made through kernel32 LockFile.
     pub file_range_locks: Vec<kernel32::FileRangeLock>,
@@ -124,6 +127,8 @@ pub fn group_of(name: &str) -> Option<&'static str> {
         // continues to its D3D9 startup path; this maps the module load only, not D3D8 exports.
         "d3d8" => Some("d3d8"),
         "dsound" => Some("dsound"),
+        "eax" => Some("eax"),
+        "vorbisfile" => Some("vorbisfile"),
         "d3dx9_31" => Some("d3dx9_31"),
         // GTA loads this DirectPlay helper as part of its DirectX runtime check. No exports are
         // supplied until a guest call demonstrates that the game needs one.
@@ -180,6 +185,8 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
         "d3d11" => d3d11::lookup(name),
         "d3d9" => d3d9::lookup(name),
         "dsound" => dsound::lookup(name),
+        "eax" => eax::lookup(name),
+        "vorbisfile" => vorbisfile::lookup(name),
         "d3dx9_31" => d3dx9_31::lookup(name),
         "ddraw" => ddraw::lookup(name),
         "dinput8" => directinput8::lookup(name),
@@ -253,6 +260,10 @@ mod import_coverage_batch_tests {
         assert!(lookup("usp10", "ScriptItemize").is_some());
         assert_eq!(group_of("netapi32"), Some("netapi32"));
         assert!(lookup("netapi32", "Netbios").is_some());
+        assert_eq!(group_of("eax"), Some("eax"));
+        assert!(lookup("eax", "#6").is_some());
+        assert_eq!(group_of("vorbisfile"), Some("vorbisfile"));
+        assert!(lookup("vorbisfile", "ov_open_callbacks").is_some());
         assert_eq!(data_symbol("msvcp", MSVC_STD_CIN_SYMBOL), Some(0x80));
         assert_eq!(data_symbol("msvcp", MSVC_STD_COUT_SYMBOL), Some(0xe0));
         assert_eq!(data_symbol("crt", "_HUGE"), Some(8));

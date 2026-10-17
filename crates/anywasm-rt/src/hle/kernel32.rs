@@ -5388,8 +5388,10 @@ fn load_library(p: &mut Process, name: &str) -> R {
     if let Some(i) = p.module_by_name(&n) {
         return Ok(p.modules[i].base);
     }
-    if anywasm_pe::canonical_dll(crate::process::base_name(&n)) == "dinput8" {
-        let i = p.register_hle_module(&n, "dinput8");
+    let canonical = anywasm_pe::canonical_dll(crate::process::base_name(&n));
+    if matches!(canonical.as_str(), "dinput8" | "eax" | "vorbisfile") {
+        let group = group_of(&canonical).expect("built-in DLL group must be registered");
+        let i = p.register_hle_module(&n, group);
         return Ok(p.modules[i].base);
     }
     let relative = absolute(&n, &p.current_directory);

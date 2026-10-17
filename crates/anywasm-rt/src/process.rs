@@ -258,6 +258,8 @@ pub struct CriticalSectionState {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SystemParameters {
+    /// Current screen-saver activation state in this virtual Windows session.
+    pub screen_saver_active: bool,
     /// Host's Windows cursor-shadow setting. `None` means the host did not supply the value.
     pub cursor_shadow: Option<bool>,
     /// Host's Windows mouse-trail count. `None` means the host did not supply the value.
@@ -266,6 +268,8 @@ pub struct SystemParameters {
     pub mouse_sonar: Option<bool>,
     /// Host's number of vertical wheel-scroll lines.
     pub wheel_scroll_lines: Option<u32>,
+    /// Host StickyKeys flags returned by SPI_GETSTICKYKEYS.
+    pub sticky_keys_flags: Option<u32>,
 }
 
 pub type RunResult = Stop;
@@ -505,6 +509,8 @@ pub struct Process {
     pub registry_key_access: HashMap<u64, u32>,
     /// Keys created by guest calls during this process lifetime.
     pub registry_paths: HashSet<String>,
+    /// Registry paths created with REG_OPTION_VOLATILE.
+    pub registry_volatile_paths: HashSet<String>,
     /// Volatile registry values indexed by normalized key path and value name.
     pub registry_values: HashMap<(String, String), (u32, Vec<u8>)>,
     /// Host snapshot values retain native UTF-16 registry storage for W APIs.
@@ -515,6 +521,10 @@ pub struct Process {
     pub registry_children: HashMap<String, Vec<String>>,
     /// Registry class and last-write metadata from the host snapshot.
     pub registry_key_metadata: HashMap<String, RegistryKeyMetadata>,
+    /// Whether the host enabled durable storage for the virtual HKCU overlay.
+    pub user_profile_persistence_enabled: bool,
+    /// Incremented whenever a persistent HKCU value changes.
+    pub user_profile_registry_generation: u32,
     pub heap: crate::hle::heap::Heap,
     pub vmem: BTreeMap<u64, (u64, u8)>,
     pub vmem_next: u64,
@@ -635,6 +645,11 @@ fn stdcall_stack_bytes(group: &str, name: &str) -> Option<u64> {
     }
     if group == "dsound" {
         if let Some(bytes) = hle::dsound::stdcall_stack_bytes(name) {
+            return Some(bytes);
+        }
+    }
+    if group == "eax" {
+        if let Some(bytes) = hle::eax::stdcall_stack_bytes(name) {
             return Some(bytes);
         }
     }
@@ -1260,6 +1275,19 @@ fn x86_abi_cleanup_bytes(group: &str, name: &str) -> Result<u64, Stop> {
 }
 
 impl Process {
+    pub fn is_registry_volatile_path(&self, path: &str) -> bool {
+        self.registry_volatile_paths
+            .iter()
+            .any(|volatile| path == volatile || path.starts_with(&format!("{volatile}\\")))
+    }
+
+    pub fn mark_user_profile_registry_dirty(&mut self) {
+        if self.user_profile_persistence_enabled {
+            self.user_profile_registry_generation =
+                self.user_profile_registry_generation.wrapping_add(1);
+        }
+    }
+
     pub fn new(mut vfs: Vfs) -> Self {
         // The virtual Windows account has the same profile folders on every
         // host. These are writable VFS directories, not paths into the host OS.
@@ -1311,11 +1339,14 @@ impl Process {
             registry_key_paths: HashMap::new(),
             registry_key_access: HashMap::new(),
             registry_paths: HashSet::new(),
+            registry_volatile_paths: HashSet::new(),
             registry_values: HashMap::new(),
             registry_host_values: HashSet::new(),
             registry_host_paths: HashSet::new(),
             registry_children: HashMap::new(),
             registry_key_metadata: HashMap::new(),
+            user_profile_persistence_enabled: false,
+            user_profile_registry_generation: 0,
             heap: crate::hle::heap::Heap::new(),
             vmem: BTreeMap::new(),
             vmem_next: 0x2_0000_0000,
@@ -3224,8 +3255,10 @@ impl Process {
         if let Some(i) = self.module_by_name(dll) {
             return Ok(i);
         }
-        if canonical_dll(&base_name(dll)) == "dinput8" {
-            return Ok(self.register_hle_module(dll, "dinput8"));
+        let canonical = canonical_dll(&base_name(dll));
+        if matches!(canonical.as_str(), "dinput8" | "eax" | "vorbisfile") {
+            let group = hle::group_of(&canonical).expect("built-in DLL group must be registered");
+            return Ok(self.register_hle_module(dll, group));
         }
         // Bundled DLL?
         let relative = crate::vfs::absolute(dll, &self.current_directory);
@@ -5540,6 +5573,19 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn vorbis_and_eax_use_their_real_hle_backends_instead_of_bundled_dll_entrypoints() {
+        let mut vfs = Vfs::new();
+        vfs.insert("vorbisFile.dll", vec![0]);
+        vfs.insert("eax.dll", vec![0]);
+        let mut process = Process::new(vfs);
+
+        for (dll, expected_group) in [("vorbisfile.dll", "vorbisfile"), ("eax.dll", "eax")] {
+            let module = process.resolve_dll(dll).unwrap();
+            assert_eq!(process.modules[module].hle_group, Some(expected_group));
+        }
+    }
+
+    #[test]
     fn x64_access_violation_enters_vectored_handler_and_resumes_edited_context() {
         const IMAGE_BASE: u64 = 0x1400_0000_0;
         const FAULT_ADDRESS: u64 = 0xdead_0000;
@@ -5871,6 +5917,8 @@ mod scheduler_tests {
             stdcall_stack_bytes("kernel32", "GetCurrentThreadId"),
             Some(0)
         );
+        assert_eq!(stdcall_stack_bytes("vorbisfile", "ov_read"), Some(0));
+        assert_eq!(stdcall_stack_bytes("eax", "#6"), Some(12));
         assert_eq!(stdcall_stack_bytes("ntdll", "RtlUnwind"), Some(16));
         assert_eq!(
             x86_abi_cleanup_bytes("crt", "_XcptFilter"),
