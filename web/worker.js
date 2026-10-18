@@ -730,7 +730,11 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
       const shellFoldersKey = hostRegistry.keys.find((key) =>
         typeof key.path === 'string' && key.path.toLowerCase() === shellFoldersPath);
       if (shellFoldersKey) {
-        installHostRegistrySnapshot(w, { available: true, keys: [shellFoldersKey] });
+        installHostRegistrySnapshot(w, {
+          available: true,
+          keys: [shellFoldersKey],
+          missingKeys32: hostRegistry.missingKeys32 || [],
+        });
         postMessage({
           type: 'out',
           stream: 'stderr',

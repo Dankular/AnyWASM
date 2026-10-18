@@ -625,6 +625,8 @@ pub struct Process {
     pub registry_host_values: HashSet<(String, String)>,
     /// Exact paths present in the host's read-only registry snapshot.
     pub registry_host_paths: HashSet<String>,
+    /// Exact host registry paths confirmed absent in the 32-bit registry view.
+    pub registry_missing_host_paths_32: HashSet<String>,
     /// Child names in host registry enumeration order, indexed by normalized parent path.
     pub registry_children: HashMap<String, Vec<String>>,
     /// Registry class and last-write metadata from the host snapshot.
@@ -1506,6 +1508,7 @@ impl Process {
             registry_values: HashMap::new(),
             registry_host_values: HashSet::new(),
             registry_host_paths: HashSet::new(),
+            registry_missing_host_paths_32: HashSet::new(),
             registry_children: HashMap::new(),
             registry_key_metadata: HashMap::new(),
             user_profile_persistence_enabled: false,

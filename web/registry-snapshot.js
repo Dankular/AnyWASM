@@ -1,5 +1,5 @@
 const encoder = new TextEncoder();
-const signature = new Uint8Array([0x41, 0x57, 0x52, 0x45, 0x47, 0x31, 0, 0]); // AWREG1\0\0
+const signature = new Uint8Array([0x41, 0x57, 0x52, 0x45, 0x47, 0x32, 0, 0]); // AWREG2\0\0
 const maxRegistryBytes = 16 * 1024 * 1024;
 
 function requireU32(value, label) {
@@ -32,6 +32,10 @@ export function encodeHostRegistrySnapshot(snapshot) {
   if (snapshot?.available !== true || !Array.isArray(snapshot.keys) || snapshot.keys.length === 0 || snapshot.keys.length > 4096) {
     throw new Error('host registry snapshot is unavailable or has an invalid key list');
   }
+  const missingKeys32 = snapshot.missingKeys32 ?? [];
+  if (!Array.isArray(missingKeys32) || missingKeys32.length > 4096) {
+    throw new Error('host registry snapshot has an invalid 32-bit missing-key list');
+  }
   const chunks = [signature];
   const header = new Uint8Array(4);
   new DataView(header.buffer).setUint32(0, snapshot.keys.length, true);
@@ -60,6 +64,9 @@ export function encodeHostRegistrySnapshot(snapshot) {
     pushU32(bytes.length, `${label} length`);
     push(bytes);
   };
+
+  pushU32(missingKeys32.length, '32-bit missing-key count');
+  for (const [index, path] of missingKeys32.entries()) pushText(path, `32-bit missing key ${index}`);
 
   for (const [index, key] of snapshot.keys.entries()) {
     if (!Array.isArray(key.subkeys) || !Array.isArray(key.values) || key.subkeys.length > 65_536 || key.values.length > 65_536) {

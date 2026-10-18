@@ -32,8 +32,8 @@ test('encodes native Sims registry metadata and raw value bytes without narrowin
     }],
   };
   const bytes = encodeHostRegistrySnapshot(snapshot);
-  assert.deepEqual([...bytes.subarray(0, 12)], [0x41, 0x57, 0x52, 0x45, 0x47, 0x31, 0, 0, 1, 0, 0, 0]);
-  const r = reader(bytes.subarray(12));
+  assert.deepEqual([...bytes.subarray(0, 16)], [0x41, 0x57, 0x52, 0x45, 0x47, 0x32, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+  const r = reader(bytes.subarray(16));
   assert.equal(r.text(), snapshot.keys[0].path);
   assert.equal(r.text(), 'Sims');
   assert.equal(r.u32(), 240);
@@ -46,7 +46,28 @@ test('encodes native Sims registry metadata and raw value bytes without narrowin
   const dataLength = r.u32();
   assert.equal(dataLength, valueData.length);
   assert.deepEqual(r.data(dataLength), valueData);
-  assert.equal(r.offset + 12, bytes.length);
+  assert.equal(r.offset + 16, bytes.length);
+});
+
+test('encodes only the explicitly confirmed 32-bit-view missing registry paths', () => {
+  const snapshot = {
+    available: true,
+    keys: [{
+      path: 'hkey_local_machine\\software\\sims(steam)',
+      className: '',
+      securityDescriptorSize: 0,
+      lastWriteFiletime: '0',
+      subkeys: [],
+      values: [],
+    }],
+    missingKeys32: ['hkey_local_machine\\software\\apple computer, inc.\\quicktime'],
+  };
+  const bytes = encodeHostRegistrySnapshot(snapshot);
+  const r = reader(bytes.subarray(8));
+  assert.equal(r.u32(), 1); // present key count
+  assert.equal(r.u32(), 1); // confirmed missing key count in 32-bit view
+  assert.equal(r.text(), snapshot.missingKeys32[0]);
+  assert.equal(r.text(), snapshot.keys[0].path);
 });
 
 test('rejects missing snapshots and malformed raw data instead of encoding empty success', () => {
@@ -55,4 +76,9 @@ test('rejects missing snapshots and malformed raw data instead of encoding empty
     available: true,
     keys: [{ path: 'key', className: '', securityDescriptorSize: 0, lastWriteFiletime: '0', subkeys: [], values: [{ name: 'x', type: 1, data: '***' }] }],
   }), /base64/);
+  assert.throws(() => encodeHostRegistrySnapshot({
+    available: true,
+    keys: [{ path: 'key', className: '', securityDescriptorSize: 0, lastWriteFiletime: '0', subkeys: [], values: [] }],
+    missingKeys32: 'hkey_local_machine\\software\\example',
+  }), /32-bit missing-key list/);
 });

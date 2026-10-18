@@ -1901,6 +1901,9 @@ fn open_key_a(
         return Ok(5); // ERROR_ACCESS_DENIED
     }
     let path = append_registry_subkey(&base, &subkey);
+    if process.registry_missing_host_paths_32.contains(&path) {
+        return Ok(ERROR_FILE_NOT_FOUND);
+    }
     if !process.registry_paths.contains(&path) && !(subkey.is_empty() && is_predefined_root(root)) {
         if registry_path_is_covered(process, &path) {
             return Ok(ERROR_FILE_NOT_FOUND);
@@ -3646,6 +3649,23 @@ mod tests {
             Err(Stop::Unimplemented { dll, name }) if dll == "advapi32" && name.contains("outside the supplied read-only snapshot")
         ));
         assert_eq!(process.rd32(output), Ok(0));
+    }
+
+    #[test]
+    fn reg_open_key_ex_a_returns_file_not_found_for_confirmed_32_bit_host_absence() {
+        const HKEY_LOCAL_MACHINE: u64 = 0xffff_ffff_8000_0002;
+        let (mut process, result) = registry_process(
+            HKEY_LOCAL_MACHINE,
+            Some("SOFTWARE\\Apple Computer, Inc.\\QuickTime"),
+        );
+        process
+            .registry_missing_host_paths_32
+            .insert(crate::registry::HOST_QUICKTIME_REGISTRY_PATH_32.to_owned());
+        let open = lookup("RegOpenKeyExA").expect("RegOpenKeyExA should be implemented");
+
+        assert_eq!(open(&mut process), Ok(2)); // ERROR_FILE_NOT_FOUND in host 32-bit view
+        assert_eq!(process.rd64(result), Ok(0xfeed_face_cafe_beef));
+        assert!(process.registry_key_paths.is_empty());
     }
 
     #[test]

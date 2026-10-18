@@ -172,6 +172,7 @@ try {
                 throw "Sims registry install dir does not match the active source path: $registeredPath"
             }
             $keys = [System.Collections.Generic.List[object]]::new()
+            $missingKeys32 = [System.Collections.Generic.List[string]]::new()
             Get-RegistrySnapshot $root 'hkey_local_machine\software\sims(steam)' $keys
             $eaRoot = $base.OpenSubKey('SOFTWARE\Electronic Arts\Sims(Steam)', $false)
             if ($null -eq $eaRoot) {
@@ -190,6 +191,15 @@ try {
                 Get-RegistrySnapshot $cpuRoot 'hkey_local_machine\hardware\description\system\centralprocessor\0' $keys
             } finally {
                 $cpuRoot.Dispose()
+            }
+            # This exact key was requested by the translated San Andreas startup trace.
+            # Record only a confirmed 32-bit-view absence; unknown host registry paths remain
+            # untranslated and stop explicitly in the guest.
+            $quickTime = $base.OpenSubKey('SOFTWARE\Apple Computer, Inc.\QuickTime', $false)
+            if ($null -eq $quickTime) {
+                $missingKeys32.Add('hkey_local_machine\software\apple computer, inc.\quicktime')
+            } else {
+                $quickTime.Dispose()
             }
             $userBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
                 [Microsoft.Win32.RegistryHive]::CurrentUser,
@@ -219,6 +229,7 @@ try {
         available = $true
         installPath = $expectedPath
         keys = $keys.ToArray()
+        missingKeys32 = $missingKeys32.ToArray()
     } | ConvertTo-Json -Depth 12 -Compress
 } catch {
     [ordered]@{

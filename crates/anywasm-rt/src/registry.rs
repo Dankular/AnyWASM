@@ -3,7 +3,8 @@
 use crate::process::{Process, RegistryKeyMetadata};
 use std::collections::{HashMap, HashSet};
 
-const MAGIC: &[u8; 8] = b"AWREG1\0\0";
+const MAGIC_V1: &[u8; 8] = b"AWREG1\0\0";
+const MAGIC_V2: &[u8; 8] = b"AWREG2\0\0";
 const USER_PROFILE_MAGIC: &[u8; 8] = b"AWUPR1\0\0";
 const MAX_KEYS: usize = 4096;
 const MAX_ITEMS: usize = 65_536;
@@ -15,6 +16,10 @@ const HOST_CPU_REGISTRY_ROOT: &str =
     "hkey_local_machine\\hardware\\description\\system\\centralprocessor\\0";
 const HOST_SHELL_FOLDERS_REGISTRY_ROOT: &str =
     "hkey_current_user\\software\\microsoft\\windows\\currentversion\\explorer\\shell folders";
+/// Exact 32-bit-view lookup added from the San Andreas runtime trace. This is negative evidence,
+/// not an allowlist for arbitrary host registry reads.
+pub const HOST_QUICKTIME_REGISTRY_PATH_32: &str =
+    "hkey_local_machine\\software\\apple computer, inc.\\quicktime";
 const HOST_REGISTRY_ROOTS: [&str; 4] = [
     SIMS_REGISTRY_ROOT,
     EA_SIMS_REGISTRY_ROOT,
@@ -23,10 +28,12 @@ const HOST_REGISTRY_ROOTS: [&str; 4] = [
 ];
 
 fn is_allowed_host_registry_path(path: &str) -> bool {
-    HOST_REGISTRY_ROOTS.iter().any(|root| {
-        path == *root
-            || (*root != HOST_SHELL_FOLDERS_REGISTRY_ROOT && path.starts_with(&format!("{root}\\")))
-    })
+    path == HOST_QUICKTIME_REGISTRY_PATH_32
+        || HOST_REGISTRY_ROOTS.iter().any(|root| {
+            path == *root
+                || (*root != HOST_SHELL_FOLDERS_REGISTRY_ROOT
+                    && path.starts_with(&format!("{root}\\")))
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +51,13 @@ pub struct RegistryKeyRecord {
     pub last_write_filetime: u64,
     pub subkeys: Vec<String>,
     pub values: Vec<RegistryValueRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRegistrySnapshot {
+    pub keys: Vec<RegistryKeyRecord>,
+    /// Exact paths verified absent in the host's 32-bit registry view.
+    pub missing_paths_32: HashSet<String>,
 }
 
 struct Reader<'a> {
@@ -398,14 +412,42 @@ pub fn serialize_user_profile_snapshot(process: &Process) -> Result<Vec<u8>, Str
     Ok(bytes)
 }
 
-pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, String> {
+pub fn parse_host_snapshot(bytes: &[u8]) -> Result<HostRegistrySnapshot, String> {
     let mut reader = Reader { bytes, offset: 0 };
-    if reader.take(MAGIC.len())? != MAGIC {
+    let magic = reader.take(MAGIC_V1.len())?;
+    let has_negative_paths = if magic == MAGIC_V2 {
+        true
+    } else if magic == MAGIC_V1 {
+        false
+    } else {
         return Err("registry snapshot has an invalid signature".to_owned());
-    }
+    };
     let key_count = reader.u32()? as usize;
     if key_count == 0 || key_count > MAX_KEYS {
         return Err("registry snapshot key count is outside the accepted range".to_owned());
+    }
+    let missing_count = if has_negative_paths {
+        let count = reader.u32()? as usize;
+        if count > MAX_KEYS {
+            return Err("registry snapshot has too many confirmed-missing keys".to_owned());
+        }
+        count
+    } else {
+        0
+    };
+    let mut missing_paths_32 = HashSet::with_capacity(missing_count);
+    for _ in 0..missing_count {
+        let path = normalize_path(&reader.text()?)?;
+        if path != HOST_QUICKTIME_REGISTRY_PATH_32 {
+            return Err(format!(
+                "registry snapshot has no 32-bit absence evidence for host path: {path}"
+            ));
+        }
+        if !missing_paths_32.insert(path.clone()) {
+            return Err(format!(
+                "registry snapshot repeats confirmed-missing host path: {path}"
+            ));
+        }
     }
 
     let mut records = Vec::with_capacity(key_count);
@@ -478,6 +520,12 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, Strin
     if reader.offset != bytes.len() {
         return Err("registry snapshot has trailing bytes".to_owned());
     }
+    if missing_paths_32
+        .iter()
+        .any(|path| by_path.contains_key(path))
+    {
+        return Err("registry snapshot marks a present key as confirmed missing".to_owned());
+    }
 
     let record_paths = by_path.keys().cloned().collect::<HashSet<_>>();
     let root_present = record_paths.contains(SIMS_REGISTRY_ROOT);
@@ -527,12 +575,15 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<Vec<RegistryKeyRecord>, Strin
             }
         }
     }
-    Ok(records)
+    Ok(HostRegistrySnapshot {
+        keys: records,
+        missing_paths_32,
+    })
 }
 
 /// Installs a validated, read-only snapshot of allowlisted host registry keys.
 pub fn load_host_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), String> {
-    let records = parse_host_snapshot(bytes)?;
+    let snapshot = parse_host_snapshot(bytes)?;
 
     let old_paths = process
         .registry_host_paths
@@ -559,7 +610,9 @@ pub fn load_host_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), Str
         .registry_host_paths
         .retain(|path| !old_paths.contains(path));
 
-    for record in records {
+    process.registry_missing_host_paths_32.clear();
+
+    for record in snapshot.keys {
         let path = normalize_path(&record.path)?;
         process.registry_paths.insert(path.clone());
         process.registry_host_paths.insert(path.clone());
@@ -582,6 +635,9 @@ pub fn load_host_snapshot(process: &mut Process, bytes: &[u8]) -> Result<(), Str
             process.registry_host_values.insert((path.clone(), name));
         }
     }
+    process
+        .registry_missing_host_paths_32
+        .extend(snapshot.missing_paths_32);
     Ok(())
 }
 
@@ -590,7 +646,7 @@ mod tests {
     use super::{
         is_allowed_host_registry_path, load_host_snapshot, load_user_profile_snapshot,
         parse_host_snapshot, serialize_user_profile_snapshot, HOST_CPU_REGISTRY_ROOT,
-        HOST_SHELL_FOLDERS_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
+        HOST_QUICKTIME_REGISTRY_PATH_32, HOST_SHELL_FOLDERS_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
     };
     use crate::{process::Process, vfs::Vfs};
     use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
@@ -729,6 +785,16 @@ mod tests {
         bytes
     }
 
+    fn sample_snapshot_with_quicktime_absence_32() -> Vec<u8> {
+        let v1 = sample_snapshot();
+        let mut bytes = b"AWREG2\0\0".to_vec();
+        bytes.extend_from_slice(&6u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        text(&mut bytes, HOST_QUICKTIME_REGISTRY_PATH_32);
+        bytes.extend_from_slice(&v1[12..]);
+        bytes
+    }
+
     fn snapshot_with_shell_folders() -> Vec<u8> {
         let mut snapshot = b"AWREG1\0\0".to_vec();
         snapshot.extend_from_slice(&1u32.to_le_bytes());
@@ -753,7 +819,8 @@ mod tests {
     fn parses_and_installs_native_registry_data() {
         let snapshot = sample_snapshot();
         let records = parse_host_snapshot(&snapshot).unwrap();
-        assert_eq!(records.len(), 6);
+        assert_eq!(records.keys.len(), 6);
+        assert!(records.missing_paths_32.is_empty());
         let mut process = Process::new(Vfs::new());
         load_host_snapshot(&mut process, &snapshot).unwrap();
         let value = process
@@ -786,6 +853,34 @@ mod tests {
     }
 
     #[test]
+    fn installs_exact_confirmed_32_bit_view_absence_without_widening_host_reads() {
+        let snapshot = sample_snapshot_with_quicktime_absence_32();
+        let parsed = parse_host_snapshot(&snapshot).unwrap();
+        assert_eq!(parsed.missing_paths_32.len(), 1);
+        assert!(parsed
+            .missing_paths_32
+            .contains(HOST_QUICKTIME_REGISTRY_PATH_32));
+
+        let mut process = Process::new(Vfs::new());
+        load_host_snapshot(&mut process, &snapshot).unwrap();
+        assert!(process
+            .registry_missing_host_paths_32
+            .contains(HOST_QUICKTIME_REGISTRY_PATH_32));
+        assert!(!process
+            .registry_paths
+            .contains(HOST_QUICKTIME_REGISTRY_PATH_32));
+        assert!(!is_allowed_host_registry_path(
+            "hkey_local_machine\\software\\apple computer, inc.\\quicktime\\private"
+        ));
+
+        let mut malformed = snapshot.clone();
+        let bad_path = b"hkey_local_machine\\software\\apple computer, inc.\\unknown";
+        let start = 16 + 4;
+        malformed[start..start + bad_path.len()].copy_from_slice(bad_path);
+        assert!(parse_host_snapshot(&malformed).is_err());
+    }
+
+    #[test]
     fn malformed_or_out_of_scope_snapshots_fail_without_installing_partial_data() {
         let mut process = Process::new(Vfs::new());
         let mut bad = sample_snapshot();
@@ -803,8 +898,8 @@ mod tests {
     #[test]
     fn accepts_only_the_exact_shell_folders_key_as_a_partial_host_snapshot() {
         let records = parse_host_snapshot(&snapshot_with_shell_folders()).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].path, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
+        assert_eq!(records.keys.len(), 1);
+        assert_eq!(records.keys[0].path, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
 
         let mut process = Process::new(Vfs::new());
         let mut partial_sims = sample_snapshot();
