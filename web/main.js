@@ -526,7 +526,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null, dir
     else if (m.type === 'asset-progress') {
       const fetched = (m.fetchedBytes / (1024 * 1024)).toFixed(1);
       const total = (Number(m.packageLength) / (1024 * 1024)).toFixed(1);
-      showLoading(`Streaming game data: ${fetched} MiB fetched · ${total} MiB package`);
+      showLoading(`Game data: ${fetched} MiB fetched on demand · ${total} MiB available`);
     }
     else if (m.type === 'message-box-request') enqueueMessageBox(m);
     else if (m.type === 'dialog-box-request') enqueueDialogBox(m);

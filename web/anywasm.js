@@ -556,10 +556,11 @@ export class AnyWasm {
     if (!inventory.executables.includes(entry)) {
       throw new Error(`selected entry point is not an executable in this folder: ${entry}`);
     }
-    const dllPaths = [...inventory.filesByPath.keys()]
-      .filter((path) => !inventory.filesByPath.get(path)?.isDirectory && path.toLowerCase().endsWith('.dll'))
-      .sort();
-    const bootPaths = [entry, ...dllPaths];
+    // The executable must be staged because Process::load_exe reads it from the local VFS.
+    // DLLs stay as indexed assets: resolve_dll reads the selected DLL only when an import (or a
+    // later LoadLibrary call) actually needs it. Staging every DLL in a large game install makes
+    // startup download unrelated expansion packs, tools, localized resources, and redistributables.
+    const bootPaths = [entry];
     const index = createDirectoryAssetIndex(files, bootPaths);
     const source = new DirectoryAssetSource(index);
     this.hostIo.assetUrl = null;
@@ -636,7 +637,27 @@ export class AnyWasm {
       onProgress({ phase: 'boot', path, loadedBytes, totalBytes, fileIndex: i + 1, totalFiles: bootFiles.length });
     }
 
-    const finishRc = this.x.aw_load_finish();
+    // Resolving imports can read streamed DLL assets through read_asset_range. That host read
+    // suspends this exported call with Asyncify, so finish the continuation after each range
+    // fetch instead of forcing the host to materialize every DLL before process startup.
+    onProgress({ phase: 'resolve', path: entry, loadedBytes, totalBytes, fileIndex: bootFiles.length, totalFiles: bootFiles.length });
+    let finishRc;
+    for (;;) {
+      finishRc = this.x.aw_load_finish();
+      if (!this.asyncifyData) break;
+      const state = this.x.asyncify_get_state();
+      if (state === 0) break;
+      if (state !== 1) throw new Error(`direct load returned in unexpected Asyncify state ${state}`);
+      this.x.asyncify_stop_unwind();
+      if (this.hostIo.pending) {
+        await this.waitForHost();
+      } else {
+        // A guest DLL entrypoint may yield while the loader initializes it. Resume with a fresh
+        // instruction slice; file and GPU reads use hostIo.pending and are awaited above.
+        this.asyncifyControl.resumeSliceSteps = 1_000_000n;
+      }
+      this.x.asyncify_start_rewind(this.asyncifyData);
+    }
     if (finishRc !== 0) throw new Error(this.message() || 'failed to finish direct folder load');
     this.x.aw_jit_set_min_prefix?.(this.jitMinPrefix);
     return {

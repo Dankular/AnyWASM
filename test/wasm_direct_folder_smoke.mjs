@@ -6,7 +6,9 @@ import { createDirectoryAssetIndex } from '../web/direct-assets.js';
 
 const runtimeBytes = readFileSync(new URL('../target/wasm32-unknown-unknown/release/anywasm_wasm.asyncified.wasm', import.meta.url));
 const exeBytes = readFileSync(new URL('../fixtures/hello.exe', import.meta.url));
-const streamedBytes = new TextEncoder().encode('only-the-requested-game-bytes');
+// Keep this above the small-file cache threshold so the smoke checks an exact range read.
+const streamedBytes = new Uint8Array(32 * 1024);
+streamedBytes.set(new TextEncoder().encode('the'), 5);
 
 function selectedFile(path, bytes) {
   const data = bytes.slice();

@@ -660,6 +660,11 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
             type: 'load-progress',
             message: `Loading ${progress.path} into runtime memory (${progress.fileIndex}/${progress.totalFiles} boot files)…`,
           });
+        } else if (progress.phase === 'resolve') {
+          postMessage({
+            type: 'load-progress',
+            message: 'Resolving executable imports and streaming required DLLs…',
+          });
         } else {
           postMessage({
             type: 'asset-progress',
