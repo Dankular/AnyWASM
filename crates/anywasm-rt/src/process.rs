@@ -423,14 +423,21 @@ pub enum PipeEndpoint {
     NamedClient,
 }
 
-/// Process-local byte-stream pipe state shared by anonymous endpoints or one named-pipe
-/// server/client instance.
+/// Process-local pipe state shared by anonymous endpoints or one named-pipe server/client
+/// instance.
 #[derive(Clone, Debug)]
 pub struct PipeConnection {
     pub name: Option<String>,
     pub anonymous: bool,
+    /// Named-pipe type mode. Each successful WriteFile call queues one message.
+    pub message_type: bool,
+    /// Server-side read mode; CreateFile clients start in byte-read mode.
+    pub server_message_read_mode: bool,
     pub buffer_to_server: VecDeque<u8>,
     pub buffer_to_client: VecDeque<u8>,
+    /// Remaining bytes in each queued message, parallel to the two byte queues.
+    pub message_lengths_to_server: VecDeque<usize>,
+    pub message_lengths_to_client: VecDeque<usize>,
     pub capacity_to_server: usize,
     pub capacity_to_client: usize,
     pub server_readable: bool,

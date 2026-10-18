@@ -13,7 +13,7 @@ import { waitForPresentInterval } from './frame-pacing.js';
 import { SharedCpuCompletion, SharedCpuWorkerPool } from './shared-cpu-pool.js';
 import { InPlaceSharedCpuPool } from './shared-cpu-inplace-pool.js';
 import { createRemoteDirectoryFiles, normalizeDirectoryPath } from './direct-assets.js';
-import { encodeHostRegistrySnapshot } from './registry-snapshot.js';
+import { encodeHostRegistrySnapshot, selectSharedHostRegistrySnapshot } from './registry-snapshot.js';
 
 let w = null, exec = null, stopped = false, disposeRequested = false, wake = null, testMode = false, sharedCpuPool = null, sharedCpuRequested = false;
 let sharedNeedsCoordinatorTurn = false;
@@ -726,25 +726,19 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
         });
       }
     } else if (hostRegistry.available) {
-      const shellFoldersPath = 'hkey_current_user\\software\\microsoft\\windows\\currentversion\\explorer\\shell folders';
-      const shellFoldersKey = hostRegistry.keys.find((key) =>
-        typeof key.path === 'string' && key.path.toLowerCase() === shellFoldersPath);
-      if (shellFoldersKey) {
-        installHostRegistrySnapshot(w, {
-          available: true,
-          keys: [shellFoldersKey],
-          missingKeys32: hostRegistry.missingKeys32 || [],
-        });
+      const sharedRegistry = selectSharedHostRegistrySnapshot(hostRegistry);
+      if (sharedRegistry.keys.length > 0) {
+        installHostRegistrySnapshot(w, sharedRegistry);
         postMessage({
           type: 'out',
           stream: 'stderr',
-          text: '[host registry] loaded the shared HKCU Shell Folders key (read-only snapshot)\n',
+          text: `[host registry] loaded ${sharedRegistry.keys.length} scoped Shell Folders/QuickTime keys and exact Registry32 absence evidence (read-only snapshot)\n`,
         });
       } else {
         postMessage({
           type: 'out',
           stream: 'stderr',
-          text: '[host registry] shared HKCU Shell Folders key is absent from the read-only snapshot; registry reads outside translated data will stop explicitly.\n',
+          text: '[host registry] shared Shell Folders and exact QuickTime paths are absent from the read-only snapshot; registry reads outside translated data will stop explicitly.\n',
         });
       }
     } else {

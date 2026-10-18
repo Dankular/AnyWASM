@@ -1,6 +1,25 @@
 const encoder = new TextEncoder();
 const signature = new Uint8Array([0x41, 0x57, 0x52, 0x45, 0x47, 0x32, 0, 0]); // AWREG2\0\0
 const maxRegistryBytes = 16 * 1024 * 1024;
+const sharedShellFoldersPath = 'hkey_current_user\\software\\microsoft\\windows\\currentversion\\explorer\\shell folders';
+const userQuickTimePath32 = 'hkey_current_user\\software\\apple computer, inc.\\quicktime';
+const machineQuickTimePath32 = 'hkey_local_machine\\software\\apple computer, inc.\\quicktime';
+
+export function selectSharedHostRegistrySnapshot(snapshot) {
+  const keys = Array.isArray(snapshot?.keys) ? snapshot.keys.filter((key) => {
+    if (typeof key?.path !== 'string') return false;
+    const path = key.path.toLowerCase();
+    return path === sharedShellFoldersPath
+      || path === userQuickTimePath32
+      || path.startsWith(`${userQuickTimePath32}\\`);
+  }) : [];
+  const allowedMissingPaths = new Set([machineQuickTimePath32, userQuickTimePath32]);
+  const missingKeys32 = Array.isArray(snapshot?.missingKeys32)
+    ? [...new Set(snapshot.missingKeys32.filter((path) =>
+      typeof path === 'string' && allowedMissingPaths.has(path.toLowerCase())))]
+    : [];
+  return { available: snapshot?.available === true, installPath: snapshot?.installPath, keys, missingKeys32 };
+}
 
 function requireU32(value, label) {
   if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {

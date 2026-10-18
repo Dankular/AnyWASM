@@ -81,7 +81,7 @@ fn create_pipe_keeps_inheritable_handles_and_transfers_guest_bytes() {
                 READ_OUT as u32,
                 WRITE_OUT as u32,
                 SECURITY_ATTRIBUTES as u32,
-                128,
+                0,
             ],
         ),
         1
@@ -96,6 +96,18 @@ fn create_pipe_keeps_inheritable_handles_and_transfers_guest_bytes() {
             ..
         })
     ));
+    let pipe_id = match process.handles.get(&reader).unwrap() {
+        Handle::Pipe { pipe_id, .. } => *pipe_id,
+        _ => panic!("read handle must reference a pipe"),
+    };
+    assert_eq!(
+        process.pipes[&pipe_id].capacity_to_server,
+        DEFAULT_PIPE_BUFFER_SIZE
+    );
+    assert_eq!(
+        crate::process::x86_import_cleanup_bytes("kernel32", "CreatePipe"),
+        Some(16)
+    );
     assert!(matches!(
         process.handles.get(&writer),
         Some(Handle::Pipe {
@@ -173,6 +185,272 @@ fn create_pipe_keeps_inheritable_handles_and_transfers_guest_bytes() {
     assert_eq!(last_error(&process), ERROR_BROKEN_PIPE);
     assert!(process.close_handle(reader).is_some());
     assert!(process.pipes.is_empty());
+}
+
+#[test]
+fn message_type_pipe_preserves_messages_reports_partial_reads_and_peeks_message_state() {
+    let mut process = process();
+    let name = pipe_name(&mut process, r"\\.\pipe\MessagePipeFixture");
+    let server = call_x86(
+        &mut process,
+        "CreateNamedPipeW",
+        &[
+            name,
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+            255,
+            1024,
+            1024,
+            200,
+            0,
+        ],
+    ) as u32;
+    assert_ne!(server, INVALID_HANDLE as u32);
+    let pipe_id = match process.handles.get(&(server as u64)).unwrap() {
+        Handle::Pipe { pipe_id, .. } => *pipe_id,
+        _ => panic!("server handle must reference a pipe"),
+    };
+    assert!(process.pipes[&pipe_id].message_type);
+    assert!(process.pipes[&pipe_id].server_message_read_mode);
+    assert_eq!(
+        crate::process::x86_import_cleanup_bytes("kernel32", "CreateNamedPipeW"),
+        Some(32)
+    );
+    assert_eq!(
+        crate::process::x86_import_cleanup_bytes("kernel32", "ConnectNamedPipe"),
+        Some(8)
+    );
+    assert_eq!(
+        crate::process::x86_import_cleanup_bytes("kernel32", "DisconnectNamedPipe"),
+        Some(4)
+    );
+
+    let client = call_x86(
+        &mut process,
+        "CreateFileW",
+        &[name, GENERIC_WRITE, 0, 0, 3, 0, 0],
+    ) as u32;
+    assert_ne!(client, INVALID_HANDLE as u32);
+    assert_eq!(call_x86(&mut process, "ConnectNamedPipe", &[server, 0]), 0);
+    assert_eq!(last_error(&process), ERROR_PIPE_CONNECTED);
+
+    process.write_bytes(DATA, b"first").unwrap();
+    process.write_bytes(DATA + 16, b"second").unwrap();
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "WriteFile",
+            &[client, DATA as u32, 5, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "WriteFile",
+            &[client, (DATA + 16) as u32, 6, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+
+    // FSCTL_PIPE_PEEK exposes both message count and the first message's remaining length.
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "DeviceIoControl",
+            &[
+                server,
+                FSCTL_PIPE_PEEK,
+                0,
+                0,
+                (DATA + 0x80) as u32,
+                64,
+                (DATA + 0x70) as u32,
+                0,
+            ],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(DATA + 0x70).unwrap(), 27);
+    assert_eq!(process.rd32(DATA + 0x80 + 8).unwrap(), 2);
+    assert_eq!(process.rd32(DATA + 0x80 + 12).unwrap(), 5);
+    assert_eq!(
+        process.read_bytes(DATA + 0x80 + 16, 11).unwrap(),
+        b"firstsecond"
+    );
+
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "ReadFile",
+            &[server, DATA as u32, 2, COUNT_OUT as u32, 0],
+        ),
+        0
+    );
+    assert_eq!(last_error(&process), ERROR_MORE_DATA);
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 2);
+    assert_eq!(process.read_bytes(DATA, 2).unwrap(), b"fi");
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "ReadFile",
+            &[server, DATA as u32, 8, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 3);
+    assert_eq!(process.read_bytes(DATA, 3).unwrap(), b"rst");
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "ReadFile",
+            &[server, DATA as u32, 8, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 6);
+    assert_eq!(process.read_bytes(DATA, 6).unwrap(), b"second");
+    assert_eq!(call_x86(&mut process, "DisconnectNamedPipe", &[server]), 1);
+}
+
+#[test]
+fn nonblocking_message_pipe_writes_are_atomic_when_capacity_is_exhausted() {
+    let mut process = process();
+    let name = pipe_name(&mut process, r"\\.\pipe\NonblockingMessagePipeFixture");
+    let server = call_x86(
+        &mut process,
+        "CreateNamedPipeW",
+        &[
+            name,
+            3,
+            PIPE_NOWAIT | PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+            1,
+            4,
+            4,
+            0,
+            0,
+        ],
+    ) as u32;
+    let client = open_duplex_client(&mut process, name);
+    assert_ne!(server, INVALID_HANDLE as u32);
+    assert_ne!(client, INVALID_HANDLE as u32);
+    assert_eq!(call_x86(&mut process, "ConnectNamedPipe", &[server, 0]), 0);
+    assert_eq!(last_error(&process), ERROR_PIPE_CONNECTED);
+
+    process.write_bytes(DATA, b"abc").unwrap();
+    process.write_bytes(DATA + 16, b"de").unwrap();
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "WriteFile",
+            &[server, DATA as u32, 3, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 3);
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "WriteFile",
+            &[server, (DATA + 16) as u32, 2, COUNT_OUT as u32, 0],
+        ),
+        0
+    );
+    assert_eq!(last_error(&process), ERROR_NO_DATA);
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 0);
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "ReadFile",
+            &[client, DATA as u32, 4, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 3);
+    assert_eq!(process.read_bytes(DATA, 3).unwrap(), b"abc");
+}
+
+#[test]
+fn byte_read_mode_consumes_message_lengths_across_write_boundaries() {
+    let mut process = process();
+    let name = pipe_name(&mut process, r"\\.\pipe\ByteReadMessagePipeFixture");
+    let server = call_x86(
+        &mut process,
+        "CreateNamedPipeW",
+        &[
+            name,
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_MESSAGE,
+            1,
+            64,
+            64,
+            0,
+            0,
+        ],
+    ) as u32;
+    let client = call_x86(
+        &mut process,
+        "CreateFileW",
+        &[name, GENERIC_WRITE, 0, 0, 3, 0, 0],
+    ) as u32;
+    assert_ne!(server, INVALID_HANDLE as u32);
+    assert_ne!(client, INVALID_HANDLE as u32);
+    assert_eq!(call_x86(&mut process, "ConnectNamedPipe", &[server, 0]), 0);
+    assert_eq!(last_error(&process), ERROR_PIPE_CONNECTED);
+
+    process.write_bytes(DATA, b"abc").unwrap();
+    process.write_bytes(DATA + 16, b"defg").unwrap();
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "WriteFile",
+            &[client, DATA as u32, 3, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "WriteFile",
+            &[client, (DATA + 16) as u32, 4, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+
+    // Byte read mode may cross a message boundary. PEEK must then report only the
+    // unconsumed tail of the second message.
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "ReadFile",
+            &[server, DATA as u32, 4, COUNT_OUT as u32, 0],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(COUNT_OUT as u64).unwrap(), 4);
+    assert_eq!(process.read_bytes(DATA, 4).unwrap(), b"abcd");
+    assert_eq!(
+        call_x86(
+            &mut process,
+            "DeviceIoControl",
+            &[
+                server,
+                FSCTL_PIPE_PEEK,
+                0,
+                0,
+                (DATA + 0x80) as u32,
+                64,
+                (DATA + 0x70) as u32,
+                0,
+            ],
+        ),
+        1
+    );
+    assert_eq!(process.rd32(DATA + 0x70).unwrap(), 19);
+    assert_eq!(process.rd32(DATA + 0x80 + 4).unwrap(), 3);
+    assert_eq!(process.rd32(DATA + 0x80 + 8).unwrap(), 1);
+    assert_eq!(process.rd32(DATA + 0x80 + 12).unwrap(), 3);
+    assert_eq!(process.read_bytes(DATA + 0x80 + 16, 3).unwrap(), b"efg");
 }
 
 #[test]
@@ -381,15 +659,14 @@ fn unsupported_pipe_modes_and_overlapped_operations_stop_explicitly() {
         Err(Stop::Unimplemented { dll, name })
             if dll == "kernel32" && name.contains("CreateNamedPipeW") && name.contains("overlapped")
     ));
-    assert!(matches!(
-        invoke_x86(
-            &mut process,
-            "CreateNamedPipeW",
-            &[name, 3, PIPE_TYPE_MESSAGE, 1, 64, 64, 0, 0],
-        ),
-        Err(Stop::Unimplemented { dll, name })
-            if dll == "kernel32" && name.contains("message-type pipes")
-    ));
+    // Message-type pipes are modeled; message read mode requires message pipe type.
+    let message_pipe = call_x86(
+        &mut process,
+        "CreateNamedPipeW",
+        &[name, 3, PIPE_TYPE_MESSAGE, 1, 64, 64, 0, 0],
+    ) as u32;
+    assert_ne!(message_pipe, INVALID_HANDLE as u32);
+    assert_eq!(call_x86(&mut process, "CloseHandle", &[message_pipe]), 1);
     assert_eq!(
         call_x86(
             &mut process,

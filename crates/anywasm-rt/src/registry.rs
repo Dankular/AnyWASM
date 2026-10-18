@@ -20,11 +20,17 @@ const HOST_SHELL_FOLDERS_REGISTRY_ROOT: &str =
 /// not an allowlist for arbitrary host registry reads.
 pub const HOST_QUICKTIME_REGISTRY_PATH_32: &str =
     "hkey_local_machine\\software\\apple computer, inc.\\quicktime";
-const HOST_REGISTRY_ROOTS: [&str; 4] = [
+/// Exact 32-bit-view host path requested by the San Andreas runtime. The
+/// snapshot may contain this key's captured tree or evidence that the key is
+/// absent; no sibling Apple registry paths are in scope.
+pub const HOST_USER_QUICKTIME_REGISTRY_PATH_32: &str =
+    "hkey_current_user\\software\\apple computer, inc.\\quicktime";
+const HOST_REGISTRY_ROOTS: [&str; 5] = [
     SIMS_REGISTRY_ROOT,
     EA_SIMS_REGISTRY_ROOT,
     HOST_CPU_REGISTRY_ROOT,
     HOST_SHELL_FOLDERS_REGISTRY_ROOT,
+    HOST_USER_QUICKTIME_REGISTRY_PATH_32,
 ];
 
 fn is_allowed_host_registry_path(path: &str) -> bool {
@@ -438,7 +444,7 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<HostRegistrySnapshot, String>
     let mut missing_paths_32 = HashSet::with_capacity(missing_count);
     for _ in 0..missing_count {
         let path = normalize_path(&reader.text()?)?;
-        if path != HOST_QUICKTIME_REGISTRY_PATH_32 {
+        if path != HOST_QUICKTIME_REGISTRY_PATH_32 && path != HOST_USER_QUICKTIME_REGISTRY_PATH_32 {
             return Err(format!(
                 "registry snapshot has no 32-bit absence evidence for host path: {path}"
             ));
@@ -520,21 +526,31 @@ pub fn parse_host_snapshot(bytes: &[u8]) -> Result<HostRegistrySnapshot, String>
     if reader.offset != bytes.len() {
         return Err("registry snapshot has trailing bytes".to_owned());
     }
-    if missing_paths_32
-        .iter()
-        .any(|path| by_path.contains_key(path))
-    {
-        return Err("registry snapshot marks a present key as confirmed missing".to_owned());
+    if missing_paths_32.iter().any(|missing| {
+        let descendant_prefix = format!("{missing}\\");
+        by_path
+            .keys()
+            .any(|present| present == missing || present.starts_with(&descendant_prefix))
+    }) {
+        return Err(
+            "registry snapshot marks a present key or descendant as confirmed missing".to_owned(),
+        );
     }
 
     let record_paths = by_path.keys().cloned().collect::<HashSet<_>>();
     let root_present = record_paths.contains(SIMS_REGISTRY_ROOT);
-    // Non-Sims launches may receive only the narrowly scoped shared folders
-    // key. Keep the normal Sims snapshot requirements intact and reject every
-    // other partial host snapshot.
-    let shell_folders_only =
-        records.len() == 1 && record_paths.contains(HOST_SHELL_FOLDERS_REGISTRY_ROOT);
-    if !root_present && !shell_folders_only {
+    // Non-Sims launches may receive the shared Shell Folders key and the
+    // exact QuickTime key/tree requested by the GTA runtime. Keep the normal
+    // Sims snapshot requirements intact and reject every other partial host
+    // snapshot.
+    let shared_runtime_keys_only = !root_present
+        && records.iter().all(|record| {
+            let path = record.path.to_lowercase();
+            path == HOST_SHELL_FOLDERS_REGISTRY_ROOT
+                || path == HOST_USER_QUICKTIME_REGISTRY_PATH_32
+                || path.starts_with(&format!("{HOST_USER_QUICKTIME_REGISTRY_PATH_32}\\"))
+        });
+    if !root_present && !shared_runtime_keys_only {
         return Err("registry snapshot omits the Sims registration root".to_owned());
     }
     if root_present && !record_paths.contains(EA_SIMS_REGISTRY_ROOT) {
@@ -646,7 +662,8 @@ mod tests {
     use super::{
         is_allowed_host_registry_path, load_host_snapshot, load_user_profile_snapshot,
         parse_host_snapshot, serialize_user_profile_snapshot, HOST_CPU_REGISTRY_ROOT,
-        HOST_QUICKTIME_REGISTRY_PATH_32, HOST_SHELL_FOLDERS_REGISTRY_ROOT, SIMS_REGISTRY_ROOT,
+        HOST_QUICKTIME_REGISTRY_PATH_32, HOST_SHELL_FOLDERS_REGISTRY_ROOT,
+        HOST_USER_QUICKTIME_REGISTRY_PATH_32, SIMS_REGISTRY_ROOT,
     };
     use crate::{process::Process, vfs::Vfs};
     use anywasm_cpu::cpu::{R8, R9, RCX, RDX, RSP};
@@ -789,9 +806,53 @@ mod tests {
         let v1 = sample_snapshot();
         let mut bytes = b"AWREG2\0\0".to_vec();
         bytes.extend_from_slice(&6u32.to_le_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
         text(&mut bytes, HOST_QUICKTIME_REGISTRY_PATH_32);
+        text(&mut bytes, HOST_USER_QUICKTIME_REGISTRY_PATH_32);
         bytes.extend_from_slice(&v1[12..]);
+        bytes
+    }
+
+    fn snapshot_with_user_quicktime_tree_32(mark_quicktime_root_missing: bool) -> Vec<u8> {
+        let mut bytes = b"AWREG2\0\0".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes()); // Shell Folders plus QuickTime root/tree.
+        bytes.extend_from_slice(
+            &(if mark_quicktime_root_missing {
+                2u32
+            } else {
+                1u32
+            })
+            .to_le_bytes(),
+        );
+        text(&mut bytes, HOST_QUICKTIME_REGISTRY_PATH_32);
+        if mark_quicktime_root_missing {
+            text(&mut bytes, HOST_USER_QUICKTIME_REGISTRY_PATH_32);
+        }
+
+        text(&mut bytes, HOST_SHELL_FOLDERS_REGISTRY_ROOT);
+        text(&mut bytes, "");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no Shell Folders subkeys
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no Shell Folders values
+
+        text(&mut bytes, HOST_USER_QUICKTIME_REGISTRY_PATH_32);
+        text(&mut bytes, "QuickTime");
+        bytes.extend_from_slice(&120u32.to_le_bytes());
+        bytes.extend_from_slice(&0x1234u64.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        text(&mut bytes, "Preferences");
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no values at the root
+
+        text(
+            &mut bytes,
+            &format!("{HOST_USER_QUICKTIME_REGISTRY_PATH_32}\\Preferences"),
+        );
+        text(&mut bytes, "Preferences");
+        bytes.extend_from_slice(&96u32.to_le_bytes());
+        bytes.extend_from_slice(&0x5678u64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no subkeys
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no values
         bytes
     }
 
@@ -856,10 +917,13 @@ mod tests {
     fn installs_exact_confirmed_32_bit_view_absence_without_widening_host_reads() {
         let snapshot = sample_snapshot_with_quicktime_absence_32();
         let parsed = parse_host_snapshot(&snapshot).unwrap();
-        assert_eq!(parsed.missing_paths_32.len(), 1);
+        assert_eq!(parsed.missing_paths_32.len(), 2);
         assert!(parsed
             .missing_paths_32
             .contains(HOST_QUICKTIME_REGISTRY_PATH_32));
+        assert!(parsed
+            .missing_paths_32
+            .contains(HOST_USER_QUICKTIME_REGISTRY_PATH_32));
 
         let mut process = Process::new(Vfs::new());
         load_host_snapshot(&mut process, &snapshot).unwrap();
@@ -872,12 +936,60 @@ mod tests {
         assert!(!is_allowed_host_registry_path(
             "hkey_local_machine\\software\\apple computer, inc.\\quicktime\\private"
         ));
+        assert!(!is_allowed_host_registry_path(
+            "hkey_current_user\\software\\apple computer, inc.\\other"
+        ));
 
         let mut malformed = snapshot.clone();
         let bad_path = b"hkey_local_machine\\software\\apple computer, inc.\\unknown";
         let start = 16 + 4;
         malformed[start..start + bad_path.len()].copy_from_slice(bad_path);
         assert!(parse_host_snapshot(&malformed).is_err());
+    }
+
+    #[test]
+    fn accepts_only_the_exact_current_user_quicktime_tree_in_a_partial_host_snapshot() {
+        let snapshot = snapshot_with_user_quicktime_tree_32(false);
+        let parsed = parse_host_snapshot(&snapshot).unwrap();
+        assert_eq!(parsed.keys.len(), 3);
+        assert!(parsed
+            .keys
+            .iter()
+            .any(|record| record.path.to_lowercase() == HOST_USER_QUICKTIME_REGISTRY_PATH_32));
+        assert!(parsed.keys.iter().any(|record| {
+            record.path.to_lowercase()
+                == format!("{HOST_USER_QUICKTIME_REGISTRY_PATH_32}\\preferences")
+        }));
+        assert!(parsed
+            .missing_paths_32
+            .contains(HOST_QUICKTIME_REGISTRY_PATH_32));
+        assert!(is_allowed_host_registry_path(
+            HOST_USER_QUICKTIME_REGISTRY_PATH_32
+        ));
+        assert!(is_allowed_host_registry_path(&format!(
+            "{HOST_USER_QUICKTIME_REGISTRY_PATH_32}\\preferences"
+        )));
+        assert!(!is_allowed_host_registry_path(
+            "hkey_current_user\\software\\apple computer, inc."
+        ));
+        assert!(!is_allowed_host_registry_path(
+            "hkey_current_user\\software\\apple computer, inc.\\unrelated"
+        ));
+
+        let mut process = Process::new(Vfs::new());
+        load_host_snapshot(&mut process, &snapshot).unwrap();
+        assert!(process
+            .registry_host_paths
+            .contains(HOST_USER_QUICKTIME_REGISTRY_PATH_32));
+        assert!(process.registry_host_paths.contains(&format!(
+            "{HOST_USER_QUICKTIME_REGISTRY_PATH_32}\\preferences"
+        )));
+
+        assert!(
+            parse_host_snapshot(&snapshot_with_user_quicktime_tree_32(true))
+                .unwrap_err()
+                .contains("present key or descendant as confirmed missing")
+        );
     }
 
     #[test]
@@ -896,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_the_exact_shell_folders_key_as_a_partial_host_snapshot() {
+    fn accepts_scoped_shell_folders_and_quicktime_roots_as_partial_host_snapshots() {
         let records = parse_host_snapshot(&snapshot_with_shell_folders()).unwrap();
         assert_eq!(records.keys.len(), 1);
         assert_eq!(records.keys[0].path, HOST_SHELL_FOLDERS_REGISTRY_ROOT);

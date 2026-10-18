@@ -205,6 +205,22 @@ try {
                 [Microsoft.Win32.RegistryHive]::CurrentUser,
                 [Microsoft.Win32.RegistryView]::Registry32)
             try {
+                # The GTA runtime requested this exact user key. Capture only
+                # its tree when present; otherwise report the exact absence in
+                # Registry32 so RegOpenKeyEx can return ERROR_FILE_NOT_FOUND.
+                $userQuickTime = $userBase.OpenSubKey(
+                    'Software\Apple Computer, Inc.\QuickTime',
+                    $false)
+                if ($null -eq $userQuickTime) {
+                    $missingKeys32.Add('hkey_current_user\software\apple computer, inc.\quicktime')
+                } else {
+                    try {
+                        Get-RegistrySnapshot $userQuickTime 'hkey_current_user\software\apple computer, inc.\quicktime' $keys
+                    } finally {
+                        $userQuickTime.Dispose()
+                    }
+                }
+
                 $shellFolders = $userBase.OpenSubKey(
                     'Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders',
                     $false)

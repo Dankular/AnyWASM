@@ -3763,6 +3763,8 @@ fn signal_pipe_connect_waiter(p: &mut Process, pipe_id: u64) {
 fn pipe_connection(
     name: Option<String>,
     anonymous: bool,
+    message_type: bool,
+    server_message_read_mode: bool,
     capacity_to_server: usize,
     capacity_to_client: usize,
     server_readable: bool,
@@ -3773,8 +3775,12 @@ fn pipe_connection(
     PipeConnection {
         name,
         anonymous,
+        message_type,
+        server_message_read_mode,
         buffer_to_server: VecDeque::new(),
         buffer_to_client: VecDeque::new(),
+        message_lengths_to_server: VecDeque::new(),
+        message_lengths_to_client: VecDeque::new(),
         capacity_to_server,
         capacity_to_client,
         server_readable,
@@ -3793,6 +3799,20 @@ fn pipe_connection(
         client_handles: 0,
         anonymous_read_handles: 0,
         anonymous_write_handles: 0,
+    }
+}
+
+fn consume_pipe_message_lengths(lengths: &mut VecDeque<usize>, mut bytes: usize) {
+    while bytes != 0 {
+        let Some(front) = lengths.front_mut() else {
+            break;
+        };
+        if bytes < *front {
+            *front -= bytes;
+            break;
+        }
+        bytes -= *front;
+        lengths.pop_front();
     }
 }
 
@@ -3826,7 +3846,7 @@ fn create_pipe(p: &mut Process) -> R {
         return Ok(0);
     }
     let pipe_id = p.new_pipe(pipe_connection(
-        None, true, capacity, capacity, false, false, false, 1,
+        None, true, false, false, capacity, capacity, false, false, false, 1,
     ));
     let read_handle = p.new_pipe_handle(pipe_id, PipeEndpoint::AnonymousRead, inheritable, false);
     let write_handle = p.new_pipe_handle(pipe_id, PipeEndpoint::AnonymousWrite, inheritable, false);
@@ -3912,10 +3932,6 @@ fn create_named_pipe_w(p: &mut Process) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(INVALID_HANDLE);
     }
-    if pipe_mode & PIPE_TYPE_MESSAGE != 0 {
-        return unsupported_kernel32("CreateNamedPipeW", "message-type pipes are not modeled");
-    }
-
     let out_size = p.arg(4) as u32 as usize;
     let in_size = p.arg(5) as u32 as usize;
     let out_size = if out_size == 0 {
@@ -3971,6 +3987,8 @@ fn create_named_pipe_w(p: &mut Process) -> R {
     let id = p.new_pipe(pipe_connection(
         Some(name.clone()),
         false,
+        pipe_mode & PIPE_TYPE_MESSAGE != 0,
+        pipe_mode & PIPE_READMODE_MESSAGE != 0,
         in_size,
         out_size,
         matches!(access_mode, PIPE_ACCESS_INBOUND | 3),
@@ -4159,6 +4177,8 @@ fn disconnect_named_pipe(p: &mut Process) -> R {
     pipe.client_open = false;
     pipe.buffer_to_server.clear();
     pipe.buffer_to_client.clear();
+    pipe.message_lengths_to_server.clear();
+    pipe.message_lengths_to_client.clear();
     Ok(1)
 }
 
@@ -4254,13 +4274,22 @@ fn device_io_control(p: &mut Process) -> R {
         return Ok(0);
     }
 
-    let (readable, queue) = match endpoint {
+    let (readable, queue, message_lengths) = match endpoint {
         PipeEndpoint::AnonymousRead | PipeEndpoint::NamedServer => (
             pipe.server_readable || pipe.anonymous,
             &pipe.buffer_to_server,
+            &pipe.message_lengths_to_server,
         ),
-        PipeEndpoint::NamedClient => (pipe.client_readable, &pipe.buffer_to_client),
-        PipeEndpoint::AnonymousWrite => (false, &pipe.buffer_to_client),
+        PipeEndpoint::NamedClient => (
+            pipe.client_readable,
+            &pipe.buffer_to_client,
+            &pipe.message_lengths_to_client,
+        ),
+        PipeEndpoint::AnonymousWrite => (
+            false,
+            &pipe.buffer_to_client,
+            &pipe.message_lengths_to_client,
+        ),
     };
     if !readable {
         p.set_last_error(ERROR_ACCESS_DENIED);
@@ -4273,9 +4302,22 @@ fn device_io_control(p: &mut Process) -> R {
     let mut result = Vec::with_capacity(PIPE_PEEK_HEADER_SIZE + copied);
     result.extend_from_slice(&PIPE_STATE_CONNECTED.to_le_bytes());
     result.extend_from_slice(&(available.min(u32::MAX as usize) as u32).to_le_bytes());
-    // This runtime implements byte-type pipes, so message count and message length are zero.
-    result.extend_from_slice(&0u32.to_le_bytes());
-    result.extend_from_slice(&0u32.to_le_bytes());
+    let message_count = if pipe.message_type {
+        message_lengths.len().min(u32::MAX as usize) as u32
+    } else {
+        0
+    };
+    let message_length = if pipe.message_type {
+        message_lengths
+            .front()
+            .copied()
+            .unwrap_or(0)
+            .min(u32::MAX as usize) as u32
+    } else {
+        0
+    };
+    result.extend_from_slice(&message_count.to_le_bytes());
+    result.extend_from_slice(&message_length.to_le_bytes());
     result.extend(queue.iter().take(copied).copied());
     p.write_bytes(output, &result)?;
     p.wr32(bytes_returned, result.len() as u32)?;
@@ -4404,11 +4446,16 @@ fn write_file(p: &mut Process) -> R {
             pipe.capacity_to_client
                 .saturating_sub(pipe.buffer_to_client.len())
         };
+        let message_type = pipe.message_type;
         if n == 0 {
             if written != 0 {
                 p.wr32(written, 0)?;
             }
             return Ok(1);
+        }
+        if message_type && available < n && nonblocking {
+            p.set_last_error(ERROR_NO_DATA);
+            return Ok(0);
         }
         if available < n && !nonblocking {
             return Err(Stop::Unimplemented {
@@ -4420,17 +4467,17 @@ fn write_file(p: &mut Process) -> R {
         let bytes_to_write = if nonblocking { n.min(available) } else { n };
         let data = p.read_bytes(buf, bytes_to_write)?;
         if queue_to_server {
-            p.pipes
-                .get_mut(&pipe_id)
-                .expect("pipe was checked above")
-                .buffer_to_server
-                .extend(data.iter().copied());
+            let pipe = p.pipes.get_mut(&pipe_id).expect("pipe was checked above");
+            pipe.buffer_to_server.extend(data.iter().copied());
+            if message_type {
+                pipe.message_lengths_to_server.push_back(data.len());
+            }
         } else if queue_to_client {
-            p.pipes
-                .get_mut(&pipe_id)
-                .expect("pipe was checked above")
-                .buffer_to_client
-                .extend(data.iter().copied());
+            let pipe = p.pipes.get_mut(&pipe_id).expect("pipe was checked above");
+            pipe.buffer_to_client.extend(data.iter().copied());
+            if message_type {
+                pipe.message_lengths_to_client.push_back(data.len());
+            }
         }
         if written != 0 {
             p.wr32(written, bytes_to_write as u32)?;
@@ -4685,6 +4732,9 @@ fn read_file(p: &mut Process) -> R {
                 return Ok(0);
             }
         };
+        let message_read_mode = pipe.message_type
+            && endpoint == PipeEndpoint::NamedServer
+            && pipe.server_message_read_mode;
         let available = if queue_to_server {
             pipe.buffer_to_server.len()
         } else {
@@ -4717,7 +4767,23 @@ fn read_file(p: &mut Process) -> R {
                     .into(),
             });
         }
-        let bytes_to_read = n.min(available);
+        let first_message_length = if queue_to_server {
+            pipe.message_lengths_to_server
+                .front()
+                .copied()
+                .unwrap_or(available)
+        } else {
+            pipe.message_lengths_to_client
+                .front()
+                .copied()
+                .unwrap_or(available)
+        };
+        let bytes_to_read = n.min(if message_read_mode {
+            first_message_length
+        } else {
+            available
+        });
+        let message_truncated = message_read_mode && n != 0 && bytes_to_read < first_message_length;
         let data: Vec<u8> = {
             let pipe = p.pipes.get_mut(&pipe_id).expect("pipe checked above");
             let queue = if queue_to_server {
@@ -4725,11 +4791,24 @@ fn read_file(p: &mut Process) -> R {
             } else {
                 &mut pipe.buffer_to_client
             };
-            queue.drain(..bytes_to_read).collect()
+            let data = queue.drain(..bytes_to_read).collect();
+            if pipe.message_type {
+                let lengths = if queue_to_server {
+                    &mut pipe.message_lengths_to_server
+                } else {
+                    &mut pipe.message_lengths_to_client
+                };
+                consume_pipe_message_lengths(lengths, bytes_to_read);
+            }
+            data
         };
         p.write_bytes(buf, &data)?;
         if read != 0 {
             p.wr32(read, data.len() as u32)?;
+        }
+        if message_truncated {
+            p.set_last_error(ERROR_MORE_DATA);
+            return Ok(0);
         }
         return Ok(1);
     }
@@ -12164,15 +12243,13 @@ mod import_batch_tests {
 
         let name = (BASE + 0x180) as u32;
         p.write_wstr(name as u64, r"\\.\pipe\MessageMode").unwrap();
-        assert!(matches!(
-            invoke_x86(
-                &mut p,
-                "CreateNamedPipeW",
-                &[name, 3, PIPE_TYPE_MESSAGE, 1, 64, 64, 0, 0]
-            ),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "kernel32" && name.contains("message-type pipes")
-        ));
+        let message_pipe = call_x86(
+            &mut p,
+            "CreateNamedPipeW",
+            &[name, 3, PIPE_TYPE_MESSAGE, 1, 64, 64, 0, 0],
+        );
+        assert_ne!(message_pipe, INVALID_HANDLE);
+        assert_eq!(call_x86(&mut p, "CloseHandle", &[message_pipe as u32]), 1);
     }
 
     #[test]

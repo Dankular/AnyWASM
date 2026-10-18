@@ -3669,6 +3669,36 @@ mod tests {
     }
 
     #[test]
+    fn reg_open_key_ex_a_returns_file_not_found_for_confirmed_hkcu_quicktime_absence() {
+        const HKEY_CURRENT_USER: u64 = 0xffff_ffff_8000_0001;
+        let (mut process, result) = registry_process(
+            HKEY_CURRENT_USER,
+            Some("Software\\Apple Computer, Inc.\\QuickTime"),
+        );
+        process
+            .registry_missing_host_paths_32
+            .insert(crate::registry::HOST_USER_QUICKTIME_REGISTRY_PATH_32.to_owned());
+        let open = lookup("RegOpenKeyExA").expect("RegOpenKeyExA should be implemented");
+
+        assert_eq!(open(&mut process), Ok(2)); // Exact host Registry32 absence.
+        assert_eq!(process.rd64(result), Ok(0xfeed_face_cafe_beef));
+        assert!(process.registry_key_paths.is_empty());
+
+        let (mut unknown, _) = registry_process(
+            HKEY_CURRENT_USER,
+            Some("Software\\Apple Computer, Inc.\\QuickTime\\Preferences"),
+        );
+        unknown
+            .registry_missing_host_paths_32
+            .insert(crate::registry::HOST_USER_QUICKTIME_REGISTRY_PATH_32.to_owned());
+        assert!(matches!(
+            open(&mut unknown),
+            Err(Stop::Unimplemented { dll, name })
+                if dll == "advapi32" && name.contains("outside the supplied read-only snapshot")
+        ));
+    }
+
+    #[test]
     fn crypt_acquire_context_a_creates_a_real_ephemeral_provider_handle() {
         const CRYPT_VERIFYCONTEXT_SILENT: u32 = 0xf000_0040;
         let mut process = registry_x86_call(&[]);

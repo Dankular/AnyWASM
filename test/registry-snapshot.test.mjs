@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { encodeHostRegistrySnapshot } from '../web/registry-snapshot.js';
+import { encodeHostRegistrySnapshot, selectSharedHostRegistrySnapshot } from '../web/registry-snapshot.js';
 
 function reader(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -60,14 +60,45 @@ test('encodes only the explicitly confirmed 32-bit-view missing registry paths',
       subkeys: [],
       values: [],
     }],
-    missingKeys32: ['hkey_local_machine\\software\\apple computer, inc.\\quicktime'],
+    missingKeys32: [
+      'hkey_local_machine\\software\\apple computer, inc.\\quicktime',
+      'hkey_current_user\\software\\apple computer, inc.\\quicktime',
+    ],
   };
   const bytes = encodeHostRegistrySnapshot(snapshot);
   const r = reader(bytes.subarray(8));
   assert.equal(r.u32(), 1); // present key count
-  assert.equal(r.u32(), 1); // confirmed missing key count in 32-bit view
+  assert.equal(r.u32(), 2); // exact confirmed missing keys in 32-bit view
   assert.equal(r.text(), snapshot.missingKeys32[0]);
+  assert.equal(r.text(), snapshot.missingKeys32[1]);
   assert.equal(r.text(), snapshot.keys[0].path);
+});
+
+test('selects only the shared Shell Folders key and exact QuickTime tree for non-direct launches', () => {
+  const shellFolders = 'hkey_current_user\\software\\microsoft\\windows\\currentversion\\explorer\\shell folders';
+  const quickTime = 'hkey_current_user\\software\\apple computer, inc.\\quicktime';
+  const snapshot = selectSharedHostRegistrySnapshot({
+    available: true,
+    installPath: 'D:\\The Sims 3',
+    keys: [
+      { path: 'hkey_local_machine\\software\\sims(steam)' },
+      { path: shellFolders },
+      { path: quickTime },
+      { path: `${quickTime}\\preferences` },
+      { path: 'hkey_current_user\\software\\apple computer, inc.\\other' },
+    ],
+    missingKeys32: [
+      'hkey_local_machine\\software\\apple computer, inc.\\quicktime',
+      quickTime,
+      'hkey_local_machine\\software\\unrelated',
+    ],
+  });
+  assert.equal(snapshot.available, true);
+  assert.deepEqual(snapshot.keys.map(({ path }) => path), [shellFolders, quickTime, `${quickTime}\\preferences`]);
+  assert.deepEqual(snapshot.missingKeys32, [
+    'hkey_local_machine\\software\\apple computer, inc.\\quicktime',
+    quickTime,
+  ]);
 });
 
 test('rejects missing snapshots and malformed raw data instead of encoding empty success', () => {

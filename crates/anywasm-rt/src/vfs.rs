@@ -1296,6 +1296,62 @@ mod tests {
     }
 
     #[test]
+    fn guest_c_drive_and_host_root_paths_share_streamed_and_persistent_keys() {
+        let package = asset_package(&[(r"Game\Bin\UI\UI.package", &[0x41, 0x57])]);
+        let index_end = 24 + u64::from_le_bytes(package[8..16].try_into().unwrap()) as usize;
+        let mut vfs = Vfs::new();
+        vfs.register_asset_index(&package[..index_end]).unwrap();
+        vfs.set_root_alias(r"D:\The Sims 3").unwrap();
+        let guest_game_file = r"C:\game\bin\UI\UI.package";
+        let host_game_file = r"D:\The Sims 3\game\bin\UI\UI.package";
+        assert_eq!(
+            vfs.normalize_path(guest_game_file),
+            r"game\bin\ui\ui.package"
+        );
+        assert_eq!(
+            vfs.normalize_path(host_game_file),
+            r"game\bin\ui\ui.package"
+        );
+        assert!(vfs.exists(guest_game_file));
+        assert!(vfs.exists(host_game_file));
+        assert_eq!(vfs.file_len(guest_game_file), Some(2));
+        assert_eq!(vfs.root_alias_drive_mask(), 1 << (b'D' - b'A'));
+
+        let save_path = r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3\Saves\slot.sims3";
+        vfs.create_dir(r"C:\Users").unwrap();
+        vfs.create_dir(r"C:\Users\AnyWASM").unwrap();
+        vfs.create_dir(r"C:\Users\AnyWASM\Documents").unwrap();
+        vfs.create_dir(r"C:\Users\AnyWASM\Documents\Electronic Arts")
+            .unwrap();
+        vfs.create_dir(r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3")
+            .unwrap();
+        vfs.create_dir(r"C:\Users\AnyWASM\Documents\Electronic Arts\The Sims 3\Saves")
+            .unwrap();
+        vfs.insert(save_path, b"profile-save".to_vec());
+        assert_eq!(
+            vfs.normalize_path(save_path),
+            r"users\anywasm\documents\electronic arts\the sims 3\saves\slot.sims3"
+        );
+        assert!(vfs.is_user_profile_path(save_path));
+
+        let snapshot = vfs.serialize_user_profile_snapshot().unwrap();
+        let mut restored = Vfs::new();
+        restored.load_user_profile_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            restored.get(save_path).map(Vec::as_slice),
+            Some(&b"profile-save"[..])
+        );
+
+        let missing_guest_path = r"C:\game\bin\missing\not-installed.dll";
+        assert_eq!(
+            vfs.normalize_path(missing_guest_path),
+            r"game\bin\missing\not-installed.dll"
+        );
+        assert!(!vfs.exists(missing_guest_path));
+        assert!(!vfs.is_dir(missing_guest_path));
+    }
+
+    #[test]
     fn directory_entries_include_immediate_files_and_synthesized_subdirectories() {
         let package = asset_package(&[
             (r"GameData\Shared\Packages\FullBuild0.package", &[1, 2, 3]),

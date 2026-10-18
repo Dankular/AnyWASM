@@ -68,6 +68,19 @@ fn validate_staged_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn current_directory_after_root_alias(current_directory: &str, host_root: &str) -> String {
+    let bytes = current_directory.as_bytes();
+    let is_guest_cwd = bytes.len() >= 3
+        && bytes.get(1) == Some(&b':')
+        && bytes.get(2) == Some(&b'\\')
+        && current_directory[..2].eq_ignore_ascii_case("C:");
+    if is_guest_cwd {
+        current_directory.to_owned()
+    } else {
+        host_root.to_owned()
+    }
+}
+
 #[allow(static_mut_refs)]
 fn state() -> Option<&'static mut State> {
     // SAFETY: WebAssembly instances are single threaded; the host never calls re-entrantly.
@@ -304,21 +317,15 @@ pub unsafe extern "C" fn aw_set_vfs_root_alias(ptr: *const u8, len: usize) -> i3
             return 1;
         }
     };
-    let current_suffix =
-        s.p.current_directory
-            .strip_prefix("C:\\")
-            .or_else(|| s.p.current_directory.strip_prefix("c:\\"))
-            .unwrap_or("")
-            .to_owned();
+    let guest_current_directory = s.p.current_directory.clone();
     if let Err(error) = s.p.vfs.set_root_alias(root) {
         s.message = error.into_bytes();
         return 1;
     }
-    s.p.current_directory = if current_suffix.is_empty() {
-        root.to_owned()
-    } else {
-        format!("{root}\\{current_suffix}")
-    };
+    // The game uses its guest C: working directory to register native path providers. Keep
+    // that identity visible. VFS normalization already maps C: paths to relative keys, while
+    // root_alias continues to accept host D: install paths and report D: as mounted.
+    s.p.current_directory = current_directory_after_root_alias(&guest_current_directory, root);
     s.message.clear();
     0
 }
@@ -1238,5 +1245,27 @@ pub unsafe extern "C" fn aw_stdin_push(ptr: *const u8, len: usize) {
     if let Some(s) = state() {
         s.p.stdin
             .extend(std::slice::from_raw_parts(ptr, len).iter().copied());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_directory_after_root_alias;
+
+    #[test]
+    fn root_alias_preserves_guest_cwd_including_the_drive_root() {
+        let host_root = r"D:\The Sims 3";
+        assert_eq!(
+            current_directory_after_root_alias(r"C:\game\bin", host_root),
+            r"C:\game\bin"
+        );
+        assert_eq!(
+            current_directory_after_root_alias(r"C:\", host_root),
+            r"C:\"
+        );
+        assert_eq!(
+            current_directory_after_root_alias(r"D:\The Sims 3\game\bin", host_root),
+            host_root
+        );
     }
 }
