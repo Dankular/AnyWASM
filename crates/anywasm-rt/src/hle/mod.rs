@@ -199,7 +199,6 @@ pub fn lookup(group: &str, name: &str) -> Option<HleFn> {
 /// handlers are useful at runtime but must not make `analyze` claim that the import is covered.
 pub fn import_is_implemented(group: &str, name: &str) -> bool {
     let diagnostic_only = match group {
-        "user32" => matches!(name, "CreateIconFromResource" | "WaitForInputIdle"),
         "kernel32" => matches!(
             name,
             "QueueUserAPC"
@@ -246,9 +245,9 @@ mod import_coverage_tests {
         assert!(import_is_implemented("user32", "DialogBoxParamA"));
         assert!(import_is_implemented("user32", "EndDialog"));
         assert!(import_is_implemented("user32", "CreateIconIndirect"));
+        assert!(import_is_implemented("user32", "CreateIconFromResource"));
+        assert!(import_is_implemented("user32", "WaitForInputIdle"));
         assert!(import_is_implemented("user32", "FillRect"));
-        assert!(!import_is_implemented("user32", "CreateIconFromResource"));
-        assert!(!import_is_implemented("user32", "WaitForInputIdle"));
         assert!(import_is_implemented("kernel32", "OpenEventW"));
         assert!(import_is_implemented("kernel32", "OpenMutexW"));
         assert!(import_is_implemented("kernel32", "OpenSemaphoreW"));

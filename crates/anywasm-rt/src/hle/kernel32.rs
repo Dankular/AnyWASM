@@ -12684,7 +12684,7 @@ mod user_apc_runtime_tests {
     use super::{
         lookup, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, THREAD_SET_CONTEXT, WAIT_IO_COMPLETION,
     };
-    use crate::process::{Handle, Process, ThreadState, ThreadWait, TEB_ADDR};
+    use crate::process::{Handle, Process, Stop, ThreadState, ThreadWait, TEB_ADDR};
     use crate::vfs::Vfs;
     use anywasm_cpu::cpu::{CpuMode, RSP};
     use anywasm_cpu::mem::{PAGE_SIZE, PROT_RW, PROT_RWX};
@@ -12898,5 +12898,49 @@ mod user_apc_runtime_tests {
         assert!(p.dispatch_current_user_apcs().unwrap());
         assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 1);
         assert_eq!(p.rd32(OUTPUT_VALUES).unwrap(), 0x6666);
+    }
+
+    #[test]
+    fn scheduler_wakes_alertable_thread_and_dispatches_x86_stdcall_apc() {
+        let mut p = process();
+        let callback = BASE + 0x100;
+        let entry = BASE + 0x200;
+        p.write_bytes(callback, &recording_apc(OUTPUT_COUNT, OUTPUT_VALUES))
+            .unwrap();
+        // Keep the started thread runnable after APC delivery so run() can return its budget.
+        p.write_bytes(entry, &[0xeb, 0xfe]).unwrap(); // jmp $
+
+        let target_id = 0x2000;
+        p.vmem_next = 0x0010_0000;
+        p.create_guest_thread(target_id, entry, 0, false).unwrap();
+        p.ready_threads.retain(|id| *id != target_id);
+        let deadline = p.now_ticks() + 50_000_000;
+        p.guest_threads.get_mut(&target_id).unwrap().state =
+            ThreadState::Blocked(ThreadWait::Sleep {
+                deadline,
+                alertable: true,
+            });
+        let target_rsp = p.guest_threads.get(&target_id).unwrap().cpu.gpr[RSP];
+        let thread_handle =
+            call_x86(&mut p, "OpenThread", &[THREAD_SET_CONTEXT, 0, target_id]).unwrap() as u32;
+
+        assert_eq!(
+            call_x86(
+                &mut p,
+                "QueueUserAPC",
+                &[callback as u32, thread_handle, 0x8888]
+            )
+            .unwrap(),
+            1
+        );
+
+        p.request_thread_yield();
+        assert_eq!(p.run(100), Stop::StepLimit);
+        assert_eq!(p.current_thread_id, target_id);
+        assert_eq!(p.rd32(OUTPUT_COUNT).unwrap(), 1);
+        assert_eq!(p.rd32(OUTPUT_VALUES).unwrap(), 0x8888);
+        assert_eq!(p.cpu.gpr[RSP], target_rsp);
+        assert_eq!(p.cpu.rip, entry);
+        assert_eq!(p.cpu.gpr[0] as u32 as u64, WAIT_IO_COMPLETION);
     }
 }
