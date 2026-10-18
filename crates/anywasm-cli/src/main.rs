@@ -73,7 +73,7 @@ fn blocker_of(dll: &str) -> Option<&'static str> {
             "BattlEye anti-cheat (cannot run)"
         }
         "steam_api64" | "steam_api" => "Steamworks (needs a steam_api replacement)",
-        "winusb" | "setupapi" | "hid" => "Direct device/driver access",
+        "winusb" | "hid" => "Direct device/driver access",
         _ => return None,
     })
 }
@@ -280,8 +280,8 @@ fn json_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_exported, json_quote, missing_x86_abi, preflight_status, supported_pe_machine,
-        BundledImage,
+        blocker_of, bundled_exported, json_quote, missing_x86_abi, preflight_status,
+        supported_pe_machine, BundledImage,
     };
     use anywasm_pe::ImportName;
     use std::collections::BTreeSet;
@@ -300,6 +300,13 @@ mod tests {
         assert_eq!(preflight_status(0, 2, 0), "review");
         assert_eq!(preflight_status(0, 0, 1), "review");
         assert_eq!(preflight_status(0, 0, 0), "no_known_blockers");
+    }
+
+    #[test]
+    fn setupapi_imports_are_not_assumed_to_require_host_device_drivers() {
+        assert_eq!(blocker_of("setupapi"), None);
+        assert_eq!(blocker_of("winusb"), Some("Direct device/driver access"));
+        assert_eq!(blocker_of("hid"), Some("Direct device/driver access"));
     }
 
     #[test]
