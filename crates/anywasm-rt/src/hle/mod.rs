@@ -201,8 +201,7 @@ pub fn import_is_implemented(group: &str, name: &str) -> bool {
     let diagnostic_only = match group {
         "kernel32" => matches!(
             name,
-            "QueueUserAPC"
-                | "CreatePipe"
+            "CreatePipe"
                 | "CreateNamedPipeW"
                 | "ConnectNamedPipe"
                 | "DisconnectNamedPipe"
@@ -235,6 +234,10 @@ mod import_coverage_tests {
                 "{group}!{name} must remain visible as an uncovered import"
             );
         }
+        assert!(
+            import_is_implemented("kernel32", "QueueUserAPC"),
+            "QueueUserAPC queues callbacks and dispatches them at alertable waits"
+        );
         assert!(import_is_implemented("user32", "CreateWindowExA"));
         assert!(import_is_implemented("kernel32", "CreateFileW"));
         assert!(import_is_implemented("kernel32", "GetWriteWatch"));
