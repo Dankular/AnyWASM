@@ -463,9 +463,139 @@ fn unsupported_pipe_modes_and_overlapped_operations_stop_explicitly() {
 
     let blocking_name = pipe_name(&mut process, r"\\.\pipe\BlockingPipeFixture");
     let blocking = create_named_pipe(&mut process, blocking_name, 0, 1, 64);
-    assert!(matches!(
+    assert_eq!(
         invoke_x86(&mut process, "ConnectNamedPipe", &[blocking, 0]),
-        Err(Stop::Unimplemented { dll, name })
-            if dll == "kernel32" && name.contains("schedulable guest thread wait")
+        Ok(0)
+    );
+    assert!(matches!(
+        process.current_thread_state,
+        ThreadState::Blocked(ThreadWait::Multiple { .. })
     ));
+}
+
+#[test]
+fn blocking_connect_named_pipe_waits_for_client_and_returns_true_on_completion() {
+    let mut process = process();
+    let main_thread_id = process.current_thread_id;
+    let name = pipe_name(&mut process, r"\\.\pipe\BlockingConnectFixture");
+    let server = create_named_pipe(&mut process, name, 0, 1, 64);
+    assert_ne!(server, INVALID_HANDLE as u32);
+
+    // Keep a guest client thread ready so the synchronous server wait can be suspended and
+    // completed by a later CreateFileW call in the same process.
+    let client_thread_id = 0x2000;
+    process.vmem_next = 0x0010_0000;
+    process
+        .create_guest_thread(client_thread_id, BASE + 0x700, 0, false)
+        .unwrap();
+
+    assert_eq!(
+        invoke_x86(&mut process, "ConnectNamedPipe", &[server, 0]),
+        Ok(0)
+    );
+    assert!(matches!(
+        process.current_thread_state,
+        ThreadState::Blocked(ThreadWait::Multiple { .. })
+    ));
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, client_thread_id);
+
+    let client = open_duplex_client(&mut process, name);
+    assert_ne!(client, INVALID_HANDLE as u32);
+    assert!(matches!(
+        process
+            .guest_threads
+            .get(&main_thread_id)
+            .map(|thread| &thread.state),
+        Some(ThreadState::Ready)
+    ));
+
+    process.request_thread_yield();
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, main_thread_id);
+    assert_eq!(process.cpu.gpr[0], 1, "connect wait returns TRUE");
+    let pipe_id = match process.handles.get(&(server as u64)).unwrap() {
+        Handle::Pipe { pipe_id, .. } => *pipe_id,
+        _ => panic!("server handle must remain a pipe"),
+    };
+    assert!(process.pipes[&pipe_id].connected);
+    assert!(
+        process
+            .named_kernel_objects
+            .keys()
+            .all(|name| !name.starts_with(PIPE_CONNECT_EVENT_PREFIX)
+                && !name.starts_with(PIPE_CONNECT_DUMMY_PREFIX)),
+        "private connect wait objects are released after completion"
+    );
+}
+
+#[test]
+fn closing_server_handle_cancels_a_blocking_connect_wait() {
+    let mut process = process();
+    let main_thread_id = process.current_thread_id;
+    let name = pipe_name(&mut process, r"\\.\pipe\CancelledConnectFixture");
+    let server = create_named_pipe(&mut process, name, 0, 1, 64);
+    let client_thread_id = 0x2000;
+    process.vmem_next = 0x0010_0000;
+    process
+        .create_guest_thread(client_thread_id, BASE + 0x700, 0, false)
+        .unwrap();
+
+    assert_eq!(
+        invoke_x86(&mut process, "ConnectNamedPipe", &[server, 0]),
+        Ok(0)
+    );
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, client_thread_id);
+
+    assert_eq!(call_x86(&mut process, "CloseHandle", &[server]), 1);
+    assert!(matches!(
+        process
+            .guest_threads
+            .get(&main_thread_id)
+            .map(|thread| &thread.state),
+        Some(ThreadState::Ready)
+    ));
+    process.request_thread_yield();
+    assert!(process.schedule_thread().unwrap());
+    assert_eq!(process.current_thread_id, main_thread_id);
+    assert_eq!(process.cpu.gpr[0], WAIT_FAILED);
+    assert_eq!(last_error(&process), ERROR_INVALID_HANDLE);
+}
+
+#[test]
+fn named_pipe_client_custom_security_fails_explicitly_without_connecting() {
+    let mut process = process();
+    let name = pipe_name(&mut process, r"\\.\pipe\CustomClientSecurityFixture");
+    let server = create_named_pipe(&mut process, name, PIPE_NOWAIT, 1, 64);
+    assert_ne!(server, INVALID_HANDLE as u32);
+    process.wr32(SECURITY_ATTRIBUTES, 12).unwrap();
+    process
+        .wr32(SECURITY_ATTRIBUTES + 4, (BASE + 0x600) as u32)
+        .unwrap();
+    process.wr32(SECURITY_ATTRIBUTES + 8, 0).unwrap();
+
+    assert!(matches!(
+        invoke_x86(
+            &mut process,
+            "CreateFileW",
+            &[
+                name,
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                SECURITY_ATTRIBUTES as u32,
+                3,
+                0,
+                0,
+            ],
+        ),
+        Err(Stop::Unimplemented { dll, name })
+            if dll == "kernel32" && name.contains("custom client security descriptors")
+    ));
+    let pipe_id = match process.handles.get(&(server as u64)).unwrap() {
+        Handle::Pipe { pipe_id, .. } => *pipe_id,
+        _ => panic!("server handle must remain a pipe"),
+    };
+    assert!(!process.pipes[&pipe_id].connected);
+    assert_eq!(process.pipes[&pipe_id].client_handles, 0);
 }

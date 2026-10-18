@@ -379,6 +379,8 @@ pub struct WinState {
     /// Process IDs whose translated UI thread has reached its first blocking GetMessage.
     /// Win32's WaitForInputIdle succeeds immediately on later calls after that first idle point.
     input_idle_observed: HashSet<u32>,
+    /// Manual-reset notification shared by WaitForInputIdle callers for the translated process.
+    input_idle_event: Option<u64>,
     timers: HashMap<(u32, u64, u64), Timer>,
     next_timer_id: u32,
     /// Balanced multimedia timer resolution requests, keyed by requested period in ms.
@@ -1801,14 +1803,49 @@ fn create_icon_from_resource(p: &mut Process) -> R {
     }
     let resource = p.read_bytes(bits, size as usize)?;
     let cursor_header_size = if is_icon { 0 } else { 4 };
-    if resource
+    if let Some(png) = resource
         .get(cursor_header_size..)
-        .is_some_and(|data| data.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .filter(|data| data.starts_with(b"\x89PNG\r\n\x1a\n"))
     {
-        return Err(Stop::Unimplemented {
-            dll: "user32".into(),
-            name: "CreateIconFromResource PNG decoding is not translated".into(),
-        });
+        let decoded = match decode_png_icon(png) {
+            Ok(decoded) => decoded,
+            Err(PngIconError::InvalidData) => {
+                p.set_last_error(ERROR_INVALID_DATA);
+                return Ok(0);
+            }
+            Err(PngIconError::Unsupported(reason)) => {
+                return Err(Stop::Unimplemented {
+                    dll: "user32".into(),
+                    name: format!("CreateIconFromResource PNG {reason} is not translated"),
+                });
+            }
+        };
+        let hotspot = if is_icon {
+            (0, 0)
+        } else {
+            (
+                u16::from_le_bytes(resource[0..2].try_into().unwrap()) as u32,
+                u16::from_le_bytes(resource[2..4].try_into().unwrap()) as u32,
+            )
+        };
+        if !is_icon && (hotspot.0 >= decoded.bitmap.width || hotspot.1 >= decoded.bitmap.height) {
+            p.set_last_error(ERROR_INVALID_DATA);
+            return Ok(0);
+        }
+        let handle = p.new_handle(Handle::Other);
+        p.extra.win.icons.insert(
+            handle,
+            IconObject {
+                is_icon,
+                width: decoded.bitmap.width,
+                height: decoded.bitmap.height,
+                hotspot,
+                mask: None,
+                color: Some(decoded.bitmap),
+                resource_bits: Some(resource),
+            },
+        );
+        return Ok(handle);
     }
     if resource.len() < cursor_header_size + 12 {
         p.set_last_error(ERROR_INVALID_DATA);
@@ -2060,6 +2097,619 @@ fn create_icon_from_resource(p: &mut Process) -> R {
     Ok(handle)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PngIconError {
+    InvalidData,
+    Unsupported(&'static str),
+}
+
+struct DecodedPngIcon {
+    bitmap: IconBitmap,
+}
+
+struct DeflateBits<'a> {
+    bytes: &'a [u8],
+    bit: usize,
+}
+
+impl DeflateBits<'_> {
+    fn read(&mut self, count: u8) -> Result<u32, PngIconError> {
+        if count > 24 || self.bit.saturating_add(count as usize) > self.bytes.len() * 8 {
+            return Err(PngIconError::InvalidData);
+        }
+        let mut value = 0;
+        for offset in 0..count as usize {
+            value |= (((self.bytes[self.bit / 8] >> (self.bit % 8)) & 1) as u32) << offset;
+            self.bit += 1;
+        }
+        Ok(value)
+    }
+
+    fn align_byte(&mut self) {
+        self.bit = self.bit.saturating_add(7) & !7;
+    }
+}
+
+struct DeflateHuffman {
+    lookup: Vec<Vec<Option<u16>>>,
+    max_bits: usize,
+}
+
+impl DeflateHuffman {
+    fn new(lengths: &[u8]) -> Result<Self, PngIconError> {
+        let mut counts = [0u16; 16];
+        for &length in lengths {
+            if length > 15 {
+                return Err(PngIconError::InvalidData);
+            }
+            counts[length as usize] += 1;
+        }
+        counts[0] = 0;
+        let max_bits = (1..=15)
+            .rev()
+            .find(|&length| counts[length] != 0)
+            .unwrap_or(0);
+        let mut lookup = std::iter::once(Vec::new())
+            .chain((1..=max_bits).map(|length| vec![None; 1 << length]))
+            .collect::<Vec<_>>();
+        if max_bits == 0 {
+            return Ok(Self { lookup, max_bits });
+        }
+
+        let mut next_code = [0u16; 16];
+        let mut code = 0u32;
+        for length in 1..=15 {
+            code = (code + counts[length - 1] as u32) << 1;
+            if code + counts[length] as u32 > (1u32 << length) {
+                return Err(PngIconError::InvalidData);
+            }
+            next_code[length] = code as u16;
+        }
+        for (symbol, &length) in lengths.iter().enumerate() {
+            if length == 0 {
+                continue;
+            }
+            let length = length as usize;
+            let canonical = next_code[length];
+            next_code[length] += 1;
+            lookup[length][canonical as usize] = Some(symbol as u16);
+        }
+        Ok(Self { lookup, max_bits })
+    }
+
+    fn symbol(&self, bits: &mut DeflateBits<'_>) -> Result<u16, PngIconError> {
+        let mut code = 0usize;
+        for length in 1..=self.max_bits {
+            code = (code << 1) | bits.read(1)? as usize;
+            if let Some(Some(symbol)) = self.lookup.get(length).and_then(|table| table.get(code)) {
+                return Ok(*symbol);
+            }
+        }
+        Err(PngIconError::InvalidData)
+    }
+}
+
+fn fixed_deflate_trees() -> Result<(DeflateHuffman, DeflateHuffman), PngIconError> {
+    let mut literal_lengths = vec![8; 288];
+    literal_lengths[144..256].fill(9);
+    literal_lengths[256..280].fill(7);
+    literal_lengths[280..].fill(8);
+    Ok((
+        DeflateHuffman::new(&literal_lengths)?,
+        DeflateHuffman::new(&[5; 32])?,
+    ))
+}
+
+fn dynamic_deflate_trees(
+    bits: &mut DeflateBits<'_>,
+) -> Result<(DeflateHuffman, DeflateHuffman), PngIconError> {
+    const CODE_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+    let literal_count = bits.read(5)? as usize + 257;
+    let distance_count = bits.read(5)? as usize + 1;
+    let code_count = bits.read(4)? as usize + 4;
+    if literal_count > 286 || distance_count > 32 {
+        return Err(PngIconError::InvalidData);
+    }
+    let mut code_lengths = [0u8; 19];
+    for &index in CODE_ORDER.iter().take(code_count) {
+        code_lengths[index] = bits.read(3)? as u8;
+    }
+    let code_tree = DeflateHuffman::new(&code_lengths)?;
+    let total = literal_count + distance_count;
+    let mut lengths = Vec::with_capacity(total);
+    while lengths.len() < total {
+        match code_tree.symbol(bits)? {
+            symbol @ 0..=15 => lengths.push(symbol as u8),
+            16 => {
+                let Some(&previous) = lengths.last() else {
+                    return Err(PngIconError::InvalidData);
+                };
+                let repeat = bits.read(2)? as usize + 3;
+                if lengths.len() + repeat > total {
+                    return Err(PngIconError::InvalidData);
+                }
+                lengths.extend(std::iter::repeat_n(previous, repeat));
+            }
+            17 => {
+                let repeat = bits.read(3)? as usize + 3;
+                if lengths.len() + repeat > total {
+                    return Err(PngIconError::InvalidData);
+                }
+                lengths.extend(std::iter::repeat_n(0, repeat));
+            }
+            18 => {
+                let repeat = bits.read(7)? as usize + 11;
+                if lengths.len() + repeat > total {
+                    return Err(PngIconError::InvalidData);
+                }
+                lengths.extend(std::iter::repeat_n(0, repeat));
+            }
+            _ => return Err(PngIconError::InvalidData),
+        }
+    }
+    if lengths[256] == 0 {
+        return Err(PngIconError::InvalidData);
+    }
+    Ok((
+        DeflateHuffman::new(&lengths[..literal_count])?,
+        DeflateHuffman::new(&lengths[literal_count..])?,
+    ))
+}
+
+fn inflate_zlib(bytes: &[u8], output_limit: usize) -> Result<Vec<u8>, PngIconError> {
+    if bytes.len() < 6 {
+        return Err(PngIconError::InvalidData);
+    }
+    let cmf = bytes[0];
+    let flg = bytes[1];
+    if cmf & 0x0f != 8 || cmf >> 4 > 7 || (u16::from(cmf) * 256 + u16::from(flg)) % 31 != 0 {
+        return Err(PngIconError::InvalidData);
+    }
+    if flg & 0x20 != 0 {
+        return Err(PngIconError::Unsupported("preset-dictionary streams"));
+    }
+    let deflate = &bytes[2..bytes.len() - 4];
+    let mut bits = DeflateBits {
+        bytes: deflate,
+        bit: 0,
+    };
+    let mut output = Vec::new();
+    loop {
+        let final_block = bits.read(1)? != 0;
+        match bits.read(2)? {
+            0 => {
+                bits.align_byte();
+                let length = bits.read(16)? as usize;
+                let complement = bits.read(16)? as u16;
+                if (length as u16) != !complement
+                    || output.len().saturating_add(length) > output_limit
+                {
+                    return Err(PngIconError::InvalidData);
+                }
+                for _ in 0..length {
+                    output.push(bits.read(8)? as u8);
+                }
+            }
+            block_type @ (1 | 2) => {
+                let (literal_tree, distance_tree) = if block_type == 1 {
+                    fixed_deflate_trees()?
+                } else {
+                    dynamic_deflate_trees(&mut bits)?
+                };
+                loop {
+                    let symbol = literal_tree.symbol(&mut bits)? as usize;
+                    match symbol {
+                        0..=255 => {
+                            if output.len() >= output_limit {
+                                return Err(PngIconError::InvalidData);
+                            }
+                            output.push(symbol as u8);
+                        }
+                        256 => break,
+                        257..=285 => {
+                            const LENGTH_BASE: [usize; 29] = [
+                                3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43,
+                                51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
+                            ];
+                            const LENGTH_EXTRA: [u8; 29] = [
+                                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4,
+                                4, 4, 5, 5, 5, 5, 0,
+                            ];
+                            const DISTANCE_BASE: [usize; 30] = [
+                                1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257,
+                                385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289,
+                                16385, 24577,
+                            ];
+                            const DISTANCE_EXTRA: [u8; 30] = [
+                                0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9,
+                                10, 10, 11, 11, 12, 12, 13, 13,
+                            ];
+                            let length_index = symbol - 257;
+                            let length = LENGTH_BASE[length_index]
+                                + bits.read(LENGTH_EXTRA[length_index])? as usize;
+                            let distance_symbol = distance_tree.symbol(&mut bits)? as usize;
+                            if distance_symbol >= DISTANCE_BASE.len() {
+                                return Err(PngIconError::InvalidData);
+                            }
+                            let distance = DISTANCE_BASE[distance_symbol]
+                                + bits.read(DISTANCE_EXTRA[distance_symbol])? as usize;
+                            if distance == 0
+                                || distance > output.len()
+                                || output.len().saturating_add(length) > output_limit
+                            {
+                                return Err(PngIconError::InvalidData);
+                            }
+                            for _ in 0..length {
+                                let byte = output[output.len() - distance];
+                                output.push(byte);
+                            }
+                        }
+                        _ => return Err(PngIconError::InvalidData),
+                    }
+                }
+            }
+            _ => return Err(PngIconError::InvalidData),
+        }
+        if final_block {
+            break;
+        }
+    }
+    if bits.bit.saturating_add(7) / 8 != deflate.len() {
+        return Err(PngIconError::InvalidData);
+    }
+    let mut a = 1u32;
+    let mut b = 0u32;
+    for byte in &output {
+        a = (a + *byte as u32) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    let expected_adler = u32::from_be_bytes(bytes[bytes.len() - 4..].try_into().unwrap());
+    if (b << 16) | a != expected_adler {
+        return Err(PngIconError::InvalidData);
+    }
+    Ok(output)
+}
+
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+fn png_sample(row: &[u8], sample: usize, depth: u8) -> Result<u16, PngIconError> {
+    match depth {
+        1 | 2 | 4 => {
+            let bit = sample * depth as usize;
+            let byte = *row.get(bit / 8).ok_or(PngIconError::InvalidData)?;
+            let shift = 8 - depth as usize - bit % 8;
+            Ok(((byte >> shift) & ((1 << depth) - 1)) as u16)
+        }
+        8 => Ok(*row.get(sample).ok_or(PngIconError::InvalidData)? as u16),
+        16 => {
+            let at = sample * 2;
+            Ok(u16::from_be_bytes(
+                row.get(at..at + 2)
+                    .ok_or(PngIconError::InvalidData)?
+                    .try_into()
+                    .unwrap(),
+            ))
+        }
+        _ => Err(PngIconError::Unsupported("bit depths")),
+    }
+}
+
+fn png_to_u8(value: u16, depth: u8) -> u8 {
+    match depth {
+        1 => (value * 255) as u8,
+        2 => (value * 85) as u8,
+        4 => (value * 17) as u8,
+        8 => value as u8,
+        16 => ((value as u32 * 255 + 32_767) / 65_535) as u8,
+        _ => 0,
+    }
+}
+
+fn paeth_predictor(left: u8, above: u8, upper_left: u8) -> u8 {
+    let p = left as i32 + above as i32 - upper_left as i32;
+    let left_distance = (p - left as i32).abs();
+    let above_distance = (p - above as i32).abs();
+    let upper_left_distance = (p - upper_left as i32).abs();
+    if left_distance <= above_distance && left_distance <= upper_left_distance {
+        left
+    } else if above_distance <= upper_left_distance {
+        above
+    } else {
+        upper_left
+    }
+}
+
+fn decode_png_icon(data: &[u8]) -> Result<DecodedPngIcon, PngIconError> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    const DECODED_LIMIT: usize = 64 * 1024 * 1024;
+    if !data.starts_with(SIGNATURE) {
+        return Err(PngIconError::InvalidData);
+    }
+    let mut offset = SIGNATURE.len();
+    let mut header = None;
+    let mut palette = None;
+    let mut transparency = None;
+    let mut compressed = Vec::new();
+    let mut saw_idat = false;
+    let mut idat_ended = false;
+    let mut saw_end = false;
+    while offset < data.len() {
+        let header_end = offset.checked_add(8).ok_or(PngIconError::InvalidData)?;
+        if header_end > data.len() {
+            return Err(PngIconError::InvalidData);
+        }
+        let length = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let kind = &data[offset + 4..offset + 8];
+        let chunk_end = header_end
+            .checked_add(length)
+            .and_then(|end| end.checked_add(4))
+            .ok_or(PngIconError::InvalidData)?;
+        if chunk_end > data.len() {
+            return Err(PngIconError::InvalidData);
+        }
+        let chunk = &data[header_end..header_end + length];
+        let expected_crc =
+            u32::from_be_bytes(data[header_end + length..chunk_end].try_into().unwrap());
+        if png_crc32(&data[offset + 4..header_end + length]) != expected_crc {
+            return Err(PngIconError::InvalidData);
+        }
+        if header.is_none() && kind != b"IHDR" {
+            return Err(PngIconError::InvalidData);
+        }
+        match kind {
+            b"IHDR" => {
+                if header.is_some() || offset != SIGNATURE.len() || chunk.len() != 13 {
+                    return Err(PngIconError::InvalidData);
+                }
+                header = Some((
+                    u32::from_be_bytes(chunk[0..4].try_into().unwrap()),
+                    u32::from_be_bytes(chunk[4..8].try_into().unwrap()),
+                    chunk[8],
+                    chunk[9],
+                    chunk[10],
+                    chunk[11],
+                    chunk[12],
+                ));
+            }
+            b"PLTE" => {
+                if saw_idat
+                    || palette.is_some()
+                    || chunk.is_empty()
+                    || chunk.len() > 768
+                    || chunk.len() % 3 != 0
+                {
+                    return Err(PngIconError::InvalidData);
+                }
+                palette = Some(chunk.to_vec());
+            }
+            b"tRNS" => {
+                if saw_idat || transparency.is_some() {
+                    return Err(PngIconError::InvalidData);
+                }
+                transparency = Some(chunk.to_vec());
+            }
+            b"IDAT" => {
+                if idat_ended {
+                    return Err(PngIconError::InvalidData);
+                }
+                saw_idat = true;
+                if compressed.len().saturating_add(chunk.len()) > DECODED_LIMIT {
+                    return Err(PngIconError::InvalidData);
+                }
+                compressed.extend_from_slice(chunk);
+            }
+            b"IEND" => {
+                if chunk.len() != 0 || !saw_idat {
+                    return Err(PngIconError::InvalidData);
+                }
+                saw_end = true;
+                offset = chunk_end;
+                break;
+            }
+            _ => {
+                if saw_idat {
+                    idat_ended = true;
+                }
+                if kind[0] & 0x20 == 0 {
+                    return Err(PngIconError::Unsupported("critical chunks"));
+                }
+            }
+        }
+        if kind != b"IDAT" && saw_idat && kind != b"IEND" {
+            idat_ended = true;
+        }
+        offset = chunk_end;
+    }
+    if !saw_end || offset != data.len() {
+        return Err(PngIconError::InvalidData);
+    }
+    let (width, height, depth, color_type, compression, filter, interlace) =
+        header.ok_or(PngIconError::InvalidData)?;
+    if width == 0 || height == 0 {
+        return Err(PngIconError::InvalidData);
+    }
+    if compression != 0 || filter != 0 {
+        return Err(PngIconError::Unsupported("compression or filter methods"));
+    }
+    if interlace > 1 {
+        return Err(PngIconError::InvalidData);
+    }
+    if interlace != 0 {
+        return Err(PngIconError::Unsupported("Adam7 interlacing"));
+    }
+    let channels = match color_type {
+        0 => 1usize,
+        2 => 3,
+        3 => 1,
+        4 => 2,
+        6 => 4,
+        _ => return Err(PngIconError::Unsupported("color types")),
+    };
+    let valid_depth = match color_type {
+        0 => matches!(depth, 1 | 2 | 4 | 8 | 16),
+        2 | 4 | 6 => matches!(depth, 8 | 16),
+        3 => matches!(depth, 1 | 2 | 4 | 8),
+        _ => false,
+    };
+    if !valid_depth {
+        return Err(PngIconError::Unsupported("bit depths"));
+    }
+    let palette = palette.unwrap_or_default();
+    if (color_type == 3 && palette.is_empty())
+        || (matches!(color_type, 0 | 4) && !palette.is_empty())
+        || (color_type == 3 && palette.len() / 3 > (1usize << depth))
+    {
+        return Err(PngIconError::InvalidData);
+    }
+    let transparency = transparency.unwrap_or_default();
+    match color_type {
+        0 if !transparency.is_empty() && transparency.len() != 2 => {
+            return Err(PngIconError::InvalidData)
+        }
+        2 if !transparency.is_empty() && transparency.len() != 6 => {
+            return Err(PngIconError::InvalidData)
+        }
+        3 if transparency.len() > palette.len() / 3 => return Err(PngIconError::InvalidData),
+        4 | 6 if !transparency.is_empty() => return Err(PngIconError::InvalidData),
+        _ => {}
+    }
+
+    let width_usize = usize::try_from(width).map_err(|_| PngIconError::InvalidData)?;
+    let height_usize = usize::try_from(height).map_err(|_| PngIconError::InvalidData)?;
+    let row_bits = width_usize
+        .checked_mul(channels)
+        .and_then(|samples| samples.checked_mul(depth as usize))
+        .ok_or(PngIconError::InvalidData)?;
+    let row_bytes = row_bits.checked_add(7).ok_or(PngIconError::InvalidData)? / 8;
+    let filtered_size = row_bytes
+        .checked_add(1)
+        .and_then(|row| row.checked_mul(height_usize))
+        .ok_or(PngIconError::InvalidData)?;
+    let rgba_size = width_usize
+        .checked_mul(height_usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(PngIconError::InvalidData)?;
+    if filtered_size > DECODED_LIMIT || rgba_size > DECODED_LIMIT {
+        return Err(PngIconError::InvalidData);
+    }
+    let filtered = inflate_zlib(&compressed, filtered_size)?;
+    if filtered.len() != filtered_size {
+        return Err(PngIconError::InvalidData);
+    }
+    let filter_bpp = ((channels * depth as usize + 7) / 8).max(1);
+    let mut rgba = vec![0u8; rgba_size];
+    let mut previous = vec![0u8; row_bytes];
+    let mut input_offset = 0usize;
+    for y in 0..height_usize {
+        let filter = filtered[input_offset];
+        input_offset += 1;
+        let mut row = filtered[input_offset..input_offset + row_bytes].to_vec();
+        input_offset += row_bytes;
+        for x in 0..row_bytes {
+            let left = if x >= filter_bpp {
+                row[x - filter_bpp]
+            } else {
+                0
+            };
+            let above = previous[x];
+            let upper_left = if x >= filter_bpp {
+                previous[x - filter_bpp]
+            } else {
+                0
+            };
+            let predictor = match filter {
+                0 => 0,
+                1 => left,
+                2 => above,
+                3 => ((left as u16 + above as u16) / 2) as u8,
+                4 => paeth_predictor(left, above, upper_left),
+                _ => return Err(PngIconError::InvalidData),
+            };
+            row[x] = row[x].wrapping_add(predictor);
+        }
+        for x in 0..width_usize {
+            let sample_at = x * channels;
+            let read = |index| png_sample(&row, sample_at + index, depth);
+            let (red, green, blue, alpha) = match color_type {
+                0 => {
+                    let gray = read(0)?;
+                    let alpha = if transparency.is_empty()
+                        || gray != u16::from_be_bytes(transparency[..2].try_into().unwrap())
+                    {
+                        255
+                    } else {
+                        0
+                    };
+                    let gray = png_to_u8(gray, depth);
+                    (gray, gray, gray, alpha)
+                }
+                2 => {
+                    let red = read(0)?;
+                    let green = read(1)?;
+                    let blue = read(2)?;
+                    let transparent = !transparency.is_empty()
+                        && red == u16::from_be_bytes(transparency[0..2].try_into().unwrap())
+                        && green == u16::from_be_bytes(transparency[2..4].try_into().unwrap())
+                        && blue == u16::from_be_bytes(transparency[4..6].try_into().unwrap());
+                    (
+                        png_to_u8(red, depth),
+                        png_to_u8(green, depth),
+                        png_to_u8(blue, depth),
+                        if transparent { 0 } else { 255 },
+                    )
+                }
+                3 => {
+                    let index = read(0)? as usize;
+                    let palette_at = index.checked_mul(3).ok_or(PngIconError::InvalidData)?;
+                    let entries = palette
+                        .get(palette_at..palette_at + 3)
+                        .ok_or(PngIconError::InvalidData)?;
+                    (
+                        entries[0],
+                        entries[1],
+                        entries[2],
+                        transparency.get(index).copied().unwrap_or(255),
+                    )
+                }
+                4 => {
+                    let gray = png_to_u8(read(0)?, depth);
+                    (gray, gray, gray, png_to_u8(read(1)?, depth))
+                }
+                6 => (
+                    png_to_u8(read(0)?, depth),
+                    png_to_u8(read(1)?, depth),
+                    png_to_u8(read(2)?, depth),
+                    png_to_u8(read(3)?, depth),
+                ),
+                _ => unreachable!(),
+            };
+            let pixel = (y * width_usize + x) * 4;
+            rgba[pixel..pixel + 4].copy_from_slice(&[red, green, blue, alpha]);
+        }
+        previous = row;
+    }
+    Ok(DecodedPngIcon {
+        bitmap: IconBitmap {
+            width,
+            height,
+            bits_per_pixel: 32,
+            row_bytes: width_usize * 4,
+            bits: rgba,
+        },
+    })
+}
+
 fn register_device_notification_a(p: &mut Process) -> R {
     register_device_notification(p, false)
 }
@@ -2176,15 +2826,46 @@ fn wait_for_input_idle(p: &mut Process) -> R {
         return Ok(0);
     }
     let timeout = p.arg(1) as u32;
-    if timeout == 0 && !p.extra.win.queue.is_empty() {
+    if timeout == 0 {
         return Ok(WAIT_TIMEOUT as u64);
     }
-    Err(Stop::Unimplemented {
-        dll: "user32".into(),
-        name: format!(
-            "WaitForInputIdle process={process:#x} timeout={timeout}ms while a translated message queue exists without an observed idle thread; queue state is insufficient to report a faithful result"
-        ),
-    })
+    if p.nested != 0 {
+        return Err(Stop::Unimplemented {
+            dll: "user32".into(),
+            name: "blocking WaitForInputIdle from a nested synchronous guest callback cannot be scheduled".into(),
+        });
+    }
+    let event = if let Some(event) = p.extra.win.input_idle_event {
+        event
+    } else {
+        let event = p.new_handle(Handle::Event {
+            signaled: false,
+            manual: true,
+        });
+        p.extra.win.input_idle_event = Some(event);
+        event
+    };
+    let deadline = (timeout != u32::MAX).then(|| {
+        p.now_ticks()
+            .saturating_add((timeout as u64).saturating_mul(100_000))
+    });
+    p.block_current_thread(ThreadWait::Handle {
+        handle: event,
+        deadline,
+        alertable: false,
+    });
+    Ok(WAIT_TIMEOUT as u64)
+}
+
+fn mark_current_process_input_idle(p: &mut Process) {
+    const CURRENT_PROCESS_ID: u32 = 0x1000;
+    p.extra.win.input_idle_observed.insert(CURRENT_PROCESS_ID);
+    if let Some(event) = p.extra.win.input_idle_event {
+        if let Some(Handle::Event { signaled, .. }) = p.handles.get_mut(&event) {
+            *signaled = true;
+        }
+        p.refresh_waiters();
+    }
 }
 
 fn fill_rect(p: &mut Process) -> R {
@@ -5666,7 +6347,7 @@ fn get_message(p: &mut Process) -> R {
         let msg = read_message_type(p, m)?;
         return Ok((msg != WM_QUIT) as u64);
     }
-    p.extra.win.input_idle_observed.insert(0x1000);
+    mark_current_process_input_idle(p);
     // Nothing to do: hand control back to the host and retry this call when input arrives.
     Err(Stop::Idle)
 }
@@ -6068,6 +6749,56 @@ mod tests {
     use anywasm_cpu::cpu::RSP;
     use anywasm_cpu::mem::PROT_RWX;
 
+    fn png_test_chunk(output: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+        output.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        output.extend_from_slice(kind);
+        output.extend_from_slice(payload);
+        let mut crc_input = kind.to_vec();
+        crc_input.extend_from_slice(payload);
+        output.extend_from_slice(&png_crc32(&crc_input).to_be_bytes());
+    }
+
+    fn one_pixel_png(interlace: u8) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut header = Vec::new();
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(&[8, 6, 0, 0, interlace]);
+        png_test_chunk(&mut png, b"IHDR", &header);
+        // zlib stream for one unfiltered RGBA pixel [18, 52, 86, 120], encoded as a fixed
+        // Huffman DEFLATE block. Keeping this fixture literal ensures the decoder exercises
+        // compressed Huffman data instead of only the simpler stored-block path.
+        png_test_chunk(
+            &mut png,
+            b"IDAT",
+            &[
+                0x78, 0xda, 0x63, 0x10, 0x32, 0x09, 0xab, 0x00, 0x00, 0x02, 0x0d, 0x01, 0x15,
+            ],
+        );
+        png_test_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    #[test]
+    fn png_deflate_decoder_handles_dynamic_huffman_and_backreferences() {
+        // zlib.compress([0,17,34,51,68] * 1000, 9), using a dynamic-Huffman block with
+        // repeated length/distance references. This exercises the normal PNG compression path.
+        let decoded = inflate_zlib(
+            &[
+                0x78, 0xda, 0xed, 0xc4, 0xc1, 0x00, 0x00, 0x00, 0x08, 0x04, 0xb0, 0x53, 0x48, 0x21,
+                0x85, 0x14, 0xf2, 0x67, 0x8a, 0xa2, 0xdf, 0xf6, 0x58, 0xaa, 0x67, 0x23, 0x49, 0x92,
+                0x24, 0x49, 0x92, 0x24, 0xe9, 0xb3, 0x03, 0x3f, 0xbb, 0x98, 0x2f,
+            ],
+            5000,
+        )
+        .unwrap();
+        assert_eq!(decoded.len(), 5000);
+        assert!(decoded
+            .iter()
+            .copied()
+            .eq([0, 17, 34, 51, 68].into_iter().cycle().take(5000)));
+    }
+
     #[test]
     fn target_imported_user32_apis_have_explicit_runtime_coverage() {
         for name in [
@@ -6452,7 +7183,7 @@ mod tests {
     }
 
     #[test]
-    fn create_icon_from_resource_validates_and_copies_dib_or_exposes_unsupported_png() {
+    fn create_icon_from_resource_validates_dib_and_decodes_png_icons_and_cursors() {
         const BITS: u64 = 0x0003_6000;
         let mut p = test_process_with_args(&[]);
         assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
@@ -6504,12 +7235,59 @@ mod tests {
         assert!(!p.extra.win.icons[&cursor_handle].is_icon);
         assert_eq!(p.extra.win.icons[&cursor_handle].hotspot, (2, 3));
 
-        p.write_bytes(BITS, b"\x89PNG\r\n\x1a\n").unwrap();
-        set_args(&mut p, &[BITS as u32, 8, 1, 0x00030000]);
+        let png = one_pixel_png(0);
+        assert_eq!(
+            inflate_zlib(
+                &[0x78, 0xda, 0x63, 0x10, 0x32, 0x09, 0xab, 0x00, 0x00, 0x02, 0x0d, 0x01, 0x15],
+                5,
+            ),
+            Ok(vec![0, 0x12, 0x34, 0x56, 0x78])
+        );
+        let direct = decode_png_icon(&png);
+        assert!(direct.is_ok(), "PNG decoder: {:?}", direct.err());
+        p.write_bytes(BITS, &png).unwrap();
+        set_args(&mut p, &[BITS as u32, png.len() as u32, 1, 0x00030000]);
+        let png_icon = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        let png_image = &p.extra.win.icons[&png_icon];
+        assert_eq!((png_image.width, png_image.height), (1, 1));
+        assert!(png_image.mask.is_none());
+        assert_eq!(
+            png_image.color.as_ref().unwrap().bits,
+            [0x12, 0x34, 0x56, 0x78]
+        );
+        assert_eq!(png_image.resource_bits.as_deref(), Some(png.as_slice()));
+
+        let mut png_cursor = vec![0, 0, 0, 0];
+        png_cursor.extend_from_slice(&png);
+        p.write_bytes(BITS, &png_cursor).unwrap();
+        set_args(
+            &mut p,
+            &[BITS as u32, png_cursor.len() as u32, 0, 0x00030000],
+        );
+        let cursor = lookup("CreateIconFromResource").unwrap()(&mut p).unwrap();
+        assert_eq!(p.extra.win.icons[&cursor].hotspot, (0, 0));
+        assert!(!p.extra.win.icons[&cursor].is_icon);
+
+        // Invalid chunk CRCs fail through the Win32 error path. Valid but unsupported Adam7
+        // input remains an explicit translation failure, never a fabricated icon handle.
+        let mut bad_crc = png.clone();
+        let bad_crc_end = bad_crc.len() - 16;
+        bad_crc[bad_crc_end] ^= 1;
+        p.write_bytes(BITS, &bad_crc).unwrap();
+        set_args(&mut p, &[BITS as u32, bad_crc.len() as u32, 1, 0x00030000]);
+        assert_eq!(lookup("CreateIconFromResource").unwrap()(&mut p), Ok(0));
+        assert_eq!(p.rd32(TEB_ADDR + 0x34).unwrap(), 13);
+
+        let interlaced = one_pixel_png(1);
+        p.write_bytes(BITS, &interlaced).unwrap();
+        set_args(
+            &mut p,
+            &[BITS as u32, interlaced.len() as u32, 1, 0x00030000],
+        );
         assert!(matches!(
             lookup("CreateIconFromResource").unwrap()(&mut p),
             Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("PNG decoding")
+                if dll == "user32" && name.contains("Adam7")
         ));
     }
 
@@ -6732,9 +7510,11 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_input_idle_times_out_or_reports_unmodeled_blocking_wait() {
+    fn wait_for_input_idle_times_out_then_blocks_until_get_message_reaches_idle() {
+        const MSG: u64 = 0x0003_b000;
         let mut p = test_process_with_args(&[]);
         assert!(p.mem.map(TEB_ADDR, 0x1000, PROT_RW));
+        assert!(p.mem.map(MSG, 0x1000, PROT_RW));
         p.extra.win.message_queue_threads.insert(0x1004);
         p.extra.win.queue.push_back(Msg {
             hwnd: HWND_DESKTOP,
@@ -6750,27 +7530,64 @@ mod tests {
         });
         set_args(&mut p, &[current as u32, 0]);
         assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0x102));
+        let deadline = p.now_ticks() + 5000 * 100_000;
         set_args(&mut p, &[current as u32, 5000]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0x102));
+        let event = p.extra.win.input_idle_event.unwrap();
         assert!(matches!(
-            lookup("WaitForInputIdle").unwrap()(&mut p),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("without an observed idle thread")
+            p.current_thread_state,
+            ThreadState::Blocked(ThreadWait::Handle {
+                handle,
+                deadline: Some(wait_deadline),
+                alertable: false,
+            }) if handle == event && wait_deadline == deadline
         ));
+        assert!(matches!(
+            p.handles.get(&event),
+            Some(Handle::Event {
+                signaled: false,
+                manual: true
+            })
+        ));
+
+        // The UI thread reaches the empty blocking GetMessage point. That observation signals
+        // WaitForInputIdle's real wait object, so scheduling completes the original wait as
+        // WAIT_OBJECT_0 and subsequent calls are immediate.
+        p.extra.win.queue.clear();
+        set_args(&mut p, &[MSG as u32, 0, 0, 0]);
+        assert!(matches!(
+            lookup("GetMessageA").unwrap()(&mut p),
+            Err(Stop::Idle)
+        ));
+        assert!(p.extra.win.input_idle_observed.contains(&0x1000));
+        assert!(matches!(
+            p.handles.get(&event),
+            Some(Handle::Event {
+                signaled: true,
+                manual: true
+            })
+        ));
+        set_args(&mut p, &[current as u32, 5000]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0));
     }
 
     #[test]
-    fn wait_for_input_idle_does_not_guess_from_an_empty_existing_queue() {
+    fn wait_for_input_idle_waits_for_an_existing_empty_queue_to_reach_idle() {
         let mut p = test_process_with_args(&[]);
         p.extra.win.message_queue_threads.insert(0x1004);
         let current = p.new_handle(Handle::Process {
             id: 0x1000,
             inheritable: false,
         });
-        set_args(&mut p, &[current as u32, 0]);
+        set_args(&mut p, &[current as u32, 1000]);
+        assert_eq!(lookup("WaitForInputIdle").unwrap()(&mut p), Ok(0x102));
         assert!(matches!(
-            lookup("WaitForInputIdle").unwrap()(&mut p),
-            Err(Stop::Unimplemented { dll, name })
-                if dll == "user32" && name.contains("queue state is insufficient")
+            p.current_thread_state,
+            ThreadState::Blocked(ThreadWait::Handle {
+                deadline: Some(_),
+                alertable: false,
+                ..
+            })
         ));
     }
 

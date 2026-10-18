@@ -1,4 +1,5 @@
 import { PackageManager } from './package-manager.js';
+import { DSoundAudioOutput } from './dsound-audio.js';
 
 const $ = (id) => document.getElementById(id);
 const term = $('term');
@@ -7,6 +8,9 @@ const diagnostic = $('diagnostic');
 const loading = $('loading');
 const loadMessage = $('load-message');
 let worker = null;
+const dsoundAudio = new DSoundAudioOutput((error) => print(`[audio] ${error.message}\n`, 'err'));
+document.addEventListener('pointerdown', () => { void dsoundAudio.activate(); }, { capture: true });
+document.addEventListener('click', () => { void dsoundAudio.activate(); }, { capture: true });
 const utf8Encoder = new TextEncoder();
 let activeModal = null;
 const queuedModals = [];
@@ -464,6 +468,8 @@ function failLoading(label, message) {
 }
 
 async function run(bundleBytes, label, assetUrl = null, assetPackage = null, directFolder = null) {
+  const audioActivation = dsoundAudio.activate();
+  dsoundAudio.stopAll();
   const reuseWorker = !!worker && stat.dataset.status !== undefined;
   if (worker && !reuseWorker) worker.postMessage({ type: 'dispose' });
   term.textContent = '';
@@ -525,6 +531,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null, dir
     else if (m.type === 'message-box-request') enqueueMessageBox(m);
     else if (m.type === 'dialog-box-request') enqueueDialogBox(m);
     else if (m.type === 'dialog-box-close') closeDialogBox(m);
+    else if (m.type === 'dsound-audio') dsoundAudio.consume(m.commands);
     else if (m.type === 'out') print(m.text, m.stream === 'stderr' ? 'err' : '');
     else if (m.type === 'window') {
       canvas.hidden = false;
@@ -541,6 +548,7 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null, dir
     } else if (m.type === 'texture-readback') {
       window.__textureReadback = m;
     } else if (m.type === 'status') {
+      dsoundAudio.stopAll();
       if (m.trace) window.__workerDiag = m.trace;
       if (m.jitStats) window.__jitStats = m.jitStats;
       clearLoading();
@@ -585,7 +593,8 @@ async function run(bundleBytes, label, assetUrl = null, assetPackage = null, dir
   const diagProgress = new URLSearchParams(location.search).has('diagProgress');
   const jitMinPrefixValue = new URLSearchParams(location.search).get('jitMinPrefix');
   showLoading('Starting guest program…');
-  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, assetPackage, testMode, traceGtaEventvol, traceImports, diagProgress };
+  const audioEnabled = await audioActivation;
+  const message = { type: 'start', wasm, bundle: bundleBytes, assetUrl, assetPackage, audioEnabled, testMode, traceGtaEventvol, traceImports, diagProgress };
   if (directFolder) {
     if (directFolder.files) {
       message.directFiles = directFolder.files;
@@ -680,7 +689,7 @@ $('demo-sims3').addEventListener('click', () => {
   };
   void run(null, 'D:\\The Sims 3\\Game\\Bin\\TS3W.exe', null, null, directSource);
 });
-$('stop').addEventListener('click', () => { worker?.postMessage({ type: 'stop' }); });
+$('stop').addEventListener('click', () => { dsoundAudio.stopAll(); worker?.postMessage({ type: 'stop' }); });
 
 const packageManager = new PackageManager(new URL('./catalog.json', import.meta.url).href);
 const packageList = $('package-list');

@@ -543,8 +543,9 @@ const waitForIdle = async (runtime) => {
 };
 const log = (m) => postMessage({ type: 'out', stream: 'stderr', text: `[gpu] ${m}\n` });
 
-async function start({ wasm, bundle, directFiles, directSource, entryPath, assetUrl, assetPackage, canvas, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, traceImports, diagProgress }) {
+async function start({ wasm, bundle, directFiles, directSource, entryPath, assetUrl, assetPackage, canvas, audioEnabled, testMode: requestedTestMode, jitMinPrefix, traceGtaEventvol, traceImports, diagProgress }) {
   const directLaunch = !!directFiles || !!directSource;
+  const directRootPath = typeof directSource?.rootPath === 'string' ? directSource.rootPath : null;
   let directChangeFeedUrl = null;
   let directChangeFeedId = null;
   let directChangeSequence = 0;
@@ -589,6 +590,10 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     options.memory = new WebAssembly.Memory({ initial: 4096, maximum: 32768, shared: true });
   }
   w = await AnyWasm.create(wasm, options);
+  w.hostIo.dsoundAudioSink = (commands) => postMessage(
+    { type: 'dsound-audio', commands },
+    [commands.buffer],
+  );
   const setDirectChangeCoverage = (enabled) => {
     if (!directSource) return true;
     if (directChangeCoverageConfigured && directChangeNotificationsEnabled === enabled) return true;
@@ -670,6 +675,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
     } else {
       w.load(bundle);
     }
+    w.setDsoundAudioEnabled(!!audioEnabled);
     if (directSource) {
       w.setVirtualRoot(directSource.rootPath);
       postMessage({
@@ -1046,7 +1052,7 @@ async function start({ wasm, bundle, directFiles, directSource, entryPath, asset
           directChangeSequence = sequence;
           continue;
         }
-        const rootPath = directSource.rootPath.replace(/[\\/]+$/, '');
+        const rootPath = directRootPath.replace(/[\\/]+$/, '');
         const guestPath = `${rootPath}\\${relativePath}`;
         try {
           w.notifyVfsChange(guestPath, filter);

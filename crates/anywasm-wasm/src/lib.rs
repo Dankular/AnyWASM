@@ -10,7 +10,10 @@
 //! unimplemented import, 3 guest crash, 4 a frame was presented (drain the GPU stream, then call
 //! again), 5 the guest is idle waiting for window input (push input, then call again). Details via `aw_message_*` and `aw_exit_code`.
 
-use anywasm_rt::{hle::user32, Bundle, Process, Stop};
+use anywasm_rt::{
+    hle::{com::DSoundAudioEvent, user32},
+    Bundle, Process, Stop,
+};
 mod shared_context;
 mod shared_snapshot;
 
@@ -23,6 +26,7 @@ struct State {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     gpu: Vec<u8>,
+    dsound_audio: Vec<u8>,
     pending_stop: Option<Stop>,
 }
 
@@ -39,6 +43,7 @@ fn new_state(p: Process, staged_entry: Option<String>, loaded: bool, message: Ve
         stdout: Vec::new(),
         stderr: Vec::new(),
         gpu: Vec::new(),
+        dsound_audio: Vec::new(),
         pending_stop: None,
     }
 }
@@ -370,6 +375,7 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
         s.stdout.extend(s.p.take_stdout());
         s.stderr.extend(s.p.take_stderr());
         s.gpu.extend(std::mem::take(&mut s.p.extra.gpu.buf));
+        append_dsound_audio_events(s);
         return match stop {
             Stop::Unimplemented { dll, name } => {
                 s.message =
@@ -399,6 +405,7 @@ pub extern "C" fn aw_run(steps: u64) -> i32 {
     // Move GPU/window commands to the host-visible buffer (appended: the host clears after reading).
     let g = std::mem::take(&mut s.p.extra.gpu.buf);
     s.gpu.extend(g);
+    append_dsound_audio_events(s);
     match r {
         Stop::StepLimit => 0,
         Stop::Exit(c) => {
@@ -1103,6 +1110,100 @@ buf_api!(aw_stdout_ptr, aw_stdout_len, aw_stdout_clear, stdout);
 buf_api!(aw_stderr_ptr, aw_stderr_len, aw_stderr_clear, stderr);
 buf_api!(aw_message_ptr, aw_message_len, aw_message_clear, message);
 buf_api!(aw_gpu_ptr, aw_gpu_len, aw_gpu_clear, gpu);
+buf_api!(
+    aw_dsound_audio_ptr,
+    aw_dsound_audio_len,
+    aw_dsound_audio_clear,
+    dsound_audio
+);
+
+fn append_dsound_audio_events(s: &mut State) {
+    fn u16le(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    fn u32le(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    fn u64le(out: &mut Vec<u8>, value: u64) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    let events = std::mem::take(&mut s.p.extra.com.dsound_audio_events);
+    for event in events {
+        let start = s.dsound_audio.len();
+        u32le(&mut s.dsound_audio, 0); // record length, filled after encoding
+        let (kind, buffer, format, frequency, volume, started_at, cursor, looping, samples) =
+            match event {
+                DSoundAudioEvent::Play {
+                    buffer,
+                    format,
+                    frequency,
+                    volume,
+                    started_at_us,
+                    cursor,
+                    looping,
+                    samples,
+                } => (
+                    1,
+                    buffer,
+                    Some(format),
+                    frequency,
+                    volume,
+                    started_at_us,
+                    cursor,
+                    looping,
+                    samples,
+                ),
+                DSoundAudioEvent::Stop { buffer } => {
+                    (2, buffer, None, 0, 0, 0, 0, false, Vec::new())
+                }
+                DSoundAudioEvent::Update {
+                    buffer,
+                    frequency,
+                    volume,
+                } => (3, buffer, None, frequency, volume, 0, 0, false, Vec::new()),
+                DSoundAudioEvent::Seek { buffer, cursor } => {
+                    (4, buffer, None, 0, 0, 0, cursor, false, Vec::new())
+                }
+                DSoundAudioEvent::Release { buffer } => {
+                    (5, buffer, None, 0, 0, 0, 0, false, Vec::new())
+                }
+            };
+        u32le(&mut s.dsound_audio, kind);
+        u64le(&mut s.dsound_audio, buffer);
+        let (sample_rate, channels, bits) = format.map_or((0, 0, 0), |f| {
+            (
+                u32::from_le_bytes(f[4..8].try_into().unwrap()),
+                u16::from_le_bytes(f[2..4].try_into().unwrap()),
+                u16::from_le_bytes(f[14..16].try_into().unwrap()),
+            )
+        });
+        u32le(&mut s.dsound_audio, sample_rate);
+        u32le(&mut s.dsound_audio, frequency);
+        u32le(&mut s.dsound_audio, volume as u32);
+        u32le(&mut s.dsound_audio, u32::from(looping));
+        u32le(&mut s.dsound_audio, cursor);
+        u64le(&mut s.dsound_audio, started_at);
+        u16le(&mut s.dsound_audio, channels);
+        u16le(&mut s.dsound_audio, bits);
+        u32le(&mut s.dsound_audio, samples.len() as u32);
+        s.dsound_audio.extend_from_slice(&samples);
+        let record_len = (s.dsound_audio.len() - start) as u32;
+        s.dsound_audio[start..start + 4].copy_from_slice(&record_len.to_le_bytes());
+    }
+}
+
+/// Enable software sound only after the browser has activated a real output context.
+#[no_mangle]
+pub extern "C" fn aw_dsound_audio_enabled(enabled: u32) -> i32 {
+    let Some(s) = state() else { return 1 };
+    if enabled > 1 {
+        s.message = b"DirectSound audio-enabled flag must be zero or one".to_vec();
+        return 1;
+    }
+    s.p.extra.com.dsound_audio_enabled = enabled != 0;
+    s.message.clear();
+    0
+}
 
 /// Deliver a browser input event (see `hle::user32::input_event` for the kinds).
 #[no_mangle]

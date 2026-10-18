@@ -231,6 +231,47 @@ pub struct DSoundBufferControlState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DSoundBufferPlaybackState {
+    /// Host monotonic timestamp (microseconds) at the last Play or SetCurrentPosition.
+    pub started_at_us: u64,
+    /// Cursor at `started_at_us`, in bytes from the start of the circular software buffer.
+    pub start_cursor: u32,
+    /// Last observed cursor, retained when playback stops or reaches the end.
+    pub cursor: u32,
+    pub playing: bool,
+    pub looping: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DSoundAudioEvent {
+    Play {
+        buffer: u64,
+        format: [u8; 18],
+        frequency: u32,
+        volume: i32,
+        started_at_us: u64,
+        cursor: u32,
+        looping: bool,
+        samples: Vec<u8>,
+    },
+    Stop {
+        buffer: u64,
+    },
+    Update {
+        buffer: u64,
+        frequency: u32,
+        volume: i32,
+    },
+    Seek {
+        buffer: u64,
+        cursor: u32,
+    },
+    Release {
+        buffer: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DSoundBufferLock {
     /// First guest-memory region returned by IDirectSoundBuffer8::Lock.
     pub first_ptr: u64,
@@ -317,6 +358,12 @@ pub struct ComState {
     pub dsound_buffer_formats: HashMap<u64, [u8; 18]>,
     /// Current software-buffer volume/frequency controls, keyed by buffer COM identity.
     pub dsound_buffer_controls: HashMap<u64, DSoundBufferControlState>,
+    /// Play state for software-backed DirectSound buffers, keyed by COM identity.
+    pub dsound_buffer_playback: HashMap<u64, DSoundBufferPlaybackState>,
+    /// Host audio events awaiting transfer to the browser's WebAudio bridge.
+    pub dsound_audio_events: Vec<DSoundAudioEvent>,
+    /// Set by the browser only after it has activated a real WebAudio output context.
+    pub dsound_audio_enabled: bool,
     /// Outstanding Lock calls. Unlock must pair the pointers returned by Lock.
     pub dsound_buffer_locks: HashMap<u64, Vec<DSoundBufferLock>>,
 }
@@ -829,6 +876,11 @@ pub fn release_obj(p: &mut Process, this: u64) -> u64 {
             ..
         } = o.kind
         {
+            p.extra.com.dsound_buffer_playback.remove(&this);
+            p.extra
+                .com
+                .dsound_audio_events
+                .push(DSoundAudioEvent::Release { buffer: this });
             p.extra.com.dsound_buffer_formats.remove(&this);
             p.extra.com.dsound_buffer_controls.remove(&this);
             p.extra.com.dsound_buffer_locks.remove(&this);

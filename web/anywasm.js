@@ -364,6 +364,9 @@ export class AnyWasm {
     const imports = {
       anywasm: {
         gpu_readback: gpuReadback,
+        audio_clock_us() {
+          return BigInt(Math.floor(performance.now() * 1000));
+        },
         random_fill(pointer, length) {
           try {
             return fillCryptoRandom(instance.exports.memory, pointer, length);
@@ -1156,6 +1159,8 @@ export class AnyWasm {
       this.x.asyncify_start_rewind(this.asyncifyData);
     }
     const status = this.x.aw_run(BigInt(steps));
+    const audio = this.takeDsoundAudio();
+    if (audio.length) this.hostIo.dsoundAudioSink?.(audio);
     if (this.asyncifyData) {
       const state = this.x.asyncify_get_state();
       if (state === 1) {
@@ -1205,6 +1210,23 @@ export class AnyWasm {
   gpuPendingBytes() { return this.callbackSuspended ? 0 : this.x.aw_gpu_len(); }
   /** Window/GPU command stream produced since the last call (copied out of WASM memory). */
   takeGpu() { return this._take(this.x.aw_gpu_ptr, this.x.aw_gpu_len, this.x.aw_gpu_clear); }
+  takeDsoundAudio() {
+    if (typeof this.x.aw_dsound_audio_ptr !== 'function' ||
+        typeof this.x.aw_dsound_audio_len !== 'function' ||
+        typeof this.x.aw_dsound_audio_clear !== 'function') return new Uint8Array(0);
+    const len = this.x.aw_dsound_audio_len();
+    if (!len) return new Uint8Array(0);
+    const out = new Uint8Array(this.x.memory.buffer, this.x.aw_dsound_audio_ptr() >>> 0, len).slice();
+    this.x.aw_dsound_audio_clear();
+    return out;
+  }
+  setDsoundAudioEnabled(enabled) {
+    if (typeof this.x.aw_dsound_audio_enabled !== 'function') {
+      throw new Error('WASM runtime is missing the DirectSound audio bridge; rebuild the runtime');
+    }
+    const rc = this.x.aw_dsound_audio_enabled(enabled ? 1 : 0);
+    if (rc !== 0) throw new Error(this.message() || `could not configure DirectSound audio (${rc})`);
+  }
   /** Deliver an input event: see crates/anywasm-rt/src/hle/user32.rs `input_event`. */
   input(kind, a = 0, b = 0, c = 0) {
     const event = () => this.x.aw_input(kind, BigInt(a), BigInt(b), BigInt(c));

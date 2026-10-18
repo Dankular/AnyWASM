@@ -1,7 +1,4 @@
 //! DirectSound 8 compatibility used to keep legacy Win32 startup moving.
-//!
-//! Sound buffers are guest-memory backed for startup compatibility. No audio is emitted to the
-//! browser yet, and playback reports `E_NOTIMPL` instead of claiming to play silently.
 
 use super::com::{self, Kind, S_OK};
 use super::*;
@@ -39,6 +36,18 @@ const DSSCL_NORMAL: u32 = 1;
 const DSSCL_PRIORITY: u32 = 2;
 const DSSCL_EXCLUSIVE: u32 = 3;
 const DSSCL_WRITEPRIMARY: u32 = 4;
+const DSBPLAY_LOOPING: u32 = 0x1;
+const DSBPLAY_LOCHARDWARE: u32 = 0x2;
+const DSBPLAY_LOCSOFTWARE: u32 = 0x4;
+const DSBPLAY_TERMINATEBY_TIME: u32 = 0x8;
+const DSBPLAY_TERMINATEBY_DISTANCE: u32 = 0x10;
+const DSBPLAY_TERMINATEBY_PRIORITY: u32 = 0x20;
+const DSBSTATUS_PLAYING: u32 = 0x1;
+const DSBSTATUS_LOOPING: u32 = 0x4;
+const DSFX_LOCHARDWARE: u32 = 0x1;
+const DSFX_LOCSOFTWARE: u32 = 0x2;
+const DSFXR_UNALLOCATED: u32 = 3;
+const MAX_EFFECTS: u32 = 64;
 const HWND_DESKTOP: u64 = 0x0001_0010;
 const WS_CHILD: u32 = 0x4000_0000;
 pub const DSBCAPS_PRIMARYBUFFER: u32 = 0x1;
@@ -74,6 +83,7 @@ const DSBCAPS_KNOWN_MASK: u32 = DSBCAPS_PRIMARYBUFFER
     | DSBCAPS_LOCDEFER
     | DSBCAPS_TRUEPLAYPOSITION;
 const DSBCAPS_SUPPORTED_SECONDARY: u32 = DSBCAPS_LOCSOFTWARE
+    | DSBCAPS_LOCDEFER
     | DSBCAPS_CTRL3D
     | DSBCAPS_CTRLFREQUENCY
     | DSBCAPS_CTRLVOLUME
@@ -92,6 +102,32 @@ const IID_IDIRECTSOUND3DLISTENER: &str = "279afa84-4981-11ce-a521-0020af0be560";
 const IID_IDIRECTSOUND3DBUFFER: &str = "279afa86-4981-11ce-a521-0020af0be560";
 const IID_IDIRECTSOUND: &str = "279afa83-4981-11ce-a521-0020af0be560";
 const IID_IDIRECTSOUNDBUFFER: &str = "279afa85-4981-11ce-a521-0020af0be560";
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "anywasm")]
+extern "C" {
+    fn audio_clock_us() -> u64;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn monotonic_audio_clock_us(_p: &Process) -> u64 {
+    // SAFETY: the browser runtime supplies a monotonic performance.now-based clock.
+    unsafe { audio_clock_us() }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn monotonic_audio_clock_us(p: &Process) -> u64 {
+    // Native HLE tests use the process's controllable virtual clock.
+    p.now_ticks() / 100
+}
+
+fn effect_desc_size(p: &Process) -> u32 {
+    if p.cpu.mode == CpuMode::X86_32 {
+        32
+    } else {
+        40
+    }
+}
 
 // The translation runtime exposes one virtual playback device. Keeping its ID stable lets
 // callers round-trip the result through GetDeviceID and DirectSoundCreate without pretending
@@ -132,12 +168,6 @@ unimplemented_method!(unimplemented_sound_initialize, "IDirectSound8::Initialize
 unimplemented_method!(
     unimplemented_buffer_initialize,
     "IDirectSoundBuffer8::Initialize"
-);
-unimplemented_method!(unimplemented_stop, "IDirectSoundBuffer8::Stop");
-unimplemented_method!(unimplemented_set_fx, "IDirectSoundBuffer8::SetFX");
-unimplemented_method!(
-    unimplemented_acquire_resources,
-    "IDirectSoundBuffer8::AcquireResources"
 );
 unimplemented_method!(
     unimplemented_buffer3d_get_all_parameters,
@@ -339,8 +369,8 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSoundBuffer8", "GetStatus") => get_status,
         ("IDirectSoundBuffer8", "Lock") => lock_buffer,
         ("IDirectSoundBuffer8", "GetObjectInPath") => get_object_in_path,
-        ("IDirectSoundBuffer8", "SetFX") => unimplemented_set_fx,
-        ("IDirectSoundBuffer8", "AcquireResources") => unimplemented_acquire_resources,
+        ("IDirectSoundBuffer8", "SetFX") => set_fx,
+        ("IDirectSoundBuffer8", "AcquireResources") => acquire_resources,
         ("IDirectSound3DListener", "GetAllParameters") => get_listener_parameters,
         ("IDirectSound3DListener", "GetDistanceFactor") => get_listener_distance_factor,
         ("IDirectSound3DListener", "GetDopplerFactor") => get_listener_doppler_factor,
@@ -388,10 +418,10 @@ pub fn method(iface: &str, name: &str) -> Option<HleFn> {
         ("IDirectSoundBuffer8", "SetVolume") => set_volume,
         ("IDirectSoundBuffer8", "SetPan") => set_pan,
         ("IDirectSoundBuffer8", "SetFrequency") => set_frequency,
-        ("IDirectSoundBuffer8", "Stop") => unimplemented_stop,
+        ("IDirectSoundBuffer8", "Stop") => stop_buffer,
         ("IDirectSoundBuffer8", "Unlock") => unlock_buffer,
         ("IDirectSoundBuffer8", "Restore") => |_| Ok(S_OK),
-        ("IDirectSoundBuffer8", "Play") => playback_not_implemented,
+        ("IDirectSoundBuffer8", "Play") => play_buffer,
         _ => return None,
     })
 }
@@ -1046,25 +1076,92 @@ fn commit_listener_settings(p: &mut Process) -> R {
 }
 
 fn get_current_position(p: &mut Process) -> R {
-    for out in [p.arg(1), p.arg(2)] {
-        if out != 0 {
-            p.wr32(out, 0)?;
-        }
+    let this = p.arg(0);
+    let Some(Kind::SoundBuffer { size, .. }) = com::kind_of(p, this) else {
+        return Ok(E_INVALIDARG);
+    };
+    let now = monotonic_audio_clock_us(p);
+    let cursor = update_playback_cursor(p, this, now);
+    let play_out = p.arg(1);
+    let write_out = p.arg(2);
+    if play_out != 0 {
+        p.wr32(play_out, cursor)?;
+    }
+    if write_out != 0 {
+        let write_cursor = if size == 0 {
+            0
+        } else if p
+            .extra
+            .com
+            .dsound_buffer_playback
+            .get(&this)
+            .is_some_and(|playback| playback.playing)
+        {
+            let format = p
+                .extra
+                .com
+                .dsound_buffer_formats
+                .get(&this)
+                .copied()
+                .unwrap_or_else(default_primary_format);
+            let average_bytes = u32::from_le_bytes(format[8..12].try_into().unwrap());
+            let block_align = u16::from_le_bytes(format[12..14].try_into().unwrap()) as u32;
+            let block_align = block_align.max(1);
+            // WebAudio exposes no DirectSound write cursor. Report a stable software write
+            // horizon 10 ms ahead of the play cursor, rounded to a complete sample frame.
+            let lead = ((average_bytes / 100) / block_align) * block_align;
+            cursor.wrapping_add(lead) % size
+        } else {
+            cursor
+        };
+        p.wr32(write_out, write_cursor)?;
     }
     Ok(S_OK)
 }
 
 fn set_buffer_current_position(p: &mut Process) -> R {
-    match com::kind_of(p, p.arg(0)) {
-        Some(Kind::SoundBuffer { caps, .. }) if caps & DSBCAPS_PRIMARYBUFFER != 0 => {
-            Ok(DSERR_INVALIDCALL)
-        }
-        Some(Kind::SoundBuffer { .. }) => Err(Stop::Unimplemented {
-            dll: "dsound".into(),
-            name: "IDirectSoundBuffer8::SetCurrentPosition on a secondary buffer".into(),
-        }),
-        _ => Ok(E_INVALIDARG),
+    let (this, position) = (p.arg(0), p.arg(1) as u32);
+    let Some(Kind::SoundBuffer { caps, size, .. }) = com::kind_of(p, this) else {
+        return Ok(E_INVALIDARG);
+    };
+    if caps & DSBCAPS_PRIMARYBUFFER != 0 {
+        return Ok(DSERR_INVALIDCALL);
     }
+    let Some(format) = p.extra.com.dsound_buffer_formats.get(&this).copied() else {
+        return Ok(E_INVALIDARG);
+    };
+    let block_align = u16::from_le_bytes([format[12], format[13]]) as u32;
+    if position >= size || block_align == 0 || position % block_align != 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    let now = monotonic_audio_clock_us(p);
+    update_playback_cursor(p, this, now);
+    let playback =
+        p.extra
+            .com
+            .dsound_buffer_playback
+            .entry(this)
+            .or_insert(com::DSoundBufferPlaybackState {
+                started_at_us: now,
+                start_cursor: 0,
+                cursor: 0,
+                playing: false,
+                looping: false,
+            });
+    let was_playing = playback.playing;
+    playback.started_at_us = now;
+    playback.start_cursor = position;
+    playback.cursor = position;
+    if was_playing {
+        p.extra
+            .com
+            .dsound_audio_events
+            .push(com::DSoundAudioEvent::Seek {
+                buffer: this,
+                cursor: position,
+            });
+    }
+    Ok(S_OK)
 }
 
 fn write_u32(p: &mut Process, value: u32) -> R {
@@ -1133,6 +1230,18 @@ fn set_control(p: &mut Process, control: u32, name: &'static str) -> R {
         });
     }
 
+    let now = monotonic_audio_clock_us(p);
+    let was_playing = p
+        .extra
+        .com
+        .dsound_buffer_playback
+        .get(&this)
+        .is_some_and(|playback| playback.playing);
+    let cursor = if was_playing {
+        update_playback_cursor(p, this, now)
+    } else {
+        0
+    };
     let requested = p.arg(1) as u32;
     let mut controls = p
         .extra
@@ -1175,6 +1284,23 @@ fn set_control(p: &mut Process, control: u32, name: &'static str) -> R {
         }
     }
     p.extra.com.dsound_buffer_controls.insert(this, controls);
+    if let Some(playback) = p.extra.com.dsound_buffer_playback.get_mut(&this) {
+        if was_playing {
+            playback.started_at_us = now;
+            playback.start_cursor = cursor;
+            playback.cursor = cursor;
+        }
+    }
+    if was_playing {
+        p.extra
+            .com
+            .dsound_audio_events
+            .push(com::DSoundAudioEvent::Update {
+                buffer: this,
+                frequency: controls.frequency,
+                volume: controls.volume,
+            });
+    }
     Ok(S_OK)
 }
 
@@ -1191,7 +1317,309 @@ fn set_frequency(p: &mut Process) -> R {
 }
 
 fn get_status(p: &mut Process) -> R {
-    write_u32(p, 0)
+    let this = p.arg(0);
+    if !matches!(com::kind_of(p, this), Some(Kind::SoundBuffer { .. })) {
+        return Ok(E_INVALIDARG);
+    }
+    let now = monotonic_audio_clock_us(p);
+    update_playback_cursor(p, this, now);
+    let status = p
+        .extra
+        .com
+        .dsound_buffer_playback
+        .get(&this)
+        .filter(|playback| playback.playing)
+        .map_or(0, |playback| {
+            DSBSTATUS_PLAYING
+                | if playback.looping {
+                    DSBSTATUS_LOOPING
+                } else {
+                    0
+                }
+        });
+    write_u32(p, status)
+}
+
+fn update_playback_cursor(p: &mut Process, this: u64, now_us: u64) -> u32 {
+    let Some(Kind::SoundBuffer { size, .. }) = com::kind_of(p, this) else {
+        return 0;
+    };
+    let Some(playback) = p.extra.com.dsound_buffer_playback.get(&this).copied() else {
+        return 0;
+    };
+    if !playback.playing || size == 0 {
+        return playback.cursor;
+    }
+    let Some(format) = p.extra.com.dsound_buffer_formats.get(&this).copied() else {
+        return playback.cursor;
+    };
+    let block_align = u16::from_le_bytes([format[12], format[13]]) as u64;
+    let controls = p
+        .extra
+        .com
+        .dsound_buffer_controls
+        .get(&this)
+        .copied()
+        .unwrap_or_default();
+    let elapsed_us = now_us.saturating_sub(playback.started_at_us);
+    let advanced_frames = (elapsed_us as u128 * controls.frequency as u128) / 1_000_000;
+    let advanced_bytes = advanced_frames.saturating_mul(block_align as u128);
+    let (cursor, playing) = if playback.looping {
+        (
+            ((playback.start_cursor as u128 + advanced_bytes) % size as u128) as u32,
+            true,
+        )
+    } else if advanced_bytes >= size.saturating_sub(playback.start_cursor) as u128 {
+        (0, false)
+    } else {
+        (
+            (playback.start_cursor as u128 + advanced_bytes) as u32,
+            true,
+        )
+    };
+    if let Some(state) = p.extra.com.dsound_buffer_playback.get_mut(&this) {
+        state.cursor = cursor;
+        state.playing = playing;
+    }
+    cursor
+}
+
+fn play_buffer(p: &mut Process) -> R {
+    let (this, reserved, priority, flags) = (p.arg(0), p.arg(1), p.arg(2) as u32, p.arg(3) as u32);
+    let known_flags = DSBPLAY_LOOPING
+        | DSBPLAY_LOCHARDWARE
+        | DSBPLAY_LOCSOFTWARE
+        | DSBPLAY_TERMINATEBY_TIME
+        | DSBPLAY_TERMINATEBY_DISTANCE
+        | DSBPLAY_TERMINATEBY_PRIORITY;
+    if reserved != 0
+        || flags & !known_flags != 0
+        || flags & DSBPLAY_LOCHARDWARE != 0 && flags & DSBPLAY_LOCSOFTWARE != 0
+    {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    let Some(Kind::SoundBuffer {
+        memory, size, caps, ..
+    }) = com::kind_of(p, this)
+    else {
+        return Ok(E_INVALIDARG);
+    };
+    let deferred = caps & DSBCAPS_LOCDEFER != 0;
+    if !deferred && priority != 0
+        || !deferred
+            && flags
+                & (DSBPLAY_LOCHARDWARE
+                    | DSBPLAY_LOCSOFTWARE
+                    | DSBPLAY_TERMINATEBY_TIME
+                    | DSBPLAY_TERMINATEBY_DISTANCE
+                    | DSBPLAY_TERMINATEBY_PRIORITY)
+                != 0
+        || caps & DSBCAPS_PRIMARYBUFFER != 0 && flags & DSBPLAY_LOOPING == 0
+    {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    if flags
+        & (DSBPLAY_LOCHARDWARE
+            | DSBPLAY_TERMINATEBY_TIME
+            | DSBPLAY_TERMINATEBY_DISTANCE
+            | DSBPLAY_TERMINATEBY_PRIORITY)
+        != 0
+    {
+        return Ok(DSERR_CONTROLUNAVAIL);
+    }
+    if !p.extra.com.dsound_audio_enabled {
+        return Err(Stop::Unimplemented {
+            dll: "dsound".into(),
+            name: "IDirectSoundBuffer8::Play (browser WebAudio output is unavailable)".into(),
+        });
+    }
+    if caps & DSBCAPS_PRIMARYBUFFER == 0 {
+        if memory == 0 || size == 0 {
+            return Ok(DSERR_INVALIDCALL);
+        }
+        if p.extra
+            .com
+            .dsound_buffer_locks
+            .get(&this)
+            .is_some_and(|locks| !locks.is_empty())
+        {
+            return Ok(DSERR_INVALIDCALL);
+        }
+    }
+    let now = monotonic_audio_clock_us(p);
+    let cursor = update_playback_cursor(p, this, now);
+    if p.extra
+        .com
+        .dsound_buffer_playback
+        .get(&this)
+        .is_some_and(|playback| playback.playing)
+    {
+        // DirectSound Play on an already-playing buffer is an idempotent success.
+        return Ok(S_OK);
+    }
+    let controls = p
+        .extra
+        .com
+        .dsound_buffer_controls
+        .get(&this)
+        .copied()
+        .unwrap_or_default();
+    let looping = flags & DSBPLAY_LOOPING != 0;
+    p.extra.com.dsound_buffer_playback.insert(
+        this,
+        com::DSoundBufferPlaybackState {
+            started_at_us: now,
+            start_cursor: cursor,
+            cursor,
+            playing: true,
+            looping,
+        },
+    );
+    if caps & DSBCAPS_PRIMARYBUFFER == 0 {
+        let Some(format) = p.extra.com.dsound_buffer_formats.get(&this).copied() else {
+            p.extra.com.dsound_buffer_playback.remove(&this);
+            return Ok(E_INVALIDARG);
+        };
+        let samples = p.read_bytes(memory, size as usize)?;
+        p.extra
+            .com
+            .dsound_audio_events
+            .push(com::DSoundAudioEvent::Play {
+                buffer: this,
+                format,
+                frequency: controls.frequency,
+                volume: controls.volume,
+                started_at_us: now,
+                cursor,
+                looping,
+                samples,
+            });
+    }
+    Ok(S_OK)
+}
+
+fn stop_buffer(p: &mut Process) -> R {
+    let this = p.arg(0);
+    if !matches!(com::kind_of(p, this), Some(Kind::SoundBuffer { .. })) {
+        return Ok(E_INVALIDARG);
+    }
+    let now = monotonic_audio_clock_us(p);
+    update_playback_cursor(p, this, now);
+    if let Some(playback) = p.extra.com.dsound_buffer_playback.get_mut(&this) {
+        if playback.playing {
+            playback.playing = false;
+            p.extra
+                .com
+                .dsound_audio_events
+                .push(com::DSoundAudioEvent::Stop { buffer: this });
+        }
+    }
+    Ok(S_OK)
+}
+
+fn set_fx(p: &mut Process) -> R {
+    let (this, count, descriptions, results) = (p.arg(0), p.arg(1) as u32, p.arg(2), p.arg(3));
+    let Some(Kind::SoundBuffer { caps, .. }) = com::kind_of(p, this) else {
+        return Ok(E_INVALIDARG);
+    };
+    if caps & DSBCAPS_CTRLFX == 0 {
+        return Ok(DSERR_CONTROLUNAVAIL);
+    }
+    if p.extra
+        .com
+        .dsound_buffer_playback
+        .get(&this)
+        .is_some_and(|playback| playback.playing)
+        || p.extra
+            .com
+            .dsound_buffer_locks
+            .get(&this)
+            .is_some_and(|locks| !locks.is_empty())
+    {
+        return Ok(DSERR_INVALIDCALL);
+    }
+    if count > MAX_EFFECTS || (count != 0 && descriptions == 0) {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    if count == 0 {
+        return Ok(S_OK);
+    }
+    if results == 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    let mut descriptors = Vec::with_capacity(count as usize);
+    let descriptor_size = effect_desc_size(p);
+    for index in 0..count {
+        let Some(address) = descriptions.checked_add(index as u64 * descriptor_size as u64) else {
+            return Ok(DSERR_INVALIDPARAM);
+        };
+        let size = p.rd32(address)?;
+        let flags = p.rd32(address + 4)?;
+        let (reserved1, reserved2) = if descriptor_size == 40 {
+            (p.rd64(address + 24)?, p.rd64(address + 32)?)
+        } else {
+            (
+                u64::from(p.rd32(address + 24)?),
+                u64::from(p.rd32(address + 28)?),
+            )
+        };
+        if size != descriptor_size
+            || flags & !(DSFX_LOCHARDWARE | DSFX_LOCSOFTWARE) != 0
+            || flags == (DSFX_LOCHARDWARE | DSFX_LOCSOFTWARE)
+            || reserved1 != 0
+            || reserved2 != 0
+        {
+            return Ok(DSERR_INVALIDPARAM);
+        }
+        descriptors.push((address, flags));
+    }
+    // The WebAudio bridge currently exposes PCM playback only. Do not claim a DirectSound FX
+    // graph exists: report each recognized effect as unallocated and return the real failure.
+    for (index, _) in descriptors.iter().enumerate() {
+        p.wr32(results + index as u64 * 4, DSFXR_UNALLOCATED)?;
+    }
+    Ok(DSERR_CONTROLUNAVAIL)
+}
+
+fn acquire_resources(p: &mut Process) -> R {
+    let (this, flags, count, results) = (p.arg(0), p.arg(1) as u32, p.arg(2) as u32, p.arg(3));
+    let Some(Kind::SoundBuffer { caps, .. }) = com::kind_of(p, this) else {
+        return Ok(E_INVALIDARG);
+    };
+    if flags
+        & !(DSBPLAY_LOCHARDWARE
+            | DSBPLAY_LOCSOFTWARE
+            | DSBPLAY_TERMINATEBY_TIME
+            | DSBPLAY_TERMINATEBY_DISTANCE
+            | DSBPLAY_TERMINATEBY_PRIORITY)
+        != 0
+        || flags & DSBPLAY_LOCHARDWARE != 0 && flags & DSBPLAY_LOCSOFTWARE != 0
+        || count > MAX_EFFECTS
+    {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    if caps & DSBCAPS_LOCDEFER == 0 {
+        return Ok(DSERR_INVALIDCALL);
+    }
+    if flags
+        & (DSBPLAY_LOCHARDWARE
+            | DSBPLAY_TERMINATEBY_TIME
+            | DSBPLAY_TERMINATEBY_DISTANCE
+            | DSBPLAY_TERMINATEBY_PRIORITY)
+        != 0
+    {
+        return Ok(DSERR_CONTROLUNAVAIL);
+    }
+    if count == 0 {
+        return Ok(S_OK);
+    }
+    if results == 0 {
+        return Ok(DSERR_INVALIDPARAM);
+    }
+    for index in 0..count {
+        p.wr32(results + index as u64 * 4, DSFXR_UNALLOCATED)?;
+    }
+    Ok(DSERR_CONTROLUNAVAIL)
 }
 
 fn get_format(p: &mut Process) -> R {
@@ -1488,13 +1916,6 @@ fn get_object_in_path(p: &mut Process) -> R {
         p.wrptr(out, 0)?;
     }
     Ok(E_NOINTERFACE)
-}
-
-fn playback_not_implemented(_p: &mut Process) -> R {
-    Err(Stop::Unimplemented {
-        dll: "dsound".into(),
-        name: "IDirectSoundBuffer8::Play (no audio output backend)".into(),
-    })
 }
 
 #[cfg(test)]
@@ -2026,15 +2447,29 @@ mod tests {
         );
 
         set_args(&mut process, &[buffer as u32, 0, 0, 0]);
-        assert!(matches!(
+        assert_eq!(
             method("IDirectSoundBuffer8", "SetFX").unwrap()(&mut process),
-            Err(Stop::Unimplemented { ref dll, ref name })
-                if dll == "dsound" && name.contains("SetFX")
-        ));
+            Ok(S_OK)
+        );
+        let effect_size = effect_desc_size(&process);
+        process.wr32(DESC, effect_size).unwrap();
+        process.wr32(DESC + 4, DSFX_LOCSOFTWARE).unwrap();
+        process.wr32(DESC + 24, 0).unwrap();
+        process.wr32(DESC + 28, 0).unwrap();
+        set_args(
+            &mut process,
+            &[buffer as u32, 1, DESC as u32, OUTPUT as u32],
+        );
+        assert_eq!(
+            method("IDirectSoundBuffer8", "SetFX").unwrap()(&mut process),
+            Ok(DSERR_CONTROLUNAVAIL)
+        );
+        assert_eq!(process.rd32(OUTPUT).unwrap(), DSFXR_UNALLOCATED);
+        set_args(&mut process, &[buffer as u32, 0, 0, 0]);
         assert!(matches!(
             method("IDirectSoundBuffer8", "Play").unwrap()(&mut process),
             Err(Stop::Unimplemented { ref dll, ref name })
-                if dll == "dsound" && name.contains("no audio output backend")
+                if dll == "dsound" && name.contains("WebAudio output is unavailable")
         ));
     }
 
@@ -2181,14 +2616,164 @@ mod tests {
 
     #[test]
     fn playback_reports_a_coverage_gap_without_an_audio_backend() {
-        let mut process = Process::new(crate::vfs::Vfs::new());
-        let play = method("IDirectSoundBuffer8", "Play").unwrap();
-
+        let mut process = x86_process();
+        let sound = com::create(&mut process, "IDirectSound8", Kind::DirectSound);
+        let format = pcm_format(2, 44_100, 16);
+        let buffer = create_secondary(&mut process, sound, 0, 0x2000, &format);
+        set_args(&mut process, &[buffer as u32, 0, 0, DSBPLAY_LOOPING]);
         assert!(matches!(
-            play(&mut process),
+            method("IDirectSoundBuffer8", "Play").unwrap()(&mut process),
             Err(Stop::Unimplemented { ref dll, ref name })
-                if dll == "dsound" && name.contains("Play")
+                if dll == "dsound" && name.contains("WebAudio output is unavailable")
         ));
+    }
+
+    #[test]
+    fn looping_pcm_playback_updates_status_position_and_emits_audio_events() {
+        const PLAY_OUT: u64 = 0x27000;
+        const WRITE_OUT: u64 = 0x28000;
+        let mut process = x86_process();
+        assert!(process.mem.map(PLAY_OUT, PAGE_SIZE, PROT_RW));
+        assert!(process.mem.map(WRITE_OUT, PAGE_SIZE, PROT_RW));
+        let sound = com::create(&mut process, "IDirectSound8", Kind::DirectSound);
+        let format = pcm_format(2, 44_100, 16);
+        let buffer = create_secondary(
+            &mut process,
+            sound,
+            DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY,
+            0x2_0000,
+            &format,
+        );
+        let memory = match com::kind_of(&process, buffer).unwrap() {
+            Kind::SoundBuffer { memory, .. } => memory,
+            _ => unreachable!(),
+        };
+        process.write_bytes(memory, &vec![0x80; 0x2_0000]).unwrap();
+        process.extra.com.dsound_audio_enabled = true;
+
+        set_args(&mut process, &[buffer as u32, 0, 0, DSBPLAY_LOOPING]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "Play").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert!(
+            matches!(process.extra.com.dsound_audio_events.as_slice(), [com::DSoundAudioEvent::Play { samples, looping: true, .. }] if samples.len() == 0x2_0000)
+        );
+        set_args(&mut process, &[buffer as u32, PLAY_OUT as u32]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "GetStatus").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert_eq!(
+            process.rd32(PLAY_OUT).unwrap(),
+            DSBSTATUS_PLAYING | DSBSTATUS_LOOPING
+        );
+
+        // Replaying a buffer that is already active must not reset its cursor or emit a second start.
+        set_args(&mut process, &[buffer as u32, 0, 0, DSBPLAY_LOOPING]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "Play").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert_eq!(process.extra.com.dsound_audio_events.len(), 1);
+
+        process.advance_time_100ns(1_000_000); // 100 ms at 44.1 kHz stereo 16-bit
+        set_args(
+            &mut process,
+            &[buffer as u32, PLAY_OUT as u32, WRITE_OUT as u32],
+        );
+        assert_eq!(
+            method("IDirectSoundBuffer8", "GetCurrentPosition").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert_eq!(process.rd32(PLAY_OUT).unwrap(), 17_640);
+        assert_eq!(
+            process.rd32(WRITE_OUT).unwrap(),
+            (17_640 + 1_764) % 0x2_0000
+        );
+
+        set_args(&mut process, &[buffer as u32, 4]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "SetCurrentPosition").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert!(
+            matches!(process.extra.com.dsound_audio_events.last(), Some(com::DSoundAudioEvent::Seek { buffer: id, cursor: 4 }) if *id == buffer)
+        );
+        set_args(&mut process, &[buffer as u32]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "Stop").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert!(
+            matches!(process.extra.com.dsound_audio_events.last(), Some(com::DSoundAudioEvent::Stop { buffer: id }) if *id == buffer)
+        );
+        set_args(&mut process, &[buffer as u32, PLAY_OUT as u32]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "GetStatus").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert_eq!(process.rd32(PLAY_OUT).unwrap(), 0);
+
+        set_args(&mut process, &[buffer as u32, 0, 0, 0]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "Play").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        process.advance_time_100ns(10_000_000); // one second runs past the 0.74 second buffer
+        set_args(&mut process, &[buffer as u32, PLAY_OUT as u32]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "GetStatus").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        assert_eq!(process.rd32(PLAY_OUT).unwrap(), 0);
+    }
+
+    #[test]
+    fn acquire_resources_uses_deferred_software_voice_flags_and_reports_unsupported_effects() {
+        let mut process = x86_process();
+        let sound = com::create(&mut process, "IDirectSound8", Kind::DirectSound);
+        let format = pcm_format(1, 22_050, 8);
+        let buffer = create_secondary(
+            &mut process,
+            sound,
+            DSBCAPS_LOCDEFER | DSBCAPS_CTRLFX,
+            0x1000,
+            &format,
+        );
+
+        set_args(&mut process, &[buffer as u32, DSBPLAY_LOCSOFTWARE, 0, 0]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "AcquireResources").unwrap()(&mut process),
+            Ok(S_OK)
+        );
+        set_args(
+            &mut process,
+            &[
+                buffer as u32,
+                DSBPLAY_LOCSOFTWARE | DSBPLAY_TERMINATEBY_TIME,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(
+            method("IDirectSoundBuffer8", "AcquireResources").unwrap()(&mut process),
+            Ok(DSERR_CONTROLUNAVAIL)
+        );
+        set_args(&mut process, &[buffer as u32, DSBPLAY_LOCHARDWARE, 0, 0]);
+        assert_eq!(
+            method("IDirectSoundBuffer8", "AcquireResources").unwrap()(&mut process),
+            Ok(DSERR_CONTROLUNAVAIL)
+        );
+        set_args(
+            &mut process,
+            &[buffer as u32, DSBPLAY_LOCSOFTWARE, 1, OUTPUT as u32],
+        );
+        assert_eq!(
+            method("IDirectSoundBuffer8", "AcquireResources").unwrap()(&mut process),
+            Ok(DSERR_CONTROLUNAVAIL)
+        );
+        assert_eq!(process.rd32(OUTPUT).unwrap(), DSFXR_UNALLOCATED);
     }
 
     #[test]

@@ -301,10 +301,25 @@ pub fn lookup(name: &str) -> Option<HleFn> {
         "FindCloseChangeNotification" => find_close_change_notification,
         "CloseHandle" => |p| {
             let h = p.arg(0);
+            let pending_pipe_connect = match p.handles.get(&h) {
+                Some(Handle::Pipe {
+                    pipe_id,
+                    endpoint: PipeEndpoint::NamedServer,
+                    ..
+                }) => Some(*pipe_id),
+                _ => None,
+            };
             let closed = p.close_handle(h).is_some() || matches!(h, STD_IN | STD_OUT | STD_ERR);
             if closed {
                 p.extra.file_range_locks.retain(|lock| lock.handle != h);
                 p.extra.file_access.remove(&h);
+            }
+            if let Some(pipe_id) = pending_pipe_connect.filter(|id| !p.pipes.contains_key(id)) {
+                // Closing the final server handle invalidates a synchronous ConnectNamedPipe
+                // wait. Releasing its private wait objects wakes the guest with WAIT_FAILED,
+                // rather than leaving a guest thread blocked forever on a dead pipe instance.
+                close_pipe_connect_wait_objects(p, pipe_id);
+                p.refresh_waiters();
             }
             Ok(closed as u64)
         },
@@ -1686,8 +1701,8 @@ fn sleep_thread(p: &mut Process, alertable: bool) -> R {
         return Ok(0);
     }
     if p.nested != 0 && alertable {
-        // No APC queue exists yet. Preserve the requested guest time without trying to
-        // schedule away from a synchronous callback that cannot be suspended.
+        // A nested callback cannot suspend its synchronous guest stack. The pending-APC case
+        // was dispatched above; preserve the requested delay without switching contexts here.
         p.advance_time_100ns((ms as u64).saturating_mul(10_000));
         return Ok(0);
     }
@@ -3637,6 +3652,113 @@ const PIPE_READMODE_MESSAGE: u32 = 0x2;
 const PIPE_NOWAIT: u32 = 0x1;
 const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x8;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+const PIPE_CONNECT_EVENT_PREFIX: &str = "\0anywasm:pipe-connect:";
+const PIPE_CONNECT_DUMMY_PREFIX: &str = "\0anywasm:pipe-connect-dummy:";
+
+fn pipe_connect_object_name(prefix: &str, pipe_id: u64) -> String {
+    format!("{prefix}{pipe_id:016x}")
+}
+
+fn pipe_connect_object_handle(p: &Process, name: &str) -> Option<(u64, u64)> {
+    let object_id = *p.named_kernel_objects.get(name)?;
+    let handle = p
+        .handles
+        .iter()
+        .find_map(|(&handle, object)| match object {
+            Handle::KernelObject {
+                object_id: handle_object_id,
+                ..
+            } if *handle_object_id == object_id => Some(handle),
+            _ => None,
+        })?;
+    Some((object_id, handle))
+}
+
+fn ensure_pipe_connect_wait_objects(p: &mut Process, pipe_id: u64) -> Result<[u64; 2], Stop> {
+    let mut handles = [0; 2];
+    for (index, prefix) in [PIPE_CONNECT_DUMMY_PREFIX, PIPE_CONNECT_EVENT_PREFIX]
+        .into_iter()
+        .enumerate()
+    {
+        let name = pipe_connect_object_name(prefix, pipe_id);
+        if let Some((object_id, handle)) = pipe_connect_object_handle(p, &name) {
+            if let Some(KernelObject {
+                state: KernelObjectState::Event { signaled, .. },
+                ..
+            }) = p.kernel_objects.get_mut(&object_id)
+            {
+                *signaled = false;
+            }
+            handles[index] = handle;
+            continue;
+        }
+        let (handle, existed) = p
+            .create_kernel_object(
+                Some(name),
+                KernelObjectState::Event {
+                    signaled: false,
+                    manual: false,
+                },
+                EVENT_ALL_ACCESS,
+                false,
+                EVENT_ALL_ACCESS,
+            )
+            .map_err(|error| {
+                Stop::Crash(format!(
+                    "failed to create internal named-pipe connection event: {error:?}"
+                ))
+            })?;
+        if existed {
+            return Err(Stop::Crash(
+                "internal named-pipe connection event unexpectedly existed without a handle".into(),
+            ));
+        }
+        handles[index] = handle;
+    }
+    Ok(handles)
+}
+
+fn close_pipe_connect_wait_objects(p: &mut Process, pipe_id: u64) {
+    let mut handles = Vec::with_capacity(2);
+    for prefix in [PIPE_CONNECT_DUMMY_PREFIX, PIPE_CONNECT_EVENT_PREFIX] {
+        let name = pipe_connect_object_name(prefix, pipe_id);
+        if let Some((object_id, _)) = pipe_connect_object_handle(p, &name) {
+            handles.extend(
+                p.handles
+                    .iter()
+                    .filter_map(|(&handle, object)| match object {
+                        Handle::KernelObject {
+                            object_id: handle_object_id,
+                            ..
+                        } if *handle_object_id == object_id => Some(handle),
+                        _ => None,
+                    }),
+            );
+        }
+    }
+    handles.sort_unstable();
+    handles.dedup();
+    for handle in handles {
+        p.close_handle(handle);
+    }
+}
+
+fn signal_pipe_connect_waiter(p: &mut Process, pipe_id: u64) {
+    let event_name = pipe_connect_object_name(PIPE_CONNECT_EVENT_PREFIX, pipe_id);
+    let Some((object_id, _)) = pipe_connect_object_handle(p, &event_name) else {
+        return;
+    };
+    let Some(KernelObject {
+        state: KernelObjectState::Event { signaled, .. },
+        ..
+    }) = p.kernel_objects.get_mut(&object_id)
+    else {
+        return;
+    };
+    *signaled = true;
+    p.refresh_waiters();
+    close_pipe_connect_wait_objects(p, pipe_id);
+}
 
 fn pipe_connection(
     name: Option<String>,
@@ -3880,13 +4002,19 @@ fn open_named_pipe_client(p: &mut Process, name: &str) -> R {
         p.set_last_error(ERROR_INVALID_PARAMETER);
         return Ok(INVALID_HANDLE);
     }
-    let (inheritable, _custom_security) = match read_security_attributes(p, attributes) {
+    let (inheritable, custom_security) = match read_security_attributes(p, attributes) {
         Ok(values) => values,
         Err(_) => {
             p.set_last_error(ERROR_INVALID_PARAMETER);
             return Ok(INVALID_HANDLE);
         }
     };
+    if custom_security {
+        return unsupported_kernel32(
+            "CreateFileW named-pipe client",
+            "custom client security descriptors are not interpreted",
+        );
+    }
     let requested_read = access & (GENERIC_READ | GENERIC_ALL | 1) != 0;
     let requested_write = access & (GENERIC_WRITE | GENERIC_ALL | 2) != 0;
     let ids = p.named_pipe_instances.get(name).cloned();
@@ -3916,23 +4044,27 @@ fn open_named_pipe_client(p: &mut Process, name: &str) -> R {
         pipe.connect_pending = true;
     }
     p.set_last_error(0);
-    Ok(p.new_pipe_handle(id, PipeEndpoint::NamedClient, inheritable, false))
+    let handle = p.new_pipe_handle(id, PipeEndpoint::NamedClient, inheritable, false);
+    signal_pipe_connect_waiter(p, id);
+    Ok(handle)
 }
 
 fn connect_named_pipe(p: &mut Process) -> R {
     let handle = p.arg(0);
     let overlapped = p.arg(1);
-    let Some(Handle::Pipe {
-        pipe_id,
-        endpoint: PipeEndpoint::NamedServer,
-        overlapped: handle_overlapped,
-        ..
-    }) = p.handles.get(&handle)
-    else {
-        p.set_last_error(ERROR_INVALID_HANDLE);
-        return Ok(0);
+    let (pipe_id, handle_overlapped) = match p.handles.get(&handle) {
+        Some(Handle::Pipe {
+            pipe_id,
+            endpoint: PipeEndpoint::NamedServer,
+            overlapped,
+            ..
+        }) => (*pipe_id, *overlapped),
+        _ => {
+            p.set_last_error(ERROR_INVALID_HANDLE);
+            return Ok(0);
+        }
     };
-    if *handle_overlapped {
+    if handle_overlapped {
         return unsupported_kernel32(
             "ConnectNamedPipe",
             "overlapped connect completion is not modeled",
@@ -3944,7 +4076,7 @@ fn connect_named_pipe(p: &mut Process) -> R {
             "OVERLAPPED arguments on synchronous pipe handles are not modeled",
         );
     }
-    let Some(pipe) = p.pipes.get_mut(pipe_id) else {
+    let Some(pipe) = p.pipes.get(&pipe_id) else {
         p.set_last_error(ERROR_INVALID_HANDLE);
         return Ok(0);
     };
@@ -3953,12 +4085,18 @@ fn connect_named_pipe(p: &mut Process) -> R {
             p.set_last_error(ERROR_NO_DATA);
             return Ok(0);
         }
-        pipe.connect_pending = false;
+        if let Some(pipe) = p.pipes.get_mut(&pipe_id) {
+            pipe.connect_pending = false;
+        }
         p.set_last_error(ERROR_PIPE_CONNECTED);
         return Ok(0);
     }
     if pipe.nonblocking {
         if pipe.reconnect_available {
+            let pipe = p
+                .pipes
+                .get_mut(&pipe_id)
+                .expect("validated pipe remains present");
             pipe.reconnect_available = false;
             p.set_last_error(0);
             return Ok(1);
@@ -3966,10 +4104,29 @@ fn connect_named_pipe(p: &mut Process) -> R {
         p.set_last_error(ERROR_PIPE_LISTENING);
         return Ok(0);
     }
-    Err(Stop::Unimplemented {
-        dll: "kernel32".into(),
-        name: "blocking ConnectNamedPipe needs a schedulable guest thread wait".into(),
-    })
+    if p.nested != 0 {
+        return unsupported_kernel32(
+            "ConnectNamedPipe",
+            "blocking connect from a nested synchronous guest callback cannot be scheduled",
+        );
+    }
+    if pipe.connect_pending {
+        p.set_last_error(ERROR_PIPE_LISTENING);
+        return Ok(0);
+    }
+    let wait_handles = ensure_pipe_connect_wait_objects(p, pipe_id)?;
+    if let Some(pipe) = p.pipes.get_mut(&pipe_id) {
+        pipe.connect_pending = true;
+    }
+    // Wait-any returns index 1 when the connection event is signaled, which is the TRUE value
+    // expected from the synchronous ConnectNamedPipe call when it completes.
+    p.block_current_thread(ThreadWait::Multiple {
+        handles: wait_handles.to_vec(),
+        wait_all: false,
+        deadline: None,
+        alertable: false,
+    });
+    Ok(0)
 }
 
 fn disconnect_named_pipe(p: &mut Process) -> R {
